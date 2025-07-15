@@ -31,24 +31,23 @@ app.get("/image", async (req, res) => {
       // privateKey: require('fs').readFileSync('/path/to/key'), // optional if using SSH key
     });
 
-const streamOrBuffer = await sftp.get(filePath);
+    const streamOrBuffer = await sftp.get(filePath);
 
-res.setHeader("Content-Type", "image/jpeg");
-res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Access-Control-Allow-Origin", "*");
 
-// Check if it is a stream or Buffer:
-if (typeof streamOrBuffer.pipe === "function") {
-    // It is a stream
-    streamOrBuffer.pipe(res);
-    streamOrBuffer.on("end", async () => {
+    // Check if it is a stream or Buffer:
+    if (typeof streamOrBuffer.pipe === "function") {
+      // It is a stream
+      streamOrBuffer.pipe(res);
+      streamOrBuffer.on("end", async () => {
         await sftp.end();
-    });
-} else {
-    // It is a Buffer
-    res.end(streamOrBuffer);
-    await sftp.end();
-}
-
+      });
+    } else {
+      // It is a Buffer
+      res.end(streamOrBuffer);
+      await sftp.end();
+    }
 
     stream.on("end", async () => {
       await sftp.end();
