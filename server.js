@@ -19,7 +19,6 @@ app.get("/image", async (req, res) => {
   }
 
   const filePath = `/LOW_RES_JPG/${productCode}.jpg`;
-
   const sftp = new SFTPClient();
 
   try {
@@ -27,8 +26,7 @@ app.get("/image", async (req, res) => {
       host: "prodinfrargftp.blob.core.windows.net",
       port: process.env.SFTP_PORT || 22,
       username: "prodinfrargftp.internal.prodimage",
-      password: process.env.SFTP_PASSWORD, // set in your .env
-      // privateKey: require('fs').readFileSync('/path/to/key'), // optional if using SSH key
+      password: process.env.SFTP_PASSWORD,
     });
 
     const streamOrBuffer = await sftp.get(filePath);
@@ -36,28 +34,26 @@ app.get("/image", async (req, res) => {
     res.setHeader("Content-Type", "image/jpeg");
     res.setHeader("Access-Control-Allow-Origin", "*");
 
-    // Check if it is a stream or Buffer:
-    if (typeof streamOrBuffer.pipe === "function") {
-      // It is a stream
+    if (streamOrBuffer.pipe) {
       streamOrBuffer.pipe(res);
       streamOrBuffer.on("end", async () => {
         await sftp.end();
       });
     } else {
-      // It is a Buffer
       res.end(streamOrBuffer);
       await sftp.end();
     }
-
-    stream.on("end", async () => {
-      await sftp.end();
-    });
   } catch (error) {
     console.error("Error fetching image from SFTP:", error.message);
-    res.status(500).send("Error fetching image from SFTP.");
-    sftp.end();
+    if (!res.headersSent) {
+      res.status(500).send("Error fetching image from SFTP.");
+    }
+    try {
+      await sftp.end();
+    } catch {}
   }
 });
+
 
 app.get("/", (req, res) => {
   res.send("SFTP Proxy for Mockup Sheets is running");
