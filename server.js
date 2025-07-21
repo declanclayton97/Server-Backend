@@ -62,3 +62,25 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
+// General Proxy Pass-Through for Snickers & Pencarrie
+app.get("/fetch-image", async (req, res) => {
+  const imageUrl = req.query.url;
+  if (!imageUrl) {
+    return res.status(400).send('Missing "url" query parameter');
+  }
+
+  try {
+    const response = await fetch(imageUrl);
+    if (!response.ok) throw new Error(`Failed to fetch ${imageUrl}`);
+
+    const contentType = response.headers.get("content-type") || "image/jpeg";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+
+    response.body.pipe(res);
+  } catch (error) {
+    console.error(`Error proxying image from ${imageUrl}:`, error.message);
+    res.status(500).send(`Error proxying image: ${error.message}`);
+  }
+});
