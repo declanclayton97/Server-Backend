@@ -60,6 +60,8 @@ app.get("/", (req, res) => {
 });
 
 // General Proxy Pass-Through for Snickers & Pencarrie
+import { Readable } from "stream";
+
 app.get("/fetch-image", async (req, res) => {
   const imageUrl = req.query.url;
   if (!imageUrl) {
@@ -74,12 +76,26 @@ app.get("/fetch-image", async (req, res) => {
     res.setHeader("Content-Type", contentType);
     res.setHeader("Access-Control-Allow-Origin", "*");
 
-    response.body.pipe(res);
+    // Convert WHATWG stream to Node stream
+    const reader = response.body.getReader();
+    const stream = new Readable({
+      async read() {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          this.push(value);
+        }
+        this.push(null);
+      },
+    });
+
+    stream.pipe(res);
   } catch (error) {
     console.error(`Error proxying image from ${imageUrl}:`, error.message);
     res.status(500).send(`Error proxying image: ${error.message}`);
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
