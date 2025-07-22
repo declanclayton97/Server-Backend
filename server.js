@@ -59,10 +59,6 @@ app.get("/", (req, res) => {
   res.send("SFTP Proxy for Mockup Sheets is running");
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ SFTP Proxy running on port ${PORT}`);
-});
-
 // General Proxy Pass-Through for Snickers & Pencarrie
 app.get("/fetch-image", async (req, res) => {
   const imageUrl = req.query.url;
@@ -84,3 +80,9 @@ app.get("/fetch-image", async (req, res) => {
     res.status(500).send(`Error proxying image: ${error.message}`);
   }
 });
+
+app.listen(PORT, () => {
+  console.log(`✅ SFTP Proxy running on port ${PORT}`);
+});
+
+
