@@ -130,27 +130,39 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    // Format: /public-api/{account-id}/order/{order-id}
-    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
+    // Add /public-api/ to the path
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
     console.log('Fetching from URL:', url);
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,  // Try this header format
-        'Content-Type': 'application/json'
+        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json',
+        'brightpearl-app-ref': BRIGHTPEARL_ACCOUNT_ID  // Add this back
       }
     });
     
+    const responseText = await response.text();
+    
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Brightpearl API error:', errorText);
-      return res.status(response.status).json({ 
-        error: errorText 
-      });
+      console.error('Brightpearl API response:', responseText);
+      
+      try {
+        const errorData = JSON.parse(responseText);
+        if (errorData.errors && errorData.errors[0]) {
+          return res.status(response.status).json({ 
+            error: errorData.errors[0].message 
+          });
+        }
+      } catch {
+        // Not JSON
+      }
+      
+      return res.status(response.status).json({ error: responseText });
     }
     
-    const data = await response.json();
+    const data = JSON.parse(responseText);
     res.json(data);
   } catch (error) {
     console.error('Order fetch error:', error);
@@ -201,6 +213,7 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
