@@ -107,16 +107,6 @@ app.get("/fetch-image", async (req, res) => {
   }
 });
 
-// Brightpearl test endpoint
-app.get("/api/brightpearl/test", (req, res) => {
-  res.json({ 
-    status: 'connected',
-    configured: !!BRIGHTPEARL_API_TOKEN,
-    datacenter: BRIGHTPEARL_DATACENTER,
-    accountId: BRIGHTPEARL_ACCOUNT_ID ? 'Set' : 'Not set'
-  });
-});
-
 app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -130,16 +120,16 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    // Add /public-api/ to the path
-    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
+    // Remove /public-api/ - it was causing auth issues
+    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
     console.log('Fetching from URL:', url);
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
         'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
-        'Content-Type': 'application/json',
-        'brightpearl-app-ref': BRIGHTPEARL_ACCOUNT_ID  // Add this back
+        'Content-Type': 'application/json'
+        // Removed brightpearl-app-ref as it's not needed
       }
     });
     
@@ -151,6 +141,12 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       try {
         const errorData = JSON.parse(responseText);
         if (errorData.errors && errorData.errors[0]) {
+          // If we get 503, it might mean wrong endpoint structure
+          if (errorData.errors[0].code === 'CMNU-503') {
+            return res.status(404).json({ 
+              error: 'Order not found or not accessible' 
+            });
+          }
           return res.status(response.status).json({ 
             error: errorData.errors[0].message 
           });
@@ -170,7 +166,7 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   }
 });
 
-// If you have a product endpoint, update it too:
+// Replace the product endpoint (starting at line 152)
 app.get("/api/brightpearl/product/:productId", async (req, res) => {
   try {
     const { productId } = req.params;
@@ -179,17 +175,17 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
     }
     
-    // Fix: Use correct URL format
     const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/product/${productId}`;
+    // Keep consistent - no /public-api/
+    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/product/${productId}`;
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${BRIGHTPEARL_API_TOKEN}`,
+        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,  // Use same auth as order endpoint
         'Content-Type': 'application/json'
       }
     });
@@ -213,6 +209,7 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
