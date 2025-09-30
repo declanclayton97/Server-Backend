@@ -126,18 +126,18 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
     }
     
-    // Fix: Use correct URL format
     const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
+    // Format: /public-api/{account-id}/order/{order-id}
+    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
     console.log('Fetching from URL:', url);
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${BRIGHTPEARL_API_TOKEN}`,
+        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,  // Try this header format
         'Content-Type': 'application/json'
       }
     });
@@ -146,7 +146,7 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       const errorText = await response.text();
       console.error('Brightpearl API error:', errorText);
       return res.status(response.status).json({ 
-        error: `Brightpearl API error: ${response.status}` 
+        error: errorText 
       });
     }
     
@@ -201,6 +201,7 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
