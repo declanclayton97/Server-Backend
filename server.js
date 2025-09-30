@@ -117,7 +117,6 @@ app.get("/api/brightpearl/test", (req, res) => {
   });
 });
 
-// Brightpearl order endpoint
 app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -127,7 +126,13 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
     }
     
-    const url = `https://api-${BRIGHTPEARL_DATACENTER}.brightpearl.com/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
+    // Fix: Use correct URL format
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
+      ? 'https://ws-eu1.brightpearl.com'
+      : 'https://ws-use.brightpearl.com';
+    
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
+    console.log('Fetching from URL:', url);
     
     const response = await fetch(url, {
       method: 'GET',
@@ -154,6 +159,48 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   }
 });
 
+// If you have a product endpoint, update it too:
+app.get("/api/brightpearl/product/:productId", async (req, res) => {
+  try {
+    const { productId } = req.params;
+    
+    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+    }
+    
+    // Fix: Use correct URL format
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
+      ? 'https://ws-eu1.brightpearl.com'
+      : 'https://ws-use.brightpearl.com';
+    
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/product/${productId}`;
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${BRIGHTPEARL_API_TOKEN}`,
+        'brightpearl-app-ref': 'mockup-sheets',
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Product API error:', errorText);
+      return res.status(response.status).json({ 
+        error: `Product API error: ${response.status}` 
+      });
+    }
+    
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('Product fetch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
