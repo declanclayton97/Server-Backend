@@ -138,7 +138,6 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${BRIGHTPEARL_API_TOKEN}`,
-        'brightpearl-app-ref': BRIGHTPEARL_ACCOUNT_ID,
         'Content-Type': 'application/json'
       }
     });
@@ -179,7 +178,6 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${BRIGHTPEARL_API_TOKEN}`,
-        'brightpearl-app-ref': BRIGHTPEARL_ACCOUNT_ID,
         'Content-Type': 'application/json'
       }
     });
@@ -203,6 +201,7 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
