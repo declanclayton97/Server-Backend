@@ -116,8 +116,11 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
     }
     
-    // Add your app reference as an environment variable
-    const APP_REFERENCE = process.env.BRIGHTPEARL_APP_REF || 'your-app-reference';
+    const APP_REFERENCE = process.env.BRIGHTPEARL_APP_REF;
+    
+    if (!APP_REFERENCE) {
+      return res.status(500).json({ error: 'Brightpearl app reference not configured' });
+    }
     
     const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
       ? 'https://ws-eu1.brightpearl.com'
@@ -130,7 +133,7 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       method: 'GET',
       headers: {
         'brightpearl-app-ref': APP_REFERENCE,
-        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,  // Your STAFF token
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
         'Content-Type': 'application/json'
       }
     });
@@ -152,132 +155,10 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   }
 });
 
-// Also update the product endpoint to use product-service
-app.get("/api/brightpearl/product/:productId", async (req, res) => {
-  try {
-    const { productId } = req.params;
-    
-    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
-      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
-    }
-    
-    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
-      ? 'https://ws-eu1.brightpearl.com'
-      : 'https://ws-use.brightpearl.com';
-    
-    // Use product-service endpoint
-    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/product-service/product/${productId}`;
-    
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Product API error:', errorText);
-      return res.status(response.status).json({ 
-        error: errorText 
-      });
-    }
-    
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    console.error('Product fetch error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Add this new endpoint to test basic API access
-app.get("/api/brightpearl/search-orders", async (req, res) => {
-  try {
-    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
-      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
-    }
-    
-    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
-      ? 'https://ws-eu1.brightpearl.com'
-      : 'https://ws-use.brightpearl.com';
-    
-    // Try to search for recent orders (simpler endpoint)
-    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search`;
-    console.log('Testing with search URL:', url);
-    
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    const responseText = await response.text();
-    console.log('Search response:', response.status, responseText.substring(0, 200));
-    
-    if (!response.ok) {
-      return res.status(response.status).json({ 
-        error: responseText 
-      });
-    }
-    
-    const data = JSON.parse(responseText);
-    res.json(data);
-  } catch (error) {
-    console.error('Search error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Add this endpoint to test what we can access
-app.get("/api/brightpearl/test-access", async (req, res) => {
-  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
-    return res.status(500).json({ error: 'Credentials not configured' });
-  }
-  
-  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
-    ? 'https://ws-eu1.brightpearl.com'
-    : 'https://ws-use.brightpearl.com';
-  
-  const tests = [
-    { name: 'Contact Search', url: `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/contact-service/contact-search` },
-    { name: 'Product Search', url: `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/product-service/product-search` },
-    { name: 'Order Search', url: `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search` },
-    { name: 'Account Status', url: `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/accounting-service/account` }
-  ];
-  
-  const results = {};
-  
-  for (const test of tests) {
-    try {
-      const response = await fetch(test.url, {
-        method: 'GET',
-        headers: {
-          'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      const text = await response.text();
-      results[test.name] = {
-        status: response.status,
-        ok: response.ok,
-        error: text.includes('CMNU-503') ? 'Service not accessible' : (response.ok ? 'Working' : text.substring(0, 100))
-      };
-    } catch (error) {
-      results[test.name] = { error: error.message };
-    }
-  }
-  
-  res.json(results);
-});
-
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
