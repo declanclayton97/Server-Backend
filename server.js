@@ -129,7 +129,7 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'brightpearl-app-ref': BRIGHTPEARL_APP_REF,
+        'brightpearl-app-ref': APP_REFERENCE,
         'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,  // Your STAFF token
         'Content-Type': 'application/json'
       }
@@ -278,6 +278,7 @@ app.get("/api/brightpearl/test-access", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
