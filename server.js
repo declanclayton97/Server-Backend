@@ -116,18 +116,21 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
     }
     
+    // Add your app reference as an environment variable
+    const APP_REFERENCE = process.env.BRIGHTPEARL_APP_REF || 'your-app-reference';
+    
     const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    // Go back to the format that was authenticating
     const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`;
     console.log('Fetching from URL:', url);
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,  // Back to this header
+        'brightpearl-app-ref': BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,  // Your STAFF token
         'Content-Type': 'application/json'
       }
     });
@@ -136,15 +139,6 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
     
     if (!response.ok) {
       console.error('Brightpearl response:', responseText);
-      
-      // Special handling for CMNU-503
-      if (responseText.includes('CMNU-503')) {
-        // This might mean we need to enable the order service
-        return res.status(503).json({ 
-          error: 'Order service not accessible. Please check: 1) The order ID exists, 2) Your Private App has Orders permission enabled in Brightpearl App Store → Private Apps → Edit App → Permissions'
-        });
-      }
-      
       return res.status(response.status).json({ 
         error: responseText 
       });
@@ -284,6 +278,7 @@ app.get("/api/brightpearl/test-access", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
