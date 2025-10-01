@@ -107,7 +107,6 @@ app.get("/fetch-image", async (req, res) => {
   }
 });
 
-// Update your order endpoint with Private App authentication
 app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -121,23 +120,31 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    // For Private Apps, use the standard REST endpoint structure
-    const url = `${baseUrl}/2.0.0/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
+    // Go back to the format that was authenticating
+    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`;
     console.log('Fetching from URL:', url);
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,  // Different header for Private Apps
+        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,  // Back to this header
         'Content-Type': 'application/json'
       }
     });
     
     const responseText = await response.text();
-    console.log('Response:', response.status);
     
     if (!response.ok) {
-      console.error('Brightpearl API response:', responseText);
+      console.error('Brightpearl response:', responseText);
+      
+      // Special handling for CMNU-503
+      if (responseText.includes('CMNU-503')) {
+        // This might mean we need to enable the order service
+        return res.status(503).json({ 
+          error: 'Order service not accessible. Please check: 1) The order ID exists, 2) Your Private App has Orders permission enabled in Brightpearl App Store → Private Apps → Edit App → Permissions'
+        });
+      }
+      
       return res.status(response.status).json({ 
         error: responseText 
       });
@@ -234,6 +241,7 @@ app.get("/api/brightpearl/search-orders", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
