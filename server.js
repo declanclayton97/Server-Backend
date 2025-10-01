@@ -107,6 +107,7 @@ app.get("/fetch-image", async (req, res) => {
   }
 });
 
+// Update your order endpoint with Private App authentication
 app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -120,36 +121,27 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    // Try the order-service endpoint structure
-    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`;
+    // For Private Apps, use the standard REST endpoint structure
+    const url = `${baseUrl}/2.0.0/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
     console.log('Fetching from URL:', url);
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,  // Different header for Private Apps
+        'brightpearl-dev-ref': 'tuffworkwear',  // Add your company/dev reference
         'Content-Type': 'application/json'
       }
     });
     
     const responseText = await response.text();
-    console.log('Response status:', response.status);
+    console.log('Response:', response.status);
     
     if (!response.ok) {
       console.error('Brightpearl API response:', responseText);
-      
-      try {
-        const errorData = JSON.parse(responseText);
-        if (errorData.errors && errorData.errors[0]) {
-          return res.status(response.status).json({ 
-            error: errorData.errors[0].message 
-          });
-        }
-      } catch {
-        // Not JSON
-      }
-      
-      return res.status(response.status).json({ error: responseText });
+      return res.status(response.status).json({ 
+        error: responseText 
+      });
     }
     
     const data = JSON.parse(responseText);
@@ -240,48 +232,10 @@ app.get("/api/brightpearl/search-orders", async (req, res) => {
   }
 });
 
-// Also try a completely different endpoint to test auth
-app.get("/api/brightpearl/warehouses", async (req, res) => {
-  try {
-    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
-      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
-    }
-    
-    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
-      ? 'https://ws-eu1.brightpearl.com'
-      : 'https://ws-use.brightpearl.com';
-    
-    // Warehouse endpoint is usually accessible
-    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/warehouse-service/warehouse`;
-    console.log('Testing warehouse URL:', url);
-    
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    const responseText = await response.text();
-    
-    if (!response.ok) {
-      return res.status(response.status).json({ 
-        error: responseText 
-      });
-    }
-    
-    const data = JSON.parse(responseText);
-    res.json(data);
-  } catch (error) {
-    console.error('Warehouse error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
