@@ -129,7 +129,7 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       method: 'GET',
       headers: {
         'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,  // Different header for Private Apps
-        'brightpearl-dev-ref': 'tuffworkwear',  // Add your company/dev reference
+        'brightpearl-dev-ref': 'tuffworkwear_decmockup',  // Add your company/dev reference
         'Content-Type': 'application/json'
       }
     });
@@ -235,6 +235,7 @@ app.get("/api/brightpearl/search-orders", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
