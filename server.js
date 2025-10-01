@@ -116,23 +116,19 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
     }
     
-    const APP_REFERENCE = process.env.BRIGHTPEARL_APP_REF;
-    
-    if (!APP_REFERENCE) {
-      return res.status(500).json({ error: 'Brightpearl app reference not configured' });
-    }
-    
+    // Use the correct Brightpearl Connect URL format
     const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
-      ? 'https://ws-eu1.brightpearl.com'
-      : 'https://ws-use.brightpearl.com';
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
     
-    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`;
-    console.log('Fetching from URL:', url);
+    // Correct path structure as confirmed by Brightpearl support
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`;
+    console.log('Using correct URL:', url);
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'brightpearl-app-ref': APP_REFERENCE,
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
         'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
         'Content-Type': 'application/json'
       }
@@ -155,9 +151,50 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   }
 });
 
+// Also update the product endpoint
+app.get("/api/brightpearl/product/:productId", async (req, res) => {
+  try {
+    const { productId } = req.params;
+    
+    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+    }
+    
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+    
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/product-service/product/${productId}`;
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Product API error:', errorText);
+      return res.status(response.status).json({ 
+        error: errorText 
+      });
+    }
+    
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('Product fetch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
