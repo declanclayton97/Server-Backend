@@ -200,9 +200,89 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
   }
 });
 
+// Add this new endpoint to test basic API access
+app.get("/api/brightpearl/search-orders", async (req, res) => {
+  try {
+    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+    }
+    
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
+      ? 'https://ws-eu1.brightpearl.com'
+      : 'https://ws-use.brightpearl.com';
+    
+    // Try to search for recent orders (simpler endpoint)
+    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search`;
+    console.log('Testing with search URL:', url);
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const responseText = await response.text();
+    console.log('Search response:', response.status, responseText.substring(0, 200));
+    
+    if (!response.ok) {
+      return res.status(response.status).json({ 
+        error: responseText 
+      });
+    }
+    
+    const data = JSON.parse(responseText);
+    res.json(data);
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Also try a completely different endpoint to test auth
+app.get("/api/brightpearl/warehouses", async (req, res) => {
+  try {
+    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+    }
+    
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
+      ? 'https://ws-eu1.brightpearl.com'
+      : 'https://ws-use.brightpearl.com';
+    
+    // Warehouse endpoint is usually accessible
+    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/warehouse-service/warehouse`;
+    console.log('Testing warehouse URL:', url);
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const responseText = await response.text();
+    
+    if (!response.ok) {
+      return res.status(response.status).json({ 
+        error: responseText 
+      });
+    }
+    
+    const data = JSON.parse(responseText);
+    res.json(data);
+  } catch (error) {
+    console.error('Warehouse error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
