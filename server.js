@@ -120,8 +120,8 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    // Remove /public-api/ - it was causing auth issues
-    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order/${orderId}`;
+    // Try the order-service endpoint structure
+    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`;
     console.log('Fetching from URL:', url);
     
     const response = await fetch(url, {
@@ -129,11 +129,11 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       headers: {
         'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
         'Content-Type': 'application/json'
-        // Removed brightpearl-app-ref as it's not needed
       }
     });
     
     const responseText = await response.text();
+    console.log('Response status:', response.status);
     
     if (!response.ok) {
       console.error('Brightpearl API response:', responseText);
@@ -141,12 +141,6 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
       try {
         const errorData = JSON.parse(responseText);
         if (errorData.errors && errorData.errors[0]) {
-          // If we get 503, it might mean wrong endpoint structure
-          if (errorData.errors[0].code === 'CMNU-503') {
-            return res.status(404).json({ 
-              error: 'Order not found or not accessible' 
-            });
-          }
           return res.status(response.status).json({ 
             error: errorData.errors[0].message 
           });
@@ -166,7 +160,7 @@ app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   }
 });
 
-// Replace the product endpoint (starting at line 152)
+// Also update the product endpoint to use product-service
 app.get("/api/brightpearl/product/:productId", async (req, res) => {
   try {
     const { productId } = req.params;
@@ -179,13 +173,13 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
       ? 'https://ws-eu1.brightpearl.com'
       : 'https://ws-use.brightpearl.com';
     
-    // Keep consistent - no /public-api/
-    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/product/${productId}`;
+    // Use product-service endpoint
+    const url = `${baseUrl}/${BRIGHTPEARL_ACCOUNT_ID}/product-service/product/${productId}`;
     
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,  // Use same auth as order endpoint
+        'brightpearl-auth': BRIGHTPEARL_API_TOKEN,
         'Content-Type': 'application/json'
       }
     });
@@ -194,7 +188,7 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
       const errorText = await response.text();
       console.error('Product API error:', errorText);
       return res.status(response.status).json({ 
-        error: `Product API error: ${response.status}` 
+        error: errorText 
       });
     }
     
@@ -209,6 +203,7 @@ app.get("/api/brightpearl/product/:productId", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
