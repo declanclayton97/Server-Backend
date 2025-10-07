@@ -6,6 +6,7 @@ import { Readable } from "stream";
 
 dotenv.config();
 
+const fetch = require('node-fetch')
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -269,6 +270,7 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
