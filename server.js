@@ -231,9 +231,45 @@ app.get("/api/brightpearl/order/:orderId/availability", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+app.get('/api/brightpearl/proof-required', async (req, res) => {
+  try {
+    // Search for orders with "Proof Required" status
+    // You'll need to know the status ID for "Proof Required" in your Brightpearl setup
+    const proofRequiredStatusId = '34'; // Replace with actual ID
+    
+    const response = await fetch(
+      `https://ws-eu1.brightpearl.com/public-api/${ACCOUNT_CODE}/order-service/order-search`,
+      {
+        method: 'POST',
+        headers: {
+          'brightpearl-app-ref': APP_REF,
+          'brightpearl-account-token': ACCOUNT_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          filters: {
+            orderStatusId: { in: [proofRequiredStatusId] }
+          },
+          columns: ['orderId', 'orderReference', 'customerName', 'placedOn', 'deliveryDate'],
+          sort: { placedOn: 'DESC' },
+          pageSize: 50
+        })
+      }
+    );
+    
+    const data = await response.json();
+    res.json(data.response);
+  } catch (error) {
+    console.error('Error fetching proof required orders:', error);
+    res.status(500).json({ error: 'Failed to fetch orders' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
