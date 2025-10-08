@@ -244,24 +244,18 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
       ? 'https://euw1.brightpearlconnect.com'
       : 'https://use1.brightpearlconnect.com';
     
-    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search`;
+    // Use GET with query parameters for order search
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderStatusId=${proofRequiredStatusId}&pageSize=50&firstResult=1`;
+    
+    console.log('Fetching orders from:', url);
     
     const response = await fetch(url, {
-      method: 'POST',
+      method: 'GET',
       headers: {
         'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
         'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
         'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        filters: {
-          orderStatusId: [proofRequiredStatusId] // Note: changed from { in: [...] } to just array
-        },
-        columns: ['orderId', 'orderReference', 'customerName', 'placedOn', 'deliveryDate'],
-        sort: 'placedOn',
-        sortDirection: 'DESC',
-        pageSize: 50
-      })
+      }
     });
     
     if (!response.ok) {
@@ -271,7 +265,49 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     }
     
     const data = await response.json();
-    res.json(data.response);
+    
+    // The response will contain order IDs, we need to fetch the details
+    if (data.response && data.response.results) {
+      const orderIds = data.response.results;
+      
+      if (orderIds.length === 0) {
+        return res.json([]);
+      }
+      
+      // Fetch order details for these IDs
+      const orderRange = orderIds.join(',');
+      const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderRange}`;
+      
+      const detailsResponse = await fetch(detailsUrl, {
+        method: 'GET',
+        headers: {
+          'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+          'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (!detailsResponse.ok) {
+        const errorText = await detailsResponse.text();
+        console.error('Order details error:', errorText);
+        return res.status(detailsResponse.status).json({ error: errorText });
+      }
+      
+      const detailsData = await detailsResponse.json();
+      
+      // Transform the data to match what your frontend expects
+      const orders = detailsData.response.map(order => ({
+        orderId: order.id,
+        orderReference: order.reference,
+        customerName: order.parties?.customer?.contactName || order.parties?.delivery?.addressFullName || 'Unknown',
+        placedOn: order.placedOn,
+        deliveryDate: order.delivery?.deliveryDate || null
+      }));
+      
+      res.json(orders);
+    } else {
+      res.json([]);
+    }
   } catch (error) {
     console.error('Error fetching proof required orders:', error);
     res.status(500).json({ error: error.message });
@@ -281,6 +317,7 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
