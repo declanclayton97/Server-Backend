@@ -238,13 +238,13 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
     }
 
-    const proofRequiredStatusId = '34'; // Replace with your actual status ID
+    const proofRequiredStatusId = '34';
     
     const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
       ? 'https://euw1.brightpearlconnect.com'
       : 'https://use1.brightpearlconnect.com';
     
-    // Use GET with query parameters for order search
+    // Search for orders with the specific status
     const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderStatusId=${proofRequiredStatusId}&pageSize=50&firstResult=1`;
     
     console.log('Fetching orders from:', url);
@@ -265,49 +265,81 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     }
     
     const data = await response.json();
+    console.log('Search response:', JSON.stringify(data, null, 2));
     
-    // The response will contain order IDs, we need to fetch the details
-    if (data.response && data.response.results) {
-      const orderIds = data.response.results;
-      
-      if (orderIds.length === 0) {
-        return res.json([]);
-      }
-      
-      // Fetch order details for these IDs
-      const orderRange = orderIds.join(',');
-      const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderRange}`;
-      
-      const detailsResponse = await fetch(detailsUrl, {
-        method: 'GET',
-        headers: {
-          'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
-          'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (!detailsResponse.ok) {
-        const errorText = await detailsResponse.text();
-        console.error('Order details error:', errorText);
-        return res.status(detailsResponse.status).json({ error: errorText });
-      }
-      
-      const detailsData = await detailsResponse.json();
-      
-      // Transform the data to match what your frontend expects
-      const orders = detailsData.response.map(order => ({
-        orderId: order.id,
-        orderReference: order.reference,
-        customerName: order.parties?.customer?.contactName || order.parties?.delivery?.addressFullName || 'Unknown',
-        placedOn: order.placedOn,
-        deliveryDate: order.delivery?.deliveryDate || null
-      }));
-      
-      res.json(orders);
-    } else {
-      res.json([]);
+    // Check if we have results
+    if (!data.response || !data.response.results || data.response.results.length === 0) {
+      return res.json([]);
     }
+    
+    // The results array contains order IDs in a specific format
+    // We need to extract just the order IDs (first column of each result)
+    let orderIds = [];
+    
+    // If results is an array of arrays (each order as an array of fields)
+    if (Array.isArray(data.response.results[0])) {
+      orderIds = data.response.results.map(row => row[0]); // First element is usually the order ID
+    } 
+    // If results is just an array of order IDs
+    else if (typeof data.response.results[0] === 'number' || typeof data.response.results[0] === 'string') {
+      orderIds = data.response.results;
+    }
+    // Handle the case where it might be returning full records
+    else {
+      console.log('Unexpected result format, attempting to extract IDs');
+      // Try to extract IDs from the comma-separated string if that's what we got
+      const resultString = data.response.results.toString();
+      const parts = resultString.split(',');
+      // Take every nth element that looks like an order ID
+      orderIds = parts.filter((part, index) => {
+        return index % 20 === 0 && /^\d+$/.test(part.trim());
+      }).map(id => id.trim());
+    }
+    
+    console.log('Extracted order IDs:', orderIds);
+    
+    if (orderIds.length === 0) {
+      return res.json([]);
+    }
+    
+    // Now fetch the details for these orders
+    // Limit to first 10 orders to avoid URL being too long
+    const limitedOrderIds = orderIds.slice(0, 10);
+    const orderRange = limitedOrderIds.join(',');
+    const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderRange}`;
+    
+    console.log('Fetching order details from:', detailsUrl);
+    
+    const detailsResponse = await fetch(detailsUrl, {
+      method: 'GET',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!detailsResponse.ok) {
+      const errorText = await detailsResponse.text();
+      console.error('Order details error:', errorText);
+      return res.status(detailsResponse.status).json({ error: errorText });
+    }
+    
+    const detailsData = await detailsResponse.json();
+    
+    // Transform the data to match what your frontend expects
+    const orders = detailsData.response.map(order => ({
+      orderId: order.id,
+      orderReference: order.reference,
+      customerName: order.parties?.customer?.contactName || 
+                    order.parties?.delivery?.addressFullName || 
+                    order.parties?.customer?.addressFullName ||
+                    'Unknown',
+      placedOn: order.placedOn,
+      deliveryDate: order.delivery?.deliveryDate || null
+    }));
+    
+    res.json(orders);
   } catch (error) {
     console.error('Error fetching proof required orders:', error);
     res.status(500).json({ error: error.message });
@@ -317,6 +349,7 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
