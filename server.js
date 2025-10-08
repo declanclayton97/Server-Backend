@@ -247,8 +247,6 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     // Search for orders with the specific status
     const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderStatusId=${proofRequiredStatusId}&pageSize=50&firstResult=1`;
     
-    console.log('Fetching orders from:', url);
-    
     const response = await fetch(url, {
       method: 'GET',
       headers: {
@@ -265,7 +263,6 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     }
     
     const data = await response.json();
-    console.log('Search response:', JSON.stringify(data, null, 2));
     
     // Check if we have results
     if (!data.response || !data.response.results || data.response.results.length === 0) {
@@ -349,6 +346,7 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
