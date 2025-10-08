@@ -234,41 +234,54 @@ app.get("/api/brightpearl/order/:orderId/availability", async (req, res) => {
 
 app.get('/api/brightpearl/proof-required', async (req, res) => {
   try {
-    // Search for orders with "Proof Required" status
-    // You'll need to know the status ID for "Proof Required" in your Brightpearl setup
-    const proofRequiredStatusId = '34'; // Replace with actual ID
+    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+    }
+
+    const proofRequiredStatusId = '34'; // Replace with your actual status ID
     
-    const response = await fetch(
-      `https://ws-eu1.brightpearl.com/public-api/${ACCOUNT_CODE}/order-service/order-search`,
-      {
-        method: 'POST',
-        headers: {
-          'brightpearl-app-ref': APP_REF,
-          'brightpearl-account-token': ACCOUNT_TOKEN,
-          'Content-Type': 'application/json'
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' 
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+    
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search`;
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        filters: {
+          orderStatusId: [proofRequiredStatusId] // Note: changed from { in: [...] } to just array
         },
-        body: JSON.stringify({
-          filters: {
-            orderStatusId: { in: [proofRequiredStatusId] }
-          },
-          columns: ['orderId', 'orderReference', 'customerName', 'placedOn', 'deliveryDate'],
-          sort: { placedOn: 'DESC' },
-          pageSize: 50
-        })
-      }
-    );
+        columns: ['orderId', 'orderReference', 'customerName', 'placedOn', 'deliveryDate'],
+        sort: 'placedOn',
+        sortDirection: 'DESC',
+        pageSize: 50
+      })
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Order search error:', errorText);
+      return res.status(response.status).json({ error: errorText });
+    }
     
     const data = await response.json();
     res.json(data.response);
   } catch (error) {
     console.error('Error fetching proof required orders:', error);
-    res.status(500).json({ error: 'Failed to fetch orders' });
+    res.status(500).json({ error: error.message });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
