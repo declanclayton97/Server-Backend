@@ -11,5 +11,6 @@
     "ssh2-sftp-client": "^9.0.4",
     "dotenv": "^16.4.5",
     "axios": "^1.5.0"
+    "docusign-esign": "^6.0.0",
   }
 }
