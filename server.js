@@ -11,13 +11,14 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
 // Brightpearl configuration
 const BRIGHTPEARL_DATACENTER = process.env.BRIGHTPEARL_DATACENTER || 'use1';
 const BRIGHTPEARL_ACCOUNT_ID = process.env.BRIGHTPEARL_ACCOUNT_ID;
 const BRIGHTPEARL_API_TOKEN = process.env.BRIGHTPEARL_API_TOKEN;
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // CORS middleware
 app.use((req, res, next) => {
@@ -30,7 +31,14 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(cors());
+// Enable CORS
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
+
+app.use(express.raw({ limit: '50mb', type: 'application/octet-stream' }));
+
 
 // Home route
 app.get("/", (req, res) => {
@@ -411,6 +419,7 @@ app.post('/send-to-docusign', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
