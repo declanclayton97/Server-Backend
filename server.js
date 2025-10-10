@@ -13,6 +13,11 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
+app.use(express.raw({ limit: '50mb', type: 'application/octet-stream' }));
 
 // Brightpearl configuration
 const BRIGHTPEARL_DATACENTER = process.env.BRIGHTPEARL_DATACENTER || 'use1';
@@ -30,15 +35,6 @@ app.use((req, res, next) => {
   }
   next();
 });
-
-// Enable CORS
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
-
-app.use(express.raw({ limit: '50mb', type: 'application/octet-stream' }));
-
 
 // Home route
 app.get("/", (req, res) => {
@@ -360,16 +356,10 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
 
 const docuSignService = new DocuSignService();
 
-// Test endpoint
-app.get('/test-docusign', (req, res) => {
+app.get('/check-limits', (req, res) => {
   res.json({ 
-    message: 'DocuSign endpoint is reachable',
-    envVarsSet: {
-      accountId: !!process.env.DOCUSIGN_ACCOUNT_ID,
-      integrationKey: !!process.env.DOCUSIGN_INTEGRATION_KEY,
-      userId: !!process.env.DOCUSIGN_USER_ID,
-      privateKey: !!process.env.DOCUSIGN_PRIVATE_KEY
-    }
+    message: 'Server is configured',
+    limits: '50mb'
   });
 });
 
@@ -419,6 +409,7 @@ app.post('/send-to-docusign', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
