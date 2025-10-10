@@ -343,9 +343,46 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
   }
 });
 
+const DocuSignService = require('./docusignService');
+const docuSignService = new DocuSignService();
+
+app.post('/send-to-docusign', async (req, res) => {
+  try {
+    const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
+    
+    // Convert base64 to bytes
+    const pdfBytes = Buffer.from(pdfBase64, 'base64');
+    
+    // Map logo positions to DocuSign coordinates
+    // You'll need to calculate these based on your PDF layout
+    const signaturePositions = logoPositions.map(pos => ({
+      page: pos.page || 1,
+      x: pos.x || 100,
+      y: pos.y || 100
+    }));
+    
+    const result = await docuSignService.createEnvelopeWithSignatureFields(
+      pdfBytes,
+      recipientEmail,
+      recipientName,
+      signaturePositions
+    );
+    
+    res.json({
+      success: true,
+      envelopeId: result.envelopeId,
+      status: result.status
+    });
+  } catch (error) {
+    console.error('DocuSign error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
