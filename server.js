@@ -346,9 +346,32 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
 
 const docuSignService = new DocuSignService();
 
+// Test endpoint
+app.get('/test-docusign', (req, res) => {
+  res.json({ 
+    message: 'DocuSign endpoint is reachable',
+    envVarsSet: {
+      accountId: !!process.env.DOCUSIGN_ACCOUNT_ID,
+      integrationKey: !!process.env.DOCUSIGN_INTEGRATION_KEY,
+      userId: !!process.env.DOCUSIGN_USER_ID,
+      privateKey: !!process.env.DOCUSIGN_PRIVATE_KEY
+    }
+  });
+});
+
+// Main DocuSign endpoint
 app.post('/send-to-docusign', async (req, res) => {
+  console.log('DocuSign endpoint hit!');
+  
   try {
     const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
+    
+    if (!pdfBase64 || !recipientEmail || !recipientName) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Missing required fields' 
+      });
+    }
     
     const pdfBytes = Buffer.from(pdfBase64, 'base64');
     
@@ -372,13 +395,17 @@ app.post('/send-to-docusign', async (req, res) => {
     });
   } catch (error) {
     console.error('DocuSign error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
