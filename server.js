@@ -3,6 +3,7 @@ import express from "express";
 import SFTPClient from "ssh2-sftp-client";
 import dotenv from "dotenv";
 import { Readable } from "stream";
+import DocuSignService from './docusignService.js';
 
 dotenv.config();
 
@@ -343,18 +344,14 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
   }
 });
 
-const DocuSignService = require('./docusignService');
 const docuSignService = new DocuSignService();
 
 app.post('/send-to-docusign', async (req, res) => {
   try {
     const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
     
-    // Convert base64 to bytes
     const pdfBytes = Buffer.from(pdfBase64, 'base64');
     
-    // Map logo positions to DocuSign coordinates
-    // You'll need to calculate these based on your PDF layout
     const signaturePositions = logoPositions.map(pos => ({
       page: pos.page || 1,
       x: pos.x || 100,
@@ -382,6 +379,7 @@ app.post('/send-to-docusign', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
