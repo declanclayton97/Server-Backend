@@ -365,43 +365,105 @@ app.get('/check-limits', (req, res) => {
 
 // Main DocuSign endpoint
 app.post('/send-to-docusign', async (req, res) => {
-  console.log('DocuSign endpoint hit!');
-  
+  const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
+
   try {
-    const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
-    
-    if (!pdfBase64 || !recipientEmail || !recipientName) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Missing required fields' 
-      });
-    }
-    
-    const pdfBytes = Buffer.from(pdfBase64, 'base64');
-    
-    const signaturePositions = logoPositions.map(pos => ({
-      page: pos.page || 1,
-      x: pos.x || 100,
-      y: pos.y || 100
-    }));
-    
-    const result = await docuSignService.createEnvelopeWithSignatureFields(
-      pdfBytes,
-      recipientEmail,
-      recipientName,
-      signaturePositions
+    const docusign = require('docusign-esign');
+    const apiClient = new docusign.ApiClient();
+    apiClient.setBasePath(process.env.DOCUSIGN_BASE_PATH);
+
+    // Authenticate
+    const results = await apiClient.requestJWTUserToken(
+      process.env.DOCUSIGN_INTEGRATION_KEY,
+      process.env.DOCUSIGN_USER_ID,
+      process.env.DOCUSIGN_OAUTH_BASE_PATH,
+      fs.readFileSync(process.env.DOCUSIGN_PRIVATE_KEY_PATH),
+      3600
     );
+
+    apiClient.addDefaultHeader('Authorization', 'Bearer ' + results.body.access_token);
+    const envelopesApi = new docusign.EnvelopesApi(apiClient);
+    const accountId = process.env.DOCUSIGN_ACCOUNT_ID;
+
+    // Create envelope definition
+    const envelopeDefinition = new docusign.EnvelopeDefinition();
+    envelopeDefinition.emailSubject = `Mockup Proof Approval - ${recipientName}`;
+    envelopeDefinition.emailBlurb = 'Please review and approve the attached mockup proof by clicking the link below.';
+
+    // Create document
+    const doc = new docusign.Document();
+    doc.documentBase64 = pdfBase64;
+    doc.name = 'Mockup Proof';
+    doc.fileExtension = 'pdf';
+    doc.documentId = '1';
+    envelopeDefinition.documents = [doc];
+
+    // Create signer with email authentication (NO ACCOUNT REQUIRED)
+    const signer = docusign.Signer.constructFromObject({
+      email: recipientEmail,
+      name: recipientName,
+      recipientId: '1',
+      routingOrder: '1',
+      // Remove clientUserId to allow email-based signing
+    });
+
+    // Add Sign Here tabs for each logo position
+    const signHereTabs = [];
+    logoPositions.forEach((position, index) => {
+      const signHere = docusign.SignHere.constructFromObject({
+        documentId: '1',
+        pageNumber: position.page.toString(),
+        xPosition: position.x.toString(),
+        yPosition: position.y.toString(),
+        tabLabel: `approve_${index}`,
+        optional: 'false',
+      });
+      signHereTabs.push(signHere);
+    });
+
+    signer.tabs = docusign.Tabs.constructFromObject({
+      signHereTabs: signHereTabs,
+    });
+
+    // THIS IS THE KEY: Set recipient authentication to "email"
+    // This bypasses the "agree to electronic records" and account creation
+    envelopeDefinition.recipientAuthentication = null; // Don't require additional auth
     
+    // Add email notification settings
+    envelopeDefinition.notification = new docusign.Notification();
+    envelopeDefinition.notification.useAccountDefaults = 'false';
+    
+    const emailSettings = new docusign.EmailSettings();
+    emailSettings.replyEmailAddressOverride = null;
+    emailSettings.replyEmailNameOverride = null;
+    envelopeDefinition.emailSettings = emailSettings;
+
+    // Add recipients
+    envelopeDefinition.recipients = new docusign.Recipients();
+    envelopeDefinition.recipients.signers = [signer];
+
+    // IMPORTANT: Set these envelope settings
+    envelopeDefinition.status = 'sent';
+    envelopeDefinition.enableWetSign = 'false'; // Prevent account creation prompt
+    envelopeDefinition.allowMarkup = 'false';
+    envelopeDefinition.allowReassign = 'false';
+
+    // Send the envelope
+    const results2 = await envelopesApi.createEnvelope(accountId, {
+      envelopeDefinition: envelopeDefinition
+    });
+
     res.json({
       success: true,
-      envelopeId: result.envelopeId,
-      status: result.status
+      envelopeId: results2.envelopeId,
+      message: 'Mockup proof sent for approval'
     });
+
   } catch (error) {
     console.error('DocuSign error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      error: error.message 
+      error: error.message
     });
   }
 });
@@ -409,6 +471,7 @@ app.post('/send-to-docusign', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
