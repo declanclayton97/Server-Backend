@@ -367,97 +367,43 @@ app.get('/check-limits', (req, res) => {
 
 // Main DocuSign endpoint
 app.post('/send-to-docusign', async (req, res) => {
-  const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
-
+  console.log('DocuSign endpoint hit!');
+  
   try {
-    const docusign = require('docusign-esign');
-    const apiClient = new docusign.ApiClient();
-    apiClient.setBasePath(process.env.DOCUSIGN_BASE_PATH);
-
-    // Authenticate
-    const results = await apiClient.requestJWTUserToken(
-      process.env.DOCUSIGN_INTEGRATION_KEY,
-      process.env.DOCUSIGN_USER_ID,
-      process.env.DOCUSIGN_OAUTH_BASE_PATH,
-      fs.readFileSync(process.env.DOCUSIGN_PRIVATE_KEY_PATH),
-      3600
-    );
-
-    apiClient.addDefaultHeader('Authorization', 'Bearer ' + results.body.access_token);
-    const envelopesApi = new docusign.EnvelopesApi(apiClient);
-    const accountId = process.env.DOCUSIGN_ACCOUNT_ID;
-
-    // Create envelope definition
-    const envelopeDefinition = new docusign.EnvelopeDefinition();
-    envelopeDefinition.emailSubject = `Mockup Proof Approval - ${recipientName}`;
-    envelopeDefinition.emailBlurb = 'Please review and approve the attached mockup proof by clicking the link below.';
-
-    // Create document
-    const doc = new docusign.Document();
-    doc.documentBase64 = pdfBase64;
-    doc.name = 'Mockup Proof';
-    doc.fileExtension = 'pdf';
-    doc.documentId = '1';
-    envelopeDefinition.documents = [doc];
-
-    // Create signer (customer)
-    const signer = docusign.Signer.constructFromObject({
-      email: recipientEmail,
-      name: recipientName,
-      recipientId: '1',
-      routingOrder: '1',
-    });
-
-    // Add Sign Here tabs for each logo position
-    const signHereTabs = [];
-    logoPositions.forEach((position, index) => {
-      const signHere = docusign.SignHere.constructFromObject({
-        documentId: '1',
-        pageNumber: position.page.toString(),
-        xPosition: position.x.toString(),
-        yPosition: position.y.toString(),
-        tabLabel: `approve_${index}`,
-        optional: 'false',
+    const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
+    
+    if (!pdfBase64 || !recipientEmail || !recipientName) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Missing required fields' 
       });
-      signHereTabs.push(signHere);
-    });
-
-    signer.tabs = docusign.Tabs.constructFromObject({
-      signHereTabs: signHereTabs,
-    });
-
-    // ADD YOURSELF AS CC TO RECEIVE COMPLETION NOTIFICATIONS
-    const ccRecipient = docusign.CarbonCopy.constructFromObject({
-      email: 'dec@tuffshop.co.uk',
-      name: 'Dec - Tuff Shop',
-      recipientId: '2',
-      routingOrder: '2',
-    });
-
-    // Add recipients
-    envelopeDefinition.recipients = new docusign.Recipients();
-    envelopeDefinition.recipients.signers = [signer];
-    envelopeDefinition.recipients.carbonCopies = [ccRecipient];
-
-    // Envelope settings
-    envelopeDefinition.status = 'sent';
-
-    // Send the envelope
-    const results2 = await envelopesApi.createEnvelope(accountId, {
-      envelopeDefinition: envelopeDefinition
-    });
-
+    }
+    
+    const pdfBytes = Buffer.from(pdfBase64, 'base64');
+    
+    const signaturePositions = logoPositions.map(pos => ({
+      page: pos.page || 1,
+      x: pos.x || 100,
+      y: pos.y || 100
+    }));
+    
+    const result = await docuSignService.createEnvelopeWithSignatureFields(
+      pdfBytes,
+      recipientEmail,
+      recipientName,
+      signaturePositions
+    );
+    
     res.json({
       success: true,
-      envelopeId: results2.envelopeId,
-      message: 'Mockup proof sent for approval'
+      envelopeId: result.envelopeId,
+      status: result.status
     });
-
   } catch (error) {
     console.error('DocuSign error:', error);
-    res.status(500).json({
+    res.status(500).json({ 
       success: false,
-      error: error.message
+      error: error.message 
     });
   }
 });
@@ -465,6 +411,7 @@ app.post('/send-to-docusign', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
