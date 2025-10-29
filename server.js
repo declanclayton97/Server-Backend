@@ -5,6 +5,8 @@ import dotenv from "dotenv";
 import { Readable } from "stream";
 import DocuSignService from './docusignService.js';
 import cors from 'cors';
+import docusign from 'docusign-esign';
+import fs from 'fs';
 
 dotenv.config();
 
@@ -368,7 +370,7 @@ app.post('/send-to-docusign', async (req, res) => {
   const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
 
   try {
-    const docusign = require('docusign-esign');
+
     const apiClient = new docusign.ApiClient();
     apiClient.setBasePath(process.env.DOCUSIGN_BASE_PATH);
 
@@ -486,6 +488,7 @@ app.post('/send-to-docusign', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
