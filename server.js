@@ -398,13 +398,13 @@ app.post('/send-to-docusign', async (req, res) => {
     doc.documentId = '1';
     envelopeDefinition.documents = [doc];
 
-    // Create signer with email authentication (NO ACCOUNT REQUIRED)
+    // Create signer (customer)
     const signer = docusign.Signer.constructFromObject({
       email: recipientEmail,
       name: recipientName,
       recipientId: '1',
       routingOrder: '1',
-      // Remove clientUserId to allow email-based signing
+      requireIdLookup: 'false',
     });
 
     // Add Sign Here tabs for each logo position
@@ -425,28 +425,43 @@ app.post('/send-to-docusign', async (req, res) => {
       signHereTabs: signHereTabs,
     });
 
-    // THIS IS THE KEY: Set recipient authentication to "email"
-    // This bypasses the "agree to electronic records" and account creation
-    envelopeDefinition.recipientAuthentication = null; // Don't require additional auth
-    
-    // Add email notification settings
-    envelopeDefinition.notification = new docusign.Notification();
-    envelopeDefinition.notification.useAccountDefaults = 'false';
-    
-    const emailSettings = new docusign.EmailSettings();
-    emailSettings.replyEmailAddressOverride = null;
-    emailSettings.replyEmailNameOverride = null;
-    envelopeDefinition.emailSettings = emailSettings;
+    // ✅ ADD YOURSELF AS CC TO RECEIVE COMPLETION NOTIFICATIONS
+    const ccRecipient = docusign.CarbonCopy.constructFromObject({
+      email: 'dec@tuffshop.co.uk',
+      name: 'Dec - Tuff Shop',
+      recipientId: '2',
+      routingOrder: '2', // After the signer
+    });
 
     // Add recipients
     envelopeDefinition.recipients = new docusign.Recipients();
     envelopeDefinition.recipients.signers = [signer];
+    envelopeDefinition.recipients.carbonCopies = [ccRecipient]; // ✅ This is key
 
-    // IMPORTANT: Set these envelope settings
+    // Envelope settings
     envelopeDefinition.status = 'sent';
-    envelopeDefinition.enableWetSign = 'false'; // Prevent account creation prompt
+    envelopeDefinition.enableWetSign = 'false';
     envelopeDefinition.allowMarkup = 'false';
     envelopeDefinition.allowReassign = 'false';
+
+    // ✅ ADD EMAIL NOTIFICATION SETTINGS FOR COMPLETION
+    envelopeDefinition.notification = new docusign.Notification();
+    envelopeDefinition.notification.useAccountDefaults = 'false';
+    
+    const reminderSettings = new docusign.Reminders();
+    reminderSettings.reminderEnabled = 'true';
+    reminderSettings.reminderDelay = '2'; // Remind after 2 days
+    reminderSettings.reminderFrequency = '2'; // Every 2 days
+    
+    envelopeDefinition.notification.reminders = reminderSettings;
+
+    // ✅ ENABLE COMPLETION EMAIL
+    const expirations = new docusign.Expirations();
+    expirations.expireEnabled = 'true';
+    expirations.expireAfter = '120'; // Expire after 120 days
+    expirations.expireWarn = '5'; // Warn 5 days before expiration
+    
+    envelopeDefinition.notification.expirations = expirations;
 
     // Send the envelope
     const results2 = await envelopesApi.createEnvelope(accountId, {
@@ -471,6 +486,7 @@ app.post('/send-to-docusign', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
