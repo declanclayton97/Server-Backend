@@ -370,6 +370,7 @@ app.post('/send-to-docusign', async (req, res) => {
   const { pdfBase64, recipientEmail, recipientName, logoPositions } = req.body;
 
   try {
+    const docusign = require('docusign-esign');
     const apiClient = new docusign.ApiClient();
     apiClient.setBasePath(process.env.DOCUSIGN_BASE_PATH);
 
@@ -389,7 +390,7 @@ app.post('/send-to-docusign', async (req, res) => {
     // Create envelope definition
     const envelopeDefinition = new docusign.EnvelopeDefinition();
     envelopeDefinition.emailSubject = `Mockup Proof Approval - ${recipientName}`;
-    envelopeDefinition.emailBlurb = `Hi ${recipientName},\n\nPlease review and approve your mockup proof by clicking the button below. No account or registration required!\n\nBest regards,\nTuff Shop Team`;
+    envelopeDefinition.emailBlurb = 'Please review and approve the attached mockup proof by clicking the link below.';
 
     // Create document
     const doc = new docusign.Document();
@@ -399,18 +400,15 @@ app.post('/send-to-docusign', async (req, res) => {
     doc.documentId = '1';
     envelopeDefinition.documents = [doc];
 
-    // Create signer with minimal friction
+    // Create signer (customer)
     const signer = docusign.Signer.constructFromObject({
       email: recipientEmail,
       name: recipientName,
       recipientId: '1',
       routingOrder: '1',
-      requireIdLookup: 'false',
-      clientUserId: null, // Email-based signing
-      embeddedRecipientStartURL: null,
     });
 
-    // Add Sign Here tabs
+    // Add Sign Here tabs for each logo position
     const signHereTabs = [];
     logoPositions.forEach((position, index) => {
       const signHere = docusign.SignHere.constructFromObject({
@@ -428,7 +426,7 @@ app.post('/send-to-docusign', async (req, res) => {
       signHereTabs: signHereTabs,
     });
 
-    // Add CC recipient for yourself
+    // ADD YOURSELF AS CC TO RECEIVE COMPLETION NOTIFICATIONS
     const ccRecipient = docusign.CarbonCopy.constructFromObject({
       email: 'dec@tuffshop.co.uk',
       name: 'Dec - Tuff Shop',
@@ -441,45 +439,13 @@ app.post('/send-to-docusign', async (req, res) => {
     envelopeDefinition.recipients.signers = [signer];
     envelopeDefinition.recipients.carbonCopies = [ccRecipient];
 
-    // ✅ CRITICAL ENVELOPE SETTINGS
+    // Envelope settings
     envelopeDefinition.status = 'sent';
-    envelopeDefinition.enableWetSign = 'false';
-    envelopeDefinition.allowMarkup = 'false';
-    envelopeDefinition.allowReassign = 'false';
-    envelopeDefinition.signingLocation = 'online';
-    envelopeDefinition.authoritativeCopy = 'false';
-    envelopeDefinition.enforceSignerVisibility = 'false';
-
-    // Email settings
-    const emailSettings = new docusign.EmailSettings();
-    emailSettings.replyEmailAddressOverride = 'dec@tuffshop.co.uk';
-    emailSettings.replyEmailNameOverride = 'Tuff Shop';
-    envelopeDefinition.emailSettings = emailSettings;
-
-    // Notifications
-    envelopeDefinition.notification = new docusign.Notification();
-    envelopeDefinition.notification.useAccountDefaults = 'false';
-    
-    const reminderSettings = new docusign.Reminders();
-    reminderSettings.reminderEnabled = 'true';
-    reminderSettings.reminderDelay = '2';
-    reminderSettings.reminderFrequency = '2';
-    envelopeDefinition.notification.reminders = reminderSettings;
-
-    const expirations = new docusign.Expirations();
-    expirations.expireEnabled = 'true';
-    expirations.expireAfter = '120';
-    expirations.expireWarn = '5';
-    envelopeDefinition.notification.expirations = expirations;
-
-    console.log('📤 Sending DocuSign envelope...');
 
     // Send the envelope
     const results2 = await envelopesApi.createEnvelope(accountId, {
       envelopeDefinition: envelopeDefinition
     });
-
-    console.log('✅ Envelope sent:', results2.envelopeId);
 
     res.json({
       success: true,
@@ -488,7 +454,7 @@ app.post('/send-to-docusign', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ DocuSign error:', error);
+    console.error('DocuSign error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -499,6 +465,7 @@ app.post('/send-to-docusign', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
+
 
 
 
