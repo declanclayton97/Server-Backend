@@ -64,7 +64,7 @@ class DocuSignService {
     const envelopesApi = new EnvelopesApi(this.apiClient);
     
     const envelopeDefinition = new EnvelopeDefinition();
-    envelopeDefinition.emailSubject = 'Please approve the mockup sheet';
+    envelopeDefinition.emailSubject = 'Tuff Workwear Ltd Proof Approval';
     envelopeDefinition.status = 'sent';
     
     const doc = new Document();
