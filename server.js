@@ -7,6 +7,12 @@ import DocuSignService from './docusignService.js';
 import cors from 'cors';
 import docusign from 'docusign-esign';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// Get directory name for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -358,6 +364,72 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
 
 const docuSignService = new DocuSignService();
 
+// DocuSign logging functionality
+const DOCUSIGN_LOG_FILE = path.join(__dirname, 'docusign-logs.json');
+
+// Initialize log file if it doesn't exist
+function initializeLogFile() {
+  if (!fs.existsSync(DOCUSIGN_LOG_FILE)) {
+    fs.writeFileSync(DOCUSIGN_LOG_FILE, JSON.stringify({ logs: [] }, null, 2));
+    console.log('📝 Created DocuSign log file:', DOCUSIGN_LOG_FILE);
+  }
+}
+
+// Log a DocuSign send
+function logDocuSignSend(logEntry) {
+  try {
+    initializeLogFile();
+    const data = JSON.parse(fs.readFileSync(DOCUSIGN_LOG_FILE, 'utf-8'));
+    data.logs.unshift(logEntry); // Add to beginning of array
+
+    // Keep only the last 1000 entries to prevent file from growing too large
+    if (data.logs.length > 1000) {
+      data.logs = data.logs.slice(0, 1000);
+    }
+
+    fs.writeFileSync(DOCUSIGN_LOG_FILE, JSON.stringify(data, null, 2));
+    console.log('✅ Logged DocuSign send:', logEntry.envelopeId);
+  } catch (error) {
+    console.error('❌ Error logging DocuSign send:', error.message);
+  }
+}
+
+// Get DocuSign logs endpoint
+app.get('/api/docusign-logs', (req, res) => {
+  try {
+    initializeLogFile();
+    const data = JSON.parse(fs.readFileSync(DOCUSIGN_LOG_FILE, 'utf-8'));
+
+    // Optional filtering by date range
+    const { startDate, endDate, limit = 50 } = req.query;
+    let logs = data.logs;
+
+    if (startDate) {
+      logs = logs.filter(log => new Date(log.timestamp) >= new Date(startDate));
+    }
+
+    if (endDate) {
+      logs = logs.filter(log => new Date(log.timestamp) <= new Date(endDate));
+    }
+
+    // Limit results
+    logs = logs.slice(0, parseInt(limit));
+
+    res.json({
+      success: true,
+      total: data.logs.length,
+      returned: logs.length,
+      logs: logs
+    });
+  } catch (error) {
+    console.error('Error reading DocuSign logs:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.get('/check-limits', (req, res) => {
   res.json({ 
     message: 'Server is configured',
@@ -413,7 +485,22 @@ app.post('/send-to-docusign', async (req, res) => {
       recipientName,
       formattedPositions
     );
-    
+
+    // Log the DocuSign send
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      envelopeId: result.envelopeId,
+      status: result.status,
+      recipientEmail,
+      recipientName,
+      signatureCount: formattedPositions.length,
+      pdfSizeBytes: pdfBytes.length,
+      userAgent: req.headers['user-agent'] || 'unknown',
+      ipAddress: req.ip || req.connection.remoteAddress || 'unknown'
+    };
+
+    logDocuSignSend(logEntry);
+
     res.json({
       success: true,
       envelopeId: result.envelopeId,
