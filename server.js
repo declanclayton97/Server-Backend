@@ -7,8 +7,32 @@ import DocuSignService from './docusignService.js';
 import cors from 'cors';
 import docusign from 'docusign-esign';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import pkg from 'pg';
+const { Pool } = pkg;
+
+// Get directory name for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
+
+// Initialize PostgreSQL connection (for production) with fallback to JSON (for local dev)
+const useDatabase = !!process.env.DATABASE_URL;
+let pool;
+
+if (useDatabase) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_URL?.includes('localhost') ? false : {
+      rejectUnauthorized: false
+    }
+  });
+  console.log('📊 Using PostgreSQL database for DocuSign logs');
+} else {
+  console.log('📝 Using JSON file storage for DocuSign logs (local development)');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -358,6 +382,170 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
 
 const docuSignService = new DocuSignService();
 
+// DocuSign logging functionality
+const DOCUSIGN_LOG_FILE = path.join(__dirname, 'docusign-logs.json');
+
+// Initialize database table if using PostgreSQL
+async function initializeDatabase() {
+  if (!useDatabase) return;
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS docusign_logs (
+        id SERIAL PRIMARY KEY,
+        timestamp TIMESTAMPTZ NOT NULL,
+        envelope_id VARCHAR(255) NOT NULL,
+        status VARCHAR(50),
+        recipient_email VARCHAR(255),
+        recipient_name VARCHAR(255),
+        signature_count INTEGER,
+        pdf_size_bytes BIGINT,
+        user_agent TEXT,
+        ip_address VARCHAR(100),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_docusign_logs_timestamp ON docusign_logs(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_docusign_logs_envelope_id ON docusign_logs(envelope_id);
+    `);
+    console.log('✅ DocuSign logs table initialized');
+  } catch (error) {
+    console.error('❌ Error initializing database:', error.message);
+  }
+}
+
+// Initialize log file if it doesn't exist (for JSON fallback)
+function initializeLogFile() {
+  if (!fs.existsSync(DOCUSIGN_LOG_FILE)) {
+    fs.writeFileSync(DOCUSIGN_LOG_FILE, JSON.stringify({ logs: [] }, null, 2));
+    console.log('📝 Created DocuSign log file:', DOCUSIGN_LOG_FILE);
+  }
+}
+
+// Log a DocuSign send (supports both PostgreSQL and JSON)
+async function logDocuSignSend(logEntry) {
+  try {
+    if (useDatabase) {
+      // Use PostgreSQL
+      await pool.query(
+        `INSERT INTO docusign_logs
+         (timestamp, envelope_id, status, recipient_email, recipient_name, signature_count, pdf_size_bytes, user_agent, ip_address)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          logEntry.timestamp,
+          logEntry.envelopeId,
+          logEntry.status,
+          logEntry.recipientEmail,
+          logEntry.recipientName,
+          logEntry.signatureCount,
+          logEntry.pdfSizeBytes,
+          logEntry.userAgent,
+          logEntry.ipAddress
+        ]
+      );
+      console.log('✅ Logged DocuSign send to database:', logEntry.envelopeId);
+    } else {
+      // Use JSON file
+      initializeLogFile();
+      const data = JSON.parse(fs.readFileSync(DOCUSIGN_LOG_FILE, 'utf-8'));
+      data.logs.unshift(logEntry);
+
+      // Keep only the last 1000 entries
+      if (data.logs.length > 1000) {
+        data.logs = data.logs.slice(0, 1000);
+      }
+
+      fs.writeFileSync(DOCUSIGN_LOG_FILE, JSON.stringify(data, null, 2));
+      console.log('✅ Logged DocuSign send to file:', logEntry.envelopeId);
+    }
+  } catch (error) {
+    console.error('❌ Error logging DocuSign send:', error.message);
+  }
+}
+
+// Get DocuSign logs endpoint (supports both PostgreSQL and JSON)
+app.get('/api/docusign-logs', async (req, res) => {
+  try {
+    const { startDate, endDate, limit = 50 } = req.query;
+
+    if (useDatabase) {
+      // Use PostgreSQL
+      let query = 'SELECT * FROM docusign_logs WHERE 1=1';
+      const params = [];
+      let paramIndex = 1;
+
+      if (startDate) {
+        query += ` AND timestamp >= $${paramIndex}`;
+        params.push(startDate);
+        paramIndex++;
+      }
+
+      if (endDate) {
+        query += ` AND timestamp <= $${paramIndex}`;
+        params.push(endDate);
+        paramIndex++;
+      }
+
+      query += ' ORDER BY timestamp DESC';
+      query += ` LIMIT $${paramIndex}`;
+      params.push(parseInt(limit));
+
+      const result = await pool.query(query, params);
+      const countResult = await pool.query('SELECT COUNT(*) FROM docusign_logs');
+
+      // Transform database results to match frontend format
+      const logs = result.rows.map(row => ({
+        timestamp: row.timestamp,
+        envelopeId: row.envelope_id,
+        status: row.status,
+        recipientEmail: row.recipient_email,
+        recipientName: row.recipient_name,
+        signatureCount: row.signature_count,
+        pdfSizeBytes: row.pdf_size_bytes,
+        userAgent: row.user_agent,
+        ipAddress: row.ip_address
+      }));
+
+      res.json({
+        success: true,
+        total: parseInt(countResult.rows[0].count),
+        returned: logs.length,
+        logs: logs
+      });
+    } else {
+      // Use JSON file
+      initializeLogFile();
+      const data = JSON.parse(fs.readFileSync(DOCUSIGN_LOG_FILE, 'utf-8'));
+      let logs = data.logs;
+
+      if (startDate) {
+        logs = logs.filter(log => new Date(log.timestamp) >= new Date(startDate));
+      }
+
+      if (endDate) {
+        logs = logs.filter(log => new Date(log.timestamp) <= new Date(endDate));
+      }
+
+      logs = logs.slice(0, parseInt(limit));
+
+      res.json({
+        success: true,
+        total: data.logs.length,
+        returned: logs.length,
+        logs: logs
+      });
+    }
+  } catch (error) {
+    console.error('Error reading DocuSign logs:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Initialize database on startup
+initializeDatabase();
+
 app.get('/check-limits', (req, res) => {
   res.json({ 
     message: 'Server is configured',
@@ -413,7 +601,22 @@ app.post('/send-to-docusign', async (req, res) => {
       recipientName,
       formattedPositions
     );
-    
+
+    // Log the DocuSign send
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      envelopeId: result.envelopeId,
+      status: result.status,
+      recipientEmail,
+      recipientName,
+      signatureCount: formattedPositions.length,
+      pdfSizeBytes: pdfBytes.length,
+      userAgent: req.headers['user-agent'] || 'unknown',
+      ipAddress: req.ip || req.connection.remoteAddress || 'unknown'
+    };
+
+    logDocuSignSend(logEntry);
+
     res.json({
       success: true,
       envelopeId: result.envelopeId,
