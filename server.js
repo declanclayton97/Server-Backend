@@ -145,6 +145,48 @@ app.get("/fetch-image", async (req, res) => {
   }
 });
 
+app.get("/api/brightpearl/order/:orderId/custom-fields", async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    console.log('Fetching Brightpearl custom fields for order:', orderId);
+
+    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+    }
+
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
+    console.log('Fetching custom fields from:', url);
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      console.error('Brightpearl custom fields response:', responseText);
+      return res.status(response.status).json({
+        error: responseText
+      });
+    }
+
+    const data = JSON.parse(responseText);
+    res.json(data);
+  } catch (error) {
+    console.error('Custom fields fetch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get("/api/brightpearl/order/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
