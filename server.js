@@ -674,6 +674,270 @@ app.post('/send-to-docusign', async (req, res) => {
   }
 });
 
+// ============================================================
+// Proof Approval System
+// ============================================================
+
+async function initApprovalDB() {
+  if (!pool) {
+    console.log("⚠️  No DATABASE_URL — approval system disabled");
+    return;
+  }
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS approval_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        order_number VARCHAR(50),
+        customer_name VARCHAR(255),
+        recipient_name VARCHAR(255),
+        pdf_data BYTEA NOT NULL,
+        logo_positions JSONB NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT NOW(),
+        completed_at TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS approval_items (
+        id SERIAL PRIMARY KEY,
+        session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
+        position_index INTEGER NOT NULL,
+        label VARCHAR(255),
+        page_number INTEGER NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending',
+        rejection_reason TEXT,
+        reviewed_at TIMESTAMP,
+        UNIQUE(session_id, position_index)
+      );
+    `);
+    console.log("✅ Approval tables ready");
+  } catch (err) {
+    console.error("❌ Failed to init approval DB:", err.message);
+  }
+}
+
+initApprovalDB();
+
+// Create approval session
+app.post("/api/approval-sessions", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+
+  try {
+    const { pdfBase64, logoPositions, orderNumber, customerName, recipientName } = req.body;
+
+    if (!pdfBase64 || !logoPositions?.length) {
+      return res.status(400).json({ error: "pdfBase64 and logoPositions are required" });
+    }
+
+    const pdfBuffer = Buffer.from(pdfBase64, "base64");
+
+    const sessionResult = await pool.query(
+      `INSERT INTO approval_sessions (order_number, customer_name, recipient_name, pdf_data, logo_positions)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, status, created_at`,
+      [orderNumber || null, customerName || null, recipientName || null, pdfBuffer, JSON.stringify(logoPositions)]
+    );
+
+    const session = sessionResult.rows[0];
+
+    for (let i = 0; i < logoPositions.length; i++) {
+      const pos = logoPositions[i];
+      await pool.query(
+        `INSERT INTO approval_items (session_id, position_index, label, page_number)
+         VALUES ($1, $2, $3, $4)`,
+        [session.id, i, pos.label || `Position ${i + 1}`, pos.page || 1]
+      );
+    }
+
+    const frontendUrl = process.env.FRONTEND_URL || "https://mock-up-creator-hosted-web.onrender.com";
+
+    res.json({
+      success: true,
+      sessionId: session.id,
+      approvalUrl: `${frontendUrl}/approve/${session.id}`,
+    });
+  } catch (err) {
+    console.error("Create approval session error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get approval session metadata
+app.get("/api/approval-sessions/:sessionId", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+
+  try {
+    const { sessionId } = req.params;
+
+    const sessionResult = await pool.query(
+      `SELECT id, order_number, customer_name, recipient_name, logo_positions,
+              status, created_at, completed_at
+       FROM approval_sessions WHERE id = $1`,
+      [sessionId]
+    );
+
+    if (sessionResult.rows.length === 0) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    const session = sessionResult.rows[0];
+
+    const itemsResult = await pool.query(
+      `SELECT id, position_index, label, page_number, status, rejection_reason, reviewed_at
+       FROM approval_items WHERE session_id = $1 ORDER BY position_index`,
+      [sessionId]
+    );
+
+    res.json({
+      success: true,
+      session: {
+        id: session.id,
+        orderNumber: session.order_number,
+        customerName: session.customer_name,
+        recipientName: session.recipient_name,
+        logoPositions: session.logo_positions,
+        status: session.status,
+        createdAt: session.created_at,
+        completedAt: session.completed_at,
+        items: itemsResult.rows.map((item) => ({
+          id: item.id,
+          positionIndex: item.position_index,
+          label: item.label,
+          pageNumber: item.page_number,
+          status: item.status,
+          rejectionReason: item.rejection_reason,
+          reviewedAt: item.reviewed_at,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error("Get approval session error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Stream PDF for approval session
+app.get("/api/approval-sessions/:sessionId/pdf", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+
+  try {
+    const { sessionId } = req.params;
+    const result = await pool.query(
+      `SELECT pdf_data FROM approval_sessions WHERE id = $1`,
+      [sessionId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "inline");
+    res.send(result.rows[0].pdf_data);
+  } catch (err) {
+    console.error("Get approval PDF error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Submit all reviews
+app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+
+  try {
+    const { sessionId } = req.params;
+    const { items } = req.body;
+
+    if (!items?.length) {
+      return res.status(400).json({ error: "items array is required" });
+    }
+
+    const sessionCheck = await pool.query(
+      `SELECT status FROM approval_sessions WHERE id = $1`,
+      [sessionId]
+    );
+    if (sessionCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    if (sessionCheck.rows[0].status !== "pending") {
+      return res.status(400).json({ error: "Session already completed" });
+    }
+
+    for (const item of items) {
+      await pool.query(
+        `UPDATE approval_items
+         SET status = $1, rejection_reason = $2, reviewed_at = NOW()
+         WHERE id = $3 AND session_id = $4`,
+        [item.status, item.rejectionReason || null, item.itemId, sessionId]
+      );
+    }
+
+    const allItems = await pool.query(
+      `SELECT status FROM approval_items WHERE session_id = $1`,
+      [sessionId]
+    );
+    const hasRejected = allItems.rows.some((i) => i.status === "rejected");
+    const allReviewed = allItems.rows.every((i) => i.status !== "pending");
+
+    let sessionStatus = "pending";
+    if (allReviewed) {
+      sessionStatus = hasRejected ? "changes_requested" : "approved";
+      await pool.query(
+        `UPDATE approval_sessions SET status = $1, completed_at = NOW() WHERE id = $2`,
+        [sessionStatus, sessionId]
+      );
+    }
+
+    res.json({ success: true, sessionStatus });
+  } catch (err) {
+    console.error("Submit approval error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List sessions
+app.get("/api/approval-sessions", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+
+  try {
+    const { orderNumber } = req.query;
+    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at
+                 FROM approval_sessions`;
+    const params = [];
+
+    if (orderNumber) {
+      query += ` WHERE order_number = $1`;
+      params.push(orderNumber);
+    }
+
+    query += ` ORDER BY created_at DESC LIMIT 50`;
+
+    const result = await pool.query(query, params);
+
+    const sessions = await Promise.all(
+      result.rows.map(async (session) => {
+        const itemsResult = await pool.query(
+          `SELECT id, label, status, rejection_reason FROM approval_items WHERE session_id = $1 ORDER BY position_index`,
+          [session.id]
+        );
+        return {
+          id: session.id,
+          orderNumber: session.order_number,
+          customerName: session.customer_name,
+          recipientName: session.recipient_name,
+          status: session.status,
+          createdAt: session.created_at,
+          completedAt: session.completed_at,
+          items: itemsResult.rows,
+        };
+      })
+    );
+
+    res.json({ success: true, sessions });
+  } catch (err) {
+    console.error("List approval sessions error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
 });
