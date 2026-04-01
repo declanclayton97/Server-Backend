@@ -893,19 +893,42 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
   }
 });
 
+// Archive a session
+app.put("/api/approval-sessions/:sessionId/archive", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const { sessionId } = req.params;
+    await pool.query(
+      `UPDATE approval_sessions SET status = 'archived' WHERE id = $1`,
+      [sessionId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Archive session error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // List sessions
 app.get("/api/approval-sessions", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
 
   try {
-    const { orderNumber } = req.query;
+    const { orderNumber, includeArchived } = req.query;
     let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at
                  FROM approval_sessions`;
+    const conditions = [];
     const params = [];
 
+    if (!includeArchived) {
+      conditions.push(`status != 'archived'`);
+    }
     if (orderNumber) {
-      query += ` WHERE order_number = $1`;
       params.push(orderNumber);
+      conditions.push(`order_number = $${params.length}`);
+    }
+    if (conditions.length) {
+      query += ` WHERE ${conditions.join(" AND ")}`;
     }
 
     query += ` ORDER BY created_at DESC LIMIT 50`;
