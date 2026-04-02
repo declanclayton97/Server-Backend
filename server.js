@@ -674,6 +674,34 @@ app.post('/send-to-docusign', async (req, res) => {
   }
 });
 
+// Search contacts by company name
+app.get("/api/brightpearl/contact-search", async (req, res) => {
+  try {
+    const { company } = req.query;
+    if (!company) return res.status(400).json({ error: "company query param required" });
+
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/contact-service/contact-search?companyName=${encodeURIComponent(company)}&pageSize=50`;
+
+    const response = await fetch(url, {
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    res.json({ success: true, results: data?.response?.results || [], columns: data?.response?.metaData?.columns });
+  } catch (error) {
+    console.error("Contact search error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Search orders by customer contact ID
 app.get("/api/brightpearl/orders-by-contact/:contactId", async (req, res) => {
   try {
