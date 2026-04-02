@@ -674,6 +674,67 @@ app.post('/send-to-docusign', async (req, res) => {
   }
 });
 
+// Search orders by customer contact ID
+app.get("/api/brightpearl/orders-by-contact/:contactId", async (req, res) => {
+  try {
+    const { contactId } = req.params;
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?customerRef=${contactId}&pageSize=200&firstResult=1`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: `Brightpearl returned ${response.status}` });
+    }
+
+    const data = await response.json();
+    const orderIds = data?.response?.results?.map(r => r[0]) || [];
+
+    if (orderIds.length === 0) {
+      return res.json({ success: true, orders: [] });
+    }
+
+    // Fetch order details in batches
+    const batchSize = 20;
+    const allOrders = [];
+
+    for (let i = 0; i < orderIds.length; i += batchSize) {
+      const batch = orderIds.slice(i, i + batchSize);
+      const orderRange = batch.join(',');
+      const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderRange}`;
+
+      const detailsResponse = await fetch(detailsUrl, {
+        headers: {
+          'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+          'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (detailsResponse.ok) {
+        const detailsData = await detailsResponse.json();
+        const orders = detailsData?.response || [];
+        allOrders.push(...(Array.isArray(orders) ? orders : [orders]));
+      }
+    }
+
+    res.json({ success: true, orders: allOrders, totalFound: orderIds.length });
+  } catch (error) {
+    console.error("Orders by contact error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================================
 // Proof Approval System
 // ============================================================
