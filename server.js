@@ -764,6 +764,99 @@ app.get("/api/brightpearl/orders-by-contact/:contactId", async (req, res) => {
 });
 
 // ============================================================
+// Customer Mockup Configs (logo placements for customer portal)
+// ============================================================
+
+async function initMockupConfigsDB() {
+  if (!pool) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS customer_mockup_configs (
+        id SERIAL PRIMARY KEY,
+        customer VARCHAR(50) NOT NULL,
+        product_code VARCHAR(20) NOT NULL,
+        colour VARCHAR(100) NOT NULL,
+        position VARCHAR(50) NOT NULL,
+        logo_id VARCHAR(50) NOT NULL,
+        side VARCHAR(10) DEFAULT 'front',
+        placement JSONB NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(customer, product_code, colour, position, logo_id, side)
+      );
+    `);
+    console.log("✅ Mockup configs table ready");
+  } catch (err) {
+    console.error("❌ Mockup configs DB init error:", err.message);
+  }
+}
+
+initMockupConfigsDB();
+
+// Save or update a placement config
+app.put("/api/mockup-configs", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const { customer, productCode, colour, position, logoId, side, placement } = req.body;
+    if (!customer || !productCode || !colour || !position || !logoId || !placement) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO customer_mockup_configs (customer, product_code, colour, position, logo_id, side, placement)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (customer, product_code, colour, position, logo_id, side)
+      DO UPDATE SET placement = $7, updated_at = NOW()
+      RETURNING id
+    `, [customer, productCode, colour, position, logoId, side || 'front', JSON.stringify(placement)]);
+
+    res.json({ success: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error("Save mockup config error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all configs for a customer
+app.get("/api/mockup-configs/:customer", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const { customer } = req.params;
+    const { productCode, colour } = req.query;
+
+    let query = `SELECT * FROM customer_mockup_configs WHERE customer = $1`;
+    const params = [customer];
+
+    if (productCode) {
+      params.push(productCode);
+      query += ` AND product_code = $${params.length}`;
+    }
+    if (colour) {
+      params.push(colour);
+      query += ` AND colour = $${params.length}`;
+    }
+
+    query += ` ORDER BY product_code, colour, position`;
+    const result = await pool.query(query, params);
+
+    res.json({ success: true, configs: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a config
+app.delete("/api/mockup-configs/:id", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    await pool.query(`DELETE FROM customer_mockup_configs WHERE id = $1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
 // Customer Order Portal
 // ============================================================
 
