@@ -927,12 +927,14 @@ async function initApprovalDB() {
         order_number VARCHAR(50),
         customer_name VARCHAR(255),
         recipient_name VARCHAR(255),
-        pdf_data BYTEA NOT NULL,
+        pdf_data BYTEA,
         logo_positions JSONB NOT NULL,
         status VARCHAR(20) DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT NOW(),
         completed_at TIMESTAMP
       );
+      -- Allow existing NOT NULL column to be nullable
+      ALTER TABLE approval_sessions ALTER COLUMN pdf_data DROP NOT NULL;
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -1066,6 +1068,10 @@ app.get("/api/approval-sessions/:sessionId/pdf", async (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
+    if (!result.rows[0].pdf_data) {
+      return res.status(410).json({ error: "PDF has been removed after approval" });
+    }
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", "inline");
     res.send(result.rows[0].pdf_data);
@@ -1117,8 +1123,9 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
     let sessionStatus = "pending";
     if (allReviewed) {
       sessionStatus = hasRejected ? "changes_requested" : "approved";
+      // Set status + clear the PDF data to free storage (user already has a local copy)
       await pool.query(
-        `UPDATE approval_sessions SET status = $1, completed_at = NOW() WHERE id = $2`,
+        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), pdf_data = NULL WHERE id = $2`,
         [sessionStatus, sessionId]
       );
     }
@@ -1126,6 +1133,21 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
     res.json({ success: true, sessionStatus });
   } catch (err) {
     console.error("Submit approval error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Clean up: purge PDF data from completed/archived sessions
+app.post("/api/approval-sessions/cleanup", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const result = await pool.query(
+      `UPDATE approval_sessions SET pdf_data = NULL
+       WHERE status IN ('approved', 'changes_requested', 'archived') AND pdf_data IS NOT NULL
+       RETURNING id`
+    );
+    res.json({ success: true, cleaned: result.rowCount });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
