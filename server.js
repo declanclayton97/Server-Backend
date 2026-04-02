@@ -682,7 +682,7 @@ app.get("/api/brightpearl/orders-by-contact/:contactId", async (req, res) => {
       ? 'https://euw1.brightpearlconnect.com'
       : 'https://use1.brightpearlconnect.com';
 
-    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?customerRef=${contactId}&pageSize=200&firstResult=1`;
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?customerId=${contactId}&pageSize=200&firstResult=1`;
 
     const response = await fetch(url, {
       method: 'GET',
