@@ -764,6 +764,61 @@ app.get("/api/brightpearl/orders-by-contact/:contactId", async (req, res) => {
 });
 
 // ============================================================
+// Customer Order Portal
+// ============================================================
+
+async function initCustomerOrdersDB() {
+  if (!pool) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS customer_orders (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        customer_name VARCHAR(255),
+        contact_name VARCHAR(255),
+        order_data JSONB NOT NULL,
+        notes TEXT,
+        status VARCHAR(20) DEFAULT 'new',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log("✅ Customer orders table ready");
+  } catch (err) {
+    console.error("❌ Customer orders DB init error:", err.message);
+  }
+}
+
+initCustomerOrdersDB();
+
+app.post("/api/customer-orders", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const { customer, contactName, items, notes } = req.body;
+    const result = await pool.query(
+      `INSERT INTO customer_orders (customer_name, contact_name, order_data, notes)
+       VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
+      [customer, contactName, JSON.stringify({ items }), notes || null]
+    );
+    res.json({ success: true, orderId: result.rows[0].id });
+  } catch (err) {
+    console.error("Customer order error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/customer-orders", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const result = await pool.query(
+      `SELECT id, customer_name, contact_name, order_data, notes, status, created_at
+       FROM customer_orders ORDER BY created_at DESC LIMIT 50`
+    );
+    res.json({ success: true, orders: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
 // Proof Approval System
 // ============================================================
 
