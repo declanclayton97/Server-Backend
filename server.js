@@ -911,6 +911,25 @@ app.get("/api/customer-orders", async (req, res) => {
   }
 });
 
+// PATCH order status
+app.patch("/api/customer-orders/:orderId/status", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const { orderId } = req.params;
+    const { status } = req.body;
+    if (!status) return res.status(400).json({ success: false, error: "status required" });
+    const result = await pool.query(
+      "UPDATE customer_orders SET status = $1 WHERE id = $2 RETURNING id, status",
+      [status, orderId]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ success: false, error: "Order not found" });
+    res.json({ success: true, id: result.rows[0].id, status: result.rows[0].status });
+  } catch (err) {
+    console.error("Failed to update order status:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ============================================================
 // Proof Approval System
 // ============================================================
