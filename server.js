@@ -950,10 +950,13 @@ async function initApprovalDB() {
         logo_positions JSONB NOT NULL,
         status VARCHAR(20) DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT NOW(),
-        completed_at TIMESTAMP
+        completed_at TIMESTAMP,
+        submitter_ip VARCHAR(100)
       );
       -- Allow existing NOT NULL column to be nullable
       ALTER TABLE approval_sessions ALTER COLUMN pdf_data DROP NOT NULL;
+      -- Add submitter_ip column if missing
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS submitter_ip VARCHAR(100);
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -1142,10 +1145,11 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
     let sessionStatus = "pending";
     if (allReviewed) {
       sessionStatus = hasRejected ? "changes_requested" : "approved";
-      // Set status + clear the PDF data to free storage (user already has a local copy)
+      // Set status + clear the PDF data + capture submitter IP
+      const submitterIp = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || null;
       await pool.query(
-        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), pdf_data = NULL WHERE id = $2`,
-        [sessionStatus, sessionId]
+        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), pdf_data = NULL, submitter_ip = $3 WHERE id = $2`,
+        [sessionStatus, sessionId, submitterIp]
       );
     }
 
@@ -1193,7 +1197,7 @@ app.get("/api/approval-sessions", async (req, res) => {
 
   try {
     const { orderNumber, includeArchived } = req.query;
-    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at
+    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, submitter_ip
                  FROM approval_sessions`;
     const conditions = [];
     const params = [];
@@ -1209,7 +1213,7 @@ app.get("/api/approval-sessions", async (req, res) => {
       query += ` WHERE ${conditions.join(" AND ")}`;
     }
 
-    query += ` ORDER BY created_at DESC LIMIT 50`;
+    query += ` ORDER BY created_at DESC LIMIT 200`;
 
     const result = await pool.query(query, params);
 
@@ -1227,6 +1231,7 @@ app.get("/api/approval-sessions", async (req, res) => {
           status: session.status,
           createdAt: session.created_at,
           completedAt: session.completed_at,
+          submitterIp: session.submitter_ip,
           items: itemsResult.rows,
         };
       })
