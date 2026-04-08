@@ -1164,7 +1164,8 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
   }
 });
 
-// Clean up: purge PDF data from completed sessions older than 14 days
+// Clean up: purge PDF data from signed/completed sessions older than 14 days
+// Pending sessions keep their PDF indefinitely (customer hasn't responded yet)
 app.post("/api/approval-sessions/cleanup", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
   try {
