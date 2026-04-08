@@ -896,13 +896,16 @@ app.post("/api/customer-orders", async (req, res) => {
     res.json({ success: true, orderId: result.rows[0].id });
 
     // Send email notification (async, don't block response)
-    if (process.env.SMTP_USER && process.env.SMTP_PASS && items?.length > 0) {
+    if (process.env.SMTP_PASS && items?.length > 0) {
       try {
         const transporter = nodemailer.createTransport({
-          host: "smtp.office365.com",
-          port: 587,
+          host: process.env.SMTP_SERVER || "mail.smtp2go.com",
+          port: parseInt(process.env.SMTP_PORT || "2525"),
           secure: false,
-          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+          auth: {
+            user: process.env.SMTP_USERNAME || "fitnessincorders@tuffshop.co.uk",
+            pass: process.env.SMTP_PASS,
+          },
         });
 
         const itemRows = (items || []).map((item) => {
@@ -920,8 +923,8 @@ app.post("/api/customer-orders", async (req, res) => {
         );
 
         await transporter.sendMail({
-          from: `"Tuffshop Orders" <${process.env.SMTP_USER}>`,
-          to: process.env.SMTP_USER,
+          from: `"Fitness Inc Orders" <${process.env.SENDER_EMAIL || "fitnessincorders@tuffshop.co.uk"}>`,
+          to: process.env.RECIPIENT_EMAILS || "dec@tuffshop.co.uk",
           subject: `Fitness Inc Order - ${contactName || customer || "Unknown"} - ${totalQty} items`,
           html: `
             <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
