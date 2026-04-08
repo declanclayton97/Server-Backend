@@ -11,6 +11,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import pkg from 'pg';
 import { PDFDocument, rgb } from 'pdf-lib';
+import nodemailer from 'nodemailer';
 const { Pool } = pkg;
 
 // Get directory name for ES modules
@@ -890,9 +891,68 @@ app.post("/api/customer-orders", async (req, res) => {
     const result = await pool.query(
       `INSERT INTO customer_orders (customer_name, contact_name, order_data, notes)
        VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
-      [customer, contactName, JSON.stringify({ items }), notes || null]
+      [customer || null, contactName || null, JSON.stringify({ items: items || [] }), notes || null]
     );
     res.json({ success: true, orderId: result.rows[0].id });
+
+    // Send email notification (async, don't block response)
+    if (process.env.SMTP_USER && process.env.SMTP_PASS && items?.length > 0) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: "smtp.office365.com",
+          port: 587,
+          secure: false,
+          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        });
+
+        const itemRows = (items || []).map((item) => {
+          const sizes = (item.sizes || []).filter((s) => s.qty > 0).map((s) => `${s.qty}x ${s.size}`).join(", ");
+          const logos = (item.logos || []).map((l) => `${l.position}: ${l.logo}`).join(" | ");
+          return `<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><strong>${item.product}</strong><br><span style="color:#888">${item.colour}</span></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${sizes}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">${logos || "None"}</td>
+          </tr>`;
+        }).join("");
+
+        const totalQty = (items || []).reduce((s, item) =>
+          s + (item.sizes || []).reduce((a, sz) => a + (sz.qty || 0), 0), 0
+        );
+
+        await transporter.sendMail({
+          from: `"Tuffshop Orders" <${process.env.SMTP_USER}>`,
+          to: process.env.SMTP_USER,
+          subject: `Fitness Inc Order - ${contactName || customer || "Unknown"} - ${totalQty} items`,
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+              <div style="background:#000;color:#fff;padding:16px 20px;border-bottom:3px solid #F3D014">
+                <h2 style="margin:0;font-size:18px">New Fitness Inc Order</h2>
+              </div>
+              <div style="padding:20px">
+                <p><strong>Customer:</strong> ${customer || "Fitness Inc"}</p>
+                <p><strong>Contact:</strong> ${contactName || "N/A"}</p>
+                <p><strong>Total Items:</strong> ${totalQty}</p>
+                ${notes ? `<p><strong>Notes:</strong> ${notes}</p>` : ""}
+                <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                  <thead><tr style="background:#f5f5f5">
+                    <th style="padding:8px;text-align:left">Product</th>
+                    <th style="padding:8px;text-align:left">Sizes</th>
+                    <th style="padding:8px;text-align:left">Logos</th>
+                  </tr></thead>
+                  <tbody>${itemRows}</tbody>
+                </table>
+                <p style="color:#888;font-size:12px;margin-top:20px">
+                  Submitted: ${new Date().toLocaleString("en-GB", { timeZone: "Europe/London" })}
+                </p>
+              </div>
+            </div>
+          `,
+        });
+        console.log("Order notification email sent");
+      } catch (emailErr) {
+        console.error("Failed to send order email:", emailErr.message);
+      }
+    }
   } catch (err) {
     console.error("Customer order error:", err);
     res.status(500).json({ error: err.message });
