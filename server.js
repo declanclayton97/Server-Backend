@@ -961,6 +961,7 @@ async function initApprovalDB() {
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS submitter_ip VARCHAR(100);
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS approver_name VARCHAR(255);
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS signature_data TEXT;
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS pdf_delete_after TIMESTAMP;
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -1170,9 +1171,11 @@ app.post("/api/approval-sessions/cleanup", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
   try {
     const result = await pool.query(
-      `UPDATE approval_sessions SET pdf_data = NULL
-       WHERE status IN ('approved', 'changes_requested', 'archived') AND pdf_data IS NOT NULL
-       AND completed_at < NOW() - INTERVAL '14 days'
+      `UPDATE approval_sessions SET pdf_data = NULL, pdf_delete_after = NULL
+       WHERE pdf_data IS NOT NULL AND (
+         (status IN ('approved', 'changes_requested', 'archived') AND completed_at < NOW() - INTERVAL '14 days')
+         OR (pdf_delete_after IS NOT NULL AND pdf_delete_after < NOW())
+       )
        RETURNING id`
     );
     res.json({ success: true, cleaned: result.rowCount });
@@ -1200,8 +1203,8 @@ app.get("/api/approval-sessions/:sessionId/download", async (req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(pdf_data);
 
-    // Clear PDF data after download
-    await pool.query(`UPDATE approval_sessions SET pdf_data = NULL WHERE id = $1`, [sessionId]);
+    // Mark for deletion in 24 hours (not immediately, in case download fails)
+    await pool.query(`UPDATE approval_sessions SET pdf_delete_after = NOW() + INTERVAL '24 hours' WHERE id = $1`, [sessionId]);
   } catch (err) {
     console.error("Download signed PDF error:", err);
     res.status(500).json({ error: err.message });
