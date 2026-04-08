@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import pkg from 'pg';
+import { PDFDocument, rgb } from 'pdf-lib';
 const { Pool } = pkg;
 
 // Get directory name for ES modules
@@ -1184,26 +1185,113 @@ app.post("/api/approval-sessions/cleanup", async (req, res) => {
   }
 });
 
-// Download signed PDF and clear from database
+// Download signed PDF — overlays signature stamp on each logo box
 app.get("/api/approval-sessions/:sessionId/download", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
   try {
     const { sessionId } = req.params;
     const result = await pool.query(
-      `SELECT pdf_data, customer_name, order_number FROM approval_sessions WHERE id = $1`,
+      `SELECT pdf_data, customer_name, order_number, approver_name, signature_data, submitter_ip, logo_positions FROM approval_sessions WHERE id = $1`,
       [sessionId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: "Session not found" });
     if (!result.rows[0].pdf_data) return res.status(410).json({ error: "PDF no longer available" });
 
-    const { pdf_data, customer_name, order_number } = result.rows[0];
+    const { pdf_data, customer_name, order_number, approver_name, signature_data, submitter_ip, logo_positions } = result.rows[0];
     const filename = `${customer_name || "Customer"}-${order_number || "proof"}-Signed.pdf`;
+
+    // Overlay signature stamp on each logo box
+    let finalPdfBytes = pdf_data;
+    if (approver_name || signature_data) {
+      try {
+        const pdfDoc = await PDFDocument.load(pdf_data);
+        const pages = pdfDoc.getPages();
+        const positions = typeof logo_positions === 'string' ? JSON.parse(logo_positions) : logo_positions;
+
+        // Logo box coordinates (same as frontend)
+        const boxCoords = [
+          { x: 21, y: 604, width: 129, height: 96 },
+          { x: 21, y: 436, width: 129, height: 96 },
+          { x: 21, y: 269, width: 129, height: 96 },
+          { x: 21, y: 100, width: 129, height: 96 },
+        ];
+
+        // Embed signature image if available
+        let sigImage = null;
+        if (signature_data) {
+          try {
+            const sigBase64 = signature_data.replace(/^data:image\/png;base64,/, '');
+            const sigBytes = Buffer.from(sigBase64, 'base64');
+            sigImage = await pdfDoc.embedPng(sigBytes);
+          } catch {}
+        }
+
+        // Stamp dimensions
+        const stampW = 129;
+        const stampH = 50;
+        const borderW = 2;
+        const yellow = rgb(0.95, 0.82, 0.08);
+        const black = rgb(0, 0, 0);
+
+        for (const pos of (positions || [])) {
+          const pageIdx = (pos.page || 1) - 1;
+          if (pageIdx >= pages.length) continue;
+          const page = pages[pageIdx];
+          const box = boxCoords[pos.boxIndex % 4];
+
+          // Position stamp centred over the logo box
+          const stampX = box.x;
+          const stampY = box.y + (box.height - stampH) / 2;
+
+          // Yellow border rectangle
+          page.drawRectangle({
+            x: stampX, y: stampY, width: stampW, height: stampH,
+            borderColor: yellow, borderWidth: borderW,
+            color: rgb(1, 1, 1), opacity: 0.85,
+          });
+
+          // Signature image (top portion)
+          if (sigImage) {
+            const sigAreaH = stampH - 14;
+            const sigDims = sigImage.scale(1);
+            const sigScale = Math.min((stampW - 8) / sigDims.width, sigAreaH / sigDims.height);
+            const sigW = sigDims.width * sigScale;
+            const sigH = sigDims.height * sigScale;
+            page.drawImage(sigImage, {
+              x: stampX + (stampW - sigW) / 2,
+              y: stampY + 14 + (sigAreaH - sigH) / 2,
+              width: sigW, height: sigH,
+            });
+          }
+
+          // Name (bottom-left) and IP (bottom-right)
+          if (approver_name) {
+            page.drawText(approver_name, {
+              x: stampX + 4, y: stampY + 4, size: 6, color: black,
+            });
+          }
+          if (submitter_ip) {
+            const ipText = submitter_ip;
+            // Right-align: approximate width
+            const ipX = stampX + stampW - 4 - (ipText.length * 3.2);
+            page.drawText(ipText, {
+              x: ipX, y: stampY + 4, size: 6, color: black,
+            });
+          }
+        }
+
+        finalPdfBytes = await pdfDoc.save();
+      } catch (stampErr) {
+        console.error("Stamp overlay failed, serving unsigned PDF:", stampErr);
+        // Fallback: serve original PDF without stamp
+      }
+    }
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.send(pdf_data);
+    res.send(Buffer.from(finalPdfBytes));
 
-    // Mark for deletion in 24 hours (not immediately, in case download fails)
+    // Mark for deletion in 24 hours
     await pool.query(`UPDATE approval_sessions SET pdf_delete_after = NOW() + INTERVAL '24 hours' WHERE id = $1`, [sessionId]);
   } catch (err) {
     console.error("Download signed PDF error:", err);
