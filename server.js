@@ -899,7 +899,7 @@ app.post("/api/customer-orders", async (req, res) => {
     if (process.env.SMTP_PASS && items?.length > 0) {
       try {
         const transporter = nodemailer.createTransport({
-          host: process.env.SMTP_SERVER || "mail.smtp2go.com",
+          host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
           port: parseInt(process.env.SMTP_PORT || "2525"),
           secure: false,
           auth: {
