@@ -951,12 +951,16 @@ async function initApprovalDB() {
         status VARCHAR(20) DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT NOW(),
         completed_at TIMESTAMP,
-        submitter_ip VARCHAR(100)
+        submitter_ip VARCHAR(100),
+        approver_name VARCHAR(255),
+        signature_data TEXT
       );
       -- Allow existing NOT NULL column to be nullable
       ALTER TABLE approval_sessions ALTER COLUMN pdf_data DROP NOT NULL;
-      -- Add submitter_ip column if missing
+      -- Add columns if missing
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS submitter_ip VARCHAR(100);
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS approver_name VARCHAR(255);
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS signature_data TEXT;
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -1109,7 +1113,7 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
 
   try {
     const { sessionId } = req.params;
-    const { items } = req.body;
+    const { items, approverName, signatureData } = req.body;
 
     if (!items?.length) {
       return res.status(400).json({ error: "items array is required" });
@@ -1145,11 +1149,11 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
     let sessionStatus = "pending";
     if (allReviewed) {
       sessionStatus = hasRejected ? "changes_requested" : "approved";
-      // Set status + clear the PDF data + capture submitter IP
+      // Set status + clear the PDF data + capture submitter IP + approver info
       const submitterIp = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || null;
       await pool.query(
-        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), pdf_data = NULL, submitter_ip = $3 WHERE id = $2`,
-        [sessionStatus, sessionId, submitterIp]
+        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), pdf_data = NULL, submitter_ip = $3, approver_name = $4, signature_data = $5 WHERE id = $2`,
+        [sessionStatus, sessionId, submitterIp, approverName || null, signatureData || null]
       );
     }
 
@@ -1197,7 +1201,7 @@ app.get("/api/approval-sessions", async (req, res) => {
 
   try {
     const { orderNumber, includeArchived } = req.query;
-    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, submitter_ip
+    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, submitter_ip, approver_name, signature_data
                  FROM approval_sessions`;
     const conditions = [];
     const params = [];
@@ -1232,6 +1236,8 @@ app.get("/api/approval-sessions", async (req, res) => {
           createdAt: session.created_at,
           completedAt: session.completed_at,
           submitterIp: session.submitter_ip,
+          approverName: session.approver_name,
+          signatureData: session.signature_data,
           items: itemsResult.rows,
         };
       })
