@@ -1247,7 +1247,7 @@ app.get("/api/approval-sessions/:sessionId/download", async (req, res) => {
           page.drawRectangle({
             x: stampX, y: stampY, width: stampW, height: stampH,
             borderColor: yellow, borderWidth: borderW,
-            color: rgb(1, 1, 1), opacity: 0.85,
+            color: rgb(1, 1, 1), opacity: 0.25,
           });
 
           // Signature image (top portion)
