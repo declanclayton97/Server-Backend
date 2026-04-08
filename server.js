@@ -962,6 +962,41 @@ app.post("/api/customer-orders", async (req, res) => {
   }
 });
 
+// Send order confirmation PDF as email attachment
+app.post("/api/customer-orders/send-confirmation", async (req, res) => {
+  if (!process.env.SMTP_PASS) return res.json({ success: false, error: "SMTP not configured" });
+  try {
+    const { pdfBase64 } = req.body;
+    if (!pdfBase64) return res.status(400).json({ error: "pdfBase64 required" });
+
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
+      port: parseInt(process.env.SMTP_PORT || "2525"),
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USERNAME || "tuffshop.co.uk",
+        pass: process.env.SMTP_PASS,
+      },
+    });
+
+    const filename = `Fitness-Inc-Order-Confirmation-${new Date().toLocaleDateString("en-GB").replace(/\//g, "-")}.pdf`;
+
+    await transporter.sendMail({
+      from: `"Fitness Inc Orders" <${process.env.SENDER_EMAIL || "fitnessincorders@tuffshop.co.uk"}>`,
+      to: process.env.RECIPIENT_EMAILS || "dec@tuffshop.co.uk",
+      subject: `Fitness Inc - Order Confirmation - ${new Date().toLocaleDateString("en-GB")}`,
+      html: `<p>Order confirmation PDF attached.</p>`,
+      attachments: [{ filename, content: Buffer.from(pdfBase64, "base64"), contentType: "application/pdf" }],
+    });
+
+    console.log("Order confirmation PDF emailed");
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Failed to email confirmation PDF:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/customer-orders", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
   try {
