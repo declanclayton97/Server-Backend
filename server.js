@@ -1152,7 +1152,7 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
       // Set status + clear the PDF data + capture submitter IP + approver info
       const submitterIp = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || null;
       await pool.query(
-        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), pdf_data = NULL, submitter_ip = $3, approver_name = $4, signature_data = $5 WHERE id = $2`,
+        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), submitter_ip = $3, approver_name = $4, signature_data = $5 WHERE id = $2`,
         [sessionStatus, sessionId, submitterIp, approverName || null, signatureData || null]
       );
     }
@@ -1164,17 +1164,45 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
   }
 });
 
-// Clean up: purge PDF data from completed/archived sessions
+// Clean up: purge PDF data from completed sessions older than 14 days
 app.post("/api/approval-sessions/cleanup", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
   try {
     const result = await pool.query(
       `UPDATE approval_sessions SET pdf_data = NULL
        WHERE status IN ('approved', 'changes_requested', 'archived') AND pdf_data IS NOT NULL
+       AND completed_at < NOW() - INTERVAL '14 days'
        RETURNING id`
     );
     res.json({ success: true, cleaned: result.rowCount });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Download signed PDF and clear from database
+app.get("/api/approval-sessions/:sessionId/download", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const { sessionId } = req.params;
+    const result = await pool.query(
+      `SELECT pdf_data, customer_name, order_number FROM approval_sessions WHERE id = $1`,
+      [sessionId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Session not found" });
+    if (!result.rows[0].pdf_data) return res.status(410).json({ error: "PDF no longer available" });
+
+    const { pdf_data, customer_name, order_number } = result.rows[0];
+    const filename = `${customer_name || "Customer"}-${order_number || "proof"}-Signed.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(pdf_data);
+
+    // Clear PDF data after download
+    await pool.query(`UPDATE approval_sessions SET pdf_data = NULL WHERE id = $1`, [sessionId]);
+  } catch (err) {
+    console.error("Download signed PDF error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1201,7 +1229,7 @@ app.get("/api/approval-sessions", async (req, res) => {
 
   try {
     const { orderNumber, includeArchived } = req.query;
-    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, submitter_ip, approver_name, signature_data
+    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, submitter_ip, approver_name, signature_data, (pdf_data IS NOT NULL) AS has_pdf
                  FROM approval_sessions`;
     const conditions = [];
     const params = [];
@@ -1238,6 +1266,7 @@ app.get("/api/approval-sessions", async (req, res) => {
           submitterIp: session.submitter_ip,
           approverName: session.approver_name,
           signatureData: session.signature_data,
+          hasPdf: session.has_pdf,
           items: itemsResult.rows,
         };
       })
