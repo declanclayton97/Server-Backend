@@ -903,7 +903,7 @@ app.post("/api/customer-orders", async (req, res) => {
           port: parseInt(process.env.SMTP_PORT || "2525"),
           secure: false,
           auth: {
-            user: process.env.SMTP_USERNAME || "fitnessincorders@tuffshop.co.uk",
+            user: process.env.SMTP_USERNAME || "tuffshop.co.uk",
             pass: process.env.SMTP_PASS,
           },
         });
