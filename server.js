@@ -1208,14 +1208,6 @@ app.get("/api/approval-sessions/:sessionId/download", async (req, res) => {
         const pages = pdfDoc.getPages();
         const positions = typeof logo_positions === 'string' ? JSON.parse(logo_positions) : logo_positions;
 
-        // Logo box coordinates (same as frontend)
-        const boxCoords = [
-          { x: 21, y: 604, width: 129, height: 96 },
-          { x: 21, y: 436, width: 129, height: 96 },
-          { x: 21, y: 269, width: 129, height: 96 },
-          { x: 21, y: 100, width: 129, height: 96 },
-        ];
-
         // Embed signature image if available
         let sigImage = null;
         if (signature_data) {
@@ -1226,22 +1218,23 @@ app.get("/api/approval-sessions/:sessionId/download", async (req, res) => {
           } catch {}
         }
 
-        // Stamp dimensions
-        const stampW = 129;
+        // Stamp dimensions and position — bottom-right of the product image area
+        // Product image area: x:179, y:296, width:373, height:373
+        const stampW = 150;
         const stampH = 50;
+        const stampX = 179 + 373 - stampW; // right-aligned within image area
+        const stampY = 296; // bottom of image area
         const borderW = 2;
         const yellow = rgb(0.95, 0.82, 0.08);
         const black = rgb(0, 0, 0);
 
+        // Draw stamp once per page
+        const stampedPages = new Set();
         for (const pos of (positions || [])) {
           const pageIdx = (pos.page || 1) - 1;
-          if (pageIdx >= pages.length) continue;
+          if (pageIdx >= pages.length || stampedPages.has(pageIdx)) continue;
+          stampedPages.add(pageIdx);
           const page = pages[pageIdx];
-          const box = boxCoords[pos.boxIndex % 4];
-
-          // Position stamp centred over the logo box
-          const stampX = box.x;
-          const stampY = box.y + (box.height - stampH) / 2;
 
           // Yellow border rectangle
           page.drawRectangle({
@@ -1272,7 +1265,6 @@ app.get("/api/approval-sessions/:sessionId/download", async (req, res) => {
           }
           if (submitter_ip) {
             const ipText = submitter_ip;
-            // Right-align: approximate width
             const ipX = stampX + stampW - 4 - (ipText.length * 3.2);
             page.drawText(ipText, {
               x: ipX, y: stampY + 4, size: 6, color: black,
