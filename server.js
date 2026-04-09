@@ -1037,6 +1037,7 @@ async function initApprovalDB() {
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS approver_name VARCHAR(255);
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS signature_data TEXT;
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS pdf_delete_after TIMESTAMP;
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS created_by VARCHAR(100);
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -1062,7 +1063,7 @@ app.post("/api/approval-sessions", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
 
   try {
-    const { pdfBase64, logoPositions, orderNumber, customerName, recipientName } = req.body;
+    const { pdfBase64, logoPositions, orderNumber, customerName, recipientName, createdBy } = req.body;
 
     if (!pdfBase64 || !logoPositions?.length) {
       return res.status(400).json({ error: "pdfBase64 and logoPositions are required" });
@@ -1071,10 +1072,10 @@ app.post("/api/approval-sessions", async (req, res) => {
     const pdfBuffer = Buffer.from(pdfBase64, "base64");
 
     const sessionResult = await pool.query(
-      `INSERT INTO approval_sessions (order_number, customer_name, recipient_name, pdf_data, logo_positions)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO approval_sessions (order_number, customer_name, recipient_name, pdf_data, logo_positions, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, status, created_at`,
-      [orderNumber || null, customerName || null, recipientName || null, pdfBuffer, JSON.stringify(logoPositions)]
+      [orderNumber || null, customerName || null, recipientName || null, pdfBuffer, JSON.stringify(logoPositions), createdBy || null]
     );
 
     const session = sessionResult.rows[0];
@@ -1234,6 +1235,129 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
     }
 
     res.json({ success: true, sessionStatus });
+
+    // Send email notification to the person who created this proof (async, don't block response)
+    if (allReviewed && process.env.SMTP_PASS) {
+      try {
+        // Get session details including created_by and PDF
+        const sessionData = await pool.query(
+          `SELECT customer_name, order_number, created_by, pdf_data, logo_positions, approver_name, signature_data, submitter_ip FROM approval_sessions WHERE id = $1`,
+          [sessionId]
+        );
+        const sess = sessionData.rows[0];
+        if (!sess) throw new Error("Session not found");
+
+        // Route email based on who created the proof
+        const emailMap = {
+          "Dec": "dec@tuffshop.co.uk",
+          "Harry": "harry.b@tuffshop.co.uk",
+        };
+        const recipientEmail = emailMap[sess.created_by] || "dec@tuffshop.co.uk";
+
+        // Get item results
+        const itemResults = await pool.query(
+          `SELECT label, status, rejection_reason FROM approval_items WHERE session_id = $1 ORDER BY position_index`,
+          [sessionId]
+        );
+
+        const statusLabel = sessionStatus === "approved" ? "APPROVED" : "CHANGES REQUESTED";
+        const statusColor = sessionStatus === "approved" ? "#48C549" : "#dc0032";
+
+        const itemRows = itemResults.rows.map((item) => {
+          const icon = item.status === "approved" ? "&#10003;" : "&#10007;";
+          const color = item.status === "approved" ? "#48C549" : "#dc0032";
+          return `<tr>
+            <td style="padding:6px 8px;border-bottom:1px solid #eee;color:${color};font-size:16px">${icon}</td>
+            <td style="padding:6px 8px;border-bottom:1px solid #eee">${item.label}</td>
+            <td style="padding:6px 8px;border-bottom:1px solid #eee;color:#888;font-size:12px">${item.rejection_reason || ""}</td>
+          </tr>`;
+        }).join("");
+
+        // Generate signed PDF for attachment if PDF data exists
+        let attachments = [];
+        if (sess.pdf_data) {
+          try {
+            const pdfDoc = await PDFDocument.load(sess.pdf_data);
+            const pages = pdfDoc.getPages();
+            const positions = typeof sess.logo_positions === 'string' ? JSON.parse(sess.logo_positions) : sess.logo_positions;
+
+            // Add signature stamp (same logic as download endpoint)
+            let sigImage = null;
+            if (sess.signature_data) {
+              try {
+                const sigBase64 = sess.signature_data.replace(/^data:image\/png;base64,/, '');
+                sigImage = await pdfDoc.embedPng(Buffer.from(sigBase64, 'base64'));
+              } catch {}
+            }
+
+            const stampW = 150, stampH = 50;
+            const stampX = 179 + 373 - stampW, stampY = 296;
+            const yellow = rgb(0.95, 0.82, 0.08), black = rgb(0, 0, 0);
+
+            const stampedPages = new Set();
+            for (const pos of (positions || [])) {
+              const pageIdx = (pos.page || 1) - 1;
+              if (pageIdx >= pages.length || stampedPages.has(pageIdx)) continue;
+              stampedPages.add(pageIdx);
+              const page = pages[pageIdx];
+              page.drawRectangle({ x: stampX, y: stampY, width: stampW, height: stampH, borderColor: yellow, borderWidth: 2, color: rgb(1, 1, 1), opacity: 0.25 });
+              if (sigImage) {
+                const sigDims = sigImage.scale(1);
+                const sigScale = Math.min((stampW - 8) / sigDims.width, (stampH - 14) / sigDims.height);
+                page.drawImage(sigImage, { x: stampX + (stampW - sigDims.width * sigScale) / 2, y: stampY + 14 + ((stampH - 14) - sigDims.height * sigScale) / 2, width: sigDims.width * sigScale, height: sigDims.height * sigScale });
+              }
+              if (sess.approver_name) page.drawText(sess.approver_name, { x: stampX + 4, y: stampY + 4, size: 6, color: black });
+              if (sess.submitter_ip) page.drawText(sess.submitter_ip, { x: stampX + stampW - 4 - (sess.submitter_ip.length * 3.2), y: stampY + 4, size: 6, color: black });
+            }
+
+            const signedPdfBytes = await pdfDoc.save();
+            const filename = `${sess.customer_name || "Customer"}-${sess.order_number || "proof"}-Signed.pdf`;
+            attachments = [{ filename, content: Buffer.from(signedPdfBytes), contentType: "application/pdf" }];
+          } catch (pdfErr) {
+            console.error("Failed to generate signed PDF for email:", pdfErr.message);
+          }
+        }
+
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
+          port: parseInt(process.env.SMTP_PORT || "2525"),
+          secure: false,
+          auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
+        });
+
+        await transporter.sendMail({
+          from: `"Tuffshop Proof Approvals" <${process.env.PROOF_SENDER_EMAIL || "proofapprovals@tuffshop.co.uk"}>`,
+          to: recipientEmail,
+          subject: `Proof ${statusLabel} — ${sess.customer_name || "Customer"}${sess.order_number ? ` (Order ${sess.order_number})` : ""}`,
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+              <div style="background:#000;color:#fff;padding:16px 20px;border-bottom:3px solid ${statusColor}">
+                <h2 style="margin:0;font-size:18px">Proof ${statusLabel}</h2>
+              </div>
+              <div style="padding:20px">
+                <p><strong>Customer:</strong> ${sess.customer_name || "N/A"}</p>
+                ${sess.order_number ? `<p><strong>Order:</strong> ${sess.order_number}</p>` : ""}
+                ${sess.approver_name ? `<p><strong>Approved by:</strong> ${sess.approver_name}</p>` : ""}
+                ${sess.submitter_ip ? `<p><strong>IP:</strong> ${sess.submitter_ip}</p>` : ""}
+                <table style="width:100%;border-collapse:collapse;margin-top:16px">
+                  <thead><tr style="background:#f5f5f5">
+                    <th style="padding:6px 8px;text-align:left;width:30px"></th>
+                    <th style="padding:6px 8px;text-align:left">Logo</th>
+                    <th style="padding:6px 8px;text-align:left">Notes</th>
+                  </tr></thead>
+                  <tbody>${itemRows}</tbody>
+                </table>
+                ${attachments.length > 0 ? '<p style="color:#888;font-size:12px;margin-top:16px">Signed PDF attached.</p>' : ""}
+              </div>
+            </div>
+          `,
+          attachments,
+        });
+        console.log(`Proof approval email sent to ${recipientEmail} (created by ${sess.created_by})`);
+      } catch (emailErr) {
+        console.error("Failed to send approval notification email:", emailErr.message);
+      }
+    }
   } catch (err) {
     console.error("Submit approval error:", err);
     res.status(500).json({ error: err.message });
