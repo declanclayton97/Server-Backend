@@ -986,6 +986,17 @@ app.get("/api/customer-orders", async (req, res) => {
   }
 });
 
+// DELETE all customer orders (admin)
+app.delete("/api/customer-orders", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const result = await pool.query("DELETE FROM customer_orders RETURNING id");
+    res.json({ success: true, deleted: result.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // PATCH order status
 app.patch("/api/customer-orders/:orderId/status", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
