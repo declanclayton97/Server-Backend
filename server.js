@@ -1511,7 +1511,7 @@ app.get("/api/approval-sessions", async (req, res) => {
 
   try {
     const { orderNumber, includeArchived } = req.query;
-    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, submitter_ip, approver_name, signature_data, (pdf_data IS NOT NULL) AS has_pdf
+    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, submitter_ip, approver_name, signature_data, created_by, (pdf_data IS NOT NULL) AS has_pdf
                  FROM approval_sessions`;
     const conditions = [];
     const params = [];
@@ -1548,6 +1548,7 @@ app.get("/api/approval-sessions", async (req, res) => {
           submitterIp: session.submitter_ip,
           approverName: session.approver_name,
           signatureData: session.signature_data,
+          createdBy: session.created_by,
           hasPdf: session.has_pdf,
           items: itemsResult.rows,
         };
