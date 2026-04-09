@@ -894,79 +894,17 @@ app.post("/api/customer-orders", async (req, res) => {
       [customer || null, contactName || null, JSON.stringify({ items: items || [] }), notes || null]
     );
     res.json({ success: true, orderId: result.rows[0].id });
-
-    // Send email notification (async, don't block response)
-    if (process.env.SMTP_PASS && items?.length > 0) {
-      try {
-        const transporter = nodemailer.createTransport({
-          host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
-          port: parseInt(process.env.SMTP_PORT || "2525"),
-          secure: false,
-          auth: {
-            user: process.env.SMTP_USERNAME || "tuffshop.co.uk",
-            pass: process.env.SMTP_PASS,
-          },
-        });
-
-        const itemRows = (items || []).map((item) => {
-          const sizes = (item.sizes || []).filter((s) => s.qty > 0).map((s) => `${s.qty}x ${s.size}`).join(", ");
-          const logos = (item.logos || []).map((l) => `${l.position}: ${l.logo}`).join(" | ");
-          return `<tr>
-            <td style="padding:8px;border-bottom:1px solid #eee"><strong>${item.product}</strong><br><span style="color:#888">${item.colour}</span></td>
-            <td style="padding:8px;border-bottom:1px solid #eee">${sizes}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">${logos || "None"}</td>
-          </tr>`;
-        }).join("");
-
-        const totalQty = (items || []).reduce((s, item) =>
-          s + (item.sizes || []).reduce((a, sz) => a + (sz.qty || 0), 0), 0
-        );
-
-        await transporter.sendMail({
-          from: `"Fitness Inc Orders" <${process.env.SENDER_EMAIL || "fitnessincorders@tuffshop.co.uk"}>`,
-          to: process.env.RECIPIENT_EMAILS || "dec@tuffshop.co.uk",
-          subject: `Fitness Inc Order - ${contactName || customer || "Unknown"} - ${totalQty} items`,
-          html: `
-            <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-              <div style="background:#000;color:#fff;padding:16px 20px;border-bottom:3px solid #F3D014">
-                <h2 style="margin:0;font-size:18px">New Fitness Inc Order</h2>
-              </div>
-              <div style="padding:20px">
-                <p><strong>Customer:</strong> ${customer || "Fitness Inc"}</p>
-                <p><strong>Contact:</strong> ${contactName || "N/A"}</p>
-                <p><strong>Total Items:</strong> ${totalQty}</p>
-                ${notes ? `<p><strong>Notes:</strong> ${notes}</p>` : ""}
-                <table style="width:100%;border-collapse:collapse;margin-top:16px">
-                  <thead><tr style="background:#f5f5f5">
-                    <th style="padding:8px;text-align:left">Product</th>
-                    <th style="padding:8px;text-align:left">Sizes</th>
-                    <th style="padding:8px;text-align:left">Logos</th>
-                  </tr></thead>
-                  <tbody>${itemRows}</tbody>
-                </table>
-                <p style="color:#888;font-size:12px;margin-top:20px">
-                  Submitted: ${new Date().toLocaleString("en-GB", { timeZone: "Europe/London" })}
-                </p>
-              </div>
-            </div>
-          `,
-        });
-        console.log("Order notification email sent");
-      } catch (emailErr) {
-        console.error("Failed to send order email:", emailErr.message);
-      }
-    }
   } catch (err) {
     console.error("Customer order error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Send order confirmation PDF as email attachment
+// Send order confirmation — summary email with PDF attached
 app.post("/api/customer-orders/send-confirmation", async (req, res) => {
   if (!process.env.SMTP_PASS) return res.json({ success: false, error: "SMTP not configured" });
   try {
-    const { pdfBase64 } = req.body;
+    const { pdfBase64, customer, contactName, items, notes } = req.body;
     if (!pdfBase64) return res.status(400).json({ error: "pdfBase64 required" });
 
     const transporter = nodemailer.createTransport({
@@ -979,20 +917,58 @@ app.post("/api/customer-orders/send-confirmation", async (req, res) => {
       },
     });
 
+    const itemRows = (items || []).map((item) => {
+      const sizes = (item.sizes || []).filter((s) => s.qty > 0).map((s) => `${s.qty}x ${s.size}`).join(", ");
+      const logos = (item.logos || []).map((l) => `${l.position}: ${l.logo}`).join(" | ");
+      return `<tr>
+        <td style="padding:8px;border-bottom:1px solid #eee"><strong>${item.product}</strong><br><span style="color:#888">${item.colour}</span></td>
+        <td style="padding:8px;border-bottom:1px solid #eee">${sizes}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">${logos || "None"}</td>
+      </tr>`;
+    }).join("");
+
+    const totalQty = (items || []).reduce((s, item) =>
+      s + (item.sizes || []).reduce((a, sz) => a + (sz.qty || 0), 0), 0
+    );
+
     const filename = `Fitness-Inc-Order-Confirmation-${new Date().toLocaleDateString("en-GB").replace(/\//g, "-")}.pdf`;
 
     await transporter.sendMail({
       from: `"Fitness Inc Orders" <${process.env.SENDER_EMAIL || "fitnessincorders@tuffshop.co.uk"}>`,
       to: process.env.RECIPIENT_EMAILS || "dec@tuffshop.co.uk",
-      subject: `Fitness Inc - Order Confirmation - ${new Date().toLocaleDateString("en-GB")}`,
-      html: `<p>Order confirmation PDF attached.</p>`,
+      subject: `Fitness Inc Order - ${contactName || customer || "Unknown"} - ${totalQty} items`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+          <div style="background:#000;color:#fff;padding:16px 20px;border-bottom:3px solid #F3D014">
+            <h2 style="margin:0;font-size:18px">New Fitness Inc Order</h2>
+          </div>
+          <div style="padding:20px">
+            <p><strong>Customer:</strong> ${customer || "Fitness Inc"}</p>
+            <p><strong>Contact:</strong> ${contactName || "N/A"}</p>
+            <p><strong>Total Items:</strong> ${totalQty}</p>
+            ${notes ? `<p><strong>Notes:</strong> ${notes}</p>` : ""}
+            <table style="width:100%;border-collapse:collapse;margin-top:16px">
+              <thead><tr style="background:#f5f5f5">
+                <th style="padding:8px;text-align:left">Product</th>
+                <th style="padding:8px;text-align:left">Sizes</th>
+                <th style="padding:8px;text-align:left">Logos</th>
+              </tr></thead>
+              <tbody>${itemRows}</tbody>
+            </table>
+            <p style="color:#888;font-size:12px;margin-top:20px">
+              Submitted: ${new Date().toLocaleString("en-GB", { timeZone: "Europe/London" })}
+            </p>
+            <p style="color:#888;font-size:12px">Order confirmation PDF attached.</p>
+          </div>
+        </div>
+      `,
       attachments: [{ filename, content: Buffer.from(pdfBase64, "base64"), contentType: "application/pdf" }],
     });
 
-    console.log("Order confirmation PDF emailed");
+    console.log("Order confirmation email sent with PDF");
     res.json({ success: true });
   } catch (err) {
-    console.error("Failed to email confirmation PDF:", err.message);
+    console.error("Failed to email confirmation:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
