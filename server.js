@@ -935,7 +935,7 @@ app.post("/api/customer-orders/send-confirmation", async (req, res) => {
 
     await transporter.sendMail({
       from: `"Fitness Inc Orders" <${process.env.SENDER_EMAIL || "fitnessincorders@tuffshop.co.uk"}>`,
-      to: process.env.RECIPIENT_EMAILS || "dec@tuffshop.co.uk",
+      to: process.env.RECIPIENT_EMAILS || "bob@tuffshop.co.uk",
       subject: `Fitness Inc Order - ${contactName || customer || "Unknown"} - ${totalQty} items`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
