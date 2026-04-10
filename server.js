@@ -708,11 +708,17 @@ app.get("/api/brightpearl/contact-search", async (req, res) => {
 app.get("/api/brightpearl/orders-by-contact/:contactId", async (req, res) => {
   try {
     const { contactId } = req.params;
+    const { fromDate, toDate } = req.query;
     const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
       ? 'https://euw1.brightpearlconnect.com'
       : 'https://use1.brightpearlconnect.com';
 
-    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?contactId=${contactId}&pageSize=200&firstResult=1`;
+    // Build placedOn filter (Brightpearl format: "fromDate/toDate" or just "fromDate/")
+    let placedOnFilter = "";
+    if (fromDate || toDate) {
+      placedOnFilter = `&placedOn=${fromDate || ""}/${toDate || ""}`;
+    }
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?contactId=${contactId}&pageSize=200&firstResult=1${placedOnFilter}`;
 
     const response = await fetch(url, {
       method: 'GET',
