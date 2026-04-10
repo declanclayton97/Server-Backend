@@ -1055,6 +1055,7 @@ async function initApprovalDB() {
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS signature_data TEXT;
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS pdf_delete_after TIMESTAMP;
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS created_by VARCHAR(100);
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS opened_at TIMESTAMP;
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -1128,7 +1129,7 @@ app.get("/api/approval-sessions/:sessionId", async (req, res) => {
 
     const sessionResult = await pool.query(
       `SELECT id, order_number, customer_name, recipient_name, logo_positions,
-              status, created_at, completed_at
+              status, created_at, completed_at, opened_at
        FROM approval_sessions WHERE id = $1`,
       [sessionId]
     );
@@ -1138,6 +1139,13 @@ app.get("/api/approval-sessions/:sessionId", async (req, res) => {
     }
 
     const session = sessionResult.rows[0];
+
+    // Record first-open timestamp (only if not already set, and only for pending sessions)
+    if (!session.opened_at && session.status === "pending") {
+      try {
+        await pool.query(`UPDATE approval_sessions SET opened_at = NOW() WHERE id = $1 AND opened_at IS NULL`, [sessionId]);
+      } catch {}
+    }
 
     const itemsResult = await pool.query(
       `SELECT id, position_index, label, page_number, status, rejection_reason, reviewed_at
@@ -1528,7 +1536,7 @@ app.get("/api/approval-sessions", async (req, res) => {
 
   try {
     const { orderNumber, includeArchived } = req.query;
-    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, submitter_ip, approver_name, signature_data, created_by, (pdf_data IS NOT NULL) AS has_pdf
+    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, opened_at, submitter_ip, approver_name, signature_data, created_by, (pdf_data IS NOT NULL) AS has_pdf
                  FROM approval_sessions`;
     const conditions = [];
     const params = [];
@@ -1562,6 +1570,7 @@ app.get("/api/approval-sessions", async (req, res) => {
           status: session.status,
           createdAt: session.created_at,
           completedAt: session.completed_at,
+          openedAt: session.opened_at,
           submitterIp: session.submitter_ip,
           approverName: session.approver_name,
           signatureData: session.signature_data,
