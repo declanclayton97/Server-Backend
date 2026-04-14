@@ -927,14 +927,26 @@ app.post("/api/customer-orders/send-confirmation", async (req, res) => {
       const sizes = (item.sizes || []).filter((s) => s.qty > 0).map((s) => `${s.qty}x ${s.size}`).join(", ");
       const logos = (item.logos || []).map((l) => `${l.position}: ${l.logo}`).join(" | ");
       let customHtml = "";
-      if (item.isCustom && item.customLogo) {
-        const cl = item.customLogo;
-        const cmyk = cl.tintCmyk ? `C${cl.tintCmyk.c} M${cl.tintCmyk.m} Y${cl.tintCmyk.y} K${cl.tintCmyk.k}` : null;
+      if (item.isCustom && item.customLogos) {
+        const entries = Object.entries(item.customLogos);
+        const logoLines = entries.map(([pos, cl]) => {
+          const cmyk = cl.tintCmyk ? `C${cl.tintCmyk.c} M${cl.tintCmyk.m} Y${cl.tintCmyk.y} K${cl.tintCmyk.k}` : null;
+          const ink = cl.tintHex
+            ? `<br><span style="font-size:11px">Ink: <span style="display:inline-block;width:10px;height:10px;background:${cl.tintHex};border:1px solid #ccc;vertical-align:middle"></span> <code>${cl.tintHex}</code>${cmyk ? ` &nbsp;|&nbsp; CMYK <strong>${cmyk}</strong>` : ""}</span>`
+            : "";
+          return `<div style="margin-top:4px"><strong>${pos}:</strong> ${cl.logoName}${ink}</div>`;
+        }).join("");
+        const frontImg = item.customPreviews && item.customPreviews.front
+          ? `<img src="${item.customPreviews.front}" alt="front" style="max-width:200px;margin:4px 4px 0 0;border:1px solid #e0e0e0;border-radius:4px"/>`
+          : "";
+        const backImg = item.customPreviews && item.customPreviews.back
+          ? `<img src="${item.customPreviews.back}" alt="back" style="max-width:200px;margin:4px 0 0 0;border:1px solid #e0e0e0;border-radius:4px"/>`
+          : "";
         customHtml = `
           <div style="margin-top:6px;padding:6px 8px;background:#fffbe6;border-left:3px solid #F3D014;font-size:12px">
-            <strong style="color:#000">CUSTOM</strong> &mdash; ${cl.logoName} @ ${cl.position}
-            ${cl.tintHex ? `<br><span>Ink: <span style="display:inline-block;width:10px;height:10px;background:${cl.tintHex};border:1px solid #ccc;vertical-align:middle"></span> <code>${cl.tintHex}</code>${cmyk ? ` &nbsp;|&nbsp; CMYK <strong>${cmyk}</strong>` : ""}</span>` : ""}
-            ${item.previewDataUrl ? `<br><img src="${item.previewDataUrl}" alt="preview" style="max-width:260px;margin-top:4px;border:1px solid #e0e0e0;border-radius:4px"/>` : ""}
+            <strong style="color:#000">CUSTOM</strong>
+            ${logoLines}
+            ${(frontImg || backImg) ? `<div style="margin-top:4px">${frontImg}${backImg}</div>` : ""}
           </div>`;
       }
       return `<tr>
