@@ -937,10 +937,10 @@ app.post("/api/customer-orders/send-confirmation", async (req, res) => {
           return `<div style="margin-top:4px"><strong>${pos}:</strong> ${cl.logoName}${ink}</div>`;
         }).join("");
         const frontImg = item.customPreviews && item.customPreviews.front
-          ? `<img src="${item.customPreviews.front}" alt="front" style="max-width:200px;margin:4px 4px 0 0;border:1px solid #e0e0e0;border-radius:4px"/>`
+          ? `<img src="${item.customPreviews.front}" alt="front" style="max-width:100px;margin:4px 4px 0 0;border:1px solid #e0e0e0;border-radius:4px"/>`
           : "";
         const backImg = item.customPreviews && item.customPreviews.back
-          ? `<img src="${item.customPreviews.back}" alt="back" style="max-width:200px;margin:4px 0 0 0;border:1px solid #e0e0e0;border-radius:4px"/>`
+          ? `<img src="${item.customPreviews.back}" alt="back" style="max-width:100px;margin:4px 0 0 0;border:1px solid #e0e0e0;border-radius:4px"/>`
           : "";
         customHtml = `
           <div style="margin-top:6px;padding:6px 8px;background:#fffbe6;border-left:3px solid #F3D014;font-size:12px">
