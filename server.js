@@ -926,10 +926,21 @@ app.post("/api/customer-orders/send-confirmation", async (req, res) => {
     const itemRows = (items || []).map((item) => {
       const sizes = (item.sizes || []).filter((s) => s.qty > 0).map((s) => `${s.qty}x ${s.size}`).join(", ");
       const logos = (item.logos || []).map((l) => `${l.position}: ${l.logo}`).join(" | ");
+      let customHtml = "";
+      if (item.isCustom && item.customLogo) {
+        const cl = item.customLogo;
+        const cmyk = cl.tintCmyk ? `C${cl.tintCmyk.c} M${cl.tintCmyk.m} Y${cl.tintCmyk.y} K${cl.tintCmyk.k}` : null;
+        customHtml = `
+          <div style="margin-top:6px;padding:6px 8px;background:#fffbe6;border-left:3px solid #F3D014;font-size:12px">
+            <strong style="color:#000">CUSTOM</strong> &mdash; ${cl.logoName} @ ${cl.position}
+            ${cl.tintHex ? `<br><span>Ink: <span style="display:inline-block;width:10px;height:10px;background:${cl.tintHex};border:1px solid #ccc;vertical-align:middle"></span> <code>${cl.tintHex}</code>${cmyk ? ` &nbsp;|&nbsp; CMYK <strong>${cmyk}</strong>` : ""}</span>` : ""}
+            ${item.previewDataUrl ? `<br><img src="${item.previewDataUrl}" alt="preview" style="max-width:260px;margin-top:4px;border:1px solid #e0e0e0;border-radius:4px"/>` : ""}
+          </div>`;
+      }
       return `<tr>
-        <td style="padding:8px;border-bottom:1px solid #eee"><strong>${item.product}</strong><br><span style="color:#888">${item.colour}</span></td>
-        <td style="padding:8px;border-bottom:1px solid #eee">${sizes}</td>
-        <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">${logos || "None"}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee"><strong>${item.product}</strong><br><span style="color:#888">${item.colour}</span>${customHtml}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;vertical-align:top">${sizes}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px;vertical-align:top">${logos || "None"}</td>
       </tr>`;
     }).join("");
 
@@ -941,7 +952,7 @@ app.post("/api/customer-orders/send-confirmation", async (req, res) => {
 
     await transporter.sendMail({
       from: `"Fitness Inc Orders" <${process.env.SENDER_EMAIL || "fitnessincorders@tuffshop.co.uk"}>`,
-      to: process.env.RECIPIENT_EMAILS || "bob@tuffshop.co.uk",
+      to: process.env.RECIPIENT_EMAILS || "dec@tuffshop.co.uk",
       subject: `Fitness Inc Order - ${contactName || customer || "Unknown"} - ${totalQty} items`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
