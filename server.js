@@ -111,17 +111,28 @@ app.get("/image", async (req, res) => {
   }
 });
 
+// Helly Hansen returns a 26829-byte placeholder image (HTTP 200) for missing
+// product/colour combinations. Treat that as a 404 so frontend probing moves on.
+const HH_PLACEHOLDER_BYTES = 26829;
+
 // Image proxy route
 app.get("/fetch-image", async (req, res) => {
   const imageUrl = req.query.url;
   if (!imageUrl) {
     return res.status(400).send('Missing "url" query parameter');
   }
-  
+
   try {
     const response = await fetch(imageUrl);
     if (!response.ok) throw new Error(`Failed to fetch ${imageUrl}`);
-    
+
+    if (imageUrl.includes("hhworkwear.com")) {
+      const len = parseInt(response.headers.get("content-length") || "0", 10);
+      if (len === HH_PLACEHOLDER_BYTES) {
+        return res.status(404).send("HH placeholder image — treated as missing");
+      }
+    }
+
     const contentType = response.headers.get("content-type") || "image/jpeg";
     res.setHeader("Content-Type", contentType);
     
