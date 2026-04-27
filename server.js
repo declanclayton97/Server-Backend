@@ -471,6 +471,46 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       'Content-Type': 'application/json'
     };
 
+    // ?probeContact=<orderId> — test contactId-based filtering: pull contactId
+    // from a known order, then count how many other orders share it. If that
+    // contactId covers all Travelex (or Asda) orders, contactId becomes the
+    // selective filter we need.
+    if (req.query.probeContact) {
+      const seedOrderId = req.query.probeContact;
+      const out = { seedOrderId };
+
+      // Get the seed order's contactId + customer info
+      const r1 = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${seedOrderId}`, { method: 'GET', headers });
+      const order = (await r1.json()).response?.[0];
+      const contactId =
+        order?.parties?.customer?.contactId ||
+        order?.parties?.customer?.id ||
+        order?.contactId;
+      out.seedOrderContactId = contactId;
+      out.seedOrderCustomer = {
+        companyName: order?.parties?.customer?.companyName,
+        contactName: order?.parties?.customer?.contactName,
+        email: order?.parties?.customer?.email,
+        addressFullName: order?.parties?.customer?.addressFullName,
+      };
+      out.seedOrderChannelId = order?.assignment?.current?.channelId;
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Count orders that share the same contactId (newest first if possible)
+      if (contactId) {
+        const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?contactId=${contactId}&pageSize=20&firstResult=1`;
+        out.searchUrl = url;
+        const r2 = await fetch(url, { method: 'GET', headers });
+        const data = await r2.json().catch(() => null);
+        out.searchStatus = r2.status;
+        out.totalOrdersForContact = data?.response?.metaData?.resultsAvailable;
+        const rows = data?.response?.results || [];
+        out.first20OrderIds = Array.isArray(rows[0]) ? rows.map(x => x[0]) : rows;
+      }
+
+      return res.json({ probeContact: true, ...out });
+    }
+
     // Probe mode: dump search metadata + try alternate channel filter syntaxes,
     // and fetch a returned order directly to confirm its actual channel.
     if (probe) {
