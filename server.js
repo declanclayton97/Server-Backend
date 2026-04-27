@@ -448,10 +448,12 @@ function isBadgeYes(value) {
 }
 
 // Name Badges: list orders in channel 22 where custom field PCF_BADGE = "Yes"
-// Pass ?debug=1 for raw diagnostic output (search response + first 3 raw custom-field responses).
+// ?debug=1                    → raw diagnostic output
+// ?debugOrder=<orderId>       → inspect one specific order's custom-fields + channel
 app.get('/api/brightpearl/name-badges', async (req, res) => {
   try {
     const debug = req.query.debug === '1';
+    const debugOrder = req.query.debugOrder;
 
     if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
@@ -467,29 +469,63 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       'Content-Type': 'application/json'
     };
 
-    // Search orders in channel 22 (matches proof-required pattern)
-    const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&pageSize=50&firstResult=1`;
-    const searchResp = await fetch(searchUrl, { method: 'GET', headers });
-
-    if (!searchResp.ok) {
-      const errorText = await searchResp.text();
-      console.error('Name badges order-search error:', errorText);
-      return res.status(searchResp.status).json({ error: errorText });
+    // Inspect one specific order — bypasses search/pagination entirely
+    if (debugOrder) {
+      const cfUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${debugOrder}/custom-field`;
+      const orderUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${debugOrder}`;
+      const [cfResp, orderResp] = await Promise.all([
+        fetch(cfUrl, { method: 'GET', headers }),
+        fetch(orderUrl, { method: 'GET', headers }),
+      ]);
+      const cfText = await cfResp.text();
+      let cfParsed;
+      try { cfParsed = JSON.parse(cfText); } catch { cfParsed = cfText; }
+      const orderData = await orderResp.json().catch(() => null);
+      const order = orderData?.response?.[0];
+      const fields = cfParsed?.response || cfParsed || {};
+      return res.json({
+        orderId: debugOrder,
+        customFieldStatus: cfResp.status,
+        customFieldKeys: typeof fields === 'object' ? Object.keys(fields) : null,
+        rawCustomFieldResponse: cfParsed,
+        orderChannelId: order?.assignment?.current?.channelId,
+        orderReference: order?.reference,
+        pcfBadgeValue: fields?.PCF_BADGE,
+        pcfBadgePassesYesCheck: isBadgeYes(fields?.PCF_BADGE),
+      });
     }
 
-    const searchData = await searchResp.json();
+    // Paginate through ALL channel-22 orders (default sort is oldest-first, so the
+    // most recent test orders will be on later pages with a 50-result page size)
+    const pageSize = 200;
+    const allOrderIds = [];
+    let firstResult = 1;
+    const searchUrls = [];
 
-    if (debug && !searchData.response?.results?.length) {
-      return res.json({ debug: true, searchUrl, searchResponse: searchData, matchedCount: 0 });
+    for (let page = 0; page < 10; page++) { // safety cap: 2000 orders max
+      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&pageSize=${pageSize}&firstResult=${firstResult}`;
+      searchUrls.push(searchUrl);
+      const searchResp = await fetch(searchUrl, { method: 'GET', headers });
+      if (!searchResp.ok) {
+        const errorText = await searchResp.text();
+        console.error('Name badges order-search error:', errorText);
+        return res.status(searchResp.status).json({ error: errorText });
+      }
+      const searchData = await searchResp.json();
+      const rows = searchData.response?.results || [];
+      if (rows.length === 0) break;
+      const ids = Array.isArray(rows[0]) ? rows.map(r => r[0]) : rows;
+      allOrderIds.push(...ids);
+      if (rows.length < pageSize) break; // last page
+      firstResult += pageSize;
     }
 
-    if (!searchData.response?.results?.length) {
+    if (allOrderIds.length === 0) {
+      if (debug) return res.json({ debug: true, searchUrls, ordersFoundInChannel22: 0 });
       return res.json([]);
     }
 
-    // Brightpearl returns results as arrays of column values; first column is order ID
-    const rows = searchData.response.results;
-    const orderIds = Array.isArray(rows[0]) ? rows.map(r => r[0]) : rows;
+    const orderIds = allOrderIds;
 
     // Fetch custom fields for each order and filter to PCF_BADGE = "Yes"
     const matches = [];
@@ -517,9 +553,10 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
     if (debug) {
       return res.json({
         debug: true,
-        searchUrl,
+        searchUrls,
         ordersFoundInChannel22: orderIds.length,
         firstOrderIds: orderIds.slice(0, 5),
+        lastOrderIds: orderIds.slice(-5),
         sampleCustomFields: debugSamples,
         matchedOrderIds: matches,
       });
