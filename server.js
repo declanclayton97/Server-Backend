@@ -606,31 +606,34 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       });
     }
 
-    // Customer name varies per order but email is consistent. Look up all
-    // Brightpearl contacts matching the email, then filter orders by those
-    // contactIds. Email defaults to accountspayable@travelex.com (the address
-    // shared by all Travelex/Asda Travel Money orders); override via env
-    // BADGE_CUSTOMER_EMAIL or query ?email=X for testing.
+    // Customer contacts for badge orders. Always include the env-configured IDs
+    // (default: 72658 = Travelex/Asda Travel Money main, 100633 = secondary).
+    // Additionally try to discover more via primaryEmail lookup, and merge.
     const badgeEmail = req.query.email || process.env.BADGE_CUSTOMER_EMAIL || 'accountspayable@travelex.com';
-    const fallbackIds = (process.env.BADGE_CONTACT_IDS || '72658')
+    const knownIds = (process.env.BADGE_CONTACT_IDS || '72658,100633')
       .split(',').map((s) => s.trim()).filter(Boolean);
 
-    // 1) Resolve contactIds via contact-search (primaryEmail filter)
+    // 1) Resolve additional contactIds via contact-search (primaryEmail filter)
     const contactSearchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/contact-service/contact-search?primaryEmail=${encodeURIComponent(badgeEmail)}&pageSize=200&firstResult=1`;
-    let contactIds = [];
+    let resolvedIds = [];
     let contactLookupOk = false;
     try {
       const cr = await fetch(contactSearchUrl, { method: 'GET', headers });
       if (cr.ok) {
         const cd = await cr.json();
         const crows = cd.response?.results || [];
-        contactIds = crows.length === 0
+        resolvedIds = crows.length === 0
           ? []
           : Array.isArray(crows[0]) ? crows.map((r) => r[0]) : crows;
         contactLookupOk = true;
       }
     } catch {}
-    if (contactIds.length === 0) contactIds = fallbackIds;
+
+    // Merge known + resolved, deduplicate (compare as strings since IDs may mix types)
+    const contactIds = Array.from(new Set([
+      ...knownIds.map(String),
+      ...resolvedIds.map(String),
+    ]));
 
     // 2) Search orders for each contactId, narrowed by updatedOn=last30days.
     //    Flipping PCF_BADGE updates the order's updatedOn, so any currently-
