@@ -632,12 +632,18 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
     } catch {}
     if (contactIds.length === 0) contactIds = fallbackIds;
 
-    // 2) Search orders for each contactId (INTEGER column — safer to do separate
-    //    calls per contactId than rely on comma-list support)
+    // 2) Search orders for each contactId, narrowed by updatedOn=last30days.
+    //    Flipping PCF_BADGE updates the order's updatedOn, so any currently-
+    //    flagged order has been touched recently. Drops the candidate set
+    //    from ~150 (all-time for this contact) to a handful (recent only).
+    const days = Math.min(parseInt(req.query.days, 10) || 30, 90);
+    const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const updatedFilter = encodeURIComponent(`${fromIso}/`);
+
     const allOrderIds = [];
     const searchUrls = [contactSearchUrl];
     for (const cid of contactIds) {
-      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?contactId=${cid}&pageSize=500&firstResult=1`;
+      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?contactId=${cid}&updatedOn=${updatedFilter}&pageSize=500&firstResult=1`;
       searchUrls.push(searchUrl);
       const r = await fetch(searchUrl, { method: 'GET', headers });
       if (!r.ok) {
@@ -657,16 +663,15 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
     }
 
     if (allOrderIds.length === 0) {
-      if (debug) return res.json({ debug: true, searchUrls, badgeEmail, contactLookupOk, contactIds, ordersForContacts: 0 });
+      if (debug) return res.json({ debug: true, searchUrls, badgeEmail, contactLookupOk, contactIds, windowDays: days, ordersForContacts: 0 });
       return res.json([]);
     }
 
-    // Bulk-fetch order details in batches of 50. Brightpearl's order detail
-    // includes customFields directly, so we can check PCF_BADGE without
-    // separate /custom-field calls.
-    const matches = [];
+    // Bulk-fetch order details in batches of 50 — gives us channelId + customer
+    // info per order. Order detail does NOT include custom fields directly, so
+    // PCF_BADGE has to come from a separate /custom-field call (next step).
     const detailMap = new Map();
-    const debugSamples = [];
+    const channel22Ids = [];
     for (let i = 0; i < allOrderIds.length; i += 50) {
       const batch = allOrderIds.slice(i, i + 50);
       const detailUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${batch.join(',')}`;
@@ -675,16 +680,31 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       const data = await r.json();
       for (const order of (data.response || [])) {
         detailMap.set(order.id, order);
-        const channelId = order?.assignment?.current?.channelId;
-        const badgeValue = order?.customFields?.PCF_BADGE;
-        if (debug && debugSamples.length < 5) {
-          debugSamples.push({ orderId: order.id, channelId, badgeValue });
-        }
-        if (channelId === 22 && isBadgeYes(badgeValue)) {
-          matches.push(order.id);
+        if (order?.assignment?.current?.channelId === 22) {
+          channel22Ids.push(order.id);
         }
       }
     }
+
+    // Custom-field check on the filtered subset — typically <30 orders after
+    // contactId + updatedOn + channel-22 narrowing, so per-order calls are fine.
+    const matches = [];
+    const debugSamples = [];
+    await Promise.all(channel22Ids.map(async (orderId) => {
+      try {
+        const cfUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
+        const cfResp = await fetch(cfUrl, { method: 'GET', headers });
+        if (!cfResp.ok) return;
+        const cfData = await cfResp.json();
+        const fields = cfData.response || cfData || {};
+        if (debug && debugSamples.length < 5) {
+          debugSamples.push({ orderId, badgeValue: fields.PCF_BADGE });
+        }
+        if (isBadgeYes(fields.PCF_BADGE)) matches.push(orderId);
+      } catch (err) {
+        console.error(`PCF_BADGE check failed for order ${orderId}:`, err.message);
+      }
+    }));
 
     if (debug) {
       return res.json({
@@ -692,9 +712,11 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
         badgeEmail,
         contactLookupOk,
         contactIds,
+        windowDays: days,
         searchUrls,
         ordersForContacts: allOrderIds.length,
-        sampleOrderInfo: debugSamples,
+        channel22OrdersInWindow: channel22Ids.length,
+        sampleBadgeValues: debugSamples,
         matchedOrderIds: matches,
       });
     }
