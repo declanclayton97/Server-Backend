@@ -1084,6 +1084,55 @@ app.get('/api/urgent-orders/inspect/:orderId', async (req, res) => {
   }
 });
 
+// Mark an urgent order complete: clears PCF_URGENT in Brightpearl and
+// removes the row from the local cache. Sales can also clear the field
+// directly in Brightpearl — the next poll cycle will catch that too.
+app.post('/api/urgent-orders/complete/:orderId', async (req, res) => {
+  const { orderId } = req.params;
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
+
+  // Try JSON Patch "remove" first; if Brightpearl rejects, fall back to "replace" with null
+  const tryPatch = async (operations) =>
+    fetch(url, {
+      method: 'PATCH',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(operations),
+    });
+
+  try {
+    let r = await tryPatch([{ op: 'remove', path: '/PCF_URGENT' }]);
+    if (!r.ok) {
+      const errText = await r.text();
+      console.warn(`[urgent/complete] remove rejected for ${orderId} — trying replace-with-null. Error:`, errText);
+      r = await tryPatch([{ op: 'replace', path: '/PCF_URGENT', value: null }]);
+    }
+    if (!r.ok) {
+      const errorText = await r.text();
+      console.error(`[urgent/complete] both remove and replace failed for ${orderId}:`, errorText);
+      return res.status(r.status).json({ error: errorText });
+    }
+
+    // Drop from local cache so the queue updates immediately on next poll
+    if (useDatabase) {
+      await pool.query('DELETE FROM urgent_orders WHERE order_id = $1', [orderId]);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[urgent/complete] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Manual re-scan trigger — useful for "force refresh" buttons / debugging.
 // ?days=N expands the lookback window (default 1 day).
 app.post('/api/urgent-orders/rescan', async (req, res) => {
