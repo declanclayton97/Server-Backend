@@ -495,64 +495,34 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       });
     }
 
-    // Sort by orderId descending so the most recent orders are on page 1.
-    // The pipe character must be URL-encoded (previous attempt with literal | got a 400).
-    const sortParam = encodeURIComponent('orderId|DESC');
+    // Mirror the proof-queue pattern: filter directly in the search URL by the
+    // selective field (PCF_BADGE=Yes), the same way proof-queue uses orderStatusId.
+    // At any moment only a handful of orders should be flagged, so one search
+    // returns everything we need without pagination.
+    const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&PCF_BADGE=Yes&pageSize=50&firstResult=1`;
+    const searchUrls = [searchUrl];
 
-    // Paginate channel-22 orders, newest-first, with a sane cap.
-    // ?days=N optional ceiling — once we paginate past N days old we stop.
-    const days = Math.min(parseInt(req.query.days, 10) || 60, 365);
-    const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
-
-    const pageSize = 200;
-    const allOrderIds = [];
-    let firstResult = 1;
-    const searchUrls = [];
-    let stoppedByCutoff = false;
-
-    for (let page = 0; page < 5; page++) { // hard cap: 1000 orders
-      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&pageSize=${pageSize}&firstResult=${firstResult}&sort=${sortParam}`;
-      searchUrls.push(searchUrl);
-      const searchResp = await fetch(searchUrl, { method: 'GET', headers });
-      if (!searchResp.ok) {
-        const errorText = await searchResp.text();
-        console.error('Name badges order-search error:', errorText);
-        return res.status(searchResp.status).json({ error: errorText });
+    const searchResp = await fetch(searchUrl, { method: 'GET', headers });
+    if (!searchResp.ok) {
+      const errorText = await searchResp.text();
+      console.error('Name badges order-search error:', errorText);
+      if (searchResp.status === 503 || searchResp.status === 429) {
+        return res.status(searchResp.status).json({
+          error: 'Brightpearl rate limit hit — please wait 30 seconds before refreshing.',
+        });
       }
-      const searchData = await searchResp.json();
-      const rows = searchData.response?.results || [];
-      if (rows.length === 0) break;
-
-      // Find which column index holds placedOn so we can stop when we cross the cutoff
-      const meta = searchData.response.metaData?.columns;
-      const placedOnIdx = meta?.findIndex?.((c) => c.name === 'placedOn');
-
-      let crossedCutoff = false;
-      const ids = [];
-      for (const row of rows) {
-        if (!Array.isArray(row)) { ids.push(row); continue; }
-        ids.push(row[0]);
-        if (placedOnIdx !== undefined && placedOnIdx >= 0) {
-          const placedOn = row[placedOnIdx];
-          if (placedOn && new Date(placedOn).getTime() < cutoffMs) {
-            crossedCutoff = true;
-            break;
-          }
-        }
-      }
-      allOrderIds.push(...ids);
-
-      if (crossedCutoff) { stoppedByCutoff = true; break; }
-      if (rows.length < pageSize) break; // last page
-      firstResult += pageSize;
+      return res.status(searchResp.status).json({ error: errorText });
     }
+    const searchData = await searchResp.json();
+    const rows = searchData.response?.results || [];
+    const orderIds = rows.length === 0
+      ? []
+      : Array.isArray(rows[0]) ? rows.map(r => r[0]) : rows;
 
-    if (allOrderIds.length === 0) {
-      if (debug) return res.json({ debug: true, searchUrls, ordersFoundInChannel22: 0 });
+    if (orderIds.length === 0) {
+      if (debug) return res.json({ debug: true, searchUrls, ordersFoundInChannel22: 0, searchResponse: searchData });
       return res.json([]);
     }
-
-    const orderIds = allOrderIds;
 
     // Fetch custom fields for each order and filter to PCF_BADGE = "Yes"
     const matches = [];
@@ -581,12 +551,15 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       return res.json({
         debug: true,
         searchUrls,
-        ordersFoundInChannel22: orderIds.length,
+        ordersFromSearch: orderIds.length,
         firstOrderIds: orderIds.slice(0, 5),
         lastOrderIds: orderIds.slice(-5),
-        stoppedByCutoff,
         sampleCustomFields: debugSamples,
         matchedOrderIds: matches,
+        note:
+          orderIds.length > 10
+            ? 'Search returned >10 orders — Brightpearl likely ignored the PCF_BADGE filter; verification step is filtering client-side.'
+            : 'Search returned a small set — PCF_BADGE filter likely worked.',
       });
     }
 
