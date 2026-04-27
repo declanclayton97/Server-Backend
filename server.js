@@ -453,8 +453,8 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       'Content-Type': 'application/json'
     };
 
-    // Search orders in channel 22, newest first
-    const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&pageSize=100&firstResult=1&sort=createdOn|desc`;
+    // Search orders in channel 22 (matches proof-required pattern)
+    const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&pageSize=50&firstResult=1`;
     const searchResp = await fetch(searchUrl, { method: 'GET', headers });
 
     if (!searchResp.ok) {
