@@ -853,10 +853,24 @@ function detectDecorationType(order) {
   return null;
 }
 
+// Extract YYYY-MM-DD without ever going through a Date object — avoids any
+// timezone shift when BP returns "2026-04-28T00:00:00+01:00" style values.
+function extractIsoDate(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'string') {
+    const m = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  }
+  // Last-resort fallback for non-string inputs (Date, number) — use UTC components
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d)) return null;
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+// Kept for any other callers that need a Date instance
 function parseDateLike(value) {
   if (!value) return null;
   if (value instanceof Date) return isNaN(value) ? null : value;
-  // Brightpearl date-type custom fields typically come back as ISO strings.
   const d = new Date(value);
   return isNaN(d) ? null : d;
 }
@@ -942,10 +956,10 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
       if (!cfResp.ok) continue;
       const cfData = await cfResp.json();
       const fields = cfData.response || cfData || {};
-      const urgentDate = parseDateLike(fields.PCF_URGENT);
+      const urgentByDateStr = extractIsoDate(fields.PCF_URGENT);
       const isAsap = isBadgeYes(fields.PCF_ASAP); // reuse the same yes/true/1 matcher
 
-      if (!urgentDate && !isAsap) {
+      if (!urgentByDateStr && !isAsap) {
         // Neither urgent nor ASAP — drop from cache if present
         const del = await pool.query('DELETE FROM urgent_orders WHERE order_id = $1', [orderId]);
         if (del.rowCount > 0) removed++;
@@ -970,7 +984,7 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
       const createdByName = await resolveStaffName(createdById);
       const decorationType = detectDecorationType(order);
       const placedOn = order.placedOn ? new Date(order.placedOn) : null;
-      const urgentByDate = urgentDate ? urgentDate.toISOString().split('T')[0] : null;
+      const urgentByDate = urgentByDateStr;
 
       await pool.query(`
         INSERT INTO urgent_orders (
@@ -1017,9 +1031,7 @@ app.get('/api/urgent-orders', async (req, res) => {
     const orders = result.rows.map((r) => ({
       orderId: Number(r.order_id),
       orderReference: r.order_reference,
-      urgentByDate: r.urgent_by_date instanceof Date
-        ? r.urgent_by_date.toISOString().split('T')[0]
-        : r.urgent_by_date,
+      urgentByDate: extractIsoDate(r.urgent_by_date),
       isAsap: !!r.is_asap,
       customerName: r.customer_name,
       businessName: r.business_name,
