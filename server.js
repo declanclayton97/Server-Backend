@@ -566,50 +566,76 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       });
     }
 
-    // Mirror the proof-queue pattern: filter directly in the search URL by the
-    // selective field (PCF_BADGE=Yes), the same way proof-queue uses orderStatusId.
-    // At any moment only a handful of orders should be flagged, so one search
-    // returns everything we need without pagination.
-    const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&PCF_BADGE=Yes&pageSize=50&firstResult=1`;
-    const searchUrls = [searchUrl];
+    // Brightpearl's order-search doesn't expose channelId or custom fields as
+    // filterable columns (we verified via probe + metaData). The only way to
+    // narrow the 350k order set is by a filterable column. updatedOn works:
+    // when the user flips PCF_BADGE on an order, its updatedOn refreshes — so
+    // any order currently flagged Yes will have been updated recently.
+    const days = Math.min(parseInt(req.query.days, 10) || 7, 90);
+    const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const updatedFilter = encodeURIComponent(`${fromIso}/`); // PERIOD: "from X onwards"
 
-    const searchResp = await fetch(searchUrl, { method: 'GET', headers });
-    if (!searchResp.ok) {
-      const errorText = await searchResp.text();
-      console.error('Name badges order-search error:', errorText);
-      if (searchResp.status === 503 || searchResp.status === 429) {
-        return res.status(searchResp.status).json({
-          error: 'Brightpearl rate limit hit — please wait 30 seconds before refreshing.',
-        });
+    // Page through recently-updated orders
+    const pageSize = 500;
+    const recentOrderIds = [];
+    let firstResult = 1;
+    const searchUrls = [];
+    for (let page = 0; page < 4; page++) { // cap at 2000
+      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?updatedOn=${updatedFilter}&pageSize=${pageSize}&firstResult=${firstResult}`;
+      searchUrls.push(searchUrl);
+      const r = await fetch(searchUrl, { method: 'GET', headers });
+      if (!r.ok) {
+        const errorText = await r.text();
+        console.error('Name badges order-search error:', errorText);
+        if (r.status === 503 || r.status === 429) {
+          return res.status(r.status).json({ error: 'Brightpearl rate limit hit — please wait 30 seconds before refreshing.' });
+        }
+        return res.status(r.status).json({ error: errorText });
       }
-      return res.status(searchResp.status).json({ error: errorText });
+      const data = await r.json();
+      const rows = data.response?.results || [];
+      if (rows.length === 0) break;
+      const ids = Array.isArray(rows[0]) ? rows.map(x => x[0]) : rows;
+      recentOrderIds.push(...ids);
+      if (rows.length < pageSize) break;
+      firstResult += pageSize;
     }
-    const searchData = await searchResp.json();
-    const rows = searchData.response?.results || [];
-    const orderIds = rows.length === 0
-      ? []
-      : Array.isArray(rows[0]) ? rows.map(r => r[0]) : rows;
 
-    if (orderIds.length === 0) {
-      if (debug) return res.json({ debug: true, searchUrls, ordersFoundInChannel22: 0, searchResponse: searchData });
+    if (recentOrderIds.length === 0) {
+      if (debug) return res.json({ debug: true, searchUrls, recentOrders: 0 });
       return res.json([]);
     }
 
-    // Fetch custom fields for each order and filter to PCF_BADGE = "Yes"
+    // Bulk-fetch order details in batches of 50 — gives us channelId per order
+    const channel22Ids = [];
+    const channel22Details = new Map();
+    for (let i = 0; i < recentOrderIds.length; i += 50) {
+      const batch = recentOrderIds.slice(i, i + 50);
+      const detailUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${batch.join(',')}`;
+      const r = await fetch(detailUrl, { method: 'GET', headers });
+      if (!r.ok) continue;
+      const data = await r.json();
+      for (const order of (data.response || [])) {
+        if (order?.assignment?.current?.channelId === 22) {
+          channel22Ids.push(order.id);
+          channel22Details.set(order.id, order);
+        }
+      }
+    }
+
+    // For the (typically small) channel-22 subset, fetch custom fields and check PCF_BADGE
     const matches = [];
     const debugSamples = [];
-    await Promise.all(orderIds.map(async (orderId) => {
+    await Promise.all(channel22Ids.map(async (orderId) => {
       try {
         const cfUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
         const cfResp = await fetch(cfUrl, { method: 'GET', headers });
         if (!cfResp.ok) return;
         const cfData = await cfResp.json();
         const fields = cfData.response || cfData || {};
-
-        if (debug && debugSamples.length < 3) {
-          debugSamples.push({ orderId, customFieldKeys: Object.keys(fields), rawResponse: cfData });
+        if (debug && debugSamples.length < 5) {
+          debugSamples.push({ orderId, pcfBadge: fields.PCF_BADGE });
         }
-
         if (isBadgeYes(fields.PCF_BADGE)) {
           matches.push(orderId);
         }
@@ -622,15 +648,12 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       return res.json({
         debug: true,
         searchUrls,
-        ordersFromSearch: orderIds.length,
-        firstOrderIds: orderIds.slice(0, 5),
-        lastOrderIds: orderIds.slice(-5),
-        sampleCustomFields: debugSamples,
+        windowDays: days,
+        recentOrdersFound: recentOrderIds.length,
+        channel22OrdersInWindow: channel22Ids.length,
+        firstChannel22Ids: channel22Ids.slice(0, 10),
+        sampleBadgeValues: debugSamples,
         matchedOrderIds: matches,
-        note:
-          orderIds.length > 10
-            ? 'Search returned >10 orders — Brightpearl likely ignored the PCF_BADGE filter; verification step is filtering client-side.'
-            : 'Search returned a small set — PCF_BADGE filter likely worked.',
       });
     }
 
@@ -638,28 +661,21 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       return res.json([]);
     }
 
-    // Fetch order details for the matching orders
-    const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${matches.join(',')}`;
-    const detailsResp = await fetch(detailsUrl, { method: 'GET', headers });
-
-    if (!detailsResp.ok) {
-      const errorText = await detailsResp.text();
-      console.error('Name badges details error:', errorText);
-      return res.status(detailsResp.status).json({ error: errorText });
-    }
-
-    const detailsData = await detailsResp.json();
-    const orders = (detailsData.response || []).map(order => ({
-      orderId: order.id,
-      orderReference: order.reference,
-      customerName: order.parties?.customer?.companyName ||
-                    order.parties?.customer?.contactName ||
-                    order.parties?.delivery?.addressFullName ||
-                    order.parties?.customer?.addressFullName ||
-                    'Unknown',
-      placedOn: order.placedOn,
-      deliveryDate: order.delivery?.deliveryDate || null
-    }));
+    // Reuse the order details we already fetched in step 2 — no extra API call needed
+    const orders = matches
+      .map((id) => channel22Details.get(id))
+      .filter(Boolean)
+      .map((order) => ({
+        orderId: order.id,
+        orderReference: order.reference,
+        customerName: order.parties?.customer?.companyName ||
+                      order.parties?.customer?.contactName ||
+                      order.parties?.delivery?.addressFullName ||
+                      order.parties?.customer?.addressFullName ||
+                      'Unknown',
+        placedOn: order.placedOn,
+        deliveryDate: order.delivery?.deliveryDate || null,
+      }));
 
     res.json(orders);
   } catch (error) {
