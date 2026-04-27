@@ -869,6 +869,7 @@ async function initializeUrgentOrdersTable() {
         order_id BIGINT PRIMARY KEY,
         order_reference TEXT,
         urgent_by_date DATE,
+        is_asap BOOLEAN NOT NULL DEFAULT FALSE,
         customer_name TEXT,
         business_name TEXT,
         decoration_type TEXT,
@@ -879,6 +880,11 @@ async function initializeUrgentOrdersTable() {
         last_checked_at TIMESTAMPTZ DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_urgent_orders_date ON urgent_orders(urgent_by_date);
+    `);
+    // Add is_asap column to existing tables (migration for old deploys)
+    await pool.query(`
+      ALTER TABLE urgent_orders
+      ADD COLUMN IF NOT EXISTS is_asap BOOLEAN NOT NULL DEFAULT FALSE
     `);
     console.log('✅ urgent_orders table initialized');
   } catch (err) {
@@ -937,15 +943,16 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
       const cfData = await cfResp.json();
       const fields = cfData.response || cfData || {};
       const urgentDate = parseDateLike(fields.PCF_URGENT);
+      const isAsap = isBadgeYes(fields.PCF_ASAP); // reuse the same yes/true/1 matcher
 
-      if (!urgentDate) {
-        // Not (or no longer) urgent — drop from cache if present
+      if (!urgentDate && !isAsap) {
+        // Neither urgent nor ASAP — drop from cache if present
         const del = await pool.query('DELETE FROM urgent_orders WHERE order_id = $1', [orderId]);
         if (del.rowCount > 0) removed++;
         continue;
       }
 
-      // Urgent — fetch order details and upsert
+      // Urgent or ASAP — fetch order details and upsert
       const orderResp = await fetch(
         `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
         { method: 'GET', headers }
@@ -963,17 +970,18 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
       const createdByName = await resolveStaffName(createdById);
       const decorationType = detectDecorationType(order);
       const placedOn = order.placedOn ? new Date(order.placedOn) : null;
-      const urgentByDate = urgentDate.toISOString().split('T')[0];
+      const urgentByDate = urgentDate ? urgentDate.toISOString().split('T')[0] : null;
 
       await pool.query(`
         INSERT INTO urgent_orders (
-          order_id, order_reference, urgent_by_date, customer_name, business_name,
+          order_id, order_reference, urgent_by_date, is_asap, customer_name, business_name,
           decoration_type, order_total, created_by_id, created_by_name, placed_on,
           last_checked_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
         ON CONFLICT (order_id) DO UPDATE SET
           order_reference = EXCLUDED.order_reference,
           urgent_by_date = EXCLUDED.urgent_by_date,
+          is_asap = EXCLUDED.is_asap,
           customer_name = EXCLUDED.customer_name,
           business_name = EXCLUDED.business_name,
           decoration_type = EXCLUDED.decoration_type,
@@ -983,7 +991,7 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
           placed_on = EXCLUDED.placed_on,
           last_checked_at = NOW()
       `, [
-        orderId, order.reference, urgentByDate, customerName, businessName,
+        orderId, order.reference, urgentByDate, isAsap, customerName, businessName,
         decorationType, orderTotal, createdById, createdByName, placedOn,
       ]);
       added++;
@@ -1000,11 +1008,11 @@ app.get('/api/urgent-orders', async (req, res) => {
   if (!useDatabase) return res.json([]);
   try {
     const result = await pool.query(`
-      SELECT order_id, order_reference, urgent_by_date, customer_name, business_name,
+      SELECT order_id, order_reference, urgent_by_date, is_asap, customer_name, business_name,
              decoration_type, order_total, created_by_id, created_by_name, placed_on,
              last_checked_at
       FROM urgent_orders
-      ORDER BY urgent_by_date ASC NULLS LAST, order_id ASC
+      ORDER BY is_asap DESC, urgent_by_date ASC NULLS LAST, order_id ASC
     `);
     const orders = result.rows.map((r) => ({
       orderId: Number(r.order_id),
@@ -1012,6 +1020,7 @@ app.get('/api/urgent-orders', async (req, res) => {
       urgentByDate: r.urgent_by_date instanceof Date
         ? r.urgent_by_date.toISOString().split('T')[0]
         : r.urgent_by_date,
+      isAsap: !!r.is_asap,
       customerName: r.customer_name,
       businessName: r.business_name,
       decorationType: r.decoration_type,
@@ -1078,6 +1087,7 @@ app.get('/api/urgent-orders/inspect/:orderId', async (req, res) => {
       rows: rowSummaries,
       customFields: cfData?.response || cfData,
       pcfUrgent: cfData?.response?.PCF_URGENT,
+      pcfAsap: cfData?.response?.PCF_ASAP,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1110,11 +1120,19 @@ app.post('/api/urgent-orders/complete/:orderId', async (req, res) => {
     });
 
   try {
-    let r = await tryPatch([{ op: 'remove', path: '/PCF_URGENT' }]);
+    // Clear both PCF_URGENT (date) and PCF_ASAP (boolean). PCF_ASAP gets set
+    // to false rather than removed, since boolean fields can't be null.
+    let r = await tryPatch([
+      { op: 'remove', path: '/PCF_URGENT' },
+      { op: 'replace', path: '/PCF_ASAP', value: false },
+    ]);
     if (!r.ok) {
       const errText = await r.text();
       console.warn(`[urgent/complete] remove rejected for ${orderId} — trying replace-with-null. Error:`, errText);
-      r = await tryPatch([{ op: 'replace', path: '/PCF_URGENT', value: null }]);
+      r = await tryPatch([
+        { op: 'replace', path: '/PCF_URGENT', value: null },
+        { op: 'replace', path: '/PCF_ASAP', value: false },
+      ]);
     }
     if (!r.ok) {
       const errorText = await r.text();
