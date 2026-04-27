@@ -912,7 +912,7 @@ let urgentPollInFlight = false;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Scan one batch of recently-updated orders, syncing PCF_URGENT into the table
-async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
+async function pollUrgentOrders({ sinceMs, label = 'incremental', refreshAllCached = false } = {}) {
   if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
   if (urgentPollInFlight) {
     console.log(`[urgent-poll/${label}] skipped — another scan is in progress`);
@@ -920,13 +920,13 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
   }
   urgentPollInFlight = true;
   try {
-    return await pollUrgentOrdersInner({ sinceMs, label });
+    return await pollUrgentOrdersInner({ sinceMs, label, refreshAllCached });
   } finally {
     urgentPollInFlight = false;
   }
 }
 
-async function pollUrgentOrdersInner({ sinceMs, label } = {}) {
+async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false } = {}) {
 
   const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
     ? 'https://euw1.brightpearlconnect.com'
@@ -958,6 +958,27 @@ async function pollUrgentOrdersInner({ sinceMs, label } = {}) {
     orderIds.push(...ids);
     if (rows.length < 200) break;
     firstResult += 200;
+  }
+
+  // Always merge in currently-cached order IDs that need re-checking. This is
+  // what makes manual Re-scan self-correcting: existing entries with wrong
+  // dates (or stale data) get re-fetched even if their updatedOn is outside
+  // the search window. For the every-5-min poll we only refresh cache entries
+  // older than 1 hour to keep load light; manual rescan refreshes them all.
+  try {
+    const cachedQuery = refreshAllCached
+      ? 'SELECT order_id FROM urgent_orders'
+      : "SELECT order_id FROM urgent_orders WHERE last_checked_at < NOW() - INTERVAL '1 hour'";
+    const cachedResult = await pool.query(cachedQuery);
+    const cachedIds = cachedResult.rows.map((r) => Number(r.order_id));
+    for (const id of cachedIds) {
+      if (!orderIds.includes(id)) orderIds.push(id);
+    }
+    if (cachedIds.length > 0) {
+      console.log(`[urgent-poll/${label}] including ${cachedIds.length} cached order(s) for re-check`);
+    }
+  } catch (err) {
+    console.error(`[urgent-poll/${label}] cached-id query failed:`, err.message);
   }
 
   if (orderIds.length === 0) return;
@@ -1212,7 +1233,7 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
   }
   const days = Math.min(parseInt(req.query.days, 10) || 1, 30);
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
-  pollUrgentOrders({ sinceMs, label: `manual-${days}d` })
+  pollUrgentOrders({ sinceMs, label: `manual-${days}d`, refreshAllCached: true })
     .catch((err) => console.error('Manual rescan failed:', err.message));
   res.json({ accepted: true, days });
 });
