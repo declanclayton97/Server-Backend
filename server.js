@@ -773,11 +773,25 @@ app.patch('/api/brightpearl/order/:orderId/custom-fields', async (req, res) => {
 // date) and keeps the table in sync. Frontend reads the table directly.
 // ===========================================================================
 
-// In-memory staff name cache so we don't re-resolve createdById every poll
+// Hard-coded staff name map — extracted from Brightpearl admin report URLs.
+// Add new staff here as one line; takes precedence over any contact lookup.
+const KNOWN_STAFF_NAMES = {
+  4: 'Tim Banks',
+  6433: 'Keith Taylor',
+  49220: 'Ryan Wilson',
+  56618: 'Abigail Birtwhistle',
+  59339: 'Helen Jackson',
+  82710: 'Jack Ellis-Haynes',
+  124562: 'Dan Ford',
+  137062: 'Laura Jackson',
+};
+
+// In-memory cache for any IDs not in the hard-coded map (looked up via API)
 const staffNameCache = new Map();
 
 async function resolveStaffName(contactId) {
   if (!contactId) return null;
+  if (KNOWN_STAFF_NAMES[contactId]) return KNOWN_STAFF_NAMES[contactId];
   if (staffNameCache.has(contactId)) return staffNameCache.get(contactId);
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return null;
   const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
@@ -792,7 +806,10 @@ async function resolveStaffName(contactId) {
         'Content-Type': 'application/json',
       }}
     );
-    if (!r.ok) return null;
+    if (!r.ok) {
+      staffNameCache.set(contactId, null); // negative-cache so we don't retry
+      return null;
+    }
     const data = await r.json();
     const c = data?.response?.[0];
     const name = [c?.firstName, c?.lastName].filter(Boolean).join(' ').trim() || null;
