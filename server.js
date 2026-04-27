@@ -606,75 +606,46 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       });
     }
 
-    // Customer contacts for badge orders. Always include the env-configured IDs
-    // (default: 72658 = Travelex/Asda Travel Money main, 100633 = secondary).
-    // Additionally try to discover more via primaryEmail lookup, and merge.
-    const badgeEmail = req.query.email || process.env.BADGE_CUSTOMER_EMAIL || 'accountspayable@travelex.com';
-    const knownIds = (process.env.BADGE_CONTACT_IDS || '72658,100633')
-      .split(',').map((s) => s.trim()).filter(Boolean);
+    // Filter by Brightpearl department — confirmed via the user's admin report
+    // URL (department_id[]=22) and metaData (departmentId is filterable). All
+    // Asda/Travelex badge orders sit in department 22, regardless of which
+    // contactId the order is on, so this avoids maintaining a contact list.
+    const departmentId = req.query.departmentId || process.env.BADGE_DEPARTMENT_ID || '22';
 
-    // 1) Resolve additional contactIds via contact-search (primaryEmail filter)
-    const contactSearchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/contact-service/contact-search?primaryEmail=${encodeURIComponent(badgeEmail)}&pageSize=200&firstResult=1`;
-    let resolvedIds = [];
-    let contactLookupOk = false;
-    try {
-      const cr = await fetch(contactSearchUrl, { method: 'GET', headers });
-      if (cr.ok) {
-        const cd = await cr.json();
-        const crows = cd.response?.results || [];
-        resolvedIds = crows.length === 0
-          ? []
-          : Array.isArray(crows[0]) ? crows.map((r) => r[0]) : crows;
-        contactLookupOk = true;
-      }
-    } catch {}
-
-    // Merge known + resolved, deduplicate (compare as strings since IDs may mix types)
-    const contactIds = Array.from(new Set([
-      ...knownIds.map(String),
-      ...resolvedIds.map(String),
-    ]));
-
-    // 2) Search orders for each contactId, narrowed by updatedOn=last30days.
-    //    Flipping PCF_BADGE updates the order's updatedOn, so any currently-
-    //    flagged order has been touched recently. Drops the candidate set
-    //    from ~150 (all-time for this contact) to a handful (recent only).
+    // Narrow further by updatedOn=last30days. Flipping PCF_BADGE refreshes
+    // the order's updatedOn, so any currently-flagged order is in the window.
     const days = Math.min(parseInt(req.query.days, 10) || 30, 90);
     const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const updatedFilter = encodeURIComponent(`${fromIso}/`);
 
-    const allOrderIds = [];
-    const searchUrls = [contactSearchUrl];
-    for (const cid of contactIds) {
-      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?contactId=${cid}&updatedOn=${updatedFilter}&pageSize=500&firstResult=1`;
-      searchUrls.push(searchUrl);
-      const r = await fetch(searchUrl, { method: 'GET', headers });
-      if (!r.ok) {
-        if (r.status === 503 || r.status === 429) {
-          return res.status(r.status).json({ error: 'Brightpearl rate limit hit — please wait 30 seconds before refreshing.' });
-        }
-        continue;
+    const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?departmentId=${departmentId}&updatedOn=${updatedFilter}&pageSize=500&firstResult=1`;
+    const searchUrls = [searchUrl];
+
+    const searchResp = await fetch(searchUrl, { method: 'GET', headers });
+    if (!searchResp.ok) {
+      const errorText = await searchResp.text();
+      console.error('Name badges order-search error:', errorText);
+      if (searchResp.status === 503 || searchResp.status === 429) {
+        return res.status(searchResp.status).json({ error: 'Brightpearl rate limit hit — please wait 30 seconds before refreshing.' });
       }
-      const data = await r.json();
-      const rows = data.response?.results || [];
-      const ids = rows.length === 0
-        ? []
-        : Array.isArray(rows[0]) ? rows.map((row) => row[0]) : rows;
-      for (const id of ids) {
-        if (!allOrderIds.includes(id)) allOrderIds.push(id);
-      }
+      return res.status(searchResp.status).json({ error: errorText });
     }
 
+    const searchData = await searchResp.json();
+    const rows = searchData.response?.results || [];
+    const allOrderIds = rows.length === 0
+      ? []
+      : Array.isArray(rows[0]) ? rows.map((r) => r[0]) : rows;
+
     if (allOrderIds.length === 0) {
-      if (debug) return res.json({ debug: true, searchUrls, badgeEmail, contactLookupOk, contactIds, windowDays: days, ordersForContacts: 0 });
+      if (debug) return res.json({ debug: true, searchUrls, departmentId, windowDays: days, ordersInDepartment: 0 });
       return res.json([]);
     }
 
-    // Bulk-fetch order details in batches of 50 — gives us channelId + customer
-    // info per order. Order detail does NOT include custom fields directly, so
-    // PCF_BADGE has to come from a separate /custom-field call (next step).
+    // Bulk-fetch order details in batches of 50 — gives us customer info for
+    // the queue display. Order detail does NOT include custom fields directly,
+    // so PCF_BADGE has to come from a separate /custom-field call (next step).
     const detailMap = new Map();
-    const channel22Ids = [];
     for (let i = 0; i < allOrderIds.length; i += 50) {
       const batch = allOrderIds.slice(i, i + 50);
       const detailUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${batch.join(',')}`;
@@ -683,17 +654,14 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       const data = await r.json();
       for (const order of (data.response || [])) {
         detailMap.set(order.id, order);
-        if (order?.assignment?.current?.channelId === 22) {
-          channel22Ids.push(order.id);
-        }
       }
     }
 
-    // Custom-field check on the filtered subset — typically <30 orders after
-    // contactId + updatedOn + channel-22 narrowing, so per-order calls are fine.
+    // Custom-field check on the filtered subset (department-22 + recent
+    // updates is already small, so per-order /custom-field calls are fine).
     const matches = [];
     const debugSamples = [];
-    await Promise.all(channel22Ids.map(async (orderId) => {
+    await Promise.all(allOrderIds.map(async (orderId) => {
       try {
         const cfUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
         const cfResp = await fetch(cfUrl, { method: 'GET', headers });
@@ -712,13 +680,10 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
     if (debug) {
       return res.json({
         debug: true,
-        badgeEmail,
-        contactLookupOk,
-        contactIds,
+        departmentId,
         windowDays: days,
         searchUrls,
-        ordersForContacts: allOrderIds.length,
-        channel22OrdersInWindow: channel22Ids.length,
+        ordersInDepartment: allOrderIds.length,
         sampleBadgeValues: debugSamples,
         matchedOrderIds: matches,
       });
