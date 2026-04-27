@@ -471,42 +471,73 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       'Content-Type': 'application/json'
     };
 
-    // Probe mode: try multiple filter syntaxes serially with delays to avoid rate limits.
-    // Tells us which (if any) custom-field filter syntax Brightpearl actually applies.
+    // Probe mode: dump search metadata + try alternate channel filter syntaxes,
+    // and fetch a returned order directly to confirm its actual channel.
     if (probe) {
-      const variants = [
-        { label: 'channelId only',                qs: 'channelId=22' },
-        { label: 'PCF_BADGE=Yes',                 qs: 'channelId=22&PCF_BADGE=Yes' },
-        { label: 'PCF_BADGE=true',                qs: 'channelId=22&PCF_BADGE=true' },
-        { label: 'customField_PCF_BADGE=Yes',     qs: 'channelId=22&customField_PCF_BADGE=Yes' },
-        { label: 'customFields.PCF_BADGE=Yes',    qs: 'channelId=22&customFields.PCF_BADGE=Yes' },
-        { label: 'columns+filter PCF_BADGE',      qs: 'channelId=22&columns=PCF_BADGE&PCF_BADGE=Yes' },
-        { label: 'no channel, just PCF_BADGE',    qs: 'PCF_BADGE=Yes' },
+      const out = {};
+
+      // 1) Get the search metadata — tells us every column Brightpearl exposes,
+      //    including which operators each column supports for filtering.
+      const metaUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?pageSize=1&firstResult=1`;
+      try {
+        const r = await fetch(metaUrl, { method: 'GET', headers });
+        const body = await r.json().catch(() => null);
+        out.metaData = body?.response?.metaData || null;
+      } catch (err) {
+        out.metaDataError = err.message;
+      }
+      await new Promise((r) => setTimeout(r, 600));
+
+      // 2) Fetch order 100086 directly — what does it ACTUALLY say its channel is?
+      //    If channelId !== 22, the prior filter was being ignored.
+      try {
+        const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/100086`, { method: 'GET', headers });
+        const body = await r.json().catch(() => null);
+        const order = body?.response?.[0];
+        out.order100086 = {
+          status: r.status,
+          orderId: order?.id,
+          reference: order?.reference,
+          channelId: order?.assignment?.current?.channelId,
+          orderStatusId: order?.orderStatusId,
+          placedOn: order?.placedOn,
+        };
+      } catch (err) {
+        out.order100086Error = err.message;
+      }
+      await new Promise((r) => setTimeout(r, 600));
+
+      // 3) Try alternate channel-related filter syntaxes
+      const channelVariants = [
+        { label: 'channelId=22',          qs: 'channelId=22' },
+        { label: 'salesChannelId=22',     qs: 'salesChannelId=22' },
+        { label: 'channelTypeId=22',      qs: 'channelTypeId=22' },
+        { label: 'siteCode=22',           qs: 'siteCode=22' },
+        { label: 'orderStatusId=34 (control)', qs: 'orderStatusId=34' },
       ];
-      const results = [];
-      for (const v of variants) {
-        const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?${v.qs}&pageSize=10&firstResult=1`;
+      const variantResults = [];
+      for (const v of channelVariants) {
+        const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?${v.qs}&pageSize=5&firstResult=1`;
         try {
           const r = await fetch(url, { method: 'GET', headers });
-          const status = r.status;
-          let body;
-          try { body = await r.json(); } catch { body = null; }
+          const body = await r.json().catch(() => null);
           const rows = body?.response?.results || [];
           const ids = Array.isArray(rows[0]) ? rows.map(x => x[0]) : rows;
-          results.push({
+          variantResults.push({
             label: v.label,
-            url,
-            status,
+            status: r.status,
             resultCount: rows.length,
             firstFiveIds: ids.slice(0, 5),
             errorBody: r.ok ? undefined : body,
           });
         } catch (err) {
-          results.push({ label: v.label, url, error: err.message });
+          variantResults.push({ label: v.label, error: err.message });
         }
-        await new Promise((r) => setTimeout(r, 600)); // ~1.5 req/sec to avoid 503
+        await new Promise((r) => setTimeout(r, 600));
       }
-      return res.json({ probe: true, variants: results });
+      out.channelFilterVariants = variantResults;
+
+      return res.json({ probe: true, ...out });
     }
 
     // Inspect one specific order — bypasses search/pagination entirely
