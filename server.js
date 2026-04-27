@@ -747,8 +747,9 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
   }
 });
 
-// Update a custom field on a Brightpearl sales order
-// Body: { "PCF_BADGE": "No" } — keys are PCF codes, values are the new field values
+// Update a custom field on a Brightpearl sales order.
+// Frontend sends a simple object: { "PCF_BADGE": "No" }
+// Brightpearl expects JSON Patch format: [{"op":"replace","path":"/PCF_BADGE","value":"No"}]
 app.patch('/api/brightpearl/order/:orderId/custom-fields', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -767,6 +768,13 @@ app.patch('/api/brightpearl/order/:orderId/custom-fields', async (req, res) => {
 
     const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
 
+    // Convert flat { PCF_CODE: value } object to JSON Patch operations
+    const operations = Object.entries(req.body).map(([key, value]) => ({
+      op: 'replace',
+      path: `/${key}`,
+      value,
+    }));
+
     const response = await fetch(url, {
       method: 'PATCH',
       headers: {
@@ -774,13 +782,14 @@ app.patch('/api/brightpearl/order/:orderId/custom-fields', async (req, res) => {
         'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(req.body)
+      body: JSON.stringify(operations)
     });
 
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`Custom field update failed for order ${orderId}:`, errorText);
-      return res.status(response.status).json({ error: errorText });
+      console.error('Sent body:', JSON.stringify(operations));
+      return res.status(response.status).json({ error: errorText, sentOperations: operations });
     }
 
     res.json({ success: true });
