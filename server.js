@@ -436,6 +436,137 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
   }
 });
 
+// Name Badges: list orders in channel 22 where custom field PCF_BADGE = "Yes"
+app.get('/api/brightpearl/name-badges', async (req, res) => {
+  try {
+    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+    }
+
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+
+    const headers = {
+      'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+      'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+      'Content-Type': 'application/json'
+    };
+
+    // Search orders in channel 22, newest first
+    const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&pageSize=100&firstResult=1&sort=createdOn|desc`;
+    const searchResp = await fetch(searchUrl, { method: 'GET', headers });
+
+    if (!searchResp.ok) {
+      const errorText = await searchResp.text();
+      console.error('Name badges order-search error:', errorText);
+      return res.status(searchResp.status).json({ error: errorText });
+    }
+
+    const searchData = await searchResp.json();
+    if (!searchData.response?.results?.length) {
+      return res.json([]);
+    }
+
+    // Brightpearl returns results as arrays of column values; first column is order ID
+    const rows = searchData.response.results;
+    const orderIds = Array.isArray(rows[0]) ? rows.map(r => r[0]) : rows;
+
+    // Fetch custom fields for each order and filter to PCF_BADGE = "Yes"
+    const matches = [];
+    await Promise.all(orderIds.map(async (orderId) => {
+      try {
+        const cfUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
+        const cfResp = await fetch(cfUrl, { method: 'GET', headers });
+        if (!cfResp.ok) return;
+        const cfData = await cfResp.json();
+        const fields = cfData.response || cfData || {};
+        const badgeValue = fields.PCF_BADGE;
+        if (typeof badgeValue === 'string' && badgeValue.toLowerCase() === 'yes') {
+          matches.push(orderId);
+        }
+      } catch (err) {
+        console.error(`Error checking PCF_BADGE for order ${orderId}:`, err.message);
+      }
+    }));
+
+    if (matches.length === 0) {
+      return res.json([]);
+    }
+
+    // Fetch order details for the matching orders
+    const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${matches.join(',')}`;
+    const detailsResp = await fetch(detailsUrl, { method: 'GET', headers });
+
+    if (!detailsResp.ok) {
+      const errorText = await detailsResp.text();
+      console.error('Name badges details error:', errorText);
+      return res.status(detailsResp.status).json({ error: errorText });
+    }
+
+    const detailsData = await detailsResp.json();
+    const orders = (detailsData.response || []).map(order => ({
+      orderId: order.id,
+      orderReference: order.reference,
+      customerName: order.parties?.customer?.companyName ||
+                    order.parties?.customer?.contactName ||
+                    order.parties?.delivery?.addressFullName ||
+                    order.parties?.customer?.addressFullName ||
+                    'Unknown',
+      placedOn: order.placedOn,
+      deliveryDate: order.delivery?.deliveryDate || null
+    }));
+
+    res.json(orders);
+  } catch (error) {
+    console.error('Error fetching name badge orders:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update a custom field on a Brightpearl sales order
+// Body: { "PCF_BADGE": "No" } — keys are PCF codes, values are the new field values
+app.patch('/api/brightpearl/order/:orderId/custom-fields', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+      return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+    }
+
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return res.status(400).json({ error: 'Body must be an object of { PCF_CODE: value }' });
+    }
+
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
+
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Custom field update failed for order ${orderId}:`, errorText);
+      return res.status(response.status).json({ error: errorText });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Custom field update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const docuSignService = new DocuSignService();
 
 // DocuSign logging functionality
