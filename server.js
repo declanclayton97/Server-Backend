@@ -495,21 +495,23 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       });
     }
 
-    // Limit to recent orders only — badge work is always on current jobs, not history.
-    // ?days=N overrides the default 60-day window if needed.
-    const days = Math.min(parseInt(req.query.days, 10) || 60, 365);
-    const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .split('T')[0]; // YYYY-MM-DD
+    // Sort by orderId descending so the most recent orders are on page 1.
+    // The pipe character must be URL-encoded (previous attempt with literal | got a 400).
+    const sortParam = encodeURIComponent('orderId|DESC');
 
-    // Paginate through channel-22 orders within the date window
+    // Paginate channel-22 orders, newest-first, with a sane cap.
+    // ?days=N optional ceiling — once we paginate past N days old we stop.
+    const days = Math.min(parseInt(req.query.days, 10) || 60, 365);
+    const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
     const pageSize = 200;
     const allOrderIds = [];
     let firstResult = 1;
     const searchUrls = [];
+    let stoppedByCutoff = false;
 
-    for (let page = 0; page < 5; page++) { // hard cap: 1000 recent channel-22 orders
-      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&placedOnFrom=${fromDate}&pageSize=${pageSize}&firstResult=${firstResult}`;
+    for (let page = 0; page < 5; page++) { // hard cap: 1000 orders
+      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&pageSize=${pageSize}&firstResult=${firstResult}&sort=${sortParam}`;
       searchUrls.push(searchUrl);
       const searchResp = await fetch(searchUrl, { method: 'GET', headers });
       if (!searchResp.ok) {
@@ -520,8 +522,27 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       const searchData = await searchResp.json();
       const rows = searchData.response?.results || [];
       if (rows.length === 0) break;
-      const ids = Array.isArray(rows[0]) ? rows.map(r => r[0]) : rows;
+
+      // Find which column index holds placedOn so we can stop when we cross the cutoff
+      const meta = searchData.response.metaData?.columns;
+      const placedOnIdx = meta?.findIndex?.((c) => c.name === 'placedOn');
+
+      let crossedCutoff = false;
+      const ids = [];
+      for (const row of rows) {
+        if (!Array.isArray(row)) { ids.push(row); continue; }
+        ids.push(row[0]);
+        if (placedOnIdx !== undefined && placedOnIdx >= 0) {
+          const placedOn = row[placedOnIdx];
+          if (placedOn && new Date(placedOn).getTime() < cutoffMs) {
+            crossedCutoff = true;
+            break;
+          }
+        }
+      }
       allOrderIds.push(...ids);
+
+      if (crossedCutoff) { stoppedByCutoff = true; break; }
       if (rows.length < pageSize) break; // last page
       firstResult += pageSize;
     }
@@ -563,6 +584,7 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
         ordersFoundInChannel22: orderIds.length,
         firstOrderIds: orderIds.slice(0, 5),
         lastOrderIds: orderIds.slice(-5),
+        stoppedByCutoff,
         sampleCustomFields: debugSamples,
         matchedOrderIds: matches,
       });
