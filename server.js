@@ -448,12 +448,14 @@ function isBadgeYes(value) {
 }
 
 // Name Badges: list orders in channel 22 where custom field PCF_BADGE = "Yes"
-// ?debug=1                    → raw diagnostic output
+// ?debug=1                    → raw diagnostic output (existing search + verify)
 // ?debugOrder=<orderId>       → inspect one specific order's custom-fields + channel
+// ?probe=1                    → try multiple filter syntaxes, report which Brightpearl honors
 app.get('/api/brightpearl/name-badges', async (req, res) => {
   try {
     const debug = req.query.debug === '1';
     const debugOrder = req.query.debugOrder;
+    const probe = req.query.probe === '1';
 
     if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
@@ -468,6 +470,44 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
       'Content-Type': 'application/json'
     };
+
+    // Probe mode: try multiple filter syntaxes serially with delays to avoid rate limits.
+    // Tells us which (if any) custom-field filter syntax Brightpearl actually applies.
+    if (probe) {
+      const variants = [
+        { label: 'channelId only',                qs: 'channelId=22' },
+        { label: 'PCF_BADGE=Yes',                 qs: 'channelId=22&PCF_BADGE=Yes' },
+        { label: 'PCF_BADGE=true',                qs: 'channelId=22&PCF_BADGE=true' },
+        { label: 'customField_PCF_BADGE=Yes',     qs: 'channelId=22&customField_PCF_BADGE=Yes' },
+        { label: 'customFields.PCF_BADGE=Yes',    qs: 'channelId=22&customFields.PCF_BADGE=Yes' },
+        { label: 'columns+filter PCF_BADGE',      qs: 'channelId=22&columns=PCF_BADGE&PCF_BADGE=Yes' },
+        { label: 'no channel, just PCF_BADGE',    qs: 'PCF_BADGE=Yes' },
+      ];
+      const results = [];
+      for (const v of variants) {
+        const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?${v.qs}&pageSize=10&firstResult=1`;
+        try {
+          const r = await fetch(url, { method: 'GET', headers });
+          const status = r.status;
+          let body;
+          try { body = await r.json(); } catch { body = null; }
+          const rows = body?.response?.results || [];
+          const ids = Array.isArray(rows[0]) ? rows.map(x => x[0]) : rows;
+          results.push({
+            label: v.label,
+            url,
+            status,
+            resultCount: rows.length,
+            firstFiveIds: ids.slice(0, 5),
+            errorBody: r.ok ? undefined : body,
+          });
+        } catch (err) {
+          results.push({ label: v.label, url, error: err.message });
+        }
+        await new Promise((r) => setTimeout(r, 600)); // ~1.5 req/sec to avoid 503
+      }
+      return res.json({ probe: true, variants: results });
+    }
 
     // Inspect one specific order — bypasses search/pagination entirely
     if (debugOrder) {
