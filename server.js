@@ -436,9 +436,23 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
   }
 });
 
+// Helper: does a custom-field value count as "Yes"?
+function isBadgeYes(value) {
+  if (value === true) return true;
+  if (typeof value === 'number') return value === 1;
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase();
+    return v === 'yes' || v === 'y' || v === 'true' || v === '1';
+  }
+  return false;
+}
+
 // Name Badges: list orders in channel 22 where custom field PCF_BADGE = "Yes"
+// Pass ?debug=1 for raw diagnostic output (search response + first 3 raw custom-field responses).
 app.get('/api/brightpearl/name-badges', async (req, res) => {
   try {
+    const debug = req.query.debug === '1';
+
     if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
       return res.status(500).json({ error: 'Brightpearl credentials not configured' });
     }
@@ -464,6 +478,11 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
     }
 
     const searchData = await searchResp.json();
+
+    if (debug && !searchData.response?.results?.length) {
+      return res.json({ debug: true, searchUrl, searchResponse: searchData, matchedCount: 0 });
+    }
+
     if (!searchData.response?.results?.length) {
       return res.json([]);
     }
@@ -474,6 +493,7 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
 
     // Fetch custom fields for each order and filter to PCF_BADGE = "Yes"
     const matches = [];
+    const debugSamples = [];
     await Promise.all(orderIds.map(async (orderId) => {
       try {
         const cfUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
@@ -481,14 +501,29 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
         if (!cfResp.ok) return;
         const cfData = await cfResp.json();
         const fields = cfData.response || cfData || {};
-        const badgeValue = fields.PCF_BADGE;
-        if (typeof badgeValue === 'string' && badgeValue.toLowerCase() === 'yes') {
+
+        if (debug && debugSamples.length < 3) {
+          debugSamples.push({ orderId, customFieldKeys: Object.keys(fields), rawResponse: cfData });
+        }
+
+        if (isBadgeYes(fields.PCF_BADGE)) {
           matches.push(orderId);
         }
       } catch (err) {
         console.error(`Error checking PCF_BADGE for order ${orderId}:`, err.message);
       }
     }));
+
+    if (debug) {
+      return res.json({
+        debug: true,
+        searchUrl,
+        ordersFoundInChannel22: orderIds.length,
+        firstOrderIds: orderIds.slice(0, 5),
+        sampleCustomFields: debugSamples,
+        matchedOrderIds: matches,
+      });
+    }
 
     if (matches.length === 0) {
       return res.json([]);
