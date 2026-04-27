@@ -495,15 +495,21 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       });
     }
 
-    // Paginate through ALL channel-22 orders (default sort is oldest-first, so the
-    // most recent test orders will be on later pages with a 50-result page size)
+    // Limit to recent orders only — badge work is always on current jobs, not history.
+    // ?days=N overrides the default 60-day window if needed.
+    const days = Math.min(parseInt(req.query.days, 10) || 60, 365);
+    const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split('T')[0]; // YYYY-MM-DD
+
+    // Paginate through channel-22 orders within the date window
     const pageSize = 200;
     const allOrderIds = [];
     let firstResult = 1;
     const searchUrls = [];
 
-    for (let page = 0; page < 10; page++) { // safety cap: 2000 orders max
-      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&pageSize=${pageSize}&firstResult=${firstResult}`;
+    for (let page = 0; page < 5; page++) { // hard cap: 1000 recent channel-22 orders
+      const searchUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?channelId=22&placedOnFrom=${fromDate}&pageSize=${pageSize}&firstResult=${firstResult}`;
       searchUrls.push(searchUrl);
       const searchResp = await fetch(searchUrl, { method: 'GET', headers });
       if (!searchResp.ok) {
