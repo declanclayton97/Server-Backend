@@ -821,8 +821,11 @@ async function resolveStaffName(contactId) {
   }
 }
 
-// Inspect order rows to detect EMBROIDERY / PRINT / BOTH / null. Mirrors
-// the SKU-prefix logic the existing parseBrightpearlProducts uses.
+// Inspect order rows to detect EMBROIDERY / PRINT / BOTH / null.
+// Checks SKU prefixes (OPEM-/OPPR-), the row's productName, and every value
+// in the row's productOptions object — Brightpearl often stores decoration
+// info as "Print Position: Left Breast Embroidery" inside productOptions
+// rather than on the SKU itself.
 function detectDecorationType(order) {
   const rows = order?.orderRows;
   if (!rows) return null;
@@ -832,8 +835,17 @@ function detectDecorationType(order) {
   for (const row of rowList) {
     const sku = (row.productSku || '').toUpperCase();
     const name = (row.productName || '').toLowerCase();
-    if (sku.startsWith('OPEM-') || /\bembroider/.test(name)) hasEmb = true;
-    if (sku.startsWith('OPPR-') || /\bprint/.test(name)) hasPrint = true;
+    const optionValues = row.productOptions
+      ? Object.values(row.productOptions).map((v) => String(v ?? '').toLowerCase())
+      : [];
+    const optionsBlob = optionValues.join(' | ');
+
+    if (sku.startsWith('OPEM-') || /\bemb(roider|\b)/.test(name) || /\bemb(roider|\b)/.test(optionsBlob)) {
+      hasEmb = true;
+    }
+    if (sku.startsWith('OPPR-') || /\bprint/.test(name) || /\bprint/.test(optionsBlob)) {
+      hasPrint = true;
+    }
   }
   if (hasEmb && hasPrint) return 'BOTH';
   if (hasEmb) return 'EMBROIDERY';
@@ -1012,6 +1024,62 @@ app.get('/api/urgent-orders', async (req, res) => {
     res.json(orders);
   } catch (err) {
     console.error('Error reading urgent_orders:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Inspect one order's raw row data + what the detector decides.
+// Use this to debug why decorationType comes back null for a specific order.
+app.get('/api/urgent-orders/inspect/:orderId', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  try {
+    const orderResp = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${req.params.orderId}`,
+      { method: 'GET', headers }
+    );
+    if (!orderResp.ok) {
+      return res.status(orderResp.status).json({ error: await orderResp.text() });
+    }
+    const orderData = await orderResp.json();
+    const order = orderData?.response?.[0];
+    if (!order) return res.status(404).json({ error: 'order not found' });
+
+    const rows = order.orderRows;
+    const rowList = Array.isArray(rows) ? rows : Object.values(rows || {});
+    const rowSummaries = rowList.map((row) => ({
+      productSku: row.productSku,
+      productName: row.productName,
+      productOptions: row.productOptions,
+      quantityMagnitude: row.quantity?.magnitude,
+    }));
+
+    const cfResp = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${req.params.orderId}/custom-field`,
+      { method: 'GET', headers }
+    );
+    const cfData = cfResp.ok ? await cfResp.json() : null;
+
+    res.json({
+      orderId: order.id,
+      orderReference: order.reference,
+      channelId: order?.assignment?.current?.channelId,
+      orderStatusId: order.orderStatusId,
+      detectedDecorationType: detectDecorationType(order),
+      rows: rowSummaries,
+      customFields: cfData?.response || cfData,
+      pcfUrgent: cfData?.response?.PCF_URGENT,
+    });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
