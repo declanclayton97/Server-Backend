@@ -906,9 +906,27 @@ async function initializeUrgentOrdersTable() {
   }
 }
 
+// Lock so concurrent scans (e.g. periodic poll firing while a manual rescan
+// is mid-flight) don't double-hit Brightpearl's rate limit.
+let urgentPollInFlight = false;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // Scan one batch of recently-updated orders, syncing PCF_URGENT into the table
 async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
   if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+  if (urgentPollInFlight) {
+    console.log(`[urgent-poll/${label}] skipped — another scan is in progress`);
+    return;
+  }
+  urgentPollInFlight = true;
+  try {
+    return await pollUrgentOrdersInner({ sinceMs, label });
+  } finally {
+    urgentPollInFlight = false;
+  }
+}
+
+async function pollUrgentOrdersInner({ sinceMs, label } = {}) {
 
   const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
     ? 'https://euw1.brightpearlconnect.com'
@@ -946,13 +964,30 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
 
   let added = 0;
   let removed = 0;
-  // Process serially with mild spacing to stay under Brightpearl's rate limit
+  let consecutiveRateLimits = 0;
+  // Process serially with spacing to stay under Brightpearl's rate limit
+  // (BP allows ~25 req/sec on the public API; we do at most ~6/sec)
   for (const orderId of orderIds) {
+    await sleep(150); // ~6.6 requests/sec, well under the limit
+
     try {
       const cfResp = await fetch(
         `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`,
         { method: 'GET', headers }
       );
+      if (cfResp.status === 503 || cfResp.status === 429) {
+        consecutiveRateLimits++;
+        // Aggressive backoff: 2s, 5s, 10s, then bail
+        if (consecutiveRateLimits >= 4) {
+          console.error(`[urgent-poll/${label}] aborting after 4 rate-limit responses; resuming next cycle`);
+          break;
+        }
+        const wait = consecutiveRateLimits * 2500;
+        console.warn(`[urgent-poll/${label}] rate limited on ${orderId}, sleeping ${wait}ms`);
+        await sleep(wait);
+        continue;
+      }
+      consecutiveRateLimits = 0;
       if (!cfResp.ok) continue;
       const cfData = await cfResp.json();
       const fields = cfData.response || cfData || {};
@@ -967,10 +1002,16 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
       }
 
       // Urgent or ASAP — fetch order details and upsert
+      await sleep(150);
       const orderResp = await fetch(
         `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
         { method: 'GET', headers }
       );
+      if (orderResp.status === 503 || orderResp.status === 429) {
+        console.warn(`[urgent-poll/${label}] rate limited on order ${orderId} details, sleeping 5s`);
+        await sleep(5000);
+        continue;
+      }
       if (!orderResp.ok) continue;
       const orderData = await orderResp.json();
       const order = orderData.response?.[0];
@@ -1166,6 +1207,9 @@ app.post('/api/urgent-orders/complete/:orderId', async (req, res) => {
 // Manual re-scan trigger — useful for "force refresh" buttons / debugging.
 // ?days=N expands the lookback window (default 1 day).
 app.post('/api/urgent-orders/rescan', async (req, res) => {
+  if (urgentPollInFlight) {
+    return res.status(409).json({ error: 'A scan is already in progress — try again in a minute.' });
+  }
   const days = Math.min(parseInt(req.query.days, 10) || 1, 30);
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
   pollUrgentOrders({ sinceMs, label: `manual-${days}d` })
