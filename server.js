@@ -777,6 +777,7 @@ app.patch('/api/brightpearl/order/:orderId/custom-fields', async (req, res) => {
 // Add new staff here as one line; takes precedence over any contact lookup.
 const KNOWN_STAFF_NAMES = {
   4: 'Tim Banks',
+  445: 'Robert Lodge',
   6433: 'Keith Taylor',
   49220: 'Ryan Wilson',
   56618: 'Abigail Birtwhistle',
