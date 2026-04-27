@@ -767,6 +767,262 @@ app.patch('/api/brightpearl/order/:orderId/custom-fields', async (req, res) => {
   }
 });
 
+// ===========================================================================
+// URGENT JOBS — backed by Postgres `urgent_orders`. Background poller scans
+// recently-updated Brightpearl orders for the PCF_URGENT custom field (a
+// date) and keeps the table in sync. Frontend reads the table directly.
+// ===========================================================================
+
+// In-memory staff name cache so we don't re-resolve createdById every poll
+const staffNameCache = new Map();
+
+async function resolveStaffName(contactId) {
+  if (!contactId) return null;
+  if (staffNameCache.has(contactId)) return staffNameCache.get(contactId);
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return null;
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  try {
+    const r = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/contact-service/contact/${contactId}`,
+      { method: 'GET', headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json',
+      }}
+    );
+    if (!r.ok) return null;
+    const data = await r.json();
+    const c = data?.response?.[0];
+    const name = [c?.firstName, c?.lastName].filter(Boolean).join(' ').trim() || null;
+    staffNameCache.set(contactId, name);
+    return name;
+  } catch {
+    return null;
+  }
+}
+
+// Inspect order rows to detect EMBROIDERY / PRINT / BOTH / null. Mirrors
+// the SKU-prefix logic the existing parseBrightpearlProducts uses.
+function detectDecorationType(order) {
+  const rows = order?.orderRows;
+  if (!rows) return null;
+  const rowList = Array.isArray(rows) ? rows : Object.values(rows);
+  let hasEmb = false;
+  let hasPrint = false;
+  for (const row of rowList) {
+    const sku = (row.productSku || '').toUpperCase();
+    const name = (row.productName || '').toLowerCase();
+    if (sku.startsWith('OPEM-') || /\bembroider/.test(name)) hasEmb = true;
+    if (sku.startsWith('OPPR-') || /\bprint/.test(name)) hasPrint = true;
+  }
+  if (hasEmb && hasPrint) return 'BOTH';
+  if (hasEmb) return 'EMBROIDERY';
+  if (hasPrint) return 'PRINT';
+  return null;
+}
+
+function parseDateLike(value) {
+  if (!value) return null;
+  if (value instanceof Date) return isNaN(value) ? null : value;
+  // Brightpearl date-type custom fields typically come back as ISO strings.
+  const d = new Date(value);
+  return isNaN(d) ? null : d;
+}
+
+async function initializeUrgentOrdersTable() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS urgent_orders (
+        order_id BIGINT PRIMARY KEY,
+        order_reference TEXT,
+        urgent_by_date DATE,
+        customer_name TEXT,
+        business_name TEXT,
+        decoration_type TEXT,
+        order_total NUMERIC(12, 2),
+        created_by_id INTEGER,
+        created_by_name TEXT,
+        placed_on TIMESTAMPTZ,
+        last_checked_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_urgent_orders_date ON urgent_orders(urgent_by_date);
+    `);
+    console.log('✅ urgent_orders table initialized');
+  } catch (err) {
+    console.error('❌ Error initializing urgent_orders table:', err.message);
+  }
+}
+
+// Scan one batch of recently-updated orders, syncing PCF_URGENT into the table
+async function pollUrgentOrders({ sinceMs, label = 'incremental' } = {}) {
+  if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+
+  // Default: orders updated in the last 15 minutes (poller runs every 5)
+  const fromMs = sinceMs ?? Date.now() - 15 * 60 * 1000;
+  const fromIso = new Date(fromMs).toISOString();
+  const updatedFilter = encodeURIComponent(`${fromIso}/`);
+
+  const orderIds = [];
+  let firstResult = 1;
+  for (let page = 0; page < 5; page++) { // up to 1000 recent orders per cycle
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?updatedOn=${updatedFilter}&pageSize=200&firstResult=${firstResult}`;
+    const r = await fetch(url, { method: 'GET', headers });
+    if (!r.ok) {
+      console.error(`[urgent-poll/${label}] order-search failed:`, r.status);
+      return;
+    }
+    const data = await r.json();
+    const rows = data.response?.results || [];
+    if (rows.length === 0) break;
+    const ids = Array.isArray(rows[0]) ? rows.map((row) => row[0]) : rows;
+    orderIds.push(...ids);
+    if (rows.length < 200) break;
+    firstResult += 200;
+  }
+
+  if (orderIds.length === 0) return;
+
+  let added = 0;
+  let removed = 0;
+  // Process serially with mild spacing to stay under Brightpearl's rate limit
+  for (const orderId of orderIds) {
+    try {
+      const cfResp = await fetch(
+        `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`,
+        { method: 'GET', headers }
+      );
+      if (!cfResp.ok) continue;
+      const cfData = await cfResp.json();
+      const fields = cfData.response || cfData || {};
+      const urgentDate = parseDateLike(fields.PCF_URGENT);
+
+      if (!urgentDate) {
+        // Not (or no longer) urgent — drop from cache if present
+        const del = await pool.query('DELETE FROM urgent_orders WHERE order_id = $1', [orderId]);
+        if (del.rowCount > 0) removed++;
+        continue;
+      }
+
+      // Urgent — fetch order details and upsert
+      const orderResp = await fetch(
+        `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
+        { method: 'GET', headers }
+      );
+      if (!orderResp.ok) continue;
+      const orderData = await orderResp.json();
+      const order = orderData.response?.[0];
+      if (!order) continue;
+
+      const customer = order.parties?.customer || {};
+      const customerName = customer.contactName || customer.addressFullName || null;
+      const businessName = customer.companyName || null;
+      const orderTotal = parseFloat(order.totalValue?.total ?? order.total ?? 0) || null;
+      const createdById = order.createdById || order.createdBy?.contactId || null;
+      const createdByName = await resolveStaffName(createdById);
+      const decorationType = detectDecorationType(order);
+      const placedOn = order.placedOn ? new Date(order.placedOn) : null;
+      const urgentByDate = urgentDate.toISOString().split('T')[0];
+
+      await pool.query(`
+        INSERT INTO urgent_orders (
+          order_id, order_reference, urgent_by_date, customer_name, business_name,
+          decoration_type, order_total, created_by_id, created_by_name, placed_on,
+          last_checked_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+        ON CONFLICT (order_id) DO UPDATE SET
+          order_reference = EXCLUDED.order_reference,
+          urgent_by_date = EXCLUDED.urgent_by_date,
+          customer_name = EXCLUDED.customer_name,
+          business_name = EXCLUDED.business_name,
+          decoration_type = EXCLUDED.decoration_type,
+          order_total = EXCLUDED.order_total,
+          created_by_id = EXCLUDED.created_by_id,
+          created_by_name = EXCLUDED.created_by_name,
+          placed_on = EXCLUDED.placed_on,
+          last_checked_at = NOW()
+      `, [
+        orderId, order.reference, urgentByDate, customerName, businessName,
+        decorationType, orderTotal, createdById, createdByName, placedOn,
+      ]);
+      added++;
+    } catch (err) {
+      console.error(`[urgent-poll/${label}] error on order ${orderId}:`, err.message);
+    }
+  }
+
+  console.log(`[urgent-poll/${label}] scanned ${orderIds.length}, added/updated ${added}, removed ${removed}`);
+}
+
+// Read endpoint — frontend reads from Postgres directly, no Brightpearl call
+app.get('/api/urgent-orders', async (req, res) => {
+  if (!useDatabase) return res.json([]);
+  try {
+    const result = await pool.query(`
+      SELECT order_id, order_reference, urgent_by_date, customer_name, business_name,
+             decoration_type, order_total, created_by_id, created_by_name, placed_on,
+             last_checked_at
+      FROM urgent_orders
+      ORDER BY urgent_by_date ASC NULLS LAST, order_id ASC
+    `);
+    const orders = result.rows.map((r) => ({
+      orderId: Number(r.order_id),
+      orderReference: r.order_reference,
+      urgentByDate: r.urgent_by_date instanceof Date
+        ? r.urgent_by_date.toISOString().split('T')[0]
+        : r.urgent_by_date,
+      customerName: r.customer_name,
+      businessName: r.business_name,
+      decorationType: r.decoration_type,
+      orderTotal: r.order_total ? Number(r.order_total) : null,
+      createdById: r.created_by_id,
+      createdByName: r.created_by_name,
+      placedOn: r.placed_on,
+      lastCheckedAt: r.last_checked_at,
+    }));
+    res.json(orders);
+  } catch (err) {
+    console.error('Error reading urgent_orders:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual re-scan trigger — useful for "force refresh" buttons / debugging.
+// ?days=N expands the lookback window (default 1 day).
+app.post('/api/urgent-orders/rescan', async (req, res) => {
+  const days = Math.min(parseInt(req.query.days, 10) || 1, 30);
+  const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  pollUrgentOrders({ sinceMs, label: `manual-${days}d` })
+    .catch((err) => console.error('Manual rescan failed:', err.message));
+  res.json({ accepted: true, days });
+});
+
+// Boot the urgent orders system
+(async () => {
+  await initializeUrgentOrdersTable();
+  if (useDatabase && BRIGHTPEARL_API_TOKEN) {
+    // Initial seed: scan the last 7 days so existing flagged orders are picked up
+    pollUrgentOrders({ sinceMs: Date.now() - 7 * 24 * 60 * 60 * 1000, label: 'initial-seed' })
+      .catch((err) => console.error('Initial urgent seed failed:', err.message));
+    // Recurring poll every 5 minutes — covers any update in the last 15 min window
+    setInterval(() => {
+      pollUrgentOrders().catch((err) => console.error('Urgent poll failed:', err.message));
+    }, 5 * 60 * 1000);
+    console.log('✅ Urgent orders poller scheduled (every 5 min)');
+  }
+})();
+
 const docuSignService = new DocuSignService();
 
 // DocuSign logging functionality
