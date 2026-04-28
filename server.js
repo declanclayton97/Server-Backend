@@ -989,7 +989,7 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
   // Process serially with spacing to stay under Brightpearl's rate limit
   // (BP allows ~25 req/sec on the public API; we do at most ~6/sec)
   for (const orderId of orderIds) {
-    await sleep(150); // ~6.6 requests/sec, well under the limit
+    await sleep(250); // ~4 requests/sec — conservative since BP budget is shared
 
     try {
       const cfResp = await fetch(
@@ -1187,11 +1187,22 @@ const checkOrderHandler = async (req, res) => {
     'Content-Type': 'application/json',
   };
 
+  // Retry helper — survives transient 503/429 by waiting and trying again
+  const fetchWithRetry = async (url, attempt = 0) => {
+    const r = await fetch(url, { method: 'GET', headers });
+    if ((r.status === 503 || r.status === 429) && attempt < 3) {
+      const wait = (attempt + 1) * 3000; // 3s, 6s, 9s
+      console.warn(`[urgent/check] ${r.status} on ${url}, retry ${attempt + 1} in ${wait}ms`);
+      await sleep(wait);
+      return fetchWithRetry(url, attempt + 1);
+    }
+    return r;
+  };
+
   try {
     // 1. Custom fields
-    const cfResp = await fetch(
-      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`,
-      { method: 'GET', headers }
+    const cfResp = await fetchWithRetry(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`
     );
     if (!cfResp.ok) {
       return res.status(cfResp.status).json({ error: 'cf-fetch-failed', detail: await cfResp.text() });
@@ -1212,9 +1223,8 @@ const checkOrderHandler = async (req, res) => {
     }
 
     // 2. Order details
-    const orderResp = await fetch(
-      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
-      { method: 'GET', headers }
+    const orderResp = await fetchWithRetry(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`
     );
     if (!orderResp.ok) {
       return res.status(orderResp.status).json({ error: 'order-fetch-failed', detail: await orderResp.text() });
