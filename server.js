@@ -1171,7 +1171,8 @@ app.get('/api/urgent-orders/inspect/:orderId', async (req, res) => {
 // Force-process a single order: fetches its custom fields + details and
 // upserts/deletes its row in urgent_orders. Useful for "I set PCF_ASAP but
 // the page didn't pick it up" cases — bypasses the time-window search.
-app.post('/api/urgent-orders/check/:orderId', async (req, res) => {
+// Both GET and POST so it's trivially testable from a browser address bar
+const checkOrderHandler = async (req, res) => {
   const orderId = req.params.orderId;
   if (!useDatabase) return res.status(500).json({ error: 'Database disabled' });
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
@@ -1274,7 +1275,9 @@ app.post('/api/urgent-orders/check/:orderId', async (req, res) => {
     console.error(`[urgent/check] error for ${orderId}:`, err.message);
     res.status(500).json({ error: err.message, stack: err.stack });
   }
-});
+};
+app.post('/api/urgent-orders/check/:orderId', checkOrderHandler);
+app.get('/api/urgent-orders/check/:orderId', checkOrderHandler);
 
 // Mark an urgent order complete: clears PCF_URGENT in Brightpearl and
 // removes the row from the local cache. Sales can also clear the field
