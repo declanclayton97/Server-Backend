@@ -1194,31 +1194,52 @@ app.post('/api/urgent-orders/complete/:orderId', async (req, res) => {
     });
 
   try {
-    // Clear both PCF_URGENT (date) and PCF_ASAP (boolean). PCF_ASAP gets set
-    // to false rather than removed, since boolean fields can't be null.
-    let r = await tryPatch([
-      { op: 'remove', path: '/PCF_URGENT' },
-      { op: 'replace', path: '/PCF_ASAP', value: false },
-    ]);
-    if (!r.ok) {
-      const errText = await r.text();
-      console.warn(`[urgent/complete] remove rejected for ${orderId} — trying replace-with-null. Error:`, errText);
-      r = await tryPatch([
-        { op: 'replace', path: '/PCF_URGENT', value: null },
-        { op: 'replace', path: '/PCF_ASAP', value: false },
-      ]);
+    // Fetch current custom fields so we only patch fields that actually exist
+    // — JSON Patch "remove" / "replace" both fail with CMNC-038 if the path
+    // is not present (and Brightpearl orders don't carry every PCF unless
+    // they've been set at least once).
+    const cfResp = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`,
+      { method: 'GET', headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json',
+      }}
+    );
+    const cfData = cfResp.ok ? await cfResp.json() : null;
+    const fields = cfData?.response || {};
+
+    const operations = [];
+    if (fields.PCF_URGENT != null && fields.PCF_URGENT !== '') {
+      operations.push({ op: 'remove', path: '/PCF_URGENT' });
     }
-    if (!r.ok) {
-      const errorText = await r.text();
-      console.error(`[urgent/complete] both remove and replace failed for ${orderId}:`, errorText);
-      return res.status(r.status).json({ error: errorText });
+    if (fields.PCF_ASAP === true || fields.PCF_ASAP === 'true' || fields.PCF_ASAP === 1) {
+      operations.push({ op: 'replace', path: '/PCF_ASAP', value: false });
     }
 
-    // Drop from local cache so the queue updates immediately on next poll
+    if (operations.length > 0) {
+      let r = await tryPatch(operations);
+      if (!r.ok) {
+        const errText = await r.text();
+        // Last-ditch fallback — convert any "remove" to "replace with null"
+        const fallback = operations.map((op) =>
+          op.op === 'remove' ? { op: 'replace', path: op.path, value: null } : op
+        );
+        console.warn(`[urgent/complete] first patch rejected for ${orderId} — retrying with replace-null. Error:`, errText);
+        r = await tryPatch(fallback);
+      }
+      if (!r.ok) {
+        const errorText = await r.text();
+        console.error(`[urgent/complete] patch failed for ${orderId}:`, errorText);
+        return res.status(r.status).json({ error: errorText });
+      }
+    }
+
+    // Drop from local cache so the queue updates immediately
     if (useDatabase) {
       await pool.query('DELETE FROM urgent_orders WHERE order_id = $1', [orderId]);
     }
-    res.json({ success: true });
+    res.json({ success: true, clearedOps: operations });
   } catch (err) {
     console.error('[urgent/complete] error:', err.message);
     res.status(500).json({ error: err.message });
