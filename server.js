@@ -1168,6 +1168,114 @@ app.get('/api/urgent-orders/inspect/:orderId', async (req, res) => {
   }
 });
 
+// Force-process a single order: fetches its custom fields + details and
+// upserts/deletes its row in urgent_orders. Useful for "I set PCF_ASAP but
+// the page didn't pick it up" cases — bypasses the time-window search.
+app.post('/api/urgent-orders/check/:orderId', async (req, res) => {
+  const orderId = req.params.orderId;
+  if (!useDatabase) return res.status(500).json({ error: 'Database disabled' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+
+  try {
+    // 1. Custom fields
+    const cfResp = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`,
+      { method: 'GET', headers }
+    );
+    if (!cfResp.ok) {
+      return res.status(cfResp.status).json({ error: 'cf-fetch-failed', detail: await cfResp.text() });
+    }
+    const cfData = await cfResp.json();
+    const fields = cfData.response || cfData || {};
+    const urgentByDateStr = extractIsoDate(fields.PCF_URGENT);
+    const isAsap = isBadgeYes(fields.PCF_ASAP);
+
+    if (!urgentByDateStr && !isAsap) {
+      const del = await pool.query('DELETE FROM urgent_orders WHERE order_id = $1', [orderId]);
+      return res.json({
+        action: del.rowCount > 0 ? 'removed' : 'skipped',
+        reason: 'neither PCF_URGENT nor PCF_ASAP is set',
+        rawPcfUrgent: fields.PCF_URGENT,
+        rawPcfAsap: fields.PCF_ASAP,
+      });
+    }
+
+    // 2. Order details
+    const orderResp = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
+      { method: 'GET', headers }
+    );
+    if (!orderResp.ok) {
+      return res.status(orderResp.status).json({ error: 'order-fetch-failed', detail: await orderResp.text() });
+    }
+    const orderData = await orderResp.json();
+    const order = orderData.response?.[0];
+    if (!order) return res.status(404).json({ error: 'order not found in detail response' });
+
+    const customer = order.parties?.customer || {};
+    const customerName = customer.contactName || customer.addressFullName || null;
+    const businessName = customer.companyName || null;
+    const orderTotal = parseFloat(order.totalValue?.total ?? order.total ?? 0) || null;
+    const createdById = order.createdById || order.createdBy?.contactId || null;
+    const createdByName = await resolveStaffName(createdById);
+    const decorationType = detectDecorationType(order);
+    const placedOn = order.placedOn ? new Date(order.placedOn) : null;
+
+    // 3. Upsert
+    await pool.query(`
+      INSERT INTO urgent_orders (
+        order_id, order_reference, urgent_by_date, is_asap, customer_name, business_name,
+        decoration_type, order_total, created_by_id, created_by_name, placed_on,
+        last_checked_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+      ON CONFLICT (order_id) DO UPDATE SET
+        order_reference = EXCLUDED.order_reference,
+        urgent_by_date = EXCLUDED.urgent_by_date,
+        is_asap = EXCLUDED.is_asap,
+        customer_name = EXCLUDED.customer_name,
+        business_name = EXCLUDED.business_name,
+        decoration_type = EXCLUDED.decoration_type,
+        order_total = EXCLUDED.order_total,
+        created_by_id = EXCLUDED.created_by_id,
+        created_by_name = EXCLUDED.created_by_name,
+        placed_on = EXCLUDED.placed_on,
+        last_checked_at = NOW()
+    `, [
+      orderId, order.reference, urgentByDateStr, isAsap, customerName, businessName,
+      decorationType, orderTotal, createdById, createdByName, placedOn,
+    ]);
+
+    res.json({
+      action: 'upserted',
+      stored: {
+        orderId,
+        urgentByDate: urgentByDateStr,
+        isAsap,
+        decorationType,
+        customerName,
+        businessName,
+        orderTotal,
+        createdByName,
+      },
+      rawPcfUrgent: fields.PCF_URGENT,
+      rawPcfAsap: fields.PCF_ASAP,
+    });
+  } catch (err) {
+    console.error(`[urgent/check] error for ${orderId}:`, err.message);
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 // Mark an urgent order complete: clears PCF_URGENT in Brightpearl and
 // removes the row from the local cache. Sales can also clear the field
 // directly in Brightpearl — the next poll cycle will catch that too.
