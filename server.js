@@ -1340,9 +1340,13 @@ app.get('/api/urgent-orders/stale-check/:orderId', async (req, res) => {
     res.json({
       orderId: order.id,
       reference: order.reference,
-      orderStatusId,
-      orderStatusIdTopLevel: order.orderStatusId,
-      orderStatusIdNested: order?.assignment?.current?.orderStatusId,
+      orderStatusId: orderStatusId ?? null,
+      orderStatusIdTopLevel: order.orderStatusId ?? null,
+      orderStatusIdNested: order?.assignment?.current?.orderStatusId ?? null,
+      orderTopLevelKeys: Object.keys(order || {}),
+      assignmentCurrentKeys: order?.assignment?.current
+        ? Object.keys(order.assignment.current)
+        : null,
       updatedOn: order.updatedOn,
       placedOn: order.placedOn,
       daysSinceUpdate,
