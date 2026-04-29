@@ -1257,6 +1257,76 @@ async function pollStaleOrdersInner() {
   console.log(`[stale-poll] stale orders found: ${allIdsArr.length}, added new: ${added}, refreshed/skipped: ${skipped}, removed: ${toRemove.length}`);
 }
 
+// Manual stale-rescan trigger + diagnostics
+app.post('/api/urgent-orders/stale-rescan', async (req, res) => {
+  if (stalePollInFlight) {
+    return res.status(409).json({ error: 'A stale scan is already running — wait a minute.' });
+  }
+  pollStaleOrders().catch((err) => console.error('Manual stale rescan failed:', err.message));
+  res.json({ accepted: true });
+});
+app.get('/api/urgent-orders/stale-rescan', async (req, res) => {
+  if (stalePollInFlight) {
+    return res.status(409).json({ error: 'A stale scan is already running — wait a minute.' });
+  }
+  pollStaleOrders().catch((err) => console.error('Manual stale rescan failed:', err.message));
+  res.json({ accepted: true });
+});
+
+// Inspect why a specific order does or doesn't qualify as stale
+app.get('/api/urgent-orders/stale-check/:orderId', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  try {
+    const r = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${req.params.orderId}`,
+      { method: 'GET', headers }
+    );
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    const order = (await r.json()).response?.[0];
+    if (!order) return res.status(404).json({ error: 'order not found' });
+
+    const statusIds = (process.env.BADGE_STALE_STATUS_IDS || '24,25')
+      .split(',').map((s) => parseInt(s.trim(), 10));
+    const staleDays = Math.max(1, parseInt(process.env.BADGE_STALE_DAYS, 10) || 14);
+    const updatedOn = order.updatedOn ? new Date(order.updatedOn) : null;
+    const daysSinceUpdate = updatedOn
+      ? Math.floor((Date.now() - updatedOn.getTime()) / (24 * 60 * 60 * 1000))
+      : null;
+    const cutoffDate = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000);
+
+    const inWatchedStatus = statusIds.includes(order.orderStatusId);
+    const oldEnough = updatedOn && updatedOn.getTime() < cutoffDate.getTime();
+    const wouldQualify = inWatchedStatus && oldEnough;
+
+    res.json({
+      orderId: order.id,
+      reference: order.reference,
+      orderStatusId: order.orderStatusId,
+      updatedOn: order.updatedOn,
+      placedOn: order.placedOn,
+      daysSinceUpdate,
+      thresholds: { watchedStatusIds: statusIds, staleDays, cutoffDate: cutoffDate.toISOString() },
+      checks: { inWatchedStatus, oldEnough },
+      wouldQualifyAsStale: wouldQualify,
+      currentlyInUrgentCache: useDatabase
+        ? (await pool.query('SELECT source FROM urgent_orders WHERE order_id = $1', [order.id])).rows[0]?.source || null
+        : null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Read endpoint — frontend reads from Postgres directly, no Brightpearl call
 app.get('/api/urgent-orders', async (req, res) => {
   if (!useDatabase) return res.json([]);
