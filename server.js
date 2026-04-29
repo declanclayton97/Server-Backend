@@ -1366,6 +1366,46 @@ app.get('/api/urgent-orders/release-lock', (req, res) => {
   res.json({ released: true, wasHeldBy: owner, wasHeldForSeconds: heldFor });
 });
 
+// Test the search query the poller uses, so we can see exactly what BP
+// returns. ?orderTypeId=N&days=N to vary, defaults match the production poller.
+app.get('/api/urgent-orders/test-search', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  const days = parseInt(req.query.days, 10) || 30;
+  const orderTypeId = req.query.orderTypeId != null ? req.query.orderTypeId : '1';
+  const useTypeFilter = orderTypeId !== 'none';
+  const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const updatedFilter = encodeURIComponent(`${fromIso}/`);
+  const typeQs = useTypeFilter ? `orderTypeId=${orderTypeId}&` : '';
+  const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?${typeQs}updatedOn=${updatedFilter}&pageSize=5&firstResult=1`;
+
+  try {
+    const r = await fetch(url, { method: 'GET', headers });
+    const body = await r.text();
+    let json;
+    try { json = JSON.parse(body); } catch { json = null; }
+    res.json({
+      requestUrl: url,
+      status: r.status,
+      resultsAvailable: json?.response?.metaData?.resultsAvailable ?? null,
+      resultsReturned: json?.response?.metaData?.resultsReturned ?? null,
+      firstFiveResults: (json?.response?.results || []).slice(0, 5),
+      rawError: r.ok ? null : body,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Status endpoint — see what the pollers are doing right now
 app.get('/api/urgent-orders/status', async (req, res) => {
   try {
