@@ -1026,10 +1026,12 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
   // BP sometimes returns fewer rows than the requested pageSize. Paginate by
   // incrementing firstResult by the ACTUAL row count and stop only when an
   // empty page comes back. Hard cap at 500 pages purely as a runaway guard.
+  // orderTypeId=1 limits to sales orders (excludes POs / credit notes / etc).
   const orderIds = [];
   let firstResult = 1;
+  startPollProgress(`urgent/${label}/searching`, 0); // visible during pagination phase
   for (let page = 0; page < 500; page++) {
-    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
     const r = await fetch(url, { method: 'GET', headers });
     if (!r.ok) {
       console.error(`[urgent-poll/${label}] order-search failed:`, r.status);
@@ -1065,8 +1067,12 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
     console.error(`[urgent-poll/${label}] cached-id query failed:`, err.message);
   }
 
-  if (orderIds.length === 0) return;
+  if (orderIds.length === 0) {
+    endPollProgress();
+    return;
+  }
 
+  // Replace the "searching" progress bar with the actual "processing" total
   startPollProgress(`urgent/${label}`, orderIds.length);
   let added = 0;
   let removed = 0;
@@ -1216,12 +1222,13 @@ async function pollStaleOrdersInner() {
   const cutoffIso = cutoff.toISOString();
   const updatedFilter = encodeURIComponent(`2010-01-01T00:00:00Z/${cutoffIso}`);
 
+  startPollProgress('stale/searching', 0);
   const candidatesByStatus = new Map(); // statusId → [orderId, ...]
   for (const statusId of statusIds) {
     const ids = [];
     let firstResult = 1;
     for (let page = 0; page < 500; page++) {
-      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderStatusId=${statusId}&updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
+      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&orderStatusId=${statusId}&updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
       const r = await fetch(url, { method: 'GET', headers });
       if (!r.ok) {
         console.error(`[stale-poll] order-search status=${statusId} failed:`, r.status);
