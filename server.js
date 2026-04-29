@@ -1847,6 +1847,20 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
   if (urgentPollInFlight) {
     return res.status(409).json({ error: 'A scan is already in progress — try again in a minute.' });
   }
+  if (Date.now() < bpRateLimitedUntil) {
+    const seconds = Math.ceil((bpRateLimitedUntil - Date.now()) / 1000);
+    return res.status(503).json({
+      error: `Brightpearl rate-limit cooldown active — pollers paused for ${seconds} more seconds. Try again then.`,
+      circuitBreakerSecondsRemaining: seconds,
+    });
+  }
+  if (bpPollLockHeld) {
+    return res.status(409).json({
+      error: `Another Brightpearl scan is already running (${bpPollLockOwner}). Wait for it to finish.`,
+      heldBy: bpPollLockOwner,
+      heldForSeconds: Math.round((Date.now() - bpPollLockAcquiredAt) / 1000),
+    });
+  }
   const days = Math.min(parseInt(req.query.days, 10) || 1, 30);
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
   pollUrgentOrders({ sinceMs, label: `manual-${days}d`, refreshAllCached: true })
