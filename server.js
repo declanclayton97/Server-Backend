@@ -1390,10 +1390,17 @@ app.get('/api/urgent-orders/test-search', async (req, res) => {
   const days = parseInt(req.query.days, 10) || 30;
   const orderTypeId = req.query.orderTypeId != null ? req.query.orderTypeId : '1';
   const useTypeFilter = orderTypeId !== 'none';
+  const createdSinceDays = req.query.createdSinceDays != null
+    ? parseInt(req.query.createdSinceDays, 10)
+    : 365;
+  const useCreatedFilter = req.query.createdSinceDays !== 'none' && createdSinceDays > 0;
   const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const updatedFilter = encodeURIComponent(`${fromIso}/`);
   const typeQs = useTypeFilter ? `orderTypeId=${orderTypeId}&` : '';
-  const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?${typeQs}updatedOn=${updatedFilter}&pageSize=5&firstResult=1`;
+  const createdQs = useCreatedFilter
+    ? `createdOn=${encodeURIComponent(`${new Date(Date.now() - createdSinceDays * 24 * 60 * 60 * 1000).toISOString()}/`)}&`
+    : '';
+  const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?${typeQs}${createdQs}updatedOn=${updatedFilter}&pageSize=5&firstResult=1`;
 
   try {
     const r = await fetch(url, { method: 'GET', headers });
