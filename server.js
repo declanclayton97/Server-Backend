@@ -773,6 +773,20 @@ app.patch('/api/brightpearl/order/:orderId/custom-fields', async (req, res) => {
 // date) and keeps the table in sync. Frontend reads the table directly.
 // ===========================================================================
 
+// Brightpearl order detail puts the current status at order.orderStatus
+// as an object (not at order.orderStatusId or assignment.current.orderStatusId).
+// Try every shape we've seen so the code is robust if BP changes endpoints.
+function getOrderStatusId(order) {
+  if (!order) return null;
+  return (
+    order.orderStatus?.orderStatusId ??
+    order.orderStatus?.id ??
+    order.assignment?.current?.orderStatusId ??
+    order.orderStatusId ??
+    null
+  );
+}
+
 // Hard-coded staff name map — extracted from Brightpearl admin report URLs.
 // Add new staff here as one line; takes precedence over any contact lookup.
 const KNOWN_STAFF_NAMES = {
@@ -1246,7 +1260,7 @@ async function pollStaleOrdersInner() {
         const days = updatedOn
           ? Math.floor((Date.now() - updatedOn.getTime()) / (24 * 60 * 60 * 1000))
           : staleDays;
-        const orderStatusId = order?.assignment?.current?.orderStatusId ?? order?.orderStatusId;
+        const orderStatusId = getOrderStatusId(order);
 
         // INSERT ... ON CONFLICT DO NOTHING — never overwrites a 'flag' row.
         // For source='stale' rows we still want to refresh display fields, so
@@ -1332,7 +1346,7 @@ app.get('/api/urgent-orders/stale-check/:orderId', async (req, res) => {
       : null;
     const cutoffDate = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000);
 
-    const orderStatusId = order?.assignment?.current?.orderStatusId ?? order?.orderStatusId;
+    const orderStatusId = getOrderStatusId(order);
     const inWatchedStatus = statusIds.includes(orderStatusId);
     const oldEnough = updatedOn && updatedOn.getTime() < cutoffDate.getTime();
     const wouldQualify = inWatchedStatus && oldEnough;
@@ -1341,8 +1355,7 @@ app.get('/api/urgent-orders/stale-check/:orderId', async (req, res) => {
       orderId: order.id,
       reference: order.reference,
       orderStatusId: orderStatusId ?? null,
-      orderStatusIdTopLevel: order.orderStatusId ?? null,
-      orderStatusIdNested: order?.assignment?.current?.orderStatusId ?? null,
+      orderStatusObject: order.orderStatus ?? null,
       orderTopLevelKeys: Object.keys(order || {}),
       assignmentCurrentKeys: order?.assignment?.current
         ? Object.keys(order.assignment.current)
