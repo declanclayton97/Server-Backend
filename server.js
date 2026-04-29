@@ -1299,6 +1299,36 @@ async function pollStaleOrdersInner() {
   console.log(`[stale-poll] stale orders found: ${allIdsArr.length}, added new: ${added}, refreshed/skipped: ${skipped}, removed: ${toRemove.length}`);
 }
 
+// Status endpoint — see what the pollers are doing right now
+app.get('/api/urgent-orders/status', async (req, res) => {
+  try {
+    const counts = useDatabase
+      ? await pool.query(`
+          SELECT source, COUNT(*)::int AS n
+          FROM urgent_orders
+          GROUP BY source
+        `).then((r) => Object.fromEntries(r.rows.map((row) => [row.source, row.n])))
+      : null;
+    res.json({
+      bpPollLockHeld,
+      urgentPollInFlight,
+      stalePollInFlight,
+      bpRateLimitedUntil: bpRateLimitedUntil
+        ? new Date(bpRateLimitedUntil).toISOString()
+        : null,
+      circuitBreakerOpen: Date.now() < bpRateLimitedUntil,
+      circuitBreakerSecondsRemaining: Math.max(0, Math.ceil((bpRateLimitedUntil - Date.now()) / 1000)),
+      cacheCounts: counts,
+      thresholds: {
+        watchedStatusIds: (process.env.BADGE_STALE_STATUS_IDS || '24,25').split(',').map((s) => s.trim()),
+        staleDays: parseInt(process.env.BADGE_STALE_DAYS, 10) || 14,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Manual stale-rescan trigger + diagnostics
 app.post('/api/urgent-orders/stale-rescan', async (req, res) => {
   if (stalePollInFlight) {
