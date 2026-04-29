@@ -1025,7 +1025,7 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
 
   const orderIds = [];
   let firstResult = 1;
-  for (let page = 0; page < 5; page++) { // up to 1000 recent orders per cycle
+  for (let page = 0; page < 100; page++) { // up to 20000 orders — accommodates busy 30-day windows
     const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?updatedOn=${updatedFilter}&pageSize=200&firstResult=${firstResult}`;
     const r = await fetch(url, { method: 'GET', headers });
     if (!r.ok) {
