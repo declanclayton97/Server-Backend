@@ -1023,10 +1023,13 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
   const fromIso = new Date(fromMs).toISOString();
   const updatedFilter = encodeURIComponent(`${fromIso}/`);
 
+  // BP sometimes returns fewer rows than the requested pageSize. Paginate by
+  // incrementing firstResult by the ACTUAL row count and stop only when an
+  // empty page comes back. Hard cap at 500 pages purely as a runaway guard.
   const orderIds = [];
   let firstResult = 1;
-  for (let page = 0; page < 100; page++) { // up to 20000 orders — accommodates busy 30-day windows
-    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?updatedOn=${updatedFilter}&pageSize=200&firstResult=${firstResult}`;
+  for (let page = 0; page < 500; page++) {
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
     const r = await fetch(url, { method: 'GET', headers });
     if (!r.ok) {
       console.error(`[urgent-poll/${label}] order-search failed:`, r.status);
@@ -1037,9 +1040,9 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
     if (rows.length === 0) break;
     const ids = Array.isArray(rows[0]) ? rows.map((row) => row[0]) : rows;
     orderIds.push(...ids);
-    if (rows.length < 200) break;
-    firstResult += 200;
+    firstResult += rows.length; // advance by what BP actually returned
   }
+  console.log(`[urgent-poll/${label}] order-search returned ${orderIds.length} order IDs across the window`);
 
   // Always merge in currently-cached order IDs that need re-checking. This is
   // what makes manual Re-scan self-correcting: existing entries with wrong
@@ -1217,8 +1220,8 @@ async function pollStaleOrdersInner() {
   for (const statusId of statusIds) {
     const ids = [];
     let firstResult = 1;
-    for (let page = 0; page < 5; page++) {
-      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderStatusId=${statusId}&updatedOn=${updatedFilter}&pageSize=200&firstResult=${firstResult}`;
+    for (let page = 0; page < 500; page++) {
+      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderStatusId=${statusId}&updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
       const r = await fetch(url, { method: 'GET', headers });
       if (!r.ok) {
         console.error(`[stale-poll] order-search status=${statusId} failed:`, r.status);
@@ -1229,8 +1232,7 @@ async function pollStaleOrdersInner() {
       if (rows.length === 0) break;
       const pageIds = Array.isArray(rows[0]) ? rows.map((row) => row[0]) : rows;
       ids.push(...pageIds);
-      if (rows.length < 200) break;
-      firstResult += 200;
+      firstResult += rows.length;
     }
     candidatesByStatus.set(statusId, ids);
   }
