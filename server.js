@@ -947,6 +947,19 @@ let bpPollLockHeld = false;
 let bpRateLimitedUntil = 0;
 let bpPollLockOwner = null;        // label of whatever is holding the lock
 let bpPollLockAcquiredAt = 0;       // ms timestamp when lock was acquired
+
+// Live progress for the currently-running scan, surfaced in /status so the
+// frontend can render a progress bar while the user waits.
+let bpPollProgress = null;
+function startPollProgress(label, total) {
+  bpPollProgress = { label, total, processed: 0, startedAt: Date.now() };
+}
+function tickPollProgress(by = 1) {
+  if (bpPollProgress) bpPollProgress.processed += by;
+}
+function endPollProgress() {
+  bpPollProgress = null;
+}
 async function acquireBpPollLock(label, { waitMs = 0 } = {}) {
   const deadline = Date.now() + waitMs;
   while (true) {
@@ -1051,12 +1064,14 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
 
   if (orderIds.length === 0) return;
 
+  startPollProgress(`urgent/${label}`, orderIds.length);
   let added = 0;
   let removed = 0;
   let consecutiveRateLimits = 0;
   // Process serially with spacing to stay under Brightpearl's rate limit
   // (BP allows ~25 req/sec on the public API; we do at most ~6/sec)
   for (const orderId of orderIds) {
+    tickPollProgress();
     await sleep(250); // ~4 requests/sec — conservative since BP budget is shared
 
     try {
@@ -1148,6 +1163,7 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
   }
 
   console.log(`[urgent-poll/${label}] scanned ${orderIds.length}, added/updated ${added}, removed ${removed}`);
+  endPollProgress();
 }
 
 // ---------------------------------------------------------------------------
@@ -1244,6 +1260,7 @@ async function pollStaleOrdersInner() {
   let added = 0;
   let skipped = 0;
   const allIdsArr = Array.from(allStaleIds);
+  startPollProgress('stale', allIdsArr.length);
   for (let i = 0; i < allIdsArr.length; i += 50) {
     const batch = allIdsArr.slice(i, i + 50);
     const r = await fetch(
@@ -1261,6 +1278,7 @@ async function pollStaleOrdersInner() {
     }
     const data = await r.json();
     for (const order of (data.response || [])) {
+      tickPollProgress();
       try {
         const customer = order.parties?.customer || {};
         const customerName = customer.contactName || customer.addressFullName || null;
@@ -1311,6 +1329,7 @@ async function pollStaleOrdersInner() {
   }
 
   console.log(`[stale-poll] stale orders found: ${allIdsArr.length}, added new: ${added}, refreshed/skipped: ${skipped}, removed: ${toRemove.length}`);
+  endPollProgress();
 }
 
 // Force-release the global BP poll lock. Use only if a scan has clearly
@@ -1365,6 +1384,17 @@ app.get('/api/urgent-orders/status', async (req, res) => {
         : null,
       circuitBreakerOpen: Date.now() < bpRateLimitedUntil,
       circuitBreakerSecondsRemaining: Math.max(0, Math.ceil((bpRateLimitedUntil - Date.now()) / 1000)),
+      pollProgress: bpPollProgress
+        ? {
+            label: bpPollProgress.label,
+            processed: bpPollProgress.processed,
+            total: bpPollProgress.total,
+            percent: bpPollProgress.total
+              ? Math.round((bpPollProgress.processed / bpPollProgress.total) * 100)
+              : 0,
+            elapsedSeconds: Math.round((Date.now() - bpPollProgress.startedAt) / 1000),
+          }
+        : null,
       cacheCounts: counts,
       thresholds: {
         watchedStatusIds: (process.env.BADGE_STALE_STATUS_IDS || '24,25').split(',').map((s) => s.trim()),
