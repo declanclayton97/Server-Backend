@@ -945,6 +945,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // serialize against each other and back off after a rate-limit hit.
 let bpPollLockHeld = false;
 let bpRateLimitedUntil = 0;
+let bpPollLockOwner = null;        // label of whatever is holding the lock
+let bpPollLockAcquiredAt = 0;       // ms timestamp when lock was acquired
 async function acquireBpPollLock(label, { waitMs = 0 } = {}) {
   const deadline = Date.now() + waitMs;
   while (true) {
@@ -954,16 +956,22 @@ async function acquireBpPollLock(label, { waitMs = 0 } = {}) {
     }
     if (!bpPollLockHeld) {
       bpPollLockHeld = true;
+      bpPollLockOwner = label;
+      bpPollLockAcquiredAt = Date.now();
       return true;
     }
     if (Date.now() >= deadline) {
-      console.log(`[bp-lock/${label}] timed out waiting for lock`);
+      console.log(`[bp-lock/${label}] timed out waiting for lock (held by ${bpPollLockOwner} for ${Math.round((Date.now() - bpPollLockAcquiredAt) / 1000)}s)`);
       return false;
     }
     await sleep(2000);
   }
 }
-function releaseBpPollLock() { bpPollLockHeld = false; }
+function releaseBpPollLock() {
+  bpPollLockHeld = false;
+  bpPollLockOwner = null;
+  bpPollLockAcquiredAt = 0;
+}
 function tripBpCircuitBreaker(seconds = 120) {
   bpRateLimitedUntil = Date.now() + seconds * 1000;
   console.warn(`[bp-lock] circuit breaker tripped — pausing all background polls for ${seconds}s`);
@@ -1305,6 +1313,31 @@ async function pollStaleOrdersInner() {
   console.log(`[stale-poll] stale orders found: ${allIdsArr.length}, added new: ${added}, refreshed/skipped: ${skipped}, removed: ${toRemove.length}`);
 }
 
+// Force-release the global BP poll lock. Use only if a scan has clearly
+// wedged (lock has been held for many minutes with no progress).
+app.post('/api/urgent-orders/release-lock', (req, res) => {
+  const heldFor = bpPollLockHeld ? Math.round((Date.now() - bpPollLockAcquiredAt) / 1000) : 0;
+  const owner = bpPollLockOwner;
+  bpPollLockHeld = false;
+  bpPollLockOwner = null;
+  bpPollLockAcquiredAt = 0;
+  urgentPollInFlight = false;
+  stalePollInFlight = false;
+  console.warn(`[bp-lock] force-released after ${heldFor}s (was held by ${owner})`);
+  res.json({ released: true, wasHeldBy: owner, wasHeldForSeconds: heldFor });
+});
+app.get('/api/urgent-orders/release-lock', (req, res) => {
+  const heldFor = bpPollLockHeld ? Math.round((Date.now() - bpPollLockAcquiredAt) / 1000) : 0;
+  const owner = bpPollLockOwner;
+  bpPollLockHeld = false;
+  bpPollLockOwner = null;
+  bpPollLockAcquiredAt = 0;
+  urgentPollInFlight = false;
+  stalePollInFlight = false;
+  console.warn(`[bp-lock] force-released after ${heldFor}s (was held by ${owner})`);
+  res.json({ released: true, wasHeldBy: owner, wasHeldForSeconds: heldFor });
+});
+
 // Status endpoint — see what the pollers are doing right now
 app.get('/api/urgent-orders/status', async (req, res) => {
   try {
@@ -1321,6 +1354,10 @@ app.get('/api/urgent-orders/status', async (req, res) => {
       : null;
     res.json({
       bpPollLockHeld,
+      bpPollLockOwner,
+      bpPollLockHeldForSeconds: bpPollLockHeld
+        ? Math.round((Date.now() - bpPollLockAcquiredAt) / 1000)
+        : 0,
       urgentPollInFlight,
       stalePollInFlight,
       bpRateLimitedUntil: bpRateLimitedUntil
