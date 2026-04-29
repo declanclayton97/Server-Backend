@@ -900,6 +900,20 @@ async function initializeUrgentOrdersTable() {
       ALTER TABLE urgent_orders
       ADD COLUMN IF NOT EXISTS is_asap BOOLEAN NOT NULL DEFAULT FALSE
     `);
+    // Source: 'flag' (user set PCF_URGENT/PCF_ASAP) vs 'stale' (auto-detected
+    // by being in status 24/25 with no activity for >14 days)
+    await pool.query(`
+      ALTER TABLE urgent_orders
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'flag'
+    `);
+    await pool.query(`
+      ALTER TABLE urgent_orders
+      ADD COLUMN IF NOT EXISTS stale_status_id INTEGER
+    `);
+    await pool.query(`
+      ALTER TABLE urgent_orders
+      ADD COLUMN IF NOT EXISTS stale_days INTEGER
+    `);
     console.log('✅ urgent_orders table initialized');
   } catch (err) {
     console.error('❌ Error initializing urgent_orders table:', err.message);
@@ -1052,8 +1066,8 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
         INSERT INTO urgent_orders (
           order_id, order_reference, urgent_by_date, is_asap, customer_name, business_name,
           decoration_type, order_total, created_by_id, created_by_name, placed_on,
-          last_checked_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+          source, stale_status_id, stale_days, last_checked_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'flag', NULL, NULL, NOW())
         ON CONFLICT (order_id) DO UPDATE SET
           order_reference = EXCLUDED.order_reference,
           urgent_by_date = EXCLUDED.urgent_by_date,
@@ -1065,6 +1079,9 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
           created_by_id = EXCLUDED.created_by_id,
           created_by_name = EXCLUDED.created_by_name,
           placed_on = EXCLUDED.placed_on,
+          source = 'flag',
+          stale_status_id = NULL,
+          stale_days = NULL,
           last_checked_at = NOW()
       `, [
         orderId, order.reference, urgentByDate, isAsap, customerName, businessName,
@@ -1079,6 +1096,167 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
   console.log(`[urgent-poll/${label}] scanned ${orderIds.length}, added/updated ${added}, removed ${removed}`);
 }
 
+// ---------------------------------------------------------------------------
+// Stale-order poller — auto-flags orders sitting in production statuses for
+// too long. Configurable via env:
+//   BADGE_STALE_STATUS_IDS = comma-separated, default "24,25" (Embroidery, Print)
+//   BADGE_STALE_DAYS       = integer, default 14
+// Runs every 30 minutes. Orders that match are added with source='stale';
+// orders that no longer match are removed (unless the row has been promoted
+// to source='flag' by a user setting PCF_URGENT/PCF_ASAP, which always wins).
+// ---------------------------------------------------------------------------
+let stalePollInFlight = false;
+
+async function pollStaleOrders() {
+  if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+  if (stalePollInFlight) {
+    console.log('[stale-poll] skipped — another stale scan is in progress');
+    return;
+  }
+  stalePollInFlight = true;
+  try {
+    return await pollStaleOrdersInner();
+  } finally {
+    stalePollInFlight = false;
+  }
+}
+
+async function pollStaleOrdersInner() {
+  const statusIds = (process.env.BADGE_STALE_STATUS_IDS || '24,25')
+    .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
+  const staleDays = Math.max(1, parseInt(process.env.BADGE_STALE_DAYS, 10) || 14);
+
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+
+  // Cutoff: any order whose updatedOn is BEFORE this date is "stale" if also
+  // sitting in one of the watched statuses
+  const cutoff = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000);
+  const cutoffIso = cutoff.toISOString();
+  const updatedFilter = encodeURIComponent(`2010-01-01T00:00:00Z/${cutoffIso}`);
+
+  const candidatesByStatus = new Map(); // statusId → [orderId, ...]
+  for (const statusId of statusIds) {
+    const ids = [];
+    let firstResult = 1;
+    for (let page = 0; page < 5; page++) {
+      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderStatusId=${statusId}&updatedOn=${updatedFilter}&pageSize=200&firstResult=${firstResult}`;
+      const r = await fetch(url, { method: 'GET', headers });
+      if (!r.ok) {
+        console.error(`[stale-poll] order-search status=${statusId} failed:`, r.status);
+        return;
+      }
+      const data = await r.json();
+      const rows = data.response?.results || [];
+      if (rows.length === 0) break;
+      const pageIds = Array.isArray(rows[0]) ? rows.map((row) => row[0]) : rows;
+      ids.push(...pageIds);
+      if (rows.length < 200) break;
+      firstResult += 200;
+    }
+    candidatesByStatus.set(statusId, ids);
+  }
+
+  // All currently-stale order IDs across watched statuses
+  const allStaleIds = new Set();
+  for (const ids of candidatesByStatus.values()) {
+    for (const id of ids) allStaleIds.add(Number(id));
+  }
+
+  // Drop any source='stale' rows whose order is no longer stale
+  const existingStale = await pool.query(
+    `SELECT order_id FROM urgent_orders WHERE source = 'stale'`
+  );
+  const toRemove = existingStale.rows
+    .map((r) => Number(r.order_id))
+    .filter((id) => !allStaleIds.has(id));
+  if (toRemove.length > 0) {
+    await pool.query(
+      `DELETE FROM urgent_orders WHERE source = 'stale' AND order_id = ANY($1::bigint[])`,
+      [toRemove]
+    );
+    console.log(`[stale-poll] removed ${toRemove.length} no-longer-stale row(s)`);
+  }
+
+  // Add / refresh stale rows. Bulk-fetch details (50 per call) for the candidates.
+  let added = 0;
+  let skipped = 0;
+  const allIdsArr = Array.from(allStaleIds);
+  for (let i = 0; i < allIdsArr.length; i += 50) {
+    const batch = allIdsArr.slice(i, i + 50);
+    const r = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${batch.join(',')}`,
+      { method: 'GET', headers }
+    );
+    if (!r.ok) {
+      if (r.status === 503 || r.status === 429) {
+        console.warn(`[stale-poll] rate limited fetching batch, sleeping 5s`);
+        await sleep(5000);
+        continue;
+      }
+      console.error(`[stale-poll] batch fetch failed:`, r.status);
+      continue;
+    }
+    const data = await r.json();
+    for (const order of (data.response || [])) {
+      try {
+        const customer = order.parties?.customer || {};
+        const customerName = customer.contactName || customer.addressFullName || null;
+        const businessName = customer.companyName || null;
+        const orderTotal = parseFloat(order.totalValue?.total ?? order.total ?? 0) || null;
+        const createdById = order.createdById || order.createdBy?.contactId || null;
+        const createdByName = await resolveStaffName(createdById);
+        const decorationType = detectDecorationType(order);
+        const placedOn = order.placedOn ? new Date(order.placedOn) : null;
+        const updatedOn = order.updatedOn ? new Date(order.updatedOn) : null;
+        const days = updatedOn
+          ? Math.floor((Date.now() - updatedOn.getTime()) / (24 * 60 * 60 * 1000))
+          : staleDays;
+        const orderStatusId = order.orderStatusId;
+
+        // INSERT ... ON CONFLICT DO NOTHING — never overwrites a 'flag' row.
+        // For source='stale' rows we still want to refresh display fields, so
+        // we do a follow-up UPDATE that only fires for stale rows.
+        const ins = await pool.query(
+          `INSERT INTO urgent_orders (
+            order_id, order_reference, urgent_by_date, is_asap, customer_name,
+            business_name, decoration_type, order_total, created_by_id,
+            created_by_name, placed_on, source, stale_status_id, stale_days,
+            last_checked_at
+          ) VALUES ($1, $2, NULL, TRUE, $3, $4, $5, $6, $7, $8, $9, 'stale', $10, $11, NOW())
+          ON CONFLICT (order_id) DO NOTHING`,
+          [
+            order.id, order.reference, customerName, businessName, decorationType,
+            orderTotal, createdById, createdByName, placedOn, orderStatusId, days,
+          ]
+        );
+        if (ins.rowCount > 0) {
+          added++;
+        } else {
+          // Row already exists. Refresh stats only if it's still source='stale'.
+          await pool.query(
+            `UPDATE urgent_orders
+              SET stale_status_id = $2, stale_days = $3, last_checked_at = NOW()
+              WHERE order_id = $1 AND source = 'stale'`,
+            [order.id, orderStatusId, days]
+          );
+          skipped++;
+        }
+      } catch (err) {
+        console.error(`[stale-poll] error on order ${order.id}:`, err.message);
+      }
+    }
+  }
+
+  console.log(`[stale-poll] stale orders found: ${allIdsArr.length}, added new: ${added}, refreshed/skipped: ${skipped}, removed: ${toRemove.length}`);
+}
+
 // Read endpoint — frontend reads from Postgres directly, no Brightpearl call
 app.get('/api/urgent-orders', async (req, res) => {
   if (!useDatabase) return res.json([]);
@@ -1086,7 +1264,7 @@ app.get('/api/urgent-orders', async (req, res) => {
     const result = await pool.query(`
       SELECT order_id, order_reference, urgent_by_date, is_asap, customer_name, business_name,
              decoration_type, order_total, created_by_id, created_by_name, placed_on,
-             last_checked_at
+             source, stale_status_id, stale_days, last_checked_at
       FROM urgent_orders
       ORDER BY is_asap DESC, urgent_by_date ASC NULLS LAST, order_id ASC
     `);
@@ -1102,6 +1280,9 @@ app.get('/api/urgent-orders', async (req, res) => {
       createdById: r.created_by_id,
       createdByName: r.created_by_name,
       placedOn: r.placed_on,
+      source: r.source || 'flag',
+      staleStatusId: r.stale_status_id,
+      staleDays: r.stale_days,
       lastCheckedAt: r.last_checked_at,
     }));
     res.json(orders);
@@ -1247,8 +1428,8 @@ const checkOrderHandler = async (req, res) => {
       INSERT INTO urgent_orders (
         order_id, order_reference, urgent_by_date, is_asap, customer_name, business_name,
         decoration_type, order_total, created_by_id, created_by_name, placed_on,
-        last_checked_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        source, stale_status_id, stale_days, last_checked_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'flag', NULL, NULL, NOW())
       ON CONFLICT (order_id) DO UPDATE SET
         order_reference = EXCLUDED.order_reference,
         urgent_by_date = EXCLUDED.urgent_by_date,
@@ -1260,6 +1441,9 @@ const checkOrderHandler = async (req, res) => {
         created_by_id = EXCLUDED.created_by_id,
         created_by_name = EXCLUDED.created_by_name,
         placed_on = EXCLUDED.placed_on,
+        source = 'flag',
+        stale_status_id = NULL,
+        stale_days = NULL,
         last_checked_at = NOW()
     `, [
       orderId, order.reference, urgentByDateStr, isAsap, customerName, businessName,
@@ -1315,6 +1499,20 @@ app.post('/api/urgent-orders/complete/:orderId', async (req, res) => {
     });
 
   try {
+    // Stale orders have no PCF to clear — they're auto-detected, not user-flagged.
+    // The only way to resolve a stale order is to actually progress it in BP.
+    if (useDatabase) {
+      const existing = await pool.query(
+        'SELECT source FROM urgent_orders WHERE order_id = $1',
+        [orderId]
+      );
+      if (existing.rows[0]?.source === 'stale') {
+        return res.status(400).json({
+          error: 'This order is auto-flagged as stale. Move it to a different status in Brightpearl to clear it.',
+        });
+      }
+    }
+
     // Fetch current custom fields so we only patch fields that actually exist
     // — JSON Patch "remove" / "replace" both fail with CMNC-038 if the path
     // is not present (and Brightpearl orders don't carry every PCF unless
@@ -1392,6 +1590,13 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
       pollUrgentOrders().catch((err) => console.error('Urgent poll failed:', err.message));
     }, 5 * 60 * 1000);
     console.log('✅ Urgent orders poller scheduled (every 5 min)');
+
+    // Stale-orders poller every 30 minutes
+    pollStaleOrders().catch((err) => console.error('Initial stale poll failed:', err.message));
+    setInterval(() => {
+      pollStaleOrders().catch((err) => console.error('Stale poll failed:', err.message));
+    }, 30 * 60 * 1000);
+    console.log('✅ Stale orders poller scheduled (every 30 min)');
   }
 })();
 
