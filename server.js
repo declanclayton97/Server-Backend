@@ -925,6 +925,30 @@ async function initializeUrgentOrdersTable() {
 let urgentPollInFlight = false;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Global Brightpearl polling lock + circuit breaker — shared by every
+// background scanner (urgent + stale). User-driven endpoints (Mark Complete,
+// Force Add, Inspect) still go through normally, but the heavyweight pollers
+// serialize against each other and back off after a rate-limit hit.
+let bpPollLockHeld = false;
+let bpRateLimitedUntil = 0;
+async function acquireBpPollLock(label) {
+  if (Date.now() < bpRateLimitedUntil) {
+    console.log(`[bp-lock/${label}] skipped — circuit breaker open until ${new Date(bpRateLimitedUntil).toISOString()}`);
+    return false;
+  }
+  if (bpPollLockHeld) {
+    console.log(`[bp-lock/${label}] skipped — another scanner is already running`);
+    return false;
+  }
+  bpPollLockHeld = true;
+  return true;
+}
+function releaseBpPollLock() { bpPollLockHeld = false; }
+function tripBpCircuitBreaker(seconds = 120) {
+  bpRateLimitedUntil = Date.now() + seconds * 1000;
+  console.warn(`[bp-lock] circuit breaker tripped — pausing all background polls for ${seconds}s`);
+}
+
 // Scan one batch of recently-updated orders, syncing PCF_URGENT into the table
 async function pollUrgentOrders({ sinceMs, label = 'incremental', refreshAllCached = false } = {}) {
   if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
@@ -932,11 +956,13 @@ async function pollUrgentOrders({ sinceMs, label = 'incremental', refreshAllCach
     console.log(`[urgent-poll/${label}] skipped — another scan is in progress`);
     return;
   }
+  if (!(await acquireBpPollLock(`urgent/${label}`))) return;
   urgentPollInFlight = true;
   try {
     return await pollUrgentOrdersInner({ sinceMs, label, refreshAllCached });
   } finally {
     urgentPollInFlight = false;
+    releaseBpPollLock();
   }
 }
 
@@ -1012,12 +1038,12 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
       );
       if (cfResp.status === 503 || cfResp.status === 429) {
         consecutiveRateLimits++;
-        // Aggressive backoff: 2s, 5s, 10s, then bail
-        if (consecutiveRateLimits >= 4) {
-          console.error(`[urgent-poll/${label}] aborting after 4 rate-limit responses; resuming next cycle`);
+        if (consecutiveRateLimits >= 3) {
+          tripBpCircuitBreaker(120);
+          console.error(`[urgent-poll/${label}] aborting after 3 rate-limit responses; circuit breaker tripped`);
           break;
         }
-        const wait = consecutiveRateLimits * 2500;
+        const wait = consecutiveRateLimits * 3000;
         console.warn(`[urgent-poll/${label}] rate limited on ${orderId}, sleeping ${wait}ms`);
         await sleep(wait);
         continue;
@@ -1113,11 +1139,13 @@ async function pollStaleOrders() {
     console.log('[stale-poll] skipped — another stale scan is in progress');
     return;
   }
+  if (!(await acquireBpPollLock('stale'))) return;
   stalePollInFlight = true;
   try {
     return await pollStaleOrdersInner();
   } finally {
     stalePollInFlight = false;
+    releaseBpPollLock();
   }
 }
 
@@ -1196,9 +1224,9 @@ async function pollStaleOrdersInner() {
     );
     if (!r.ok) {
       if (r.status === 503 || r.status === 429) {
-        console.warn(`[stale-poll] rate limited fetching batch, sleeping 5s`);
-        await sleep(5000);
-        continue;
+        tripBpCircuitBreaker(120);
+        console.warn(`[stale-poll] rate limited — tripping circuit breaker for 2 min`);
+        return; // bail; next scheduled cycle will resume
       }
       console.error(`[stale-poll] batch fetch failed:`, r.status);
       continue;
@@ -1218,7 +1246,7 @@ async function pollStaleOrdersInner() {
         const days = updatedOn
           ? Math.floor((Date.now() - updatedOn.getTime()) / (24 * 60 * 60 * 1000))
           : staleDays;
-        const orderStatusId = order.orderStatusId;
+        const orderStatusId = order?.assignment?.current?.orderStatusId ?? order?.orderStatusId;
 
         // INSERT ... ON CONFLICT DO NOTHING — never overwrites a 'flag' row.
         // For source='stale' rows we still want to refresh display fields, so
@@ -1304,14 +1332,17 @@ app.get('/api/urgent-orders/stale-check/:orderId', async (req, res) => {
       : null;
     const cutoffDate = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000);
 
-    const inWatchedStatus = statusIds.includes(order.orderStatusId);
+    const orderStatusId = order?.assignment?.current?.orderStatusId ?? order?.orderStatusId;
+    const inWatchedStatus = statusIds.includes(orderStatusId);
     const oldEnough = updatedOn && updatedOn.getTime() < cutoffDate.getTime();
     const wouldQualify = inWatchedStatus && oldEnough;
 
     res.json({
       orderId: order.id,
       reference: order.reference,
-      orderStatusId: order.orderStatusId,
+      orderStatusId,
+      orderStatusIdTopLevel: order.orderStatusId,
+      orderStatusIdNested: order?.assignment?.current?.orderStatusId,
       updatedOn: order.updatedOn,
       placedOn: order.placedOn,
       daysSinceUpdate,
@@ -1661,12 +1692,15 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
     }, 5 * 60 * 1000);
     console.log('✅ Urgent orders poller scheduled (every 5 min)');
 
-    // Stale-orders poller every 30 minutes
-    pollStaleOrders().catch((err) => console.error('Initial stale poll failed:', err.message));
+    // Stale-orders poller every 30 minutes — staggered 90 sec after the
+    // urgent seed scan so they don't compete for BP rate budget at boot
+    setTimeout(() => {
+      pollStaleOrders().catch((err) => console.error('Initial stale poll failed:', err.message));
+    }, 90 * 1000);
     setInterval(() => {
       pollStaleOrders().catch((err) => console.error('Stale poll failed:', err.message));
     }, 30 * 60 * 1000);
-    console.log('✅ Stale orders poller scheduled (every 30 min)');
+    console.log('✅ Stale orders poller scheduled (every 30 min, first run +90s)');
   }
 })();
 
