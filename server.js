@@ -945,17 +945,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // serialize against each other and back off after a rate-limit hit.
 let bpPollLockHeld = false;
 let bpRateLimitedUntil = 0;
-async function acquireBpPollLock(label) {
-  if (Date.now() < bpRateLimitedUntil) {
-    console.log(`[bp-lock/${label}] skipped — circuit breaker open until ${new Date(bpRateLimitedUntil).toISOString()}`);
-    return false;
+async function acquireBpPollLock(label, { waitMs = 0 } = {}) {
+  const deadline = Date.now() + waitMs;
+  while (true) {
+    if (Date.now() < bpRateLimitedUntil) {
+      console.log(`[bp-lock/${label}] skipped — circuit breaker open`);
+      return false;
+    }
+    if (!bpPollLockHeld) {
+      bpPollLockHeld = true;
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      console.log(`[bp-lock/${label}] timed out waiting for lock`);
+      return false;
+    }
+    await sleep(2000);
   }
-  if (bpPollLockHeld) {
-    console.log(`[bp-lock/${label}] skipped — another scanner is already running`);
-    return false;
-  }
-  bpPollLockHeld = true;
-  return true;
 }
 function releaseBpPollLock() { bpPollLockHeld = false; }
 function tripBpCircuitBreaker(seconds = 120) {
@@ -1147,13 +1153,13 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
 // ---------------------------------------------------------------------------
 let stalePollInFlight = false;
 
-async function pollStaleOrders() {
+async function pollStaleOrders({ waitForLockMs = 0 } = {}) {
   if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
   if (stalePollInFlight) {
     console.log('[stale-poll] skipped — another stale scan is in progress');
     return;
   }
-  if (!(await acquireBpPollLock('stale'))) return;
+  if (!(await acquireBpPollLock('stale', { waitMs: waitForLockMs }))) return;
   stalePollInFlight = true;
   try {
     return await pollStaleOrdersInner();
@@ -1330,20 +1336,22 @@ app.get('/api/urgent-orders/status', async (req, res) => {
 });
 
 // Manual stale-rescan trigger + diagnostics
-app.post('/api/urgent-orders/stale-rescan', async (req, res) => {
+const staleRescanHandler = async (req, res) => {
   if (stalePollInFlight) {
     return res.status(409).json({ error: 'A stale scan is already running — wait a minute.' });
   }
-  pollStaleOrders().catch((err) => console.error('Manual stale rescan failed:', err.message));
-  res.json({ accepted: true });
-});
-app.get('/api/urgent-orders/stale-rescan', async (req, res) => {
-  if (stalePollInFlight) {
-    return res.status(409).json({ error: 'A stale scan is already running — wait a minute.' });
-  }
-  pollStaleOrders().catch((err) => console.error('Manual stale rescan failed:', err.message));
-  res.json({ accepted: true });
-});
+  // Wait up to 5 min for the global BP lock if the urgent poller is busy
+  pollStaleOrders({ waitForLockMs: 5 * 60 * 1000 })
+    .catch((err) => console.error('Manual stale rescan failed:', err.message));
+  res.json({
+    accepted: true,
+    note: bpPollLockHeld
+      ? 'Urgent poll currently in flight — stale scan will start as soon as it finishes (up to 5 min wait).'
+      : 'Stale scan started.',
+  });
+};
+app.post('/api/urgent-orders/stale-rescan', staleRescanHandler);
+app.get('/api/urgent-orders/stale-rescan', staleRescanHandler);
 
 // Inspect why a specific order does or doesn't qualify as stale
 app.get('/api/urgent-orders/stale-check/:orderId', async (req, res) => {
