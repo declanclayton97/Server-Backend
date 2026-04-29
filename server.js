@@ -1313,7 +1313,11 @@ app.get('/api/urgent-orders/status', async (req, res) => {
           SELECT source, COUNT(*)::int AS n
           FROM urgent_orders
           GROUP BY source
-        `).then((r) => Object.fromEntries(r.rows.map((row) => [row.source, row.n])))
+        `).then((r) => {
+          const out = { flag: 0, stale: 0 };
+          for (const row of r.rows) out[row.source] = row.n;
+          return out;
+        })
       : null;
     res.json({
       bpPollLockHeld,
