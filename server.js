@@ -2531,6 +2531,76 @@ const proofChaseReseedHandler = async (req, res) => {
 app.post('/api/proof-chase/reseed', proofChaseReseedHandler);
 app.get('/api/proof-chase/reseed', proofChaseReseedHandler);
 
+// Send a real test email to an arbitrary address using the chase template,
+// bypassing dry-run and the >N-days filter. Useful for previewing what
+// customers will see. Defaults `to` to dec@tuffshop.co.uk.
+//   ?to=<email>      destination address (default dec@tuffshop.co.uk)
+//   ?orderId=<id>    optional — if given, uses real order data; otherwise
+//                    sends a synthetic test order
+const proofChaseTestSendHandler = async (req, res) => {
+  const to = (req.query.to || 'dec@tuffshop.co.uk').toString();
+  const orderId = req.query.orderId ? parseInt(req.query.orderId, 10) : null;
+
+  if (!process.env.SMTP_PASS) {
+    return res.status(500).json({ error: 'SMTP_PASS not configured on backend' });
+  }
+
+  let order;
+  if (orderId && BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+    try {
+      const r = await fetch(
+        `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
+        {
+          headers: {
+            'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+            'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+          },
+        }
+      );
+      if (r.ok) order = (await r.json()).response?.[0];
+    } catch (err) {
+      console.warn(`[proof-chase-test] failed to fetch order ${orderId}: ${err.message}`);
+    }
+  }
+  if (!order) {
+    order = {
+      id: 999999,
+      reference: 'TEST-EMAIL-PREVIEW',
+      parties: { customer: { contactName: 'Test Recipient', email: to } },
+    };
+  }
+
+  const { subject, text, html } = buildProofChaseEmail(order);
+  const sender = process.env.PROOF_CHASE_SENDER || 'noreply@tuffshop.co.uk';
+  try {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
+      port: parseInt(process.env.SMTP_PORT || '2525'),
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USERNAME || 'tuffshop.co.uk',
+        pass: process.env.SMTP_PASS,
+      },
+    });
+    await transporter.sendMail({
+      from: `"Tuff Workwear" <${sender}>`,
+      to,
+      subject: `[TEST] ${subject}`,
+      text,
+      html,
+    });
+    res.json({ sent: true, to, subject: `[TEST] ${subject}`, basedOnOrderId: order.id });
+  } catch (err) {
+    console.error('[proof-chase-test] send failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+app.get('/api/proof-chase/send-test', proofChaseTestSendHandler);
+app.post('/api/proof-chase/send-test', proofChaseTestSendHandler);
+
 // Boot the proof-chase system
 (async () => {
   await initializeProofChaseTable();
