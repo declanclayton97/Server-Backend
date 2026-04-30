@@ -2241,10 +2241,13 @@ app.get('/api/proof-chase/find-statuses', async (req, res) => {
     const all = data.response || [];
     const filter = (req.query.q || 'proof').toLowerCase();
     const matching = all.filter((s) => (s.name || '').toLowerCase().includes(filter));
+    // BP's order-status response varies in field name — try every shape we've seen
+    const idOf = (s) => s.id ?? s.orderStatusId ?? s.statusId ?? s.code ?? null;
     res.json({
       filter,
-      matching: matching.map((s) => ({ id: s.id, name: s.name })),
+      matching: matching.map((s) => ({ id: idOf(s), name: s.name, raw: s })),
       total: all.length,
+      sampleRawShape: all[0] ? Object.keys(all[0]) : null,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
