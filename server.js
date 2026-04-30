@@ -2032,8 +2032,7 @@ function buildProofChaseEmail(order) {
   const customer = order.parties?.customer || {};
   const fullName = customer.contactName || customer.addressFullName || '';
   const firstName = (fullName.split(/\s+/)[0] || '').trim();
-  const orderRef = order.reference || `Order ${order.id}`;
-  const subject = `Following up on your proofs — ${orderRef}`;
+  const subject = `Following up on your proofs — SO${order.id}`;
   const greeting = firstName ? `Hi ${firstName},` : `Hi,`;
 
   const text = `${greeting}
