@@ -1284,6 +1284,8 @@ async function pollStaleOrdersInner() {
   let skipped = 0;
   const allIdsArr = Array.from(allStaleIds);
   startPollProgress('stale', allIdsArr.length);
+  // BP requires comma-separated IDs in path to be ascending (CMNC-008)
+  allIdsArr.sort((a, b) => a - b);
   for (let i = 0; i < allIdsArr.length; i += 50) {
     const batch = allIdsArr.slice(i, i + 50);
     const r = await fetch(
