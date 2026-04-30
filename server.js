@@ -1420,6 +1420,70 @@ app.get('/api/urgent-orders/test-search', async (req, res) => {
   }
 });
 
+// Probe BP for order-email endpoints — tries common candidate URLs with empty
+// bodies. 404 means the endpoint doesn't exist; 400 / 405 / 422 means the
+// path is valid but the body's wrong (which is fine, we're just mapping).
+app.get('/api/bp-email-probe', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const orderId = req.query.orderId || '442282'; // default to a known order
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+
+  const candidates = [
+    { path: `/order-service/order/${orderId}/email`,             method: 'POST', body: {} },
+    { path: `/order-service/order/${orderId}/send-email`,        method: 'POST', body: {} },
+    { path: `/order-service/order/${orderId}/notification`,      method: 'POST', body: {} },
+    { path: `/order-service/order/${orderId}/document`,          method: 'POST', body: {} },
+    { path: `/order-service/order/${orderId}/document-email`,    method: 'POST', body: {} },
+    { path: `/communication-service/notification`,               method: 'POST', body: {} },
+    { path: `/communication-service/email`,                      method: 'POST', body: {} },
+    { path: `/messaging-service/message`,                        method: 'POST', body: {} },
+    { path: `/workflow-service/email`,                           method: 'POST', body: {} },
+    { path: `/workflow-service/document/63/send`,                method: 'POST', body: { orderId: parseInt(orderId, 10) } },
+    { path: `/document-service/document/63/email`,               method: 'POST', body: { orderId: parseInt(orderId, 10) } },
+    { path: `/contact-service/contact-search`,                   method: 'GET',  body: null }, // sanity check (we know this works)
+  ];
+
+  const results = [];
+  for (const c of candidates) {
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}${c.path}`;
+    try {
+      const init = { method: c.method, headers };
+      if (c.body !== null) init.body = JSON.stringify(c.body);
+      const r = await fetch(url, init);
+      const text = await r.text();
+      let body;
+      try { body = JSON.parse(text); } catch { body = text.slice(0, 300); }
+      results.push({
+        method: c.method,
+        path: c.path,
+        status: r.status,
+        // Status interpretation hints
+        verdict:
+          r.status === 404 ? 'PATH NOT FOUND'
+          : r.status === 405 ? 'METHOD NOT ALLOWED (path exists)'
+          : r.status === 401 ? 'AUTH ISSUE'
+          : r.status === 400 || r.status === 422 ? 'PATH EXISTS — bad body shape (good sign)'
+          : r.status === 200 || r.status === 201 || r.status === 204 ? 'SUCCESS — be careful, may have actually fired'
+          : `OTHER (${r.status})`,
+        responseSample: body,
+      });
+    } catch (err) {
+      results.push({ method: c.method, path: c.path, error: err.message });
+    }
+    await new Promise((r) => setTimeout(r, 400)); // pace to avoid rate limit
+  }
+  res.json({ orderId, candidates: results });
+});
+
 // Status endpoint — see what the pollers are doing right now
 app.get('/api/urgent-orders/status', async (req, res) => {
   try {
