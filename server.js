@@ -2028,6 +2028,34 @@ async function initializeProofChaseTable() {
 }
 
 // Build the chase email body. Quicknote text + customer/order merge.
+const PROOF_CHASE_SIGNATURE_TEXT = `--
+
+Declan Clayton
+Design Manager
+Tuffshop.co.uk
+Email: dec@tuffshop.co.uk
+Office: +44 113 288 7713
+
+144-146 Aberford Road, Leeds, LS26 8LG
+
+This email and any attachments to it may be confidential and are intended solely for the use of the individual to whom it is addressed. Any views or opinions expressed are solely those of the author and do not necessarily represent those of Tuff Workwear Ltd.
+If you are not the intended recipient of this email, you must neither take any action based upon its contents, nor copy or show it to anyone.
+Please contact the sender if you believe you have received this email in error.`;
+
+const PROOF_CHASE_SIGNATURE_HTML = `<p style="margin-top:24px;color:#444;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;">
+  <strong>Declan Clayton</strong><br>
+  Design Manager<br>
+  <a href="https://tuffshop.co.uk" style="color:#444;text-decoration:underline;">Tuffshop.co.uk</a><br>
+  Email: <a href="mailto:dec@tuffshop.co.uk" style="color:#444;text-decoration:underline;">dec@tuffshop.co.uk</a><br>
+  Office: +44 113 288 7713
+</p>
+<p style="color:#444;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;">144-146 Aberford Road, Leeds, LS26 8LG</p>
+<p style="color:#888;font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:1.4;margin-top:18px;">
+  This email and any attachments to it may be confidential and are intended solely for the use of the individual to whom it is addressed. Any views or opinions expressed are solely those of the author and do not necessarily represent those of Tuff Workwear Ltd.<br>
+  If you are not the intended recipient of this email, you must neither take any action based upon its contents, nor copy or show it to anyone.<br>
+  Please contact the sender if you believe you have received this email in error.
+</p>`;
+
 function buildProofChaseEmail(order) {
   const customer = order.parties?.customer || {};
   const fullName = customer.contactName || customer.addressFullName || '';
@@ -2045,15 +2073,20 @@ Sometimes our e-mails do go into spam folders so if you can please have a check 
 
 If you no longer require this, it is not an issue just please let us know.
 
-Thank you`;
+Thank you
+
+${PROOF_CHASE_SIGNATURE_TEXT}`;
 
   // Light HTML version — same wording, basic formatting.
-  const html = `<p>${greeting.replace(/,/, ',')}</p>
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#222;">
+<p>${greeting}</p>
 <p>Did you get the mock ups through all ok and is this something you still require?</p>
 <p>We send proofs on both WhatsApp and Email so if you can check both of those if possible.</p>
 <p>Sometimes our e-mails do go into spam folders so if you can please have a check in there too for the mock up email it would be much appreciated.</p>
 <p>If you no longer require this, it is not an issue just please let us know.</p>
-<p>Thank you</p>`;
+<p>Thank you</p>
+${PROOF_CHASE_SIGNATURE_HTML}
+</div>`;
 
   return { subject, text, html };
 }
