@@ -1950,8 +1950,29 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
 (async () => {
   await initializeUrgentOrdersTable();
   if (useDatabase && BRIGHTPEARL_API_TOKEN) {
-    // Initial seed: scan the last 7 days so existing flagged orders are picked up
-    pollUrgentOrders({ sinceMs: Date.now() - 7 * 24 * 60 * 60 * 1000, label: 'initial-seed' })
+    // Adaptive seed window: scan only the gap since we last polled. Keeps
+    // frequent redeploys cheap (seconds, not minutes) while still falling
+    // back to a full 7-day catch-up after long downtime or first-ever boot.
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    let sinceMs = Date.now() - sevenDaysMs;
+    let seedLabel = 'initial-seed';
+    try {
+      const r = await pool.query('SELECT MAX(last_checked_at) AS t FROM urgent_orders');
+      const lastCheck = r.rows[0]?.t;
+      if (lastCheck) {
+        // 15 min slack to overlap with the incremental poll window
+        const gapStart = new Date(lastCheck).getTime() - 15 * 60 * 1000;
+        if (gapStart > sinceMs) {
+          sinceMs = gapStart;
+          const gapMin = Math.round((Date.now() - gapStart) / 60000);
+          seedLabel = `gap-seed-${gapMin}m`;
+        }
+      }
+    } catch (err) {
+      console.warn('[urgent-poll] could not determine last check, doing full 7-day seed:', err.message);
+    }
+    console.log(`[urgent-poll] boot seed window: ${new Date(sinceMs).toISOString()} → now (${seedLabel})`);
+    pollUrgentOrders({ sinceMs, label: seedLabel })
       .catch((err) => console.error('Initial urgent seed failed:', err.message));
     // Recurring poll every 5 minutes — covers any update in the last 15 min window
     setInterval(() => {
