@@ -2195,7 +2195,7 @@ async function sendProofChaseEmail(order, dryRun) {
   });
   await postBpOrderNote(
     order.id,
-    `AUTO-CHASE: 3-day proof follow-up email sent to ${recipient} on ${new Date().toLocaleString('en-GB')}`
+    `Proof Chased - Email sent to ${recipient} on ${new Date().toLocaleString('en-GB')}`
   );
   return { sent: true, recipient, subject };
 }
