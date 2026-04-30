@@ -1479,7 +1479,7 @@ app.get('/api/bp-email-probe', async (req, res) => {
     } catch (err) {
       results.push({ method: c.method, path: c.path, error: err.message });
     }
-    await new Promise((r) => setTimeout(r, 400)); // pace to avoid rate limit
+    await new Promise((r) => setTimeout(r, 1500)); // generous spacing — keeps total well under BP per-minute budget even if other pollers are active
   }
   res.json({ orderId, candidates: results });
 });
