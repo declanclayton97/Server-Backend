@@ -1296,7 +1296,10 @@ async function pollStaleOrdersInner() {
         console.warn(`[stale-poll] rate limited — tripping circuit breaker for 2 min`);
         return; // bail; next scheduled cycle will resume
       }
-      console.error(`[stale-poll] batch fetch failed:`, r.status);
+      const errBody = await r.text().catch(() => '');
+      console.error(
+        `[stale-poll] batch fetch failed: ${r.status} — batch=${JSON.stringify(batch)} body=${errBody.slice(0, 500)}`
+      );
       continue;
     }
     const data = await r.json();
