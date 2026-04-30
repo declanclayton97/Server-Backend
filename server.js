@@ -2174,26 +2174,47 @@ async function pollProofChase({ daysOverride } = {}) {
         const data = await r.json();
         const rows = data.response?.results || [];
         if (rows.length === 0) break;
-        // Find which column index BP used for updatedOn so we can seed
-        // first_seen with a sensible historical lower bound on first insert.
-        const meta = data.response?.metaData?.columns || [];
-        const updatedOnIdx = meta.findIndex((c) => c.name === 'updatedOn');
         for (const row of rows) {
           const id = Array.isArray(row) ? row[0] : row;
-          const updatedOn = (Array.isArray(row) && updatedOnIdx >= 0) ? row[updatedOnIdx] : null;
-          // Use updatedOn as the lower-bound timestamp on FIRST sight (so
-          // orders that have actually been sitting in this status for weeks
-          // qualify immediately). On subsequent sightings, leave the
-          // existing first_seen alone.
-          const firstSeen = updatedOn ? new Date(updatedOn).toISOString() : new Date().toISOString();
           seenInThisCycle.add(Number(id));
-          await pool.query(`
-            INSERT INTO proof_chase_log (order_id, first_seen_in_proof_status_at, last_status_id, last_checked_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (order_id) DO UPDATE SET
-              last_status_id = EXCLUDED.last_status_id,
-              last_checked_at = NOW()
-          `, [id, firstSeen, statusId]);
+
+          // For NEW orders only, fetch the order detail to get a real
+          // updatedOn (BP's default order-search response doesn't include
+          // it). For orders we've already seen, just refresh status/check.
+          const existing = await pool.query(
+            'SELECT 1 FROM proof_chase_log WHERE order_id = $1',
+            [id]
+          );
+          if (existing.rowCount === 0) {
+            let firstSeen = new Date().toISOString();
+            try {
+              await sleep(250);
+              const detailResp = await fetch(
+                `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}`,
+                { method: 'GET', headers }
+              );
+              if (detailResp.ok) {
+                const detail = (await detailResp.json()).response?.[0];
+                const updatedOn = detail?.updatedOn || detail?.placedOn;
+                if (updatedOn) firstSeen = new Date(updatedOn).toISOString();
+              }
+            } catch (err) {
+              console.warn(`[proof-chase] could not fetch detail for ${id}: ${err.message}`);
+            }
+            await pool.query(`
+              INSERT INTO proof_chase_log (order_id, first_seen_in_proof_status_at, last_status_id, last_checked_at)
+              VALUES ($1, $2, $3, NOW())
+              ON CONFLICT (order_id) DO UPDATE SET
+                last_status_id = EXCLUDED.last_status_id,
+                last_checked_at = NOW()
+            `, [id, firstSeen, statusId]);
+          } else {
+            await pool.query(`
+              UPDATE proof_chase_log
+              SET last_status_id = $2, last_checked_at = NOW()
+              WHERE order_id = $1
+            `, [id, statusId]);
+          }
         }
         firstResult += rows.length;
       }
@@ -2373,6 +2394,72 @@ const proofChaseRunHandler = async (req, res) => {
 };
 app.post('/api/proof-chase/run-now', proofChaseRunHandler);
 app.get('/api/proof-chase/run-now', proofChaseRunHandler);
+
+// One-shot: re-seed first_seen_in_proof_status_at by fetching the order detail
+// from BP for every row in proof_chase_log. Useful after a deploy where the
+// previous seed used the wrong source for the timestamp. Preserves chase_sent_at.
+const proofChaseReseedHandler = async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  if (bpPollLockHeld) {
+    return res.status(409).json({ error: `Another scan is in progress (${bpPollLockOwner})` });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  if (!(await acquireBpPollLock('proof-chase-reseed'))) {
+    return res.status(409).json({ error: 'could not acquire BP lock' });
+  }
+  // Optional: also clear any DRY-RUN chase_sent_at marks so the orders
+  // re-qualify on the next run. Useful when re-testing after a bad seed.
+  const clearDryRunChase = req.query.clearDryRunChase === '1' || req.query.clearDryRunChase === 'true';
+  res.json({ accepted: true, clearDryRunChase });
+  (async () => {
+    try {
+      if (clearDryRunChase) {
+        const cleared = await pool.query(
+          `UPDATE proof_chase_log
+           SET chase_sent_at = NULL, chase_sent_to = NULL, chase_dry_run = NULL
+           WHERE chase_dry_run = true`
+        );
+        console.log(`[proof-chase-reseed] cleared ${cleared.rowCount} dry-run chase marks`);
+      }
+      const rows = await pool.query('SELECT order_id FROM proof_chase_log');
+      let updated = 0;
+      for (const row of rows.rows) {
+        try {
+          await sleep(300);
+          const r = await fetch(
+            `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${row.order_id}`,
+            { method: 'GET', headers }
+          );
+          if (!r.ok) continue;
+          const order = (await r.json()).response?.[0];
+          const updatedOn = order?.updatedOn || order?.placedOn;
+          if (!updatedOn) continue;
+          await pool.query(
+            `UPDATE proof_chase_log SET first_seen_in_proof_status_at = $2 WHERE order_id = $1`,
+            [row.order_id, new Date(updatedOn).toISOString()]
+          );
+          updated++;
+        } catch (err) {
+          console.warn(`[proof-chase-reseed] error on ${row.order_id}: ${err.message}`);
+        }
+      }
+      console.log(`[proof-chase-reseed] updated ${updated} of ${rows.rows.length} rows`);
+    } finally {
+      releaseBpPollLock();
+    }
+  })();
+};
+app.post('/api/proof-chase/reseed', proofChaseReseedHandler);
+app.get('/api/proof-chase/reseed', proofChaseReseedHandler);
 
 // Boot the proof-chase system
 (async () => {
