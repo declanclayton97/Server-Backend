@@ -1460,13 +1460,12 @@ app.get('/api/bp-email-probe', async (req, res) => {
       if (c.body !== null) init.body = JSON.stringify(c.body);
       const r = await fetch(url, init);
       const text = await r.text();
-      let body;
-      try { body = JSON.parse(text); } catch { body = text.slice(0, 300); }
+      // Cap snippet to 200 chars so order-list responses don't flood the output
+      const snippet = text.length > 200 ? `${text.slice(0, 200)}…` : text;
       results.push({
         method: c.method,
         path: c.path,
         status: r.status,
-        // Status interpretation hints
         verdict:
           r.status === 404 ? 'PATH NOT FOUND'
           : r.status === 405 ? 'METHOD NOT ALLOWED (path exists)'
@@ -1474,7 +1473,8 @@ app.get('/api/bp-email-probe', async (req, res) => {
           : r.status === 400 || r.status === 422 ? 'PATH EXISTS — bad body shape (good sign)'
           : r.status === 200 || r.status === 201 || r.status === 204 ? 'SUCCESS — be careful, may have actually fired'
           : `OTHER (${r.status})`,
-        responseSample: body,
+        responseSnippet: snippet,
+        responseLength: text.length,
       });
     } catch (err) {
       results.push({ method: c.method, path: c.path, error: err.message });
