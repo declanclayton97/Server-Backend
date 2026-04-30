@@ -1971,6 +1971,391 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
   }
 })();
 
+// ===========================================================================
+// PROOF CHASE — auto-emails customers whose proof has been sent and not
+// responded to for >3 days. Built standalone, defaults to DRY-RUN (no real
+// emails fired) until env var PROOF_CHASE_DRY_RUN=false is set.
+//
+// Config (Render env):
+//   PROOF_CHASE_STATUS_IDS  — comma-separated orderStatusIds of "Proof Sent"
+//                             statuses (e.g. "35,92" — find via the
+//                             /api/proof-chase/find-statuses endpoint)
+//   PROOF_CHASE_DAYS        — days in status before chasing (default 3)
+//   PROOF_CHASE_DRY_RUN     — "false" to actually send (default "true")
+//   PROOF_CHASE_SENDER      — From: address (default noreply@tuffshop.co.uk)
+// ===========================================================================
+
+async function initializeProofChaseTable() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS proof_chase_log (
+        order_id BIGINT PRIMARY KEY,
+        first_seen_in_proof_status_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        chase_sent_at TIMESTAMPTZ,
+        chase_sent_to TEXT,
+        chase_dry_run BOOLEAN,
+        last_status_id INTEGER,
+        last_checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_proof_chase_first_seen ON proof_chase_log(first_seen_in_proof_status_at);
+    `);
+    console.log('✅ proof_chase_log table initialized');
+  } catch (err) {
+    console.error('❌ Error initializing proof_chase_log table:', err.message);
+  }
+}
+
+// Build the chase email body. Quicknote text + customer/order merge.
+function buildProofChaseEmail(order) {
+  const customer = order.parties?.customer || {};
+  const fullName = customer.contactName || customer.addressFullName || '';
+  const firstName = (fullName.split(/\s+/)[0] || '').trim();
+  const orderRef = order.reference || `Order ${order.id}`;
+  const subject = `Following up on your proofs — ${orderRef}`;
+  const greeting = firstName ? `Hi ${firstName},` : `Hi,`;
+
+  const text = `${greeting}
+
+Did you get the mock ups through all ok and is this something you still require?
+
+We send proofs on both WhatsApp and Email so if you can check both of those if possible.
+
+Sometimes our e-mails do go into spam folders so if you can please have a check in there too for the mock up email it would be much appreciated.
+
+If you no longer require this, it is not an issue just please let us know.
+
+Thank you`;
+
+  // Light HTML version — same wording, basic formatting.
+  const html = `<p>${greeting.replace(/,/, ',')}</p>
+<p>Did you get the mock ups through all ok and is this something you still require?</p>
+<p>We send proofs on both WhatsApp and Email so if you can check both of those if possible.</p>
+<p>Sometimes our e-mails do go into spam folders so if you can please have a check in there too for the mock up email it would be much appreciated.</p>
+<p>If you no longer require this, it is not an issue just please let us know.</p>
+<p>Thank you</p>`;
+
+  return { subject, text, html };
+}
+
+async function postBpOrderNote(orderId, noteText) {
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/note`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+      'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      contactId: 0, // 0 = system note
+      text: noteText,
+      addedOn: new Date().toISOString(),
+    }),
+  });
+  if (!r.ok) {
+    const err = await r.text();
+    console.error(`[proof-chase] BP note post failed for ${orderId}: ${r.status} ${err}`);
+    return false;
+  }
+  return true;
+}
+
+async function sendProofChaseEmail(order, dryRun) {
+  const customer = order.parties?.customer || {};
+  const recipient = customer.email;
+  if (!recipient) {
+    console.warn(`[proof-chase] no customer email on order ${order.id}, skipping`);
+    return { skipped: true, reason: 'no email' };
+  }
+
+  const { subject, text, html } = buildProofChaseEmail(order);
+  const sender = process.env.PROOF_CHASE_SENDER || 'noreply@tuffshop.co.uk';
+
+  if (dryRun) {
+    console.log(`[proof-chase] DRY RUN — would send to ${recipient} for order ${order.reference || order.id}`);
+    console.log(`[proof-chase] DRY RUN — subject: ${subject}`);
+    console.log(`[proof-chase] DRY RUN — body:\n${text}`);
+    return { dryRun: true, recipient, subject };
+  }
+
+  if (!process.env.SMTP_PASS) {
+    console.error('[proof-chase] SMTP_PASS not configured, cannot send');
+    return { skipped: true, reason: 'smtp not configured' };
+  }
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
+    port: parseInt(process.env.SMTP_PORT || '2525'),
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USERNAME || 'tuffshop.co.uk',
+      pass: process.env.SMTP_PASS,
+    },
+  });
+  await transporter.sendMail({
+    from: `"Tuff Workwear" <${sender}>`,
+    to: recipient,
+    subject,
+    text,
+    html,
+  });
+  await postBpOrderNote(
+    order.id,
+    `AUTO-CHASE: 3-day proof follow-up email sent to ${recipient} on ${new Date().toLocaleString('en-GB')}`
+  );
+  return { sent: true, recipient, subject };
+}
+
+async function pollProofChase() {
+  if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+  const statusIdsRaw = (process.env.PROOF_CHASE_STATUS_IDS || '').trim();
+  if (!statusIdsRaw) {
+    console.log('[proof-chase] PROOF_CHASE_STATUS_IDS not set — poller idle');
+    return;
+  }
+  const statusIds = statusIdsRaw.split(',').map((s) => parseInt(s.trim(), 10)).filter(Boolean);
+  const days = parseInt(process.env.PROOF_CHASE_DAYS, 10) || 3;
+  const dryRun = process.env.PROOF_CHASE_DRY_RUN !== 'false';
+
+  if (!(await acquireBpPollLock('proof-chase'))) return;
+  try {
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+    const headers = {
+      'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+      'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+      'Content-Type': 'application/json',
+    };
+
+    const seenInThisCycle = new Set();
+
+    for (const statusId of statusIds) {
+      let firstResult = 1;
+      for (let page = 0; page < 20; page++) {
+        const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderStatusId=${statusId}&pageSize=500&firstResult=${firstResult}`;
+        await sleep(500);
+        const r = await fetch(url, { method: 'GET', headers });
+        if (!r.ok) {
+          if (r.status === 503 || r.status === 429) {
+            tripBpCircuitBreaker(120);
+            console.warn(`[proof-chase] rate limited — bailing this cycle`);
+            return;
+          }
+          console.error(`[proof-chase] order-search failed for status ${statusId}: ${r.status}`);
+          break;
+        }
+        const data = await r.json();
+        const rows = data.response?.results || [];
+        if (rows.length === 0) break;
+        const ids = Array.isArray(rows[0]) ? rows.map((row) => row[0]) : rows;
+        for (const id of ids) {
+          seenInThisCycle.add(Number(id));
+          await pool.query(`
+            INSERT INTO proof_chase_log (order_id, first_seen_in_proof_status_at, last_status_id, last_checked_at)
+            VALUES ($1, NOW(), $2, NOW())
+            ON CONFLICT (order_id) DO UPDATE SET
+              last_status_id = EXCLUDED.last_status_id,
+              last_checked_at = NOW()
+          `, [id, statusId]);
+        }
+        firstResult += rows.length;
+      }
+    }
+
+    // Find orders ready to chase: been in proof status >N days and not yet chased
+    const ready = await pool.query(`
+      SELECT order_id, first_seen_in_proof_status_at
+      FROM proof_chase_log
+      WHERE chase_sent_at IS NULL
+        AND first_seen_in_proof_status_at < NOW() - ($1 || ' days')::interval
+        AND last_checked_at >= NOW() - INTERVAL '15 minutes'
+    `, [days]);
+
+    console.log(`[proof-chase] ${ready.rows.length} order(s) ready to chase (dryRun=${dryRun})`);
+
+    for (const row of ready.rows) {
+      const orderId = Number(row.order_id);
+      try {
+        await sleep(500);
+        const orderResp = await fetch(
+          `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
+          { method: 'GET', headers }
+        );
+        if (!orderResp.ok) {
+          console.error(`[proof-chase] order detail fetch failed for ${orderId}: ${orderResp.status}`);
+          continue;
+        }
+        const order = (await orderResp.json()).response?.[0];
+        if (!order) continue;
+
+        const result = await sendProofChaseEmail(order, dryRun);
+        if (result.sent || result.dryRun) {
+          await pool.query(`
+            UPDATE proof_chase_log
+            SET chase_sent_at = NOW(), chase_sent_to = $2, chase_dry_run = $3
+            WHERE order_id = $1
+          `, [orderId, result.recipient || null, !!result.dryRun]);
+        }
+      } catch (err) {
+        console.error(`[proof-chase] error processing order ${orderId}: ${err.message}`);
+      }
+    }
+
+    // Cleanup: orders no longer in any proof-sent status (they advanced or
+    // got cancelled). Drop them from the log so a future re-entry restarts
+    // the 3-day clock cleanly.
+    const cleanup = await pool.query(
+      `DELETE FROM proof_chase_log WHERE last_checked_at < NOW() - INTERVAL '1 hour'`
+    );
+    if (cleanup.rowCount > 0) {
+      console.log(`[proof-chase] cleaned up ${cleanup.rowCount} stale row(s)`);
+    }
+  } finally {
+    releaseBpPollLock();
+  }
+}
+
+// Discover status IDs by name — helps the user find what to put in PROOF_CHASE_STATUS_IDS
+app.get('/api/proof-chase/find-statuses', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  try {
+    const r = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-status`,
+      { method: 'GET', headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json',
+      }}
+    );
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    const data = await r.json();
+    const all = data.response || [];
+    const filter = (req.query.q || 'proof').toLowerCase();
+    const matching = all.filter((s) => (s.name || '').toLowerCase().includes(filter));
+    res.json({
+      filter,
+      matching: matching.map((s) => ({ id: s.id, name: s.name })),
+      total: all.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Status / counts
+app.get('/api/proof-chase/status', async (req, res) => {
+  if (!useDatabase) return res.json({ enabled: false });
+  try {
+    const cfg = {
+      statusIdsConfigured: !!process.env.PROOF_CHASE_STATUS_IDS,
+      days: parseInt(process.env.PROOF_CHASE_DAYS, 10) || 3,
+      dryRun: process.env.PROOF_CHASE_DRY_RUN !== 'false',
+      sender: process.env.PROOF_CHASE_SENDER || 'noreply@tuffshop.co.uk',
+    };
+    const counts = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE chase_sent_at IS NULL) AS pending,
+        COUNT(*) FILTER (WHERE chase_sent_at IS NOT NULL AND chase_dry_run = true) AS dry_run_logged,
+        COUNT(*) FILTER (WHERE chase_sent_at IS NOT NULL AND chase_dry_run = false) AS sent_for_real
+      FROM proof_chase_log
+    `);
+    const recent = await pool.query(`
+      SELECT order_id, first_seen_in_proof_status_at, chase_sent_at, chase_sent_to, chase_dry_run, last_status_id
+      FROM proof_chase_log
+      ORDER BY COALESCE(chase_sent_at, first_seen_in_proof_status_at) DESC
+      LIMIT 20
+    `);
+    res.json({
+      config: cfg,
+      counts: counts.rows[0],
+      recent: recent.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Preview what would be sent for a specific order — safe, no actual send
+app.get('/api/proof-chase/preview/:orderId', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  try {
+    const r = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${req.params.orderId}`,
+      { method: 'GET', headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json',
+      }}
+    );
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    const order = (await r.json()).response?.[0];
+    if (!order) return res.status(404).json({ error: 'order not found' });
+    const customer = order.parties?.customer || {};
+    const { subject, text, html } = buildProofChaseEmail(order);
+    res.json({
+      orderId: order.id,
+      orderReference: order.reference,
+      currentOrderStatusId: order.orderStatus?.orderStatusId,
+      currentOrderStatusName: order.orderStatus?.name,
+      recipient: customer.email || null,
+      recipientName: customer.contactName || customer.addressFullName || null,
+      subject,
+      bodyText: text,
+      bodyHtml: html,
+      wouldSend: !!customer.email,
+      reasonNotSent: customer.email ? null : 'no customer email on order',
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual trigger for the next poll cycle (useful for testing without waiting 30 min)
+app.post('/api/proof-chase/run-now', async (req, res) => {
+  if (bpPollLockHeld) {
+    return res.status(409).json({ error: `Another scan is in progress (${bpPollLockOwner})` });
+  }
+  pollProofChase().catch((err) => console.error('Manual proof-chase run failed:', err.message));
+  res.json({ accepted: true });
+});
+app.get('/api/proof-chase/run-now', async (req, res) => {
+  if (bpPollLockHeld) {
+    return res.status(409).json({ error: `Another scan is in progress (${bpPollLockOwner})` });
+  }
+  pollProofChase().catch((err) => console.error('Manual proof-chase run failed:', err.message));
+  res.json({ accepted: true });
+});
+
+// Boot the proof-chase system
+(async () => {
+  await initializeProofChaseTable();
+  if (useDatabase && BRIGHTPEARL_API_TOKEN) {
+    // Stagger initial run 3 minutes after boot so other pollers settle first
+    setTimeout(() => {
+      pollProofChase().catch((err) => console.error('Initial proof-chase run failed:', err.message));
+    }, 3 * 60 * 1000);
+    // Periodic every 30 minutes
+    setInterval(() => {
+      pollProofChase().catch((err) => console.error('Proof-chase poll failed:', err.message));
+    }, 30 * 60 * 1000);
+    console.log('✅ Proof-chase poller scheduled (every 30 min, first run +3min). Dry-run defaults ON.');
+  }
+})();
+
 const docuSignService = new DocuSignService();
 
 // DocuSign logging functionality
