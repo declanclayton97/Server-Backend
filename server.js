@@ -2109,7 +2109,7 @@ async function sendProofChaseEmail(order, dryRun) {
   return { sent: true, recipient, subject };
 }
 
-async function pollProofChase() {
+async function pollProofChase({ daysOverride } = {}) {
   if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
   const statusIdsRaw = (process.env.PROOF_CHASE_STATUS_IDS || '').trim();
   if (!statusIdsRaw) {
@@ -2117,7 +2117,9 @@ async function pollProofChase() {
     return;
   }
   const statusIds = statusIdsRaw.split(',').map((s) => parseInt(s.trim(), 10)).filter(Boolean);
-  const days = parseInt(process.env.PROOF_CHASE_DAYS, 10) || 3;
+  const days = daysOverride != null
+    ? Math.max(0, parseInt(daysOverride, 10) || 0)
+    : (parseInt(process.env.PROOF_CHASE_DAYS, 10) || 3);
   const dryRun = process.env.PROOF_CHASE_DRY_RUN !== 'false';
 
   if (!(await acquireBpPollLock('proof-chase'))) return;
@@ -2151,16 +2153,26 @@ async function pollProofChase() {
         const data = await r.json();
         const rows = data.response?.results || [];
         if (rows.length === 0) break;
-        const ids = Array.isArray(rows[0]) ? rows.map((row) => row[0]) : rows;
-        for (const id of ids) {
+        // Find which column index BP used for updatedOn so we can seed
+        // first_seen with a sensible historical lower bound on first insert.
+        const meta = data.response?.metaData?.columns || [];
+        const updatedOnIdx = meta.findIndex((c) => c.name === 'updatedOn');
+        for (const row of rows) {
+          const id = Array.isArray(row) ? row[0] : row;
+          const updatedOn = (Array.isArray(row) && updatedOnIdx >= 0) ? row[updatedOnIdx] : null;
+          // Use updatedOn as the lower-bound timestamp on FIRST sight (so
+          // orders that have actually been sitting in this status for weeks
+          // qualify immediately). On subsequent sightings, leave the
+          // existing first_seen alone.
+          const firstSeen = updatedOn ? new Date(updatedOn).toISOString() : new Date().toISOString();
           seenInThisCycle.add(Number(id));
           await pool.query(`
             INSERT INTO proof_chase_log (order_id, first_seen_in_proof_status_at, last_status_id, last_checked_at)
-            VALUES ($1, NOW(), $2, NOW())
+            VALUES ($1, $2, $3, NOW())
             ON CONFLICT (order_id) DO UPDATE SET
               last_status_id = EXCLUDED.last_status_id,
               last_checked_at = NOW()
-          `, [id, statusId]);
+          `, [id, firstSeen, statusId]);
         }
         firstResult += rows.length;
       }
@@ -2327,21 +2339,19 @@ app.get('/api/proof-chase/preview/:orderId', async (req, res) => {
   }
 });
 
-// Manual trigger for the next poll cycle (useful for testing without waiting 30 min)
-app.post('/api/proof-chase/run-now', async (req, res) => {
+// Manual trigger for the next poll cycle (useful for testing without waiting 30 min).
+// ?days=N overrides PROOF_CHASE_DAYS for this run only — set 0 to chase every
+// order currently in proof-sent status, regardless of how long it's been there.
+const proofChaseRunHandler = async (req, res) => {
   if (bpPollLockHeld) {
     return res.status(409).json({ error: `Another scan is in progress (${bpPollLockOwner})` });
   }
-  pollProofChase().catch((err) => console.error('Manual proof-chase run failed:', err.message));
-  res.json({ accepted: true });
-});
-app.get('/api/proof-chase/run-now', async (req, res) => {
-  if (bpPollLockHeld) {
-    return res.status(409).json({ error: `Another scan is in progress (${bpPollLockOwner})` });
-  }
-  pollProofChase().catch((err) => console.error('Manual proof-chase run failed:', err.message));
-  res.json({ accepted: true });
-});
+  const daysOverride = req.query.days;
+  pollProofChase({ daysOverride }).catch((err) => console.error('Manual proof-chase run failed:', err.message));
+  res.json({ accepted: true, daysOverride: daysOverride ?? null });
+};
+app.post('/api/proof-chase/run-now', proofChaseRunHandler);
+app.get('/api/proof-chase/run-now', proofChaseRunHandler);
 
 // Boot the proof-chase system
 (async () => {
