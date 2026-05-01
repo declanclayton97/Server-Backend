@@ -2073,7 +2073,7 @@ app.post('/api/urgent-orders/reject/:orderId', async (req, res) => {
 // Sends a single email listing all pending orders that haven't been notified
 // about yet. Called after each urgent-poll cycle.
 const MIKE_NOTIFY_EMAIL = process.env.MIKE_NOTIFY_EMAIL || 'michael.hodgkins@tuffshop.co.uk';
-const MIKE_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
+const MIKE_NOTIFY_COOLDOWN_MS = 15 * 60 * 1000;
 let lastMikeNotifyAt = 0;
 
 async function maybeNotifyMike() {
