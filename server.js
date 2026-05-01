@@ -935,6 +935,34 @@ async function initializeUrgentOrdersTable() {
       ALTER TABLE urgent_orders
       ADD COLUMN IF NOT EXISTS stale_days INTEGER
     `);
+    // Approval workflow: new orders default to 'pending' until Mike (or any
+    // approver) signs them off. Backfill — pre-existing rows on first deploy
+    // were trusted, so they become 'approved'. After this column exists, the
+    // default flips to 'pending' for all subsequent inserts.
+    await pool.query(`
+      ALTER TABLE urgent_orders
+      ADD COLUMN IF NOT EXISTS approval_status TEXT
+    `);
+    await pool.query(`
+      UPDATE urgent_orders SET approval_status = 'approved' WHERE approval_status IS NULL
+    `);
+    await pool.query(`
+      ALTER TABLE urgent_orders ALTER COLUMN approval_status SET DEFAULT 'pending'
+    `);
+    await pool.query(`
+      ALTER TABLE urgent_orders ALTER COLUMN approval_status SET NOT NULL
+    `);
+    await pool.query(`
+      ALTER TABLE urgent_orders ADD COLUMN IF NOT EXISTS approved_by TEXT
+    `);
+    await pool.query(`
+      ALTER TABLE urgent_orders ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ
+    `);
+    // Notification tracking — set when Mike has been emailed about a pending
+    // order so the digest doesn't re-send the same items.
+    await pool.query(`
+      ALTER TABLE urgent_orders ADD COLUMN IF NOT EXISTS mike_notified_at TIMESTAMPTZ
+    `);
     console.log('✅ urgent_orders table initialized');
   } catch (err) {
     console.error('❌ Error initializing urgent_orders table:', err.message);
@@ -1187,6 +1215,8 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
 
   console.log(`[urgent-poll/${label}] scanned ${orderIds.length}, added/updated ${added}, removed ${removed}`);
   endPollProgress();
+  // Email Mike if any pending orders are waiting (cooldown enforced inside).
+  maybeNotifyMike().catch((err) => console.error('[mike-notify] error:', err.message));
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,15 +1653,23 @@ app.get('/api/urgent-orders/stale-check/:orderId', async (req, res) => {
   }
 });
 
-// Read endpoint — frontend reads from Postgres directly, no Brightpearl call
+// Read endpoint — frontend reads from Postgres directly, no Brightpearl call.
+// Default returns only 'approved' rows (so standard / view-only users never
+// see un-approved jobs). Pass ?include=pending to also see rows awaiting Mike.
 app.get('/api/urgent-orders', async (req, res) => {
   if (!useDatabase) return res.json([]);
   try {
+    const includePending = req.query.include === 'pending' || req.query.include === 'all';
+    const where = includePending
+      ? `WHERE approval_status IN ('pending', 'approved')`
+      : `WHERE approval_status = 'approved'`;
     const result = await pool.query(`
       SELECT order_id, order_reference, urgent_by_date, is_asap, customer_name, business_name,
              decoration_type, order_total, created_by_id, created_by_name, placed_on,
-             source, stale_status_id, stale_days, last_checked_at
+             source, stale_status_id, stale_days, last_checked_at,
+             approval_status, approved_by, approved_at
       FROM urgent_orders
+      ${where}
       ORDER BY is_asap DESC, urgent_by_date ASC NULLS LAST, order_id ASC
     `);
     const orders = result.rows.map((r) => ({
@@ -1650,6 +1688,9 @@ app.get('/api/urgent-orders', async (req, res) => {
       staleStatusId: r.stale_status_id,
       staleDays: r.stale_days,
       lastCheckedAt: r.last_checked_at,
+      approvalStatus: r.approval_status || 'approved',
+      approvedBy: r.approved_by,
+      approvedAt: r.approved_at,
     }));
     res.json(orders);
   } catch (err) {
@@ -1930,6 +1971,180 @@ app.post('/api/urgent-orders/complete/:orderId', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Approval workflow ---------------------------------------------------------
+// Approve a pending order — flips approval_status to 'approved' so it shows
+// up on the standard / view-only boards. ?approvedBy=Name optional.
+app.post('/api/urgent-orders/approve/:orderId', async (req, res) => {
+  if (!useDatabase) return res.status(500).json({ error: 'Database unavailable' });
+  try {
+    const orderId = parseInt(req.params.orderId, 10);
+    const approvedBy = (req.body?.approvedBy || req.query.approvedBy || 'Mike').slice(0, 64);
+    const r = await pool.query(`
+      UPDATE urgent_orders
+      SET approval_status = 'approved', approved_by = $2, approved_at = NOW()
+      WHERE order_id = $1
+      RETURNING order_id, approval_status
+    `, [orderId, approvedBy]);
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Order not found in cache' });
+    res.json({ success: true, approvalStatus: r.rows[0].approval_status });
+  } catch (err) {
+    console.error('[urgent/approve] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reject a pending order — clears the urgent flag in Brightpearl (so the
+// poller doesn't immediately re-add it) and removes the row. The card on
+// Mike's board shows the createdByName so he knows who to email manually
+// for a new date.
+app.post('/api/urgent-orders/reject/:orderId', async (req, res) => {
+  const { orderId } = req.params;
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  try {
+    if (useDatabase) {
+      const existing = await pool.query(
+        'SELECT source FROM urgent_orders WHERE order_id = $1',
+        [orderId]
+      );
+      if (existing.rows[0]?.source === 'stale') {
+        return res.status(400).json({
+          error: 'Stale orders are auto-detected — progress them in Brightpearl rather than rejecting.',
+        });
+      }
+    }
+
+    // Read current custom fields so we only patch what's actually present.
+    const cfResp = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`,
+      { method: 'GET', headers }
+    );
+    const cfData = cfResp.ok ? await cfResp.json() : null;
+    const fields = cfData?.response || {};
+
+    const operations = [];
+    if (fields.PCF_URGENT != null && fields.PCF_URGENT !== '') {
+      operations.push({ op: 'remove', path: '/PCF_URGENT' });
+    }
+    if (fields.PCF_ASAP === true || fields.PCF_ASAP === 'true' || fields.PCF_ASAP === 1) {
+      operations.push({ op: 'replace', path: '/PCF_ASAP', value: false });
+    }
+    if (operations.length > 0) {
+      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
+      let r = await fetch(url, { method: 'PATCH', headers, body: JSON.stringify(operations) });
+      if (!r.ok) {
+        // Some BP accounts reject 'remove' — retry with replace-null
+        const fallback = operations.map((op) =>
+          op.op === 'remove' ? { op: 'replace', path: op.path, value: null } : op
+        );
+        r = await fetch(url, { method: 'PATCH', headers, body: JSON.stringify(fallback) });
+      }
+      if (!r.ok) {
+        const errText = await r.text();
+        console.error(`[urgent/reject] patch failed for ${orderId}:`, errText);
+        return res.status(r.status).json({ error: errText });
+      }
+    }
+
+    // Remove from cache. Mike will manually email the createdBy person to get
+    // a new date — the order will reappear on next poll if BP gets re-flagged.
+    if (useDatabase) {
+      await pool.query('DELETE FROM urgent_orders WHERE order_id = $1', [orderId]);
+    }
+    res.json({ success: true, clearedOps: operations });
+  } catch (err) {
+    console.error('[urgent/reject] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mike approval-digest emailer ----------------------------------------------
+// Sends a single email listing all pending orders that haven't been notified
+// about yet. Called after each urgent-poll cycle.
+const MIKE_NOTIFY_EMAIL = process.env.MIKE_NOTIFY_EMAIL || 'michael.hodgkins@tuffshop.co.uk';
+const MIKE_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
+let lastMikeNotifyAt = 0;
+
+async function maybeNotifyMike() {
+  if (!useDatabase) return;
+  if (!process.env.SMTP_PASS) return; // SMTP not configured, silently skip
+  const now = Date.now();
+  if (now - lastMikeNotifyAt < MIKE_NOTIFY_COOLDOWN_MS) return;
+
+  try {
+    const pending = await pool.query(`
+      SELECT order_id, order_reference, urgent_by_date, is_asap, customer_name, business_name, created_by_name
+      FROM urgent_orders
+      WHERE approval_status = 'pending' AND mike_notified_at IS NULL
+      ORDER BY is_asap DESC, urgent_by_date ASC NULLS LAST, order_id ASC
+    `);
+    if (pending.rows.length === 0) return;
+
+    const rows = pending.rows;
+    const subject = `Urgent Jobs: ${rows.length} order${rows.length === 1 ? '' : 's'} need approval`;
+    const lines = rows.map((r) => {
+      const ref = r.order_reference || `#${r.order_id}`;
+      const due = r.is_asap
+        ? 'ASAP'
+        : (r.urgent_by_date ? new Date(r.urgent_by_date).toLocaleDateString('en-GB') : 'No date');
+      const who = r.created_by_name || 'Unknown';
+      const cust = r.business_name || r.customer_name || '';
+      return `• ${ref} — ${due} — ${cust} — flagged by ${who}`;
+    });
+    const text = `${rows.length} urgent order${rows.length === 1 ? '' : 's'} awaiting approval:\n\n${lines.join('\n')}\n\nApprove at: https://urgent-jobs.onrender.com/?User=Mike`;
+
+    const htmlList = rows.map((r) => {
+      const ref = r.order_reference || `#${r.order_id}`;
+      const due = r.is_asap
+        ? '<strong style="color:#c62828">ASAP</strong>'
+        : (r.urgent_by_date ? new Date(r.urgent_by_date).toLocaleDateString('en-GB') : 'No date');
+      const who = r.created_by_name || 'Unknown';
+      const cust = r.business_name || r.customer_name || '';
+      return `<li><strong>${ref}</strong> — ${due} — ${cust} — flagged by ${who}</li>`;
+    }).join('');
+    const html = `
+      <p>${rows.length} urgent order${rows.length === 1 ? '' : 's'} need your approval:</p>
+      <ul>${htmlList}</ul>
+      <p><a href="https://urgent-jobs.onrender.com/?User=Mike">Open the approval board</a></p>
+    `;
+
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
+      port: parseInt(process.env.SMTP_PORT || '2525'),
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USERNAME || 'tuffshop.co.uk',
+        pass: process.env.SMTP_PASS,
+      },
+    });
+    await transporter.sendMail({
+      from: '"Tuff Workwear" <noreply@tuffshop.co.uk>',
+      to: MIKE_NOTIFY_EMAIL,
+      subject,
+      text,
+      html,
+    });
+
+    await pool.query(
+      `UPDATE urgent_orders SET mike_notified_at = NOW() WHERE order_id = ANY($1::bigint[])`,
+      [rows.map((r) => Number(r.order_id))]
+    );
+    lastMikeNotifyAt = now;
+    console.log(`[mike-notify] sent digest of ${rows.length} pending order(s) to ${MIKE_NOTIFY_EMAIL}`);
+  } catch (err) {
+    console.error('[mike-notify] failed:', err.message);
+  }
+}
 
 // Manual re-scan trigger — useful for "force refresh" buttons / debugging.
 // ?days=N expands the lookback window (default 1 day).
