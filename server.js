@@ -2012,47 +2012,48 @@ app.post('/api/urgent-orders/reject/:orderId', async (req, res) => {
     'Content-Type': 'application/json',
   };
   try {
+    let isStale = false;
     if (useDatabase) {
       const existing = await pool.query(
         'SELECT source FROM urgent_orders WHERE order_id = $1',
         [orderId]
       );
-      if (existing.rows[0]?.source === 'stale') {
-        return res.status(400).json({
-          error: 'Stale orders are auto-detected — progress them in Brightpearl rather than rejecting.',
-        });
-      }
+      isStale = existing.rows[0]?.source === 'stale';
     }
 
-    // Read current custom fields so we only patch what's actually present.
-    const cfResp = await fetch(
-      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`,
-      { method: 'GET', headers }
-    );
-    const cfData = cfResp.ok ? await cfResp.json() : null;
-    const fields = cfData?.response || {};
+    // Stale orders have no PCF flag to clear — they're auto-detected by the
+    // stale poller. Rejecting one just dismisses it from the cache; the next
+    // stale-poll cycle will re-add it if it's still genuinely stale.
+    if (!isStale) {
+      const cfResp = await fetch(
+        `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`,
+        { method: 'GET', headers }
+      );
+      const cfData = cfResp.ok ? await cfResp.json() : null;
+      const fields = cfData?.response || {};
 
-    const operations = [];
-    if (fields.PCF_URGENT != null && fields.PCF_URGENT !== '') {
-      operations.push({ op: 'remove', path: '/PCF_URGENT' });
-    }
-    if (fields.PCF_ASAP === true || fields.PCF_ASAP === 'true' || fields.PCF_ASAP === 1) {
-      operations.push({ op: 'replace', path: '/PCF_ASAP', value: false });
-    }
-    if (operations.length > 0) {
-      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
-      let r = await fetch(url, { method: 'PATCH', headers, body: JSON.stringify(operations) });
-      if (!r.ok) {
-        // Some BP accounts reject 'remove' — retry with replace-null
-        const fallback = operations.map((op) =>
-          op.op === 'remove' ? { op: 'replace', path: op.path, value: null } : op
-        );
-        r = await fetch(url, { method: 'PATCH', headers, body: JSON.stringify(fallback) });
+      const operations = [];
+      if (fields.PCF_URGENT != null && fields.PCF_URGENT !== '') {
+        operations.push({ op: 'remove', path: '/PCF_URGENT' });
       }
-      if (!r.ok) {
-        const errText = await r.text();
-        console.error(`[urgent/reject] patch failed for ${orderId}:`, errText);
-        return res.status(r.status).json({ error: errText });
+      if (fields.PCF_ASAP === true || fields.PCF_ASAP === 'true' || fields.PCF_ASAP === 1) {
+        operations.push({ op: 'replace', path: '/PCF_ASAP', value: false });
+      }
+      if (operations.length > 0) {
+        const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
+        let r = await fetch(url, { method: 'PATCH', headers, body: JSON.stringify(operations) });
+        if (!r.ok) {
+          // Some BP accounts reject 'remove' — retry with replace-null
+          const fallback = operations.map((op) =>
+            op.op === 'remove' ? { op: 'replace', path: op.path, value: null } : op
+          );
+          r = await fetch(url, { method: 'PATCH', headers, body: JSON.stringify(fallback) });
+        }
+        if (!r.ok) {
+          const errText = await r.text();
+          console.error(`[urgent/reject] patch failed for ${orderId}:`, errText);
+          return res.status(r.status).json({ error: errText });
+        }
       }
     }
 
@@ -2061,7 +2062,7 @@ app.post('/api/urgent-orders/reject/:orderId', async (req, res) => {
     if (useDatabase) {
       await pool.query('DELETE FROM urgent_orders WHERE order_id = $1', [orderId]);
     }
-    res.json({ success: true, clearedOps: operations });
+    res.json({ success: true, wasStale: isStale });
   } catch (err) {
     console.error('[urgent/reject] error:', err.message);
     res.status(500).json({ error: err.message });
