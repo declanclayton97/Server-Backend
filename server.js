@@ -2229,10 +2229,26 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
 //   PROOF_CHASE_STATUS_IDS  — comma-separated orderStatusIds of "Proof Sent"
 //                             statuses (e.g. "35,92" — find via the
 //                             /api/proof-chase/find-statuses endpoint)
-//   PROOF_CHASE_DAYS        — days in status before chasing (default 3)
+//   PROOF_CHASE_DAYS        — business days in status before chasing
+//                             (default 3, weekends excluded — no sends Sat/Sun)
 //   PROOF_CHASE_DRY_RUN     — "false" to actually send (default "true")
 //   PROOF_CHASE_SENDER      — From: address (default noreply@tuffshop.co.uk)
 // ===========================================================================
+
+// Count Mon–Fri day boundaries crossed between two timestamps. Used so
+// PROOF_CHASE_DAYS reflects working days, not calendar days — a proof
+// sent Friday afternoon shouldn't trigger a chase Monday morning.
+function businessDaysBetween(start, end) {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const startDay = Math.floor(start.getTime() / dayMs);
+  const endDay = Math.floor(end.getTime() / dayMs);
+  let count = 0;
+  for (let d = startDay + 1; d <= endDay; d++) {
+    const dow = new Date(d * dayMs).getUTCDay();
+    if (dow !== 0 && dow !== 6) count++;
+  }
+  return count;
+}
 
 async function initializeProofChaseTable() {
   if (!useDatabase) return;
@@ -2511,7 +2527,19 @@ async function pollProofChase({ daysOverride } = {}) {
       }
     }
 
-    // Find orders ready to chase: been in proof status >N days and not yet chased
+    // Don't fire chase emails on weekends — customers reading "your proof's
+    // been waiting 3 days" on a Saturday looks bad, and they can't act on it
+    // until Monday anyway. The order-search above still runs so first_seen
+    // gets recorded for anything that lands in proof status over the weekend.
+    const todayDow = new Date().getUTCDay();
+    if (todayDow === 0 || todayDow === 6) {
+      console.log('[proof-chase] weekend — skipping send phase, will resume Monday');
+      return;
+    }
+
+    // Find orders ready to chase: been in proof status >N calendar days and
+    // not yet chased. Calendar-days is a loose prefilter — we re-check using
+    // business-days in JS below so weekends don't count toward the threshold.
     const ready = await pool.query(`
       SELECT order_id, first_seen_in_proof_status_at
       FROM proof_chase_log
@@ -2520,9 +2548,15 @@ async function pollProofChase({ daysOverride } = {}) {
         AND last_checked_at >= NOW() - INTERVAL '15 minutes'
     `, [days]);
 
-    console.log(`[proof-chase] ${ready.rows.length} order(s) ready to chase (dryRun=${dryRun})`);
+    const nowDate = new Date();
+    const dueRows = ready.rows.filter((row) => {
+      const firstSeen = new Date(row.first_seen_in_proof_status_at);
+      return businessDaysBetween(firstSeen, nowDate) >= days;
+    });
 
-    for (const row of ready.rows) {
+    console.log(`[proof-chase] ${ready.rows.length} candidate(s), ${dueRows.length} ready to chase after business-day filter (dryRun=${dryRun})`);
+
+    for (const row of dueRows) {
       const orderId = Number(row.order_id);
       try {
         await sleep(500);
