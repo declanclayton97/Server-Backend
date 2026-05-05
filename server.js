@@ -2434,7 +2434,7 @@ async function pollProofChase({ daysOverride } = {}) {
     : (parseInt(process.env.PROOF_CHASE_DAYS, 10) || 3);
   const dryRun = process.env.PROOF_CHASE_DRY_RUN !== 'false';
 
-  if (!(await acquireBpPollLock('proof-chase'))) return;
+  if (!(await acquireBpPollLock('proof-chase', { waitMs: 5 * 60 * 1000 }))) return;
   try {
     const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
       ? 'https://euw1.brightpearlconnect.com'
