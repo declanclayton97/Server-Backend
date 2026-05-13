@@ -12,7 +12,7 @@ import { fileURLToPath } from 'url';
 import pkg from 'pg';
 import { PDFDocument, rgb } from 'pdf-lib';
 import nodemailer from 'nodemailer';
-import { listStates } from './orderPipelineMapper.js';
+import { listStates, customerStateForBpStatus } from './orderPipelineMapper.js';
 import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables } from './orderPipelineVariables.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
@@ -2863,6 +2863,44 @@ async function initializeOrderPipelineTables() {
       ALTER TABLE order_pipeline_templates
         ADD COLUMN IF NOT EXISTS sender_email TEXT NOT NULL
         DEFAULT 'ordertracking@tuffshop.co.uk';
+
+      -- Per-event activity log for the poller. Server stdout would clog
+      -- under 5-10k orders/day; querying this table from the admin panel
+      -- gives operators a paginated, filterable view of every decision
+      -- the poller made (dry_run / sent / skipped / error).
+      CREATE TABLE IF NOT EXISTS order_pipeline_send_log (
+        id BIGSERIAL PRIMARY KEY,
+        order_id BIGINT NOT NULL,
+        state TEXT NOT NULL,
+        status TEXT NOT NULL,
+        recipient TEXT,
+        sender TEXT,
+        subject TEXT,
+        error_message TEXT,
+        bp_status_name TEXT,
+        prev_state TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_op_send_log_created_at
+        ON order_pipeline_send_log(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_op_send_log_order_id
+        ON order_pipeline_send_log(order_id);
+      CREATE INDEX IF NOT EXISTS idx_op_send_log_status
+        ON order_pipeline_send_log(status);
+
+      -- Singleton holding the timestamp of the last successful poll.
+      -- The poller uses this for the adaptive window — on next run it
+      -- scans NOW() - max(15min, gap-since-last-poll), capped at 7 days
+      -- so the first ever poll doesn't try to backfill years of orders.
+      CREATE TABLE IF NOT EXISTS order_pipeline_poll_state (
+        id INT PRIMARY KEY DEFAULT 1,
+        last_polled_at TIMESTAMPTZ,
+        last_poll_count INT,
+        last_poll_duration_ms INT,
+        last_poll_error TEXT,
+        CHECK (id = 1)
+      );
+      INSERT INTO order_pipeline_poll_state (id) VALUES (1) ON CONFLICT DO NOTHING;
     `);
 
     // First-deploy backfill for the back-order template — only flips the
@@ -2990,6 +3028,19 @@ async function initializeOrderPipelineTables() {
 
 (async () => {
   await initializeOrderPipelineTables();
+  if (useDatabase && BRIGHTPEARL_API_TOKEN) {
+    // Stagger initial run 4 min after boot so the urgent/stale/proof-chase
+    // pollers settle first and we don't elbow them at the BP rate limit.
+    setTimeout(() => {
+      pollOrderTrackingPipeline({ label: 'boot' })
+        .catch((err) => console.error('Initial order-pipeline run failed:', err.message));
+    }, 4 * 60 * 1000);
+    setInterval(() => {
+      pollOrderTrackingPipeline()
+        .catch((err) => console.error('Order-pipeline poll failed:', err.message));
+    }, ORDER_PIPELINE_POLL_INTERVAL_MS);
+    console.log(`✅ Order-pipeline poller scheduled (every ${ORDER_PIPELINE_POLL_INTERVAL_MS / 60000} min, first run +4min). Mode: ${isDryRun() ? 'DRY-RUN' : 'LIVE'}.`);
+  }
 })();
 
 // ── Order pipeline: admin / inspect endpoints ─────────────────────
@@ -3215,6 +3266,389 @@ app.get('/api/order-pipeline/inspect/:orderId', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Order tracking pipeline POLLER ────────────────────────────────
+// Scans BP for online-channel orders that have moved status in the last
+// 15 min (or the gap since our last successful poll, whichever is wider)
+// and decides whether each one is due a customer email. In dry-run mode
+// (default) every "would-send" is written to order_pipeline_send_log
+// with status='dry_run' and no SMTP traffic is generated. Activity log
+// is the source of truth for what the system would do — server stdout
+// only carries a one-line summary per poll cycle.
+
+const ORDER_PIPELINE_POLL_INTERVAL_MS = 5 * 60 * 1000;          // 5 min
+const ORDER_PIPELINE_WINDOW_MIN_MS = 15 * 60 * 1000;            // 15 min
+const ORDER_PIPELINE_WINDOW_MAX_MS = 7 * 24 * 60 * 60 * 1000;   // 7 days cap
+const ORDER_PIPELINE_BP_SPACING_MS = 250;                       // per-order pause
+const ORDER_PIPELINE_DEPARTMENT_ID = parseInt(process.env.ORDER_PIPELINE_DEPARTMENT_ID || '17', 10);
+// Default-on dry-run — must set ORDER_PIPELINE_DRY_RUN=false to flip live.
+function isDryRun() {
+  const v = String(process.env.ORDER_PIPELINE_DRY_RUN ?? 'true').toLowerCase();
+  return v !== 'false' && v !== '0' && v !== 'no';
+}
+
+let orderPipelinePollInFlight = false;
+
+async function writeActivityLog(entry) {
+  if (!useDatabase) return;
+  try {
+    await pool.query(
+      `INSERT INTO order_pipeline_send_log
+       (order_id, state, status, recipient, sender, subject, error_message, bp_status_name, prev_state, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+      [
+        Number(entry.orderId) || 0,
+        entry.state || '',
+        entry.status,
+        entry.recipient || null,
+        entry.sender || null,
+        entry.subject || null,
+        entry.errorMessage || null,
+        entry.bpStatusName || null,
+        entry.prevState || null,
+      ]
+    );
+  } catch (err) {
+    console.error('[order-pipeline] failed to write activity log:', err.message);
+  }
+}
+
+async function fetchOrderNotesSafe(orderId) {
+  try {
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+    const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/note`, {
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+      },
+    });
+    if (!r.ok) return [];
+    const data = await r.json().catch(() => ({ response: [] }));
+    return data.response || [];
+  } catch {
+    return [];
+  }
+}
+
+// Decide + log what should happen for a single BP order detail. Mutates
+// order_email_log (last_customer_state + last_checked_at). Only writes
+// emails_sent in real-send mode — leaving it empty during dry-run keeps
+// the de-dup guard a clean slate for when the switch flips live.
+async function processOrderForPipeline(order) {
+  const orderId = order?.id;
+  if (!orderId) return { decision: 'no-id' };
+  const bpStatusName = order.orderStatus?.name || '';
+
+  const logRes = await pool.query(
+    `SELECT last_customer_state, emails_sent FROM order_email_log WHERE order_id = $1`,
+    [orderId]
+  );
+  const prevLog = logRes.rows[0];
+  const prevState = prevLog?.last_customer_state || null;
+  const emailsSent = Array.isArray(prevLog?.emails_sent) ? prevLog.emails_sent : [];
+
+  const currentState = customerStateForBpStatus(bpStatusName, prevState);
+
+  // Touch last_checked_at regardless of outcome so the inspect view shows
+  // we've seen this order recently.
+  const touchSql = (state) => state
+    ? `INSERT INTO order_email_log (order_id, last_customer_state, last_checked_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (order_id) DO UPDATE SET
+         last_customer_state = EXCLUDED.last_customer_state,
+         last_checked_at = NOW()`
+    : `INSERT INTO order_email_log (order_id, last_checked_at)
+       VALUES ($1, NOW())
+       ON CONFLICT (order_id) DO UPDATE SET last_checked_at = NOW()`;
+
+  if (!currentState) {
+    // Status doesn't trigger any email (internal / proof flow / pick-stage).
+    await pool.query(touchSql(null), [orderId]);
+    return { decision: 'no-state', bpStatusName };
+  }
+
+  if (emailsSent.some((e) => e && e.state === currentState)) {
+    // Already emailed this state for this order — guard against re-fires.
+    await pool.query(touchSql(currentState), [orderId, currentState]);
+    return { decision: 'already-emailed', state: currentState };
+  }
+
+  // Look up the template for this state
+  const tplRes = await pool.query(
+    `SELECT subject, body_html, sender_email, enabled FROM order_pipeline_templates WHERE state = $1`,
+    [currentState]
+  );
+  const template = tplRes.rows[0];
+  if (!template) {
+    await pool.query(touchSql(currentState), [orderId, currentState]);
+    await writeActivityLog({
+      orderId, state: currentState, status: 'error',
+      errorMessage: `no template seeded for state '${currentState}'`,
+      bpStatusName, prevState,
+    });
+    return { decision: 'no-template' };
+  }
+  if (!template.enabled) {
+    await pool.query(touchSql(currentState), [orderId, currentState]);
+    await writeActivityLog({
+      orderId, state: currentState, status: 'skipped',
+      errorMessage: 'template disabled in admin panel',
+      bpStatusName, prevState,
+      sender: template.sender_email,
+    });
+    return { decision: 'template-disabled' };
+  }
+
+  // Build the variables (notes only needed for shipped emails but cheap to
+  // always fetch and it keeps the dry-run preview accurate).
+  const notes = await fetchOrderNotesSafe(orderId);
+  const variables = deriveVariables(order, { notes });
+  const rendered = renderTemplate(
+    { subject: template.subject, body_html: template.body_html },
+    variables
+  );
+  const recipient = order.parties?.customer?.email || '';
+  const sender = template.sender_email;
+
+  if (!recipient) {
+    await pool.query(touchSql(currentState), [orderId, currentState]);
+    await writeActivityLog({
+      orderId, state: currentState, status: 'skipped',
+      errorMessage: 'no customer email on order',
+      bpStatusName, prevState,
+      sender, subject: rendered.subject,
+    });
+    return { decision: 'no-email' };
+  }
+
+  if (isDryRun()) {
+    // Update last_customer_state so the Invoiced/Completed disambiguation
+    // (Shipped vs Collected based on the previous state) keeps working
+    // through a long dry-run period. emails_sent stays untouched so when
+    // we flip out of dry-run nothing is mistakenly marked already-sent.
+    await pool.query(touchSql(currentState), [orderId, currentState]);
+    await writeActivityLog({
+      orderId, state: currentState, status: 'dry_run',
+      recipient, sender, subject: rendered.subject,
+      bpStatusName, prevState,
+    });
+    return { decision: 'dry_run', state: currentState, recipient };
+  }
+
+  // Real send path — currently locked off behind ORDER_PIPELINE_DRY_RUN.
+  // Will be enabled in Phase 4 after the dry-run logs have been audited.
+  await writeActivityLog({
+    orderId, state: currentState, status: 'error',
+    errorMessage: 'real-send path not yet implemented (Phase 4)',
+    recipient, sender, subject: rendered.subject,
+    bpStatusName, prevState,
+  });
+  return { decision: 'real-send-not-implemented' };
+}
+
+async function pollOrderTrackingPipeline({ sinceMs, label = 'incremental' } = {}) {
+  if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+  if (orderPipelinePollInFlight) {
+    console.log(`[order-pipeline/${label}] skipped — another scan is in progress`);
+    return { skipped: 'in-flight' };
+  }
+  if (!(await acquireBpPollLock(`order-pipeline/${label}`, { waitMs: 60 * 1000 }))) {
+    return { skipped: 'bp-lock' };
+  }
+  orderPipelinePollInFlight = true;
+  const start = Date.now();
+  try {
+    return await pollOrderTrackingPipelineInner({ sinceMs, label });
+  } catch (err) {
+    console.error(`[order-pipeline/${label}] uncaught:`, err.message);
+    try {
+      await pool.query(
+        `UPDATE order_pipeline_poll_state SET last_poll_error = $1, last_poll_duration_ms = $2 WHERE id = 1`,
+        [err.message?.slice(0, 500) || 'unknown', Date.now() - start]
+      );
+    } catch {}
+    return { error: err.message };
+  } finally {
+    orderPipelinePollInFlight = false;
+    releaseBpPollLock();
+  }
+}
+
+async function pollOrderTrackingPipelineInner({ sinceMs, label }) {
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+  };
+
+  // Adaptive window — if we polled successfully recently, scan the gap
+  // since then (plus a 1-minute overlap for safety). Otherwise fall
+  // back to the 15-min default. Capped at 7 days so a long outage
+  // doesn't trigger a year-long historical scan.
+  let fromMs = sinceMs;
+  if (fromMs === undefined) {
+    try {
+      const r = await pool.query(`SELECT last_polled_at FROM order_pipeline_poll_state WHERE id = 1`);
+      const last = r.rows[0]?.last_polled_at;
+      if (last) {
+        const gap = Date.now() - new Date(last).getTime() + 60 * 1000;
+        fromMs = Date.now() - Math.min(ORDER_PIPELINE_WINDOW_MAX_MS, Math.max(ORDER_PIPELINE_WINDOW_MIN_MS, gap));
+      } else {
+        fromMs = Date.now() - ORDER_PIPELINE_WINDOW_MIN_MS;
+      }
+    } catch {
+      fromMs = Date.now() - ORDER_PIPELINE_WINDOW_MIN_MS;
+    }
+  }
+  const fromIso = new Date(fromMs).toISOString();
+  const updatedFilter = encodeURIComponent(`${fromIso}/`);
+  const start = Date.now();
+
+  // Paginate order-search until BP returns an empty page. Filter by
+  // departmentId so we only get online-channel orders.
+  const orderIds = [];
+  let firstResult = 1;
+  for (let page = 0; page < 100; page++) {
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&departmentId=${ORDER_PIPELINE_DEPARTMENT_ID}&updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
+    const r = await fetch(url, { method: 'GET', headers });
+    if (!r.ok) {
+      if (r.status === 503 || r.status === 429) tripBpCircuitBreaker(120);
+      throw new Error(`order-search ${r.status}`);
+    }
+    const data = await r.json();
+    const rows = data.response?.results || [];
+    if (rows.length === 0) break;
+    const ids = Array.isArray(rows[0]) ? rows.map((row) => row[0]) : rows;
+    orderIds.push(...ids);
+    firstResult += rows.length;
+  }
+
+  if (orderIds.length === 0) {
+    await pool.query(
+      `UPDATE order_pipeline_poll_state
+       SET last_polled_at = NOW(), last_poll_count = 0,
+           last_poll_duration_ms = $1, last_poll_error = NULL
+       WHERE id = 1`,
+      [Date.now() - start]
+    );
+    console.log(`[order-pipeline/${label}] window from=${fromIso}, 0 orders updated`);
+    return { processed: 0, errors: 0, fromIso };
+  }
+
+  // Fetch details in BP-supported batches of up to ~100 IDs.
+  let processed = 0;
+  let errors = 0;
+  const BATCH = 100;
+  for (let i = 0; i < orderIds.length; i += BATCH) {
+    const range = orderIds.slice(i, i + BATCH).join(',');
+    const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${range}`, {
+      method: 'GET', headers,
+    });
+    if (!r.ok) {
+      if (r.status === 503 || r.status === 429) tripBpCircuitBreaker(120);
+      throw new Error(`order-detail batch ${r.status}`);
+    }
+    const data = await r.json();
+    const orders = data.response || [];
+    for (const order of orders) {
+      try {
+        await processOrderForPipeline(order);
+        processed++;
+      } catch (err) {
+        errors++;
+        await writeActivityLog({
+          orderId: order?.id || 0, state: '', status: 'error',
+          errorMessage: err.message,
+          bpStatusName: order?.orderStatus?.name,
+        });
+      }
+      await sleep(ORDER_PIPELINE_BP_SPACING_MS);
+    }
+  }
+
+  await pool.query(
+    `UPDATE order_pipeline_poll_state
+     SET last_polled_at = NOW(), last_poll_count = $1,
+         last_poll_duration_ms = $2, last_poll_error = NULL
+     WHERE id = 1`,
+    [processed, Date.now() - start]
+  );
+  console.log(`[order-pipeline/${label}] processed ${processed}/${orderIds.length} updated orders (${errors} errors) in ${Math.round((Date.now() - start) / 1000)}s. mode=${isDryRun() ? 'dry-run' : 'LIVE'}`);
+  return { processed, errors, fromIso, total: orderIds.length };
+}
+
+// GET /api/order-pipeline/poll-status — last poll meta + dry-run flag
+app.get('/api/order-pipeline/poll-status', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  try {
+    const r = await pool.query(`SELECT last_polled_at, last_poll_count, last_poll_duration_ms, last_poll_error FROM order_pipeline_poll_state WHERE id = 1`);
+    res.json({
+      ...(r.rows[0] || {}),
+      dryRun: isDryRun(),
+      inFlight: orderPipelinePollInFlight,
+      pollIntervalMs: ORDER_PIPELINE_POLL_INTERVAL_MS,
+      windowMinMs: ORDER_PIPELINE_WINDOW_MIN_MS,
+      departmentId: ORDER_PIPELINE_DEPARTMENT_ID,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/order-pipeline/activity — paginated activity log
+app.get('/api/order-pipeline/activity', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const status = req.query.status; // optional filter: dry_run / sent / skipped / error
+  const orderId = req.query.orderId; // optional filter
+  const conditions = [];
+  const params = [];
+  if (status) { conditions.push(`status = $${params.length + 1}`); params.push(status); }
+  if (orderId) { conditions.push(`order_id = $${params.length + 1}`); params.push(Number(orderId)); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  try {
+    const r = await pool.query(
+      `SELECT id, order_id, state, status, recipient, sender, subject,
+              error_message, bp_status_name, prev_state, created_at
+       FROM order_pipeline_send_log
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ${limit} OFFSET ${offset}`,
+      params
+    );
+    const countRes = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM order_pipeline_send_log ${where}`,
+      params
+    );
+    res.json({
+      events: r.rows,
+      total: countRes.rows[0].c,
+      limit, offset,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/order-pipeline/poll/run — manual trigger
+// Body: { windowMins?: number } — optional wider window for audit runs
+app.post('/api/order-pipeline/poll/run', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  if (orderPipelinePollInFlight) {
+    return res.status(409).json({ error: 'poll already in flight' });
+  }
+  const windowMins = Math.min(Math.max(parseInt(req.body?.windowMins, 10) || 0, 0), 60 * 24 * 7);
+  const sinceMs = windowMins > 0 ? Date.now() - windowMins * 60 * 1000 : undefined;
+  // Fire and forget — return immediately, results land in the activity log
+  pollOrderTrackingPipeline({ sinceMs, label: `manual-${windowMins || 'auto'}` })
+    .catch((err) => console.error('Manual order-pipeline run failed:', err.message));
+  res.json({ accepted: true, windowMins: windowMins || 'auto', dryRun: isDryRun() });
 });
 
 const docuSignService = new DocuSignService();
