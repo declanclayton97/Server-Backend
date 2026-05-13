@@ -2906,6 +2906,24 @@ async function initializeOrderPipelineTables() {
         updated_by TEXT,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      -- sender_email is per-template so states that invite replies (e.g.
+      -- the back-order delay email, where a customer may want to ask for
+      -- a substitute or cancel) come from a monitored inbox, while the
+      -- informational states come from an unmonitored ordertracking@
+      -- address. Editable in the admin panel — these are only defaults.
+      ALTER TABLE order_pipeline_templates
+        ADD COLUMN IF NOT EXISTS sender_email TEXT NOT NULL
+        DEFAULT 'ordertracking@tuffshop.co.uk';
+    `);
+
+    // First-deploy backfill for the back-order template — only flips the
+    // sender if the row is still on the column default (i.e. nobody has
+    // edited via the admin panel yet). Safe to run on every boot.
+    await pool.query(`
+      UPDATE order_pipeline_templates
+      SET sender_email = 'sales@tuffshop.co.uk', updated_at = NOW()
+      WHERE state = 'back_order' AND sender_email = 'ordertracking@tuffshop.co.uk'
     `);
 
     // Seed placeholder templates on first boot. Uses ON CONFLICT DO NOTHING
@@ -2925,63 +2943,90 @@ async function initializeOrderPipelineTables() {
     //   {{reviewUrl}}           — for collected / delivered review emails
     //   {{shopName}}            — constant: Tuff Workwear
     //   {{supportEmail}}        — constant: info@tuffshop.co.uk
+    // Reusable footer fragments so the "monitored vs unmonitored sender"
+    // language stays consistent across templates without copy-pasting.
+    const noReplyFooter =
+      "<p style=\"color:#888;font-size:12px;margin-top:24px;\">" +
+      "This email comes from an unmonitored address — please don't reply. " +
+      "If you need help, email <a href=\"mailto:{{supportEmail}}\">{{supportEmail}}</a>." +
+      "</p>";
+    const replyOkFooter =
+      "<p style=\"color:#888;font-size:12px;margin-top:24px;\">" +
+      "You can reply to this email and we'll get back to you, or email " +
+      "<a href=\"mailto:{{supportEmail}}\">{{supportEmail}}</a>." +
+      "</p>";
+
     const seeds = [
-      ['stock_ordered',
+      // [state, sender_email, subject, body_html]
+      ['stock_ordered', 'ordertracking@tuffshop.co.uk',
         "We've ordered the stock for your order {{orderNumber}}",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Just a quick update — we've placed the order with our supplier for the items on your order <strong>{{orderNumber}}</strong>. " +
         "As soon as they arrive with us we'll start preparing your order and email you again.</p>" +
-        "<p>Any questions, reply to this email or get in touch at {{supportEmail}}.</p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>"],
-      ['in_production',
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+      ['in_production', 'ordertracking@tuffshop.co.uk',
         "Your order {{orderNumber}} is being prepared",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Good news — we've started work on your order <strong>{{orderNumber}}</strong>. " +
         "We'll let you know as soon as it's ready.</p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>"],
-      ['back_order',
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+      ['back_order', 'sales@tuffshop.co.uk',
         "There's a delay with your order {{orderNumber}}",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>We wanted to let you know about a delay with your order <strong>{{orderNumber}}</strong> — our supplier has the stock on back order. " +
         "We'll keep you updated and let you know as soon as it lands with us.</p>" +
-        "<p>If you'd rather not wait, just reply to this email and we'll sort it.</p>" +
-        "<p>Thanks for your patience,<br/>{{shopName}}</p>"],
-      ['ready_for_collection',
+        "<p>If you'd rather not wait, just reply to this email and we'll sort it for you.</p>" +
+        "<p>Thanks for your patience,<br/>{{shopName}}</p>" + replyOkFooter],
+      ['ready_for_collection', 'ordertracking@tuffshop.co.uk',
         "Your order {{orderNumber}} is ready to collect",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Your order <strong>{{orderNumber}}</strong> is all ready for you to collect from:</p>" +
         "<p>{{collectionAddress}}</p>" +
         "<p>We're open Monday–Friday 9–5. See you soon!</p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>"],
-      ['shipped',
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+      ['shipped', 'ordertracking@tuffshop.co.uk',
         "Your order {{orderNumber}} is on its way",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Your order <strong>{{orderNumber}}</strong> has been shipped with {{carrierName}}.</p>" +
         "<p>Tracking number: <strong>{{trackingNumber}}</strong><br/>" +
         "Track it here: <a href=\"{{trackingUrl}}\">{{trackingUrl}}</a></p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>"],
-      ['collected',
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+      ['collected', 'ordertracking@tuffshop.co.uk',
         "Thanks for picking up your order, {{customerFirstName}}",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Just wanted to say thanks for collecting your order <strong>{{orderNumber}}</strong>. " +
         "If you have a moment, we'd hugely appreciate a quick review:</p>" +
         "<p><a href=\"{{reviewUrl}}\">Leave a review</a></p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>"],
-      ['delivered',
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+      ['delivered', 'ordertracking@tuffshop.co.uk',
         "How was your order, {{customerFirstName}}?",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>We hope your order <strong>{{orderNumber}}</strong> arrived safely and you're happy with it. " +
         "If you have a moment, we'd really appreciate a quick review:</p>" +
         "<p><a href=\"{{reviewUrl}}\">Leave a review</a></p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>"],
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
     ];
 
-    for (const [state, subject, body] of seeds) {
+    for (const [state, sender, subject, body] of seeds) {
       await pool.query(
-        `INSERT INTO order_pipeline_templates (state, subject, body_html, enabled, updated_by)
-         VALUES ($1, $2, $3, TRUE, 'system-seed')
+        `INSERT INTO order_pipeline_templates (state, subject, body_html, sender_email, enabled, updated_by)
+         VALUES ($1, $2, $3, $4, TRUE, 'system-seed')
          ON CONFLICT (state) DO NOTHING`,
-        [state, subject, body]
+        [state, subject, body, sender]
+      );
+    }
+
+    // Refresh never-edited templates so wording improvements (e.g. the
+    // monitored-vs-unmonitored sender footers) propagate to existing
+    // deploys. We only touch rows still tagged `updated_by = 'system-seed'`
+    // — once anyone saves via the admin panel, updated_by changes and we
+    // leave their version alone.
+    for (const [state, sender, subject, body] of seeds) {
+      await pool.query(
+        `UPDATE order_pipeline_templates
+         SET subject = $1, body_html = $2, sender_email = $3, updated_at = NOW()
+         WHERE state = $4 AND updated_by = 'system-seed'`,
+        [subject, body, sender, state]
       );
     }
 
@@ -3048,7 +3093,7 @@ app.get('/api/order-pipeline/templates', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
   try {
     const r = await pool.query(
-      `SELECT state, subject, body_html, enabled, updated_by, updated_at
+      `SELECT state, subject, body_html, sender_email, enabled, updated_by, updated_at
        FROM order_pipeline_templates
        ORDER BY state`
     );
@@ -3058,15 +3103,20 @@ app.get('/api/order-pipeline/templates', async (req, res) => {
   }
 });
 
-// PUT /api/order-pipeline/templates/:state — update subject / body / enabled.
-// `enabled` is optional (preserves existing value when omitted) so the UI
-// can save copy edits without flipping the enable flag.
+// PUT /api/order-pipeline/templates/:state — update subject / body /
+// sender_email / enabled. Any field omitted from the body preserves its
+// existing value so the UI can save partial edits.
 app.put('/api/order-pipeline/templates/:state', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
   const { state } = req.params;
-  const { subject, body_html, enabled, updatedBy } = req.body || {};
+  const { subject, body_html, sender_email, enabled, updatedBy } = req.body || {};
   if (typeof subject !== 'string' || typeof body_html !== 'string') {
     return res.status(400).json({ error: 'subject and body_html are required strings' });
+  }
+  if (sender_email !== undefined && sender_email !== null) {
+    if (typeof sender_email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(sender_email)) {
+      return res.status(400).json({ error: 'sender_email must be a valid email address' });
+    }
   }
   const known = listStates().some((s) => s.id === state);
   if (!known) return res.status(400).json({ error: `unknown state '${state}'` });
@@ -3075,12 +3125,20 @@ app.put('/api/order-pipeline/templates/:state', async (req, res) => {
       `UPDATE order_pipeline_templates
        SET subject = $1,
            body_html = $2,
-           enabled = COALESCE($3, enabled),
-           updated_by = $4,
+           sender_email = COALESCE($3, sender_email),
+           enabled = COALESCE($4, enabled),
+           updated_by = $5,
            updated_at = NOW()
-       WHERE state = $5
-       RETURNING state, subject, body_html, enabled, updated_by, updated_at`,
-      [subject, body_html, typeof enabled === 'boolean' ? enabled : null, updatedBy || null, state]
+       WHERE state = $6
+       RETURNING state, subject, body_html, sender_email, enabled, updated_by, updated_at`,
+      [
+        subject,
+        body_html,
+        typeof sender_email === 'string' ? sender_email : null,
+        typeof enabled === 'boolean' ? enabled : null,
+        updatedBy || null,
+        state,
+      ]
     );
     if (r.rowCount === 0) return res.status(404).json({ error: `template '${state}' not seeded` });
     res.json({ template: r.rows[0] });
@@ -3101,7 +3159,7 @@ app.get('/api/order-pipeline/preview', async (req, res) => {
   }
   try {
     const tplRes = await pool.query(
-      'SELECT state, subject, body_html, enabled FROM order_pipeline_templates WHERE state = $1',
+      'SELECT state, subject, body_html, sender_email, enabled FROM order_pipeline_templates WHERE state = $1',
       [state]
     );
     if (tplRes.rowCount === 0) {
@@ -3114,6 +3172,7 @@ app.get('/api/order-pipeline/preview', async (req, res) => {
     res.json({
       state: template.state,
       enabled: template.enabled,
+      sender_email: template.sender_email,
       subject: rendered.subject,
       body_html: rendered.body_html,
       variables,
@@ -3139,7 +3198,7 @@ app.post('/api/order-pipeline/test-send', async (req, res) => {
   }
   try {
     const tplRes = await pool.query(
-      'SELECT state, subject, body_html FROM order_pipeline_templates WHERE state = $1',
+      'SELECT state, subject, body_html, sender_email FROM order_pipeline_templates WHERE state = $1',
       [state]
     );
     if (tplRes.rowCount === 0) {
@@ -3153,7 +3212,7 @@ app.post('/api/order-pipeline/test-send', async (req, res) => {
     if (!process.env.SMTP_PASS) {
       return res.status(503).json({ error: 'SMTP_PASS not configured on backend' });
     }
-    const sender = process.env.ORDER_PIPELINE_SENDER_EMAIL || 'noreply@tuffshop.co.uk';
+    const sender = template.sender_email || 'ordertracking@tuffshop.co.uk';
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
       port: parseInt(process.env.SMTP_PORT || '2525', 10),
@@ -3165,7 +3224,7 @@ app.post('/api/order-pipeline/test-send', async (req, res) => {
     });
     const testBanner = `<div style="background:#fff8d6;border:1px solid #f0c419;padding:10px 14px;margin:0 0 16px;font-family:Arial,sans-serif;font-size:12px;color:#7a5b00;">
 <strong>[TEST EMAIL]</strong> Rendered for state <code>${state}</code> against BP order <strong>#${orderId}</strong>.
-Triggered by ${requestedBy || 'unknown'}. The customer would have received the content below.
+Sender: <code>${sender}</code>. Triggered by ${requestedBy || 'unknown'}. The customer would have received the content below.
 </div>`;
     await transporter.sendMail({
       from: `${variables.shopName} <${sender}>`,
@@ -3175,6 +3234,7 @@ Triggered by ${requestedBy || 'unknown'}. The customer would have received the c
     });
     res.json({
       sent: true,
+      sender,
       recipient: recipientEmail,
       subject: rendered.subject,
       diagnostics: rendered.diagnostics,
