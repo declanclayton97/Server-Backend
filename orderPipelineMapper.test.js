@@ -7,6 +7,7 @@ import {
   customerStateForBpStatus,
   isInternalStatus,
   isProofFlowStatus,
+  isPickStageStatus,
   listStates,
 } from "./orderPipelineMapper.js";
 
@@ -32,13 +33,45 @@ assert("Ordered Stock Awaiting Delivery → stock_ordered",
 assert("Sportswear - Ordered Stock → stock_ordered",
   customerStateForBpStatus("Sportswear - Ordered Stock"), STATES.STOCK_ORDERED);
 
-// ── In Production (14 BP statuses, spot-check) ─────────────────
-assert("In stock, pick/pack/ship → in_production",
-  customerStateForBpStatus("In stock, pick/pack/ship"), STATES.IN_PRODUCTION);
+// ── In Production (only the production-room statuses fire here) ────
 assert("Embroidery Room ready → in_production",
   customerStateForBpStatus("Embroidery Room ready"), STATES.IN_PRODUCTION);
-assert("AVIATION - TO PICK → in_production",
-  customerStateForBpStatus("AVIATION - TO PICK"), STATES.IN_PRODUCTION);
+assert("Print Room ready → in_production",
+  customerStateForBpStatus("Print Room ready"), STATES.IN_PRODUCTION);
+assert("EMB - Awaiting Tidying → in_production",
+  customerStateForBpStatus("EMB - Awaiting Tidying"), STATES.IN_PRODUCTION);
+assert("Personalisation Correction → in_production",
+  customerStateForBpStatus("Personalisation Correction"), STATES.IN_PRODUCTION);
+assert("Print - Mimaki Printer → in_production",
+  customerStateForBpStatus("Print - Mimaki Printer"), STATES.IN_PRODUCTION);
+assert("Banners/Stickers/Signs need printing → in_production",
+  customerStateForBpStatus("Banners/Stickers/Signs need printing"), STATES.IN_PRODUCTION);
+
+// ── Pick-stage statuses — deliberately silent, return null ─────
+// These were previously mapped to in_production but BP's stock-allocation
+// belief is too optimistic to trigger a customer email at this point.
+assert("In stock, pick/pack/ship → null (pick stage)",
+  customerStateForBpStatus("In stock, pick/pack/ship"), null);
+assert("Instock - pick & put in workshop → null (pick stage)",
+  customerStateForBpStatus("Instock - pick & put in workshop"), null);
+assert("Pending Room - Awaiting Instructions → null (pick stage)",
+  customerStateForBpStatus("Pending Room - Awaiting Instructions"), null);
+assert("Order Needs Files Adding → null (pick stage)",
+  customerStateForBpStatus("Order Needs Files Adding"), null);
+assert("SPORTS - FILES NEED ADDING → null (pick stage)",
+  customerStateForBpStatus("SPORTS - FILES NEED ADDING"), null);
+assert("Sportswear Orders To Pick → null (pick stage)",
+  customerStateForBpStatus("Sportswear Orders To Pick"), null);
+assert("AVIATION - TO PICK → null (pick stage)",
+  customerStateForBpStatus("AVIATION - TO PICK"), null);
+
+// isPickStageStatus predicate
+assert("isPickStageStatus('In stock, pick/pack/ship') → true",
+  isPickStageStatus("In stock, pick/pack/ship"), true);
+assert("isPickStageStatus('Embroidery Room ready') → false",
+  isPickStageStatus("Embroidery Room ready"), false);
+assert("isPickStageStatus('Cancelled') → false",
+  isPickStageStatus("Cancelled"), false);
 
 // ── Back Order ─────────────────────────────────────────────────
 assert("Back Order with Supplier → back_order",

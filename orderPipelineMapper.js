@@ -46,20 +46,16 @@ const STATE_FOR_STATUS_NAME = new Map([
   ["ordered stock awaiting delivery", STATES.STOCK_ORDERED],
   ["sportswear - ordered stock", STATES.STOCK_ORDERED],
 
-  // In Production — the order is actively being processed in-house
-  ["in stock, pick/pack/ship", STATES.IN_PRODUCTION],
-  ["instock - pick & put in workshop", STATES.IN_PRODUCTION],
+  // In Production — the order is actively being processed in-house. Only
+  // the production-room statuses live here; pick-stage statuses below are
+  // explicitly silent so we don't email "being prepared" before the picker
+  // has actually confirmed the stock exists (see PICK_STAGE_STATUS_NAMES).
   ["banners/stickers/signs need printing", STATES.IN_PRODUCTION],
-  ["sportswear orders to pick", STATES.IN_PRODUCTION],
-  ["pending room - awaiting instructions", STATES.IN_PRODUCTION],
   ["embroidery room ready", STATES.IN_PRODUCTION],
   ["emb - awaiting tidying", STATES.IN_PRODUCTION],
   ["print room ready", STATES.IN_PRODUCTION],
   ["personalisation correction", STATES.IN_PRODUCTION],
   ["print - mimaki printer", STATES.IN_PRODUCTION],
-  ["order needs files adding", STATES.IN_PRODUCTION],
-  ["sports - files need adding", STATES.IN_PRODUCTION],
-  ["aviation - to pick", STATES.IN_PRODUCTION],
 
   // Back Order — supplier delay
   ["back order with supplier", STATES.BACK_ORDER],
@@ -69,6 +65,23 @@ const STATE_FOR_STATUS_NAME = new Map([
   ["collection - credit account", STATES.READY_FOR_COLLECTION],
   ["sportswear collection paid", STATES.READY_FOR_COLLECTION],
 ]);
+
+// Pick-stage statuses — BP says "this can be picked" but it hasn't been
+// physically pulled off the shelf yet. The Pick-Pack unfound workflow shows
+// these are over-optimistic often enough that emailing "your order is being
+// prepared" here risks misleading the customer when the stock turns out to
+// be missing and the order has to wait days for a restock. Deliberately
+// silent — the customer's next email fires either at a production-room
+// status (logo orders) or at Invoiced and Completed (non-logo orders).
+const PICK_STAGE_STATUS_NAMES = new Set([
+  "in stock, pick/pack/ship",
+  "instock - pick & put in workshop",
+  "pending room - awaiting instructions",
+  "order needs files adding",
+  "sports - files need adding",
+  "sportswear orders to pick",
+  "aviation - to pick",
+].map(norm));
 
 // "Final" BP statuses — these route to either Shipped or Collected based
 // on the previous customer state captured in order_email_log.
@@ -132,6 +145,15 @@ function isProofFlowStatus(bpStatusName) {
   return PROOF_STATUS_NAMES.has(n);
 }
 
+// Returns true if the order is in a pick-stage status — BP indicates the
+// items are ready to pick but no physical pick has been confirmed. Useful
+// for the admin "inspect order" panel so users can distinguish "deliberately
+// silent" from "unknown status" when reviewing an order's email history.
+function isPickStageStatus(bpStatusName) {
+  const n = norm(bpStatusName);
+  return PICK_STAGE_STATUS_NAMES.has(n);
+}
+
 // Returns the customer-facing state for a given BP status name, taking the
 // previously-emailed state into account so that "Invoiced and Completed"
 // routes correctly between Shipped and Collected.
@@ -143,6 +165,7 @@ function customerStateForBpStatus(bpStatusName, prevCustomerState = null) {
   if (!n) return null;
   if (INTERNAL_STATUS_NAMES.has(n)) return null;
   if (PROOF_STATUS_NAMES.has(n)) return null;
+  if (PICK_STAGE_STATUS_NAMES.has(n)) return null;
 
   if (FINAL_STATUS_NAMES.has(n)) {
     // Disambiguate based on the previous customer-facing state.
@@ -173,6 +196,7 @@ export {
   customerStateForBpStatus,
   isInternalStatus,
   isProofFlowStatus,
+  isPickStageStatus,
   listStates,
   // Exposed for test introspection / admin panel "which BP statuses map
   // here" display. Not meant for callers to mutate.
@@ -180,4 +204,5 @@ export {
   FINAL_STATUS_NAMES as _FINAL_STATUS_NAMES,
   INTERNAL_STATUS_NAMES as _INTERNAL_STATUS_NAMES,
   PROOF_STATUS_NAMES as _PROOF_STATUS_NAMES,
+  PICK_STAGE_STATUS_NAMES as _PICK_STAGE_STATUS_NAMES,
 };
