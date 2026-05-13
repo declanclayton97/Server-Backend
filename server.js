@@ -2872,6 +2872,126 @@ app.post('/api/proof-chase/send-test', proofChaseTestSendHandler);
   }
 })();
 
+// ── Order tracking email pipeline ─────────────────────────────────
+// Customer-facing transactional emails across the lifecycle of an online
+// order (departmentId=17). Phase 1: schema + status mapper only — no
+// poller, no sends. See Order-Tracking-Pipeline/SPEC.md.
+//
+// Two tables:
+//   order_email_log         — per-order send history, the idempotency guard
+//                             that stops the same state firing twice.
+//   order_pipeline_templates — admin-editable subject/body per customer
+//                             state. Seeded with placeholders on first boot.
+async function initializeOrderPipelineTables() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS order_email_log (
+        order_id BIGINT PRIMARY KEY,
+        last_customer_state TEXT,
+        emails_sent JSONB NOT NULL DEFAULT '[]'::jsonb,
+        last_checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_order_email_log_checked
+        ON order_email_log(last_checked_at);
+
+      CREATE TABLE IF NOT EXISTS order_pipeline_templates (
+        state TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        body_html TEXT NOT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    // Seed placeholder templates on first boot. Uses ON CONFLICT DO NOTHING
+    // so existing rows are never overwritten — once the user edits a
+    // template in the admin panel, redeploys leave their version alone.
+    //
+    // Variables locked for v1 (admin panel must document these for users):
+    //   {{customerName}}        — full name
+    //   {{customerFirstName}}   — first name only (for greetings)
+    //   {{orderNumber}}         — BP order ref / PO number
+    //   {{orderId}}             — numeric BP id (for support reference)
+    //   {{orderDate}}           — placed-on date, formatted DD MMM YYYY
+    //   {{collectionAddress}}   — for ready-for-collection emails
+    //   {{trackingNumber}}      — for shipped emails
+    //   {{carrierName}}         — for shipped emails (FedEx / Royal Mail / DPD)
+    //   {{trackingUrl}}         — carrier tracking page link
+    //   {{reviewUrl}}           — for collected / delivered review emails
+    //   {{shopName}}            — constant: Tuff Workwear
+    //   {{supportEmail}}        — constant: info@tuffshop.co.uk
+    const seeds = [
+      ['stock_ordered',
+        "We've ordered the stock for your order {{orderNumber}}",
+        "<p>Hi {{customerFirstName}},</p>" +
+        "<p>Just a quick update — we've placed the order with our supplier for the items on your order <strong>{{orderNumber}}</strong>. " +
+        "As soon as they arrive with us we'll start preparing your order and email you again.</p>" +
+        "<p>Any questions, reply to this email or get in touch at {{supportEmail}}.</p>" +
+        "<p>Thanks,<br/>{{shopName}}</p>"],
+      ['in_production',
+        "Your order {{orderNumber}} is being prepared",
+        "<p>Hi {{customerFirstName}},</p>" +
+        "<p>Good news — we've started work on your order <strong>{{orderNumber}}</strong>. " +
+        "We'll let you know as soon as it's ready.</p>" +
+        "<p>Thanks,<br/>{{shopName}}</p>"],
+      ['back_order',
+        "There's a delay with your order {{orderNumber}}",
+        "<p>Hi {{customerFirstName}},</p>" +
+        "<p>We wanted to let you know about a delay with your order <strong>{{orderNumber}}</strong> — our supplier has the stock on back order. " +
+        "We'll keep you updated and let you know as soon as it lands with us.</p>" +
+        "<p>If you'd rather not wait, just reply to this email and we'll sort it.</p>" +
+        "<p>Thanks for your patience,<br/>{{shopName}}</p>"],
+      ['ready_for_collection',
+        "Your order {{orderNumber}} is ready to collect",
+        "<p>Hi {{customerFirstName}},</p>" +
+        "<p>Your order <strong>{{orderNumber}}</strong> is all ready for you to collect from:</p>" +
+        "<p>{{collectionAddress}}</p>" +
+        "<p>We're open Monday–Friday 9–5. See you soon!</p>" +
+        "<p>Thanks,<br/>{{shopName}}</p>"],
+      ['shipped',
+        "Your order {{orderNumber}} is on its way",
+        "<p>Hi {{customerFirstName}},</p>" +
+        "<p>Your order <strong>{{orderNumber}}</strong> has been shipped with {{carrierName}}.</p>" +
+        "<p>Tracking number: <strong>{{trackingNumber}}</strong><br/>" +
+        "Track it here: <a href=\"{{trackingUrl}}\">{{trackingUrl}}</a></p>" +
+        "<p>Thanks,<br/>{{shopName}}</p>"],
+      ['collected',
+        "Thanks for picking up your order, {{customerFirstName}}",
+        "<p>Hi {{customerFirstName}},</p>" +
+        "<p>Just wanted to say thanks for collecting your order <strong>{{orderNumber}}</strong>. " +
+        "If you have a moment, we'd hugely appreciate a quick review:</p>" +
+        "<p><a href=\"{{reviewUrl}}\">Leave a review</a></p>" +
+        "<p>Thanks,<br/>{{shopName}}</p>"],
+      ['delivered',
+        "How was your order, {{customerFirstName}}?",
+        "<p>Hi {{customerFirstName}},</p>" +
+        "<p>We hope your order <strong>{{orderNumber}}</strong> arrived safely and you're happy with it. " +
+        "If you have a moment, we'd really appreciate a quick review:</p>" +
+        "<p><a href=\"{{reviewUrl}}\">Leave a review</a></p>" +
+        "<p>Thanks,<br/>{{shopName}}</p>"],
+    ];
+
+    for (const [state, subject, body] of seeds) {
+      await pool.query(
+        `INSERT INTO order_pipeline_templates (state, subject, body_html, enabled, updated_by)
+         VALUES ($1, $2, $3, TRUE, 'system-seed')
+         ON CONFLICT (state) DO NOTHING`,
+        [state, subject, body]
+      );
+    }
+
+    console.log('✅ order_email_log + order_pipeline_templates initialized');
+  } catch (err) {
+    console.error('❌ Error initializing order pipeline tables:', err.message);
+  }
+}
+
+(async () => {
+  await initializeOrderPipelineTables();
+})();
+
 const docuSignService = new DocuSignService();
 
 // DocuSign logging functionality
