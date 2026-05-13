@@ -9,7 +9,7 @@ import { SIGNATURE_HTML } from "./emailSignature.js";
 
 const BRAND_CONSTANTS = {
   shopName: process.env.ORDER_PIPELINE_SHOP_NAME || "Tuff Workwear",
-  supportEmail: process.env.ORDER_PIPELINE_SUPPORT_EMAIL || "info@tuffshop.co.uk",
+  supportEmail: process.env.ORDER_PIPELINE_SUPPORT_EMAIL || "sales@tuffshop.co.uk",
   reviewUrl: process.env.ORDER_PIPELINE_REVIEW_URL || "https://uk.trustpilot.com/review/tuffshop.co.uk",
   collectionAddress: process.env.ORDER_PIPELINE_COLLECTION_ADDRESS ||
     "Tuff Workwear, [collection address — set ORDER_PIPELINE_COLLECTION_ADDRESS env var]",

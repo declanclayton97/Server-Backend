@@ -2890,7 +2890,7 @@ async function initializeOrderPipelineTables() {
     //   {{trackingUrl}}         — carrier tracking page link
     //   {{reviewUrl}}           — for collected / delivered review emails
     //   {{shopName}}            — constant: Tuff Workwear
-    //   {{supportEmail}}        — constant: info@tuffshop.co.uk
+    //   {{supportEmail}}        — constant: sales@tuffshop.co.uk
     // Reusable footer fragments so the "monitored vs unmonitored sender"
     // language stays consistent across templates without copy-pasting.
     const noReplyFooter =

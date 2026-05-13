@@ -23,7 +23,7 @@ const VARIABLE_SCHEMA = [
   { name: "trackingUrl",       label: "Carrier tracking URL (shipped)",    example: "https://www.fedex.com/..." },
   { name: "reviewUrl",         label: "Review request URL",                example: "https://trustpilot.com/..." },
   { name: "shopName",          label: "Shop name (brand constant)",        example: "Tuff Workwear" },
-  { name: "supportEmail",      label: "Support email (brand constant)",    example: "info@tuffshop.co.uk" },
+  { name: "supportEmail",      label: "Support email (brand constant)",    example: "sales@tuffshop.co.uk" },
   { name: "signature",         label: "Brand signature (HTML — logo + socials + legal)", example: "(rendered block — same as proof-chase emails)" },
 ];
 

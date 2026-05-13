@@ -107,7 +107,7 @@ const notes = [
 ];
 const constants = {
   shopName: "Tuff Workwear",
-  supportEmail: "info@tuffshop.co.uk",
+  supportEmail: "sales@tuffshop.co.uk",
   reviewUrl: "https://example.com/review",
   collectionAddress: "Test Yard, Test St",
 };
@@ -123,7 +123,7 @@ assertEq("carrierName from notes", vars.carrierName, "FedEx");
 assertEq("trackingUrl built", vars.trackingUrl,
   "https://www.fedex.com/fedextrack/?trknbr=871203703913");
 assertEq("shopName from constants", vars.shopName, "Tuff Workwear");
-assertEq("supportEmail from constants", vars.supportEmail, "info@tuffshop.co.uk");
+assertEq("supportEmail from constants", vars.supportEmail, "sales@tuffshop.co.uk");
 assertEq("reviewUrl from constants", vars.reviewUrl, "https://example.com/review");
 assertEq("collectionAddress from constants", vars.collectionAddress, "Test Yard, Test St");
 assertEq("signature is the branded HTML block",

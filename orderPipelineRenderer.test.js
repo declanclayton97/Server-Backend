@@ -21,7 +21,7 @@ const vars = {
   carrierName: "FedEx",
   trackingUrl: "https://example.com/track",
   shopName: "Tuff Workwear",
-  supportEmail: "info@tuffshop.co.uk",
+  supportEmail: "sales@tuffshop.co.uk",
 };
 
 // ── Basic substitution ─────────────────────────────────────────
