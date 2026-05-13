@@ -12,6 +12,9 @@ import { fileURLToPath } from 'url';
 import pkg from 'pg';
 import { PDFDocument, rgb } from 'pdf-lib';
 import nodemailer from 'nodemailer';
+import { listStates } from './orderPipelineMapper.js';
+import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
+import { deriveVariables } from './orderPipelineVariables.js';
 const { Pool } = pkg;
 
 // Get directory name for ES modules
@@ -2991,6 +2994,216 @@ async function initializeOrderPipelineTables() {
 (async () => {
   await initializeOrderPipelineTables();
 })();
+
+// ── Order pipeline: admin / inspect endpoints ─────────────────────
+// Read-only for the admin panel + a single test-send. No poller endpoints
+// here yet — that's Phase 3. None of these touch real customer emails.
+
+// Helper: fetch a BP order detail + its notes in parallel. Returns
+// { order, notes } in the shapes orderPipelineVariables.js expects.
+async function fetchBpOrderForPipeline(orderId) {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    throw new Error('Brightpearl credentials not configured on this backend');
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+  };
+
+  const [orderRes, notesRes] = await Promise.all([
+    fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`, { headers }),
+    fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/note`, { headers }),
+  ]);
+
+  if (!orderRes.ok) {
+    const t = await orderRes.text().catch(() => '');
+    throw new Error(`Failed to fetch BP order ${orderId}: ${orderRes.status} ${t.slice(0, 200)}`);
+  }
+  const orderJson = await orderRes.json();
+  const order = (orderJson.response || [])[0];
+  if (!order) throw new Error(`BP order ${orderId} not found`);
+
+  let notes = [];
+  if (notesRes.ok) {
+    const notesJson = await notesRes.json().catch(() => ({ response: [] }));
+    notes = notesJson.response || [];
+  }
+  return { order, notes };
+}
+
+// GET /api/order-pipeline/states — for the admin panel sidebar + variable
+// reference card. Static data, doesn't touch the DB.
+app.get('/api/order-pipeline/states', (req, res) => {
+  res.json({
+    states: listStates(),
+    variables: VARIABLE_SCHEMA,
+  });
+});
+
+// GET /api/order-pipeline/templates — return all 7 stored templates.
+app.get('/api/order-pipeline/templates', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT state, subject, body_html, enabled, updated_by, updated_at
+       FROM order_pipeline_templates
+       ORDER BY state`
+    );
+    res.json({ templates: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/order-pipeline/templates/:state — update subject / body / enabled.
+// `enabled` is optional (preserves existing value when omitted) so the UI
+// can save copy edits without flipping the enable flag.
+app.put('/api/order-pipeline/templates/:state', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  const { state } = req.params;
+  const { subject, body_html, enabled, updatedBy } = req.body || {};
+  if (typeof subject !== 'string' || typeof body_html !== 'string') {
+    return res.status(400).json({ error: 'subject and body_html are required strings' });
+  }
+  const known = listStates().some((s) => s.id === state);
+  if (!known) return res.status(400).json({ error: `unknown state '${state}'` });
+  try {
+    const r = await pool.query(
+      `UPDATE order_pipeline_templates
+       SET subject = $1,
+           body_html = $2,
+           enabled = COALESCE($3, enabled),
+           updated_by = $4,
+           updated_at = NOW()
+       WHERE state = $5
+       RETURNING state, subject, body_html, enabled, updated_by, updated_at`,
+      [subject, body_html, typeof enabled === 'boolean' ? enabled : null, updatedBy || null, state]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: `template '${state}' not seeded` });
+    res.json({ template: r.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/order-pipeline/preview?orderId=X&state=Y — renders the stored
+// template against a real BP order. Returns rendered subject/body + the
+// resolved variables (for the side panel) + diagnostics (missing/unknown
+// placeholders so the admin can spot typos before saving).
+app.get('/api/order-pipeline/preview', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  const { orderId, state } = req.query;
+  if (!orderId || !state) {
+    return res.status(400).json({ error: 'orderId and state query params required' });
+  }
+  try {
+    const tplRes = await pool.query(
+      'SELECT state, subject, body_html, enabled FROM order_pipeline_templates WHERE state = $1',
+      [state]
+    );
+    if (tplRes.rowCount === 0) {
+      return res.status(404).json({ error: `template for state '${state}' not found` });
+    }
+    const template = tplRes.rows[0];
+    const { order, notes } = await fetchBpOrderForPipeline(orderId);
+    const variables = deriveVariables(order, { notes });
+    const rendered = renderTemplate(template, variables);
+    res.json({
+      state: template.state,
+      enabled: template.enabled,
+      subject: rendered.subject,
+      body_html: rendered.body_html,
+      variables,
+      diagnostics: rendered.diagnostics,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/order-pipeline/test-send — same as preview, but actually emails
+// the result to the requester (NOT the customer). Subject is prefixed with
+// [TEST] and a yellow info banner is injected at the top of the body so
+// recipients are never confused about whether it's the real thing.
+app.post('/api/order-pipeline/test-send', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  const { state, orderId, recipientEmail, requestedBy } = req.body || {};
+  if (!state || !orderId || !recipientEmail) {
+    return res.status(400).json({ error: 'state, orderId and recipientEmail required' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+    return res.status(400).json({ error: 'recipientEmail looks invalid' });
+  }
+  try {
+    const tplRes = await pool.query(
+      'SELECT state, subject, body_html FROM order_pipeline_templates WHERE state = $1',
+      [state]
+    );
+    if (tplRes.rowCount === 0) {
+      return res.status(404).json({ error: `template for state '${state}' not found` });
+    }
+    const template = tplRes.rows[0];
+    const { order, notes } = await fetchBpOrderForPipeline(orderId);
+    const variables = deriveVariables(order, { notes });
+    const rendered = renderTemplate(template, variables);
+
+    if (!process.env.SMTP_PASS) {
+      return res.status(503).json({ error: 'SMTP_PASS not configured on backend' });
+    }
+    const sender = process.env.ORDER_PIPELINE_SENDER_EMAIL || 'noreply@tuffshop.co.uk';
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
+      port: parseInt(process.env.SMTP_PORT || '2525', 10),
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USERNAME || 'tuffshop.co.uk',
+        pass: process.env.SMTP_PASS,
+      },
+    });
+    const testBanner = `<div style="background:#fff8d6;border:1px solid #f0c419;padding:10px 14px;margin:0 0 16px;font-family:Arial,sans-serif;font-size:12px;color:#7a5b00;">
+<strong>[TEST EMAIL]</strong> Rendered for state <code>${state}</code> against BP order <strong>#${orderId}</strong>.
+Triggered by ${requestedBy || 'unknown'}. The customer would have received the content below.
+</div>`;
+    await transporter.sendMail({
+      from: `${variables.shopName} <${sender}>`,
+      to: recipientEmail,
+      subject: `[TEST] ${rendered.subject}`,
+      html: testBanner + rendered.body_html,
+    });
+    res.json({
+      sent: true,
+      recipient: recipientEmail,
+      subject: rendered.subject,
+      diagnostics: rendered.diagnostics,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/order-pipeline/inspect/:orderId — what (if anything) we've
+// emailed for this order. Drives the "is this customer up to date?"
+// section of the admin panel.
+app.get('/api/order-pipeline/inspect/:orderId', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT order_id, last_customer_state, emails_sent, last_checked_at
+       FROM order_email_log
+       WHERE order_id = $1`,
+      [req.params.orderId]
+    );
+    if (r.rowCount === 0) {
+      return res.json({ orderId: req.params.orderId, found: false, log: null });
+    }
+    res.json({ orderId: req.params.orderId, found: true, log: r.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 const docuSignService = new DocuSignService();
 
