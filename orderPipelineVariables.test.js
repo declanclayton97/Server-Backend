@@ -8,6 +8,9 @@ import {
   firstName,
   formatOrderDate,
   pickCustomerName,
+  smartTitleCase,
+  isTitleToken,
+  isOnlyTitles,
 } from "./orderPipelineVariables.js";
 
 let pass = 0, fail = 0;
@@ -19,11 +22,58 @@ function assertEq(label, actual, expected) {
   }
 }
 
-// ── firstName ──────────────────────────────────────────────────
+// ── smartTitleCase ─────────────────────────────────────────────
+assertEq("ALL CAPS → title case",
+  smartTitleCase("JOHN SMITH"), "John Smith");
+assertEq("all lowercase → title case",
+  smartTitleCase("john smith"), "John Smith");
+assertEq("Mixed casing → title case",
+  smartTitleCase("jOhN sMiTh"), "John Smith");
+assertEq("Hyphenated name",
+  smartTitleCase("ANNE-MARIE"), "Anne-Marie");
+assertEq("Apostrophe name",
+  smartTitleCase("O'BRIEN"), "O'Brien");
+assertEq("Mc prefix",
+  smartTitleCase("MCDONALD"), "McDonald");
+assertEq("Mc prefix mid-name",
+  smartTitleCase("john mcconnell"), "John McConnell");
+assertEq("Accented chars preserved",
+  smartTitleCase("MÜLLER"), "Müller");
+assertEq("Multiple spaces collapsed",
+  smartTitleCase("  john    smith  "), "John Smith");
+assertEq("Empty input → empty string", smartTitleCase(""), "");
+assertEq("Null input → empty string", smartTitleCase(null), "");
+
+// ── isTitleToken / isOnlyTitles ────────────────────────────────
+assertEq("'Mr' is a title", isTitleToken("Mr"), true);
+assertEq("'MR.' is a title (punct stripped)", isTitleToken("MR."), true);
+assertEq("'Dr' is a title", isTitleToken("Dr"), true);
+assertEq("'John' is not a title", isTitleToken("John"), false);
+assertEq("isOnlyTitles 'Mr'", isOnlyTitles("Mr"), true);
+assertEq("isOnlyTitles 'Mr Dr'", isOnlyTitles("Mr Dr"), true);
+assertEq("isOnlyTitles 'Mr Smith'", isOnlyTitles("Mr Smith"), false);
+assertEq("isOnlyTitles ''", isOnlyTitles(""), false);
+
+// ── firstName (greeting fallback + title handling) ─────────────
 assertEq("firstName 'John Smith'", firstName("John Smith"), "John");
-assertEq("firstName trims", firstName("  Mary  Jane  Smith "), "Mary");
-assertEq("firstName empty", firstName(""), "");
-assertEq("firstName null", firstName(null), "");
+assertEq("firstName normalises case",
+  firstName("JOHN SMITH"), "John");
+assertEq("firstName 'jane doe' → 'Jane'",
+  firstName("jane doe"), "Jane");
+assertEq("firstName 'Mr John Smith' → 'John'",
+  firstName("Mr John Smith"), "John");
+assertEq("firstName 'MR JOHN SMITH' → 'John'",
+  firstName("MR JOHN SMITH"), "John");
+assertEq("firstName 'Mr Smith' → 'there' (surname-only is ambiguous)",
+  firstName("Mr Smith"), "there");
+assertEq("firstName 'Mr' alone → 'there'",
+  firstName("Mr"), "there");
+assertEq("firstName trims",
+  firstName("  Mary  Jane  Smith "), "Mary");
+assertEq("firstName empty → 'there'", firstName(""), "there");
+assertEq("firstName null → 'there'", firstName(null), "there");
+assertEq("firstName 'Anne-Marie Smith' → 'Anne-Marie'",
+  firstName("Anne-Marie Smith"), "Anne-Marie");
 
 // ── formatOrderDate ────────────────────────────────────────────
 assertEq("ISO date 2026-05-13", formatOrderDate("2026-05-13T10:00:00Z"), "13 May 2026");
@@ -36,17 +86,68 @@ assertEq("Prefers addressFullName over company",
     customer: { companyName: "ACME Ltd", addressFullName: "John Smith" },
   }),
   "John Smith");
+assertEq("Normalises ALL CAPS full name",
+  pickCustomerName({
+    customer: { addressFullName: "JOHN SMITH" },
+  }),
+  "John Smith");
+assertEq("Normalises all-lowercase",
+  pickCustomerName({
+    customer: { addressFullName: "john smith" },
+  }),
+  "John Smith");
 assertEq("Falls back to first+last",
   pickCustomerName({
     customer: { addressFirstName: "Jane", addressLastName: "Doe" },
   }),
   "Jane Doe");
+assertEq("Title-only full name → augment with addressLastName",
+  pickCustomerName({
+    customer: { addressFullName: "Mr", addressLastName: "Smith" },
+  }),
+  "Mr Smith");
+assertEq("Title-only full name → augment with delivery lastName",
+  pickCustomerName({
+    customer: { addressFullName: "Mrs" },
+    delivery: { addressLastName: "Jones" },
+  }),
+  "Mrs Jones");
+assertEq("Title in fullName + name in first/last → 'Mr John Smith'",
+  pickCustomerName({
+    customer: { addressFullName: "MR", addressFirstName: "John", addressLastName: "Smith" },
+  }),
+  "Mr John Smith");
+assertEq("Title typed into firstName box alongside name → 'Mr John Smith'",
+  pickCustomerName({
+    customer: { addressFirstName: "Mr John", addressLastName: "Smith" },
+  }),
+  "Mr John Smith");
+assertEq("Title with trailing dot in firstName box",
+  pickCustomerName({
+    customer: { addressFirstName: "Mr.", addressLastName: "Smith" },
+  }),
+  "Mr Smith");
+assertEq("Title + firstName combined in full name stays intact",
+  pickCustomerName({
+    customer: { addressFullName: "Mr John Smith" },
+  }),
+  "Mr John Smith");
+assertEq("McDonald name title-cased",
+  pickCustomerName({
+    customer: { addressFullName: "JOHN MCDONALD" },
+  }),
+  "John McDonald");
 assertEq("Falls back to delivery if customer empty",
   pickCustomerName({
     customer: {},
     delivery: { addressFullName: "Site Foreman" },
   }),
   "Site Foreman");
+assertEq("Last resort: company name title-cased",
+  pickCustomerName({
+    customer: { companyName: "TUFF WORKWEAR LTD" },
+  }),
+  "Tuff Workwear Ltd");
 assertEq("Returns empty if nothing", pickCustomerName({}), "");
 
 // ── buildTrackingUrl (per carrier) ─────────────────────────────
