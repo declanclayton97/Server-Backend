@@ -126,6 +126,8 @@ assertEq("shopName from constants", vars.shopName, "Tuff Workwear");
 assertEq("supportEmail from constants", vars.supportEmail, "info@tuffshop.co.uk");
 assertEq("reviewUrl from constants", vars.reviewUrl, "https://example.com/review");
 assertEq("collectionAddress from constants", vars.collectionAddress, "Test Yard, Test St");
+assertEq("signature is the branded HTML block",
+  vars.signature.startsWith("<table"), true);
 
 // ── deriveVariables with no notes (in-production email use case) ─
 const varsNoNotes = deriveVariables(bp, { constants });

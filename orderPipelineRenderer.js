@@ -24,6 +24,7 @@ const VARIABLE_SCHEMA = [
   { name: "reviewUrl",         label: "Review request URL",                example: "https://trustpilot.com/..." },
   { name: "shopName",          label: "Shop name (brand constant)",        example: "Tuff Workwear" },
   { name: "supportEmail",      label: "Support email (brand constant)",    example: "info@tuffshop.co.uk" },
+  { name: "signature",         label: "Brand signature (HTML — logo + socials + legal)", example: "(rendered block — same as proof-chase emails)" },
 ];
 
 const VALID_VAR_NAMES = new Set(VARIABLE_SCHEMA.map((v) => v.name));

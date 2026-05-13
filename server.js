@@ -15,6 +15,7 @@ import nodemailer from 'nodemailer';
 import { listStates } from './orderPipelineMapper.js';
 import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables } from './orderPipelineVariables.js';
+import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 const { Pool } = pkg;
 
 // Get directory name for ES modules
@@ -2275,64 +2276,11 @@ async function initializeProofChaseTable() {
 }
 
 // Build the chase email body. Quicknote text + customer/order merge.
-const EMAIL_ASSETS_BASE = process.env.EMAIL_ASSETS_BASE_URL || 'https://server-backend-1i47.onrender.com/email-assets';
-
-const PROOF_CHASE_SIGNATURE_TEXT = `--
-
-Tuff Workwear Ltd
-Tuffshop.co.uk
-144-146 Aberford Road, Leeds, LS26 8LG
-
-Follow us:
-Facebook: https://facebook.com/tuffshop.co.uk/
-Twitter: https://twitter.com/tuffshop
-LinkedIn: https://www.linkedin.com/company/tuff-workwear-ltd
-YouTube: https://youtube.com/channel/UCjI55--M7y8397npIA-BAdw
-Instagram: https://instagram.com/tuff.shop/
-Pinterest: https://pinterest.com/tuffshop/
-
-This email and any attachments to it may be confidential and are intended solely for the use of the individual to whom it is addressed. Any views or opinions expressed are solely those of the author and do not necessarily represent those of Tuff Workwear Ltd.
-If you are not the intended recipient of this email, you must neither take any action based upon its contents, nor copy or show it to anyone.
-Please contact the sender if you believe you have received this email in error.`;
-
-const PROOF_CHASE_SIGNATURE_HTML = `<table cellpadding="0" cellspacing="0" border="0" style="margin-top:24px;font-family:'Lucida Grande',Arial,Helvetica,sans-serif;font-size:12px;color:#222;">
-  <tr>
-    <td style="padding:6px 0;">
-      <a href="https://tuffshop.co.uk" style="text-decoration:none;border:0;">
-        <img src="${EMAIL_ASSETS_BASE}/image001.png" alt="Tuff Workwear" width="113" height="80" style="display:block;border:0;outline:none;">
-      </a>
-    </td>
-  </tr>
-  <tr>
-    <td style="padding:6px 0;">
-      <a href="https://maps.apple.com/?q=144-146+Aberford+Road,Leeds,LS26+8LG" style="color:#222;text-decoration:none;">144-146 Aberford Road, Leeds, LS26 8LG</a>
-    </td>
-  </tr>
-  <tr>
-    <td style="padding:6px 0;">
-      <table cellpadding="0" cellspacing="0" border="0">
-        <tr>
-          <td style="padding:0 6px 0 0;"><a href="https://facebook.com/tuffshop.co.uk/" style="border:0;"><img src="${EMAIL_ASSETS_BASE}/image002.png" alt="Facebook" width="32" height="32" style="display:block;border:0;outline:none;"></a></td>
-          <td style="padding:0 6px;"><a href="https://twitter.com/tuffshop?lang=en" style="border:0;"><img src="${EMAIL_ASSETS_BASE}/image003.png" alt="Twitter" width="32" height="32" style="display:block;border:0;outline:none;"></a></td>
-          <td style="padding:0 6px;"><a href="https://www.linkedin.com/company/tuff-workwear-ltd" style="border:0;"><img src="${EMAIL_ASSETS_BASE}/image004.png" alt="LinkedIn" width="32" height="32" style="display:block;border:0;outline:none;"></a></td>
-          <td style="padding:0 6px;"><a href="https://youtube.com/channel/UCjI55--M7y8397npIA-BAdw" style="border:0;"><img src="${EMAIL_ASSETS_BASE}/image005.png" alt="YouTube" width="32" height="32" style="display:block;border:0;outline:none;"></a></td>
-          <td style="padding:0 6px;"><a href="https://instagram.com/tuff.shop/?hl=en" style="border:0;"><img src="${EMAIL_ASSETS_BASE}/image006.png" alt="Instagram" width="32" height="32" style="display:block;border:0;outline:none;"></a></td>
-          <td style="padding:0 6px;"><a href="https://pinterest.com/tuffshop/" style="border:0;"><img src="${EMAIL_ASSETS_BASE}/image007.png" alt="Pinterest" width="32" height="32" style="display:block;border:0;outline:none;"></a></td>
-          <td style="padding:0 6px;"><a href="https://wa.me/" style="border:0;"><img src="${EMAIL_ASSETS_BASE}/image008.png" alt="WhatsApp" width="32" height="32" style="display:block;border:0;outline:none;"></a></td>
-          <td style="padding:0 0 0 6px;"><a href="https://www.google.com/maps/place/Tuffshop.co.uk/@53.7529091,-1.4490469,17z/data=!3m1!4b1!4m5!3m4!1s0x48795d81c9d2d0df:0x51b05d91e1ea6be9!8m2!3d53.7529091!4d-1.4468582" style="border:0;"><img src="${EMAIL_ASSETS_BASE}/image009.png" alt="Google" width="32" height="32" style="display:block;border:0;outline:none;"></a></td>
-        </tr>
-      </table>
-    </td>
-  </tr>
-  <tr>
-    <td style="padding:6px 0;font-size:12px;">To follow us on social media or leave a review click the icons - we would love your feedback!</td>
-  </tr>
-</table>
-<p style="color:#888;font-family:'Lucida Grande',Arial,Helvetica,sans-serif;font-size:11px;line-height:1.4;margin-top:18px;">
-  This email and any attachments to it may be confidential and are intended solely for the use of the individual to whom it is addressed. Any views or opinions expressed are solely those of the author and do not necessarily represent those of Tuff Workwear Ltd.<br>
-  If you are not the intended recipient of this email, you must neither take any action based upon its contents, nor copy or show it to anyone.<br>
-  Please contact the sender if you believe you have received this email in error.
-</p>`;
+// Signature constants moved to emailSignature.js so the order tracking
+// pipeline can reuse the same block. Aliases below keep the existing
+// proof-chase references intact without touching that module.
+const PROOF_CHASE_SIGNATURE_TEXT = SIGNATURE_TEXT;
+const PROOF_CHASE_SIGNATURE_HTML = SIGNATURE_HTML;
 
 function buildProofChaseEmail(order) {
   const customer = order.parties?.customer || {};
@@ -2956,6 +2904,10 @@ async function initializeOrderPipelineTables() {
       "<a href=\"mailto:{{supportEmail}}\">{{supportEmail}}</a>." +
       "</p>";
 
+    // Every template ends with {{signature}} — the renderer expands it to
+    // the shared branded HTML signature (logo, socials, legal disclaimer).
+    // Same block proof-chase emails use, so customers see consistent
+    // branding across every Tuff Workwear email.
     const seeds = [
       // [state, sender_email, subject, body_html]
       ['stock_ordered', 'ordertracking@tuffshop.co.uk',
@@ -2963,48 +2915,48 @@ async function initializeOrderPipelineTables() {
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Just a quick update — we've placed the order with our supplier for the items on your order <strong>{{orderNumber}}</strong>. " +
         "As soon as they arrive with us we'll start preparing your order and email you again.</p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter + "{{signature}}"],
       ['in_production', 'ordertracking@tuffshop.co.uk',
         "Your order {{orderNumber}} is being prepared",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Good news — we've started work on your order <strong>{{orderNumber}}</strong>. " +
         "We'll let you know as soon as it's ready.</p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter + "{{signature}}"],
       ['back_order', 'sales@tuffshop.co.uk',
         "There's a delay with your order {{orderNumber}}",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>We wanted to let you know about a delay with your order <strong>{{orderNumber}}</strong> — our supplier has the stock on back order. " +
         "We'll keep you updated and let you know as soon as it lands with us.</p>" +
         "<p>If you'd rather not wait, just reply to this email and we'll sort it for you.</p>" +
-        "<p>Thanks for your patience,<br/>{{shopName}}</p>" + replyOkFooter],
+        "<p>Thanks for your patience,<br/>{{shopName}}</p>" + replyOkFooter + "{{signature}}"],
       ['ready_for_collection', 'ordertracking@tuffshop.co.uk',
         "Your order {{orderNumber}} is ready to collect",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Your order <strong>{{orderNumber}}</strong> is all ready for you to collect from:</p>" +
         "<p>{{collectionAddress}}</p>" +
         "<p>We're open Monday–Friday 9–5. See you soon!</p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter + "{{signature}}"],
       ['shipped', 'ordertracking@tuffshop.co.uk',
         "Your order {{orderNumber}} is on its way",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Your order <strong>{{orderNumber}}</strong> has been shipped with {{carrierName}}.</p>" +
         "<p>Tracking number: <strong>{{trackingNumber}}</strong><br/>" +
         "Track it here: <a href=\"{{trackingUrl}}\">{{trackingUrl}}</a></p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter + "{{signature}}"],
       ['collected', 'ordertracking@tuffshop.co.uk',
         "Thanks for picking up your order, {{customerFirstName}}",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Just wanted to say thanks for collecting your order <strong>{{orderNumber}}</strong>. " +
         "If you have a moment, we'd hugely appreciate a quick review:</p>" +
         "<p><a href=\"{{reviewUrl}}\">Leave a review</a></p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter + "{{signature}}"],
       ['delivered', 'ordertracking@tuffshop.co.uk',
         "How was your order, {{customerFirstName}}?",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>We hope your order <strong>{{orderNumber}}</strong> arrived safely and you're happy with it. " +
         "If you have a moment, we'd really appreciate a quick review:</p>" +
         "<p><a href=\"{{reviewUrl}}\">Leave a review</a></p>" +
-        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter],
+        "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter + "{{signature}}"],
     ];
 
     for (const [state, sender, subject, body] of seeds) {

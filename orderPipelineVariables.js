@@ -5,6 +5,8 @@
 // are read from env at load time so changes don't need code edits. They can
 // be overridden per-call via the `constants` option for preview testing.
 
+import { SIGNATURE_HTML } from "./emailSignature.js";
+
 const BRAND_CONSTANTS = {
   shopName: process.env.ORDER_PIPELINE_SHOP_NAME || "Tuff Workwear",
   supportEmail: process.env.ORDER_PIPELINE_SUPPORT_EMAIL || "info@tuffshop.co.uk",
@@ -125,6 +127,9 @@ function deriveVariables(bp, { notes = [], constants = BRAND_CONSTANTS } = {}) {
     reviewUrl: constants.reviewUrl,
     shopName: constants.shopName,
     supportEmail: constants.supportEmail,
+    // Branded HTML signature block — same one the proof-chase emails use.
+    // Templates can drop {{signature}} wherever they want it to land.
+    signature: SIGNATURE_HTML,
   };
 }
 
