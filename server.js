@@ -15,6 +15,7 @@ import nodemailer from 'nodemailer';
 import { listStates, customerStateForBpStatus } from './orderPipelineMapper.js';
 import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables } from './orderPipelineVariables.js';
+import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 const { Pool } = pkg;
 
@@ -2845,6 +2846,12 @@ async function initializeOrderPipelineTables() {
       );
       CREATE INDEX IF NOT EXISTS idx_order_email_log_checked
         ON order_email_log(last_checked_at);
+      -- Per-order skip list — admin-managed via the "Skip these states"
+      -- panel. The poller short-circuits on any state in this array so an
+      -- order can be excluded from any subset of pipeline emails (typical
+      -- use: skip collected + delivered for an order we know went badly).
+      ALTER TABLE order_email_log
+        ADD COLUMN IF NOT EXISTS excluded_states JSONB NOT NULL DEFAULT '[]'::jsonb;
 
       CREATE TABLE IF NOT EXISTS order_pipeline_templates (
         state TEXT PRIMARY KEY,
@@ -3019,6 +3026,20 @@ async function initializeOrderPipelineTables() {
         [subject, body, sender, state]
       );
     }
+
+    // The "Stock Ordered" email caused more confusion than it solved
+    // ("oh, you don't have it yet?" panic from customers who'd expected
+    // it to ship). Disabled by default; an admin can re-enable via the
+    // panel if they want it back. Only touches rows still tagged
+    // updated_by='system-seed' AND currently enabled — won't override an
+    // admin who has explicitly switched it back on.
+    await pool.query(`
+      UPDATE order_pipeline_templates
+      SET enabled = FALSE, updated_at = NOW()
+      WHERE state = 'stock_ordered'
+        AND updated_by = 'system-seed'
+        AND enabled = TRUE
+    `);
 
     console.log('✅ order_email_log + order_pipeline_templates initialized');
   } catch (err) {
@@ -3254,7 +3275,7 @@ app.get('/api/order-pipeline/inspect/:orderId', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
   try {
     const r = await pool.query(
-      `SELECT order_id, last_customer_state, emails_sent, last_checked_at
+      `SELECT order_id, last_customer_state, emails_sent, excluded_states, last_checked_at
        FROM order_email_log
        WHERE order_id = $1`,
       [req.params.orderId]
@@ -3263,6 +3284,64 @@ app.get('/api/order-pipeline/inspect/:orderId', async (req, res) => {
       return res.json({ orderId: req.params.orderId, found: false, log: null });
     }
     res.json({ orderId: req.params.orderId, found: true, log: r.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/order-pipeline/exclude-state
+// Body: { orderId, state, action: 'add' | 'remove', by? }
+// Manages the per-order skip list. Idempotent — adding a state that's
+// already excluded does nothing; removing a state that isn't excluded
+// does nothing.
+app.post('/api/order-pipeline/exclude-state', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  const { orderId, state, action, by } = req.body || {};
+  if (!orderId || !state || !['add', 'remove'].includes(action)) {
+    return res.status(400).json({ error: 'orderId, state and action ("add"|"remove") required' });
+  }
+  if (!listStates().some((s) => s.id === state)) {
+    return res.status(400).json({ error: `unknown state '${state}'` });
+  }
+  try {
+    if (action === 'add') {
+      // Ensure the row exists first, then add the state to the JSONB array
+      // if it isn't already in there. The CASE NOT-IN guard makes the
+      // operation idempotent.
+      await pool.query(
+        `INSERT INTO order_email_log (order_id, excluded_states, last_checked_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (order_id) DO UPDATE SET
+           excluded_states = CASE
+             WHEN order_email_log.excluded_states @> $2::jsonb
+               THEN order_email_log.excluded_states
+             ELSE order_email_log.excluded_states || $2::jsonb
+           END,
+           last_checked_at = NOW()`,
+        [Number(orderId), JSON.stringify([state])]
+      );
+    } else {
+      // Remove via jsonb_array_elements + filter
+      await pool.query(
+        `UPDATE order_email_log
+         SET excluded_states = COALESCE(
+           (SELECT jsonb_agg(elem) FROM jsonb_array_elements(excluded_states) elem WHERE elem <> $2::jsonb),
+           '[]'::jsonb
+         ),
+         last_checked_at = NOW()
+         WHERE order_id = $1`,
+        [Number(orderId), JSON.stringify(state)]
+      );
+    }
+    await writeActivityLog({
+      orderId: Number(orderId), state, status: 'skipped',
+      errorMessage: `manual ${action === 'add' ? 'EXCLUDE' : 'INCLUDE'} from skip list by ${by || 'admin'}`,
+    });
+    const r = await pool.query(
+      `SELECT excluded_states FROM order_email_log WHERE order_id = $1`,
+      [Number(orderId)]
+    );
+    res.json({ ok: true, excluded_states: r.rows[0]?.excluded_states || [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3343,12 +3422,13 @@ async function processOrderForPipeline(order) {
   const bpStatusName = order.orderStatus?.name || '';
 
   const logRes = await pool.query(
-    `SELECT last_customer_state, emails_sent FROM order_email_log WHERE order_id = $1`,
+    `SELECT last_customer_state, emails_sent, excluded_states FROM order_email_log WHERE order_id = $1`,
     [orderId]
   );
   const prevLog = logRes.rows[0];
   const prevState = prevLog?.last_customer_state || null;
   const emailsSent = Array.isArray(prevLog?.emails_sent) ? prevLog.emails_sent : [];
+  const excludedStates = Array.isArray(prevLog?.excluded_states) ? prevLog.excluded_states : [];
 
   const currentState = customerStateForBpStatus(bpStatusName, prevState);
 
@@ -3400,6 +3480,39 @@ async function processOrderForPipeline(order) {
       sender: template.sender_email,
     });
     return { decision: 'template-disabled' };
+  }
+
+  // Per-order skip list — populated via the admin panel for orders we know
+  // shouldn't receive a particular email (e.g. a botched experience that
+  // we don't want to ask for a review on).
+  if (excludedStates.includes(currentState)) {
+    await pool.query(touchSql(currentState), [orderId, currentState]);
+    await writeActivityLog({
+      orderId, state: currentState, status: 'skipped',
+      errorMessage: 'state in per-order skip list (excluded_states)',
+      bpStatusName, prevState,
+      sender: template.sender_email,
+    });
+    return { decision: 'excluded' };
+  }
+
+  // Review-request gating — only for the collected / delivered states.
+  // Plain orders need to be out the door same or next working day; logo
+  // orders get 14 calendar days. Anything slower than that, skip the
+  // review email — a bad review from a frustrated customer costs more
+  // than the missed opportunity.
+  if (currentState === 'collected' || currentState === 'delivered') {
+    const eligibility = checkReviewEligibility(order, order.updatedOn || new Date().toISOString());
+    if (!eligibility.eligible) {
+      await pool.query(touchSql(currentState), [orderId, currentState]);
+      await writeActivityLog({
+        orderId, state: currentState, status: 'skipped',
+        errorMessage: `review skipped — ${eligibility.reason}`,
+        bpStatusName, prevState,
+        sender: template.sender_email,
+      });
+      return { decision: 'review-ineligible', reason: eligibility.reason };
+    }
   }
 
   // Build the variables (notes only needed for shipped emails but cheap to
