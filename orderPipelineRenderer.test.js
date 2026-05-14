@@ -78,7 +78,7 @@ r = renderText("hi {{customerFirstName}}", { customerFirstName: "" });
 assertEq("Empty string value → missing[]", r.missing, ["customerFirstName"]);
 
 // ── Variable schema integrity ──────────────────────────────────
-assertEq("Schema has 14 variables", VARIABLE_SCHEMA.length, 14);
+assertEq("Schema has 17 variables", VARIABLE_SCHEMA.length, 17);
 assertEq("Schema entries have name/label/example",
   VARIABLE_SCHEMA.every((v) => v.name && v.label && v.example), true);
 const names = VARIABLE_SCHEMA.map((v) => v.name);

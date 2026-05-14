@@ -2978,8 +2978,8 @@ async function initializeOrderPipelineTables() {
         "Your order {{orderNumber}} is on its way",
         "<p>Hi {{customerFirstName}},</p>" +
         "<p>Your order <strong>{{orderNumber}}</strong> has been shipped with {{carrierName}}.</p>" +
-        "<p>Tracking number: <strong>{{trackingNumber}}</strong><br/>" +
-        "Track it here: <a href=\"{{trackingUrl}}\">{{trackingUrl}}</a></p>" +
+        "<p>Tracking number: <strong>{{trackingNumber}}</strong></p>" +
+        "{{trackingButton}}" +
         "<p>Thanks,<br/>{{shopName}}</p>" + noReplyFooter + "{{signature}}"],
       ['collected', 'ordertracking@tuffshop.co.uk',
         "Thanks for picking up your order, {{customerFirstName}}",

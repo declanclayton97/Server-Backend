@@ -228,6 +228,14 @@ assertEq("shopName from constants", vars.shopName, "Tuff Workwear");
 assertEq("supportEmail from constants", vars.supportEmail, "sales@tuffshop.co.uk");
 assertEq("reviewUrl from constants", vars.reviewUrl, "https://example.com/review");
 assertEq("googleReviewUrl from constants", vars.googleReviewUrl, "https://example.com/google");
+assertEq("trackingButton present when trackingUrl is set",
+  vars.trackingButton.includes('href="https://www.fedex.com/'), true);
+assertEq("reviewButton uses Trustpilot URL",
+  vars.reviewButton.includes('href="https://example.com/review"'), true);
+assertEq("googleReviewButton uses Google URL",
+  vars.googleReviewButton.includes('href="https://example.com/google"'), true);
+assertEq("Button HTML uses table pattern (email-safe)",
+  vars.trackingButton.startsWith("<table"), true);
 assertEq("collectionAddress from constants", vars.collectionAddress, "Test Yard, Test St");
 assertEq("signature is the branded HTML block",
   vars.signature.startsWith("<table"), true);
@@ -237,6 +245,8 @@ const varsNoNotes = deriveVariables(bp, { constants });
 assertEq("No notes → empty trackingNumber", varsNoNotes.trackingNumber, "");
 assertEq("No notes → empty carrierName", varsNoNotes.carrierName, "");
 assertEq("No notes → empty trackingUrl", varsNoNotes.trackingUrl, "");
+assertEq("No notes → empty trackingButton",
+  varsNoNotes.trackingButton, "");
 
 // ── deriveVariables falls back to id when no customerRef ──────
 const bp2 = { id: 12345, placedOn: "2026-05-01" };

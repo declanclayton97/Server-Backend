@@ -46,6 +46,22 @@ function buildTrackingUrl(carrier, number) {
   return builder ? builder(number) : "";
 }
 
+// Render an email-safe HTML "button" for a URL. Uses a single-cell table —
+// most resilient pattern across email clients (Outlook ignores
+// padding/background on bare <a> tags). Returns empty string when href is
+// missing so templates that use {{trackingButton}} for an order with no
+// tracking number just collapse the section silently.
+function makeEmailButton(href, label, { bg = "#1f1f1f", color = "#ffffff" } = {}) {
+  if (!href || !label) return "";
+  return (
+    `<table cellpadding="0" cellspacing="0" border="0" style="margin:16px 0;">` +
+    `<tr><td style="border-radius:6px;background:${bg};">` +
+    `<a href="${href}" style="display:inline-block;padding:12px 24px;color:${color};` +
+    `text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:14px;">` +
+    `${label}</a></td></tr></table>`
+  );
+}
+
 // Accepts BP's note shape (or any object with .text). Returns the list of
 // extracted tracking events sorted newest-first.
 function parseTrackingNotes(notes) {
@@ -253,6 +269,12 @@ function deriveVariables(bp, { notes = [], constants = BRAND_CONSTANTS } = {}) {
     // Branded HTML signature block — same one the proof-chase emails use.
     // Templates can drop {{signature}} wherever they want it to land.
     signature: SIGNATURE_HTML,
+    // Pre-styled email-safe buttons. Use these instead of {{trackingUrl}}
+    // / {{reviewUrl}} when you want a clickable button with friendly link
+    // text rather than a raw URL spelled out in the body.
+    trackingButton: makeEmailButton(trackingUrl, "Track your order"),
+    reviewButton: makeEmailButton(constants.reviewUrl, "Leave a Trustpilot review", { bg: "#00b67a" }),
+    googleReviewButton: makeEmailButton(constants.googleReviewUrl, "Leave a Google review", { bg: "#4285f4" }),
   };
 }
 
@@ -262,6 +284,7 @@ export {
   deriveVariables,
   parseTrackingNotes,
   buildTrackingUrl,
+  makeEmailButton,
   pickCustomerName,
   firstName,
   formatOrderDate,
