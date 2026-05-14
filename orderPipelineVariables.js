@@ -10,7 +10,12 @@ import { SIGNATURE_HTML } from "./emailSignature.js";
 const BRAND_CONSTANTS = {
   shopName: process.env.ORDER_PIPELINE_SHOP_NAME || "Tuff Workwear",
   supportEmail: process.env.ORDER_PIPELINE_SUPPORT_EMAIL || "sales@tuffshop.co.uk",
+  // {{reviewUrl}} stays as the Trustpilot link so any template that already
+  // uses it keeps working unchanged. {{googleReviewUrl}} is a sibling
+  // variable so templates can offer both options.
   reviewUrl: process.env.ORDER_PIPELINE_REVIEW_URL || "https://uk.trustpilot.com/review/tuffshop.co.uk",
+  googleReviewUrl: process.env.ORDER_PIPELINE_GOOGLE_REVIEW_URL ||
+    "https://www.google.com/search?newwindow=1&sca_esv=23181f9f9c0f0df0&rlz=1C1YTUH_en-GBGB1087GB1087&si=AL3DRZFIhG6pAqfNLal55wUTwygCG0fClF3UxiOmgw9Hq7nbWSabA4-IiFJbXPux_EoC-BKpHe_SPFRI3IuymQlPHZEUvxA6fNcvOfrZzqJ2_ztJd4ma9whaaWi8xH668oAofC8WuuoN&q=Tuffshop.co.uk+Reviews&sa=X&ved=2ahUKEwjEjKH5rbiUAxW5UkEAHXhFKO8Q0bkNegQIIxAH",
   collectionAddress: process.env.ORDER_PIPELINE_COLLECTION_ADDRESS ||
     "Tuff Workwear, [collection address — set ORDER_PIPELINE_COLLECTION_ADDRESS env var]",
 };
@@ -242,6 +247,7 @@ function deriveVariables(bp, { notes = [], constants = BRAND_CONSTANTS } = {}) {
     carrierName,
     trackingUrl,
     reviewUrl: constants.reviewUrl,
+    googleReviewUrl: constants.googleReviewUrl,
     shopName: constants.shopName,
     supportEmail: constants.supportEmail,
     // Branded HTML signature block — same one the proof-chase emails use.
