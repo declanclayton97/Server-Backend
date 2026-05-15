@@ -3764,6 +3764,9 @@ app.get('/api/order-pipeline/poll-status', async (req, res) => {
 });
 
 // GET /api/order-pipeline/activity — paginated activity log
+// Skipped events are excluded from the default view (they'd dominate the
+// table once the eligibility / skip-list rules are in play). Pass
+// ?status=skipped explicitly to see them.
 app.get('/api/order-pipeline/activity', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
@@ -3772,7 +3775,15 @@ app.get('/api/order-pipeline/activity', async (req, res) => {
   const orderId = req.query.orderId; // optional filter
   const conditions = [];
   const params = [];
-  if (status) { conditions.push(`status = $${params.length + 1}`); params.push(status); }
+  if (status) {
+    conditions.push(`status = $${params.length + 1}`);
+    params.push(status);
+  } else {
+    // Default view hides skipped — most of those are routine (template
+    // disabled, eligibility rule fired, manual exclude) and would bury
+    // the dry_run / sent / error rows the operator actually cares about.
+    conditions.push(`status <> 'skipped'`);
+  }
   if (orderId) { conditions.push(`order_id = $${params.length + 1}`); params.push(Number(orderId)); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   try {
