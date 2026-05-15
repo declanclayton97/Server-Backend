@@ -2852,6 +2852,14 @@ async function initializeOrderPipelineTables() {
       -- use: skip collected + delivered for an order we know went badly).
       ALTER TABLE order_email_log
         ADD COLUMN IF NOT EXISTS excluded_states JSONB NOT NULL DEFAULT '[]'::jsonb;
+      -- Mirror of emails_sent but for dry-run mode. While dry-run is on we
+      -- deliberately don't touch emails_sent (so flipping live starts with
+      -- a clean slate), but without dry_run_states the poller would re-log
+      -- the same "would-send" decision every 5 minutes for as long as the
+      -- order is in the updatedOn window. Resetting this column safely
+      -- re-runs dry-run testing.
+      ALTER TABLE order_email_log
+        ADD COLUMN IF NOT EXISTS dry_run_states JSONB NOT NULL DEFAULT '[]'::jsonb;
 
       CREATE TABLE IF NOT EXISTS order_pipeline_templates (
         state TEXT PRIMARY KEY,
@@ -3275,7 +3283,8 @@ app.get('/api/order-pipeline/inspect/:orderId', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
   try {
     const r = await pool.query(
-      `SELECT order_id, last_customer_state, emails_sent, excluded_states, last_checked_at
+      `SELECT order_id, last_customer_state, emails_sent, excluded_states,
+              dry_run_states, last_checked_at
        FROM order_email_log
        WHERE order_id = $1`,
       [req.params.orderId]
@@ -3284,6 +3293,30 @@ app.get('/api/order-pipeline/inspect/:orderId', async (req, res) => {
       return res.json({ orderId: req.params.orderId, found: false, log: null });
     }
     res.json({ orderId: req.params.orderId, found: true, log: r.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/order-pipeline/reset-dry-run
+// Body: { orderId? }  (omit for all orders)
+// Clears dry_run_states so the dry-run loop will re-log decisions next
+// poll. Useful after editing a template — lets you see fresh "would
+// send" entries with the new copy. Doesn't touch emails_sent or
+// excluded_states, so live-mode behaviour is unaffected.
+app.post('/api/order-pipeline/reset-dry-run', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  const { orderId } = req.body || {};
+  try {
+    const q = orderId
+      ? await pool.query(
+          `UPDATE order_email_log SET dry_run_states = '[]'::jsonb WHERE order_id = $1`,
+          [Number(orderId)]
+        )
+      : await pool.query(
+          `UPDATE order_email_log SET dry_run_states = '[]'::jsonb WHERE dry_run_states <> '[]'::jsonb`
+        );
+    res.json({ ok: true, rowsAffected: q.rowCount, scope: orderId ? `order ${orderId}` : 'all orders' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3422,13 +3455,15 @@ async function processOrderForPipeline(order) {
   const bpStatusName = order.orderStatus?.name || '';
 
   const logRes = await pool.query(
-    `SELECT last_customer_state, emails_sent, excluded_states FROM order_email_log WHERE order_id = $1`,
+    `SELECT last_customer_state, emails_sent, excluded_states, dry_run_states
+     FROM order_email_log WHERE order_id = $1`,
     [orderId]
   );
   const prevLog = logRes.rows[0];
   const prevState = prevLog?.last_customer_state || null;
   const emailsSent = Array.isArray(prevLog?.emails_sent) ? prevLog.emails_sent : [];
   const excludedStates = Array.isArray(prevLog?.excluded_states) ? prevLog.excluded_states : [];
+  const dryRunStates = Array.isArray(prevLog?.dry_run_states) ? prevLog.dry_run_states : [];
 
   const currentState = customerStateForBpStatus(bpStatusName, prevState);
 
@@ -3538,11 +3573,26 @@ async function processOrderForPipeline(order) {
   }
 
   if (isDryRun()) {
-    // Update last_customer_state so the Invoiced/Completed disambiguation
-    // (Shipped vs Collected based on the previous state) keeps working
-    // through a long dry-run period. emails_sent stays untouched so when
-    // we flip out of dry-run nothing is mistakenly marked already-sent.
-    await pool.query(touchSql(currentState), [orderId, currentState]);
+    // If we've already logged a dry-run decision for this (order, state)
+    // pair, don't re-log it on subsequent polls. Updates last_checked_at
+    // so the inspect view still shows we've seen it.
+    if (dryRunStates.includes(currentState)) {
+      await pool.query(touchSql(currentState), [orderId, currentState]);
+      return { decision: 'dry_run_already_logged', state: currentState };
+    }
+    // First time we've decided this combo. Update last_customer_state so
+    // the Invoiced/Completed disambiguation keeps working, and append the
+    // state to dry_run_states so we don't re-log next poll. emails_sent
+    // stays untouched — flipping out of dry-run starts with a clean slate.
+    await pool.query(
+      `INSERT INTO order_email_log (order_id, last_customer_state, dry_run_states, last_checked_at)
+       VALUES ($1, $2, $3::jsonb, NOW())
+       ON CONFLICT (order_id) DO UPDATE SET
+         last_customer_state = EXCLUDED.last_customer_state,
+         dry_run_states = order_email_log.dry_run_states || EXCLUDED.dry_run_states,
+         last_checked_at = NOW()`,
+      [orderId, currentState, JSON.stringify([currentState])]
+    );
     await writeActivityLog({
       orderId, state: currentState, status: 'dry_run',
       recipient, sender, subject: rendered.subject,
