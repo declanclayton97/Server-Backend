@@ -4582,12 +4582,19 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
   const templateLang = process.env.WHATSAPP_TEMPLATE_LANG || "en_GB";
   const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
 
-  // Template body: "Hi {{1}}, your proof for order {{2}} is ready... {{3}}"
+  // Template body: "Hi {{1}}, your proof for order {{2}} is ready... tap the
+  // button below." The link is a dynamic URL button, NOT a body variable.
   const bodyParams = [
     { type: "text", text: (customerName || "there").toString().slice(0, 60) },
     { type: "text", text: (orderNumber || "your order").toString().slice(0, 60) },
-    { type: "text", text: approvalUrl.toString() },
   ];
+
+  // The button's URL is configured in WhatsApp Manager as
+  // https://mock-up-creator-hosted-web.onrender.com/approve/{{1}}
+  // so we pass only the path suffix after /approve/ as the variable.
+  const fullUrl = approvalUrl.toString();
+  const suffixMatch = fullUrl.match(/\/approve\/(.+)$/);
+  const urlSuffix = suffixMatch ? suffixMatch[1] : fullUrl;
 
   try {
     const gRes = await fetch(
@@ -4605,7 +4612,15 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
           template: {
             name: templateName,
             language: { code: templateLang },
-            components: [{ type: "body", parameters: bodyParams }],
+            components: [
+              { type: "body", parameters: bodyParams },
+              {
+                type: "button",
+                sub_type: "url",
+                index: "0",
+                parameters: [{ type: "text", text: urlSuffix }],
+              },
+            ],
           },
         }),
       }
