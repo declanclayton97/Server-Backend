@@ -7,6 +7,7 @@ import DocuSignService from './docusignService.js';
 import cors from 'cors';
 import docusign from 'docusign-esign';
 import fs from 'fs';
+import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import pkg from 'pg';
@@ -44,7 +45,12 @@ if (useDatabase) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: '50mb' }));
+// Stash the raw request body so the WhatsApp webhook can verify Meta's
+// X-Hub-Signature-256 HMAC (which is computed over the exact bytes sent).
+app.use(express.json({
+  limit: '50mb',
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors({
   origin: true,
@@ -3055,8 +3061,41 @@ async function initializeOrderPipelineTables() {
   }
 }
 
+// whatsapp_messages — every inbound/outbound WhatsApp message for the
+// proof number, plus delivery status. Conversations are derived by
+// grouping on peer_number (the customer's E.164-without-plus number).
+// raw keeps the full Graph webhook payload for debugging / future media.
+async function initializeWhatsAppTables() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS whatsapp_messages (
+        id BIGSERIAL PRIMARY KEY,
+        wa_message_id TEXT,
+        direction TEXT NOT NULL,            -- 'in' | 'out'
+        peer_number TEXT NOT NULL,          -- the customer's number
+        body TEXT,
+        msg_type TEXT NOT NULL DEFAULT 'text',
+        status TEXT,                        -- sent|delivered|read|failed (out)
+        order_number TEXT,
+        read_at TIMESTAMPTZ,                -- when staff read an inbound msg
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        raw JSONB
+      );
+      CREATE INDEX IF NOT EXISTS idx_wa_messages_peer
+        ON whatsapp_messages(peer_number, created_at);
+      CREATE INDEX IF NOT EXISTS idx_wa_messages_wamid
+        ON whatsapp_messages(wa_message_id);
+    `);
+    console.log('✅ whatsapp_messages initialized');
+  } catch (err) {
+    console.error('❌ Error initializing whatsapp_messages table:', err.message);
+  }
+}
+
 (async () => {
   await initializeOrderPipelineTables();
+  await initializeWhatsAppTables();
   if (useDatabase && BRIGHTPEARL_API_TOKEN) {
     // Stagger initial run 4 min after boot so the urgent/stale/proof-chase
     // pollers settle first and we don't elbow them at the BP rate limit.
@@ -4557,6 +4596,131 @@ function normaliseWhatsAppNumber(raw) {
   return digits;
 }
 
+// Insert one message row into whatsapp_messages. Best-effort: a logging
+// failure must never break the actual send/receive path, so we swallow.
+async function recordWhatsAppMessage({
+  waMessageId = null,
+  direction,
+  peerNumber,
+  body = null,
+  msgType = "text",
+  status = null,
+  orderNumber = null,
+  raw = null,
+}) {
+  if (!useDatabase) return;
+  try {
+    await pool.query(
+      `INSERT INTO whatsapp_messages
+         (wa_message_id, direction, peer_number, body, msg_type, status, order_number, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [waMessageId, direction, peerNumber, body, msgType, status, orderNumber,
+       raw ? JSON.stringify(raw) : null]
+    );
+  } catch (err) {
+    console.error("[whatsapp] recordWhatsAppMessage failed:", err.message);
+  }
+}
+
+// The 24h customer-service window is open iff the customer sent us an
+// inbound message within the last 24h. Returns { open, expiresAt }.
+async function whatsAppWindow(peerNumber) {
+  if (!useDatabase) return { open: false, expiresAt: null };
+  const r = await pool.query(
+    `SELECT MAX(created_at) AS last_in FROM whatsapp_messages
+       WHERE peer_number = $1 AND direction = 'in'`,
+    [peerNumber]
+  );
+  const lastIn = r.rows[0]?.last_in ? new Date(r.rows[0].last_in) : null;
+  if (!lastIn) return { open: false, expiresAt: null };
+  const expiresAt = new Date(lastIn.getTime() + 24 * 60 * 60 * 1000);
+  return { open: expiresAt.getTime() > Date.now(), expiresAt };
+}
+
+// GET webhook — Meta's one-time verification handshake. Echoes
+// hub.challenge only when the verify token matches.
+app.get("/api/whatsapp/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// POST webhook — inbound messages + delivery-status callbacks from Meta.
+// Always 200 quickly (Meta retries on non-2xx); do work after responding.
+app.post("/api/whatsapp/webhook", async (req, res) => {
+  // Verify X-Hub-Signature-256 over the exact raw bytes.
+  const appSecret = process.env.WHATSAPP_APP_SECRET;
+  const sigHeader = req.get("x-hub-signature-256") || "";
+  if (appSecret && req.rawBody) {
+    const expected =
+      "sha256=" +
+      crypto.createHmac("sha256", appSecret).update(req.rawBody).digest("hex");
+    const a = Buffer.from(sigHeader);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      console.warn("[whatsapp/webhook] signature mismatch — rejected");
+      return res.sendStatus(403);
+    }
+  }
+  res.sendStatus(200);
+
+  try {
+    const entries = req.body?.entry || [];
+    for (const entry of entries) {
+      for (const change of entry.changes || []) {
+        const value = change.value || {};
+        const contacts = value.contacts || [];
+        const nameByWaId = {};
+        for (const c of contacts) nameByWaId[c.wa_id] = c.profile?.name;
+
+        // Inbound customer messages
+        for (const m of value.messages || []) {
+          const peer = m.from;
+          let text = null;
+          if (m.type === "text") text = m.text?.body || null;
+          else if (m.type === "button") text = m.button?.text || null;
+          else if (m.type === "interactive")
+            text =
+              m.interactive?.button_reply?.title ||
+              m.interactive?.list_reply?.title ||
+              null;
+          else text = `[${m.type} message]`;
+          await recordWhatsAppMessage({
+            waMessageId: m.id,
+            direction: "in",
+            peerNumber: peer,
+            body: text,
+            msgType: m.type || "text",
+            raw: { message: m, contactName: nameByWaId[peer] || null },
+          });
+          console.log(`[whatsapp/webhook] inbound from ${peer}: ${text?.slice(0, 80)}`);
+        }
+
+        // Delivery-status updates for our outbound messages
+        for (const s of value.statuses || []) {
+          if (!useDatabase) continue;
+          try {
+            await pool.query(
+              `UPDATE whatsapp_messages
+                 SET status = $1
+               WHERE wa_message_id = $2 AND direction = 'out'`,
+              [s.status, s.id]
+            );
+          } catch (err) {
+            console.error("[whatsapp/webhook] status update failed:", err.message);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[whatsapp/webhook] processing error:", err.message);
+  }
+});
+
 // Send a proof-approval link to a customer via the WhatsApp Cloud API,
 // using the pre-approved "proof_approval_request" message template.
 app.post("/api/whatsapp/send-proof", async (req, res) => {
@@ -4636,9 +4800,167 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
 
     const messageId = data?.messages?.[0]?.id || null;
     console.log(`[whatsapp/send-proof] sent to ${to} (order ${orderNumber || "?"}) id=${messageId}`);
+    await recordWhatsAppMessage({
+      waMessageId: messageId,
+      direction: "out",
+      peerNumber: to,
+      body: `📄 Proof approval link sent for order ${orderNumber || "?"}`,
+      msgType: "template",
+      status: "sent",
+      orderNumber: orderNumber ? String(orderNumber) : null,
+      raw: { template: templateName, approvalUrl: fullUrl },
+    });
     res.json({ success: true, messageId, to });
   } catch (err) {
     console.error("[whatsapp/send-proof] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send a free-form reply to a customer. Only allowed inside the 24h
+// customer-service window (i.e. they messaged us within 24h); outside it
+// WhatsApp requires a template, so we 409 with windowClosed so the UI can
+// explain and offer the proof template instead.
+app.post("/api/whatsapp/send-message", async (req, res) => {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token || !phoneNumberId) {
+    return res.status(503).json({ error: "WhatsApp not configured" });
+  }
+  const { phone, body } = req.body || {};
+  const to = normaliseWhatsAppNumber(phone);
+  if (!to) return res.status(400).json({ error: "A valid phone number is required" });
+  const text = (body || "").toString().trim();
+  if (!text) return res.status(400).json({ error: "Message body is required" });
+
+  const win = await whatsAppWindow(to);
+  if (!win.open) {
+    return res.status(409).json({
+      error: "The 24-hour reply window has closed for this customer.",
+      windowClosed: true,
+    });
+  }
+
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  try {
+    const gRes = await fetch(
+      `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to,
+          type: "text",
+          text: { body: text.slice(0, 4096) },
+        }),
+      }
+    );
+    const data = await gRes.json().catch(() => ({}));
+    if (!gRes.ok) {
+      const fbErr = data?.error?.message || `Graph API returned ${gRes.status}`;
+      console.error("[whatsapp/send-message] Graph error:", JSON.stringify(data?.error || data));
+      return res.status(502).json({ error: fbErr });
+    }
+    const messageId = data?.messages?.[0]?.id || null;
+    await recordWhatsAppMessage({
+      waMessageId: messageId,
+      direction: "out",
+      peerNumber: to,
+      body: text,
+      msgType: "text",
+      status: "sent",
+    });
+    res.json({ success: true, messageId, to });
+  } catch (err) {
+    console.error("[whatsapp/send-message] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Conversation list — one row per customer number, newest activity first.
+app.get("/api/whatsapp/conversations", async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const r = await pool.query(`
+      SELECT m.peer_number,
+             MAX(m.created_at) AS last_at,
+             COUNT(*) FILTER (
+               WHERE m.direction = 'in' AND m.read_at IS NULL
+             ) AS unread,
+             MAX(m.created_at) FILTER (WHERE m.direction = 'in') AS last_in_at,
+             (SELECT body FROM whatsapp_messages x
+                WHERE x.peer_number = m.peer_number
+                ORDER BY x.created_at DESC LIMIT 1) AS last_body,
+             (SELECT direction FROM whatsapp_messages x
+                WHERE x.peer_number = m.peer_number
+                ORDER BY x.created_at DESC LIMIT 1) AS last_direction,
+             (SELECT order_number FROM whatsapp_messages x
+                WHERE x.peer_number = m.peer_number AND x.order_number IS NOT NULL
+                ORDER BY x.created_at DESC LIMIT 1) AS order_number
+        FROM whatsapp_messages m
+       GROUP BY m.peer_number
+       ORDER BY last_at DESC
+    `);
+    const now = Date.now();
+    const conversations = r.rows.map((row) => {
+      const lastIn = row.last_in_at ? new Date(row.last_in_at).getTime() : null;
+      const expiresAt = lastIn ? new Date(lastIn + 24 * 3600 * 1000) : null;
+      return {
+        phone: row.peer_number,
+        lastAt: row.last_at,
+        lastBody: row.last_body,
+        lastDirection: row.last_direction,
+        unread: Number(row.unread) || 0,
+        orderNumber: row.order_number || null,
+        windowOpen: expiresAt ? expiresAt.getTime() > now : false,
+        windowExpiresAt: expiresAt,
+      };
+    });
+    res.json({ conversations });
+  } catch (err) {
+    console.error("[whatsapp/conversations] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Full message thread for one customer number.
+app.get("/api/whatsapp/conversations/:phone/messages", async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const phone = req.params.phone;
+    const r = await pool.query(
+      `SELECT id, wa_message_id, direction, peer_number, body, msg_type,
+              status, order_number, read_at, created_at
+         FROM whatsapp_messages
+        WHERE peer_number = $1
+        ORDER BY created_at ASC`,
+      [phone]
+    );
+    const win = await whatsAppWindow(phone);
+    res.json({ phone, messages: r.rows, windowOpen: win.open, windowExpiresAt: win.expiresAt });
+  } catch (err) {
+    console.error("[whatsapp/messages] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mark all inbound messages from a customer as read.
+app.post("/api/whatsapp/conversations/:phone/read", async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  try {
+    await pool.query(
+      `UPDATE whatsapp_messages
+          SET read_at = NOW()
+        WHERE peer_number = $1 AND direction = 'in' AND read_at IS NULL`,
+      [req.params.phone]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[whatsapp/read] error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
