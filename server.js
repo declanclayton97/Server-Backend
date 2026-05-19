@@ -4543,6 +4543,91 @@ app.post("/api/approval-sessions", async (req, res) => {
   }
 });
 
+// Normalise a UK-centric phone string to WhatsApp's E.164-without-plus format.
+// Accepts "07911 123456", "+44 7911 123456", "0044...", "447911123456" etc.
+function normaliseWhatsAppNumber(raw) {
+  if (!raw) return null;
+  let digits = String(raw).replace(/[^\d+]/g, "");
+  if (digits.startsWith("+")) digits = digits.slice(1);
+  else if (digits.startsWith("00")) digits = digits.slice(2);
+  // Bare UK national number (leading 0) -> prepend country code 44.
+  if (digits.startsWith("0")) digits = "44" + digits.slice(1);
+  // Must be all digits, plausible length (8-15 per E.164).
+  if (!/^\d{8,15}$/.test(digits)) return null;
+  return digits;
+}
+
+// Send a proof-approval link to a customer via the WhatsApp Cloud API,
+// using the pre-approved "proof_approval_request" message template.
+app.post("/api/whatsapp/send-proof", async (req, res) => {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token || !phoneNumberId) {
+    return res.status(503).json({
+      error: "WhatsApp not configured (set WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID)",
+    });
+  }
+
+  const { phone, customerName, orderNumber, approvalUrl } = req.body || {};
+
+  const to = normaliseWhatsAppNumber(phone);
+  if (!to) {
+    return res.status(400).json({ error: "A valid phone number is required" });
+  }
+  if (!approvalUrl) {
+    return res.status(400).json({ error: "approvalUrl is required" });
+  }
+
+  const templateName = process.env.WHATSAPP_TEMPLATE_NAME || "proof_approval_request";
+  const templateLang = process.env.WHATSAPP_TEMPLATE_LANG || "en_GB";
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+
+  // Template body: "Hi {{1}}, your proof for order {{2}} is ready... {{3}}"
+  const bodyParams = [
+    { type: "text", text: (customerName || "there").toString().slice(0, 60) },
+    { type: "text", text: (orderNumber || "your order").toString().slice(0, 60) },
+    { type: "text", text: approvalUrl.toString() },
+  ];
+
+  try {
+    const gRes = await fetch(
+      `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to,
+          type: "template",
+          template: {
+            name: templateName,
+            language: { code: templateLang },
+            components: [{ type: "body", parameters: bodyParams }],
+          },
+        }),
+      }
+    );
+
+    const data = await gRes.json().catch(() => ({}));
+
+    if (!gRes.ok) {
+      const fbErr = data?.error?.message || `Graph API returned ${gRes.status}`;
+      console.error("[whatsapp/send-proof] Graph API error:", JSON.stringify(data?.error || data));
+      return res.status(502).json({ error: fbErr, details: data?.error || null });
+    }
+
+    const messageId = data?.messages?.[0]?.id || null;
+    console.log(`[whatsapp/send-proof] sent to ${to} (order ${orderNumber || "?"}) id=${messageId}`);
+    res.json({ success: true, messageId, to });
+  } catch (err) {
+    console.error("[whatsapp/send-proof] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get approval session metadata
 app.get("/api/approval-sessions/:sessionId", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
