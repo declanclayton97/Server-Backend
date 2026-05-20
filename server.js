@@ -4637,6 +4637,85 @@ async function whatsAppWindow(peerNumber) {
   return { open: expiresAt.getTime() > Date.now(), expiresAt };
 }
 
+// Default auto-reply body, sent once per cooldown when a customer messages
+// the proof number. Wording overridable via env without a deploy.
+const DEFAULT_AUTO_REPLY =
+  "This is a proof only service. For sales or general enquiries please email " +
+  "sales@tuffshop.co.uk. If your message is about your proof, please wait and " +
+  "we will be in touch shortly.";
+
+// Send a one-shot auto-reply to a customer who just messaged us. Skips:
+//  - if WHATSAPP_AUTO_REPLY_DISABLED is set (kill switch)
+//  - if an auto-reply or human-typed reply went out in the cooldown window
+//    (default 60 min) — prevents spam on rapid messages and stays silent
+//    while a human is actively chatting
+// Best-effort: a failure here must NOT break the webhook ack path.
+async function maybeSendAutoReply(peer) {
+  if (!peer) return;
+  if (process.env.WHATSAPP_AUTO_REPLY_DISABLED === "1") return;
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token || !phoneNumberId || !useDatabase) return;
+
+  const cooldownMin = Number(process.env.WHATSAPP_AUTO_REPLY_COOLDOWN_MIN) || 60;
+  try {
+    const r = await pool.query(
+      `SELECT 1 FROM whatsapp_messages
+        WHERE peer_number = $1
+          AND direction = 'out'
+          AND msg_type IN ('auto_reply','text')
+          AND created_at > NOW() - ($2 || ' minutes')::interval
+        LIMIT 1`,
+      [peer, String(cooldownMin)]
+    );
+    if (r.rowCount > 0) return; // recent outbound — stay quiet
+  } catch (err) {
+    console.error("[whatsapp/auto-reply] lookup failed:", err.message);
+    return;
+  }
+
+  const body = process.env.WHATSAPP_AUTO_REPLY_TEXT || DEFAULT_AUTO_REPLY;
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  try {
+    const gRes = await fetch(
+      `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: peer,
+          type: "text",
+          text: { body },
+        }),
+      }
+    );
+    const data = await gRes.json().catch(() => ({}));
+    if (!gRes.ok) {
+      console.error(
+        "[whatsapp/auto-reply] Graph error:",
+        JSON.stringify(data?.error || data)
+      );
+      return;
+    }
+    const messageId = data?.messages?.[0]?.id || null;
+    await recordWhatsAppMessage({
+      waMessageId: messageId,
+      direction: "out",
+      peerNumber: peer,
+      body,
+      msgType: "auto_reply",
+      status: "sent",
+    });
+    console.log(`[whatsapp/auto-reply] sent to ${peer}`);
+  } catch (err) {
+    console.error("[whatsapp/auto-reply] error:", err.message);
+  }
+}
+
 // GET webhook — Meta's one-time verification handshake. Echoes
 // hub.challenge only when the verify token matches.
 app.get("/api/whatsapp/webhook", (req, res) => {
@@ -4698,6 +4777,10 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             raw: { message: m, contactName: nameByWaId[peer] || null },
           });
           console.log(`[whatsapp/webhook] inbound from ${peer}: ${text?.slice(0, 80)}`);
+          // Fire-and-forget auto-reply (rate-limited inside the helper).
+          maybeSendAutoReply(peer).catch((err) =>
+            console.error("[whatsapp/auto-reply] unhandled:", err.message)
+          );
         }
 
         // Delivery-status updates for our outbound messages
