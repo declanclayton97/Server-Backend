@@ -4583,7 +4583,8 @@ app.post("/api/approval-sessions", async (req, res) => {
 });
 
 // Normalise a UK-centric phone string to WhatsApp's E.164-without-plus format.
-// Accepts "07911 123456", "+44 7911 123456", "0044...", "447911123456" etc.
+// Accepts "07911 123456", "+44 7911 123456", "0044...", "447911123456",
+// and bare mobiles missing the leading 0 like "7911123456".
 function normaliseWhatsAppNumber(raw) {
   if (!raw) return null;
   let digits = String(raw).replace(/[^\d+]/g, "");
@@ -4591,6 +4592,11 @@ function normaliseWhatsAppNumber(raw) {
   else if (digits.startsWith("00")) digits = digits.slice(2);
   // Bare UK national number (leading 0) -> prepend country code 44.
   if (digits.startsWith("0")) digits = "44" + digits.slice(1);
+  // UK mobile entered without the leading 0 (10 digits starting 7,
+  // e.g. "7892872364") -> prepend country code. WhatsApp will accept a
+  // malformed number and return a messageId, then silently fail to
+  // deliver, so we must fix this before sending.
+  else if (/^7\d{9}$/.test(digits)) digits = "44" + digits;
   // Must be all digits, plausible length (8-15 per E.164).
   if (!/^\d{8,15}$/.test(digits)) return null;
   return digits;
