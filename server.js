@@ -4791,6 +4791,19 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
 
         // Delivery-status updates for our outbound messages
         for (const s of value.statuses || []) {
+          // Log every status so delivery problems are visible. A 'failed'
+          // status carries an errors[] array with the real reason (e.g.
+          // recipient has no WhatsApp account, not in allowed list, etc).
+          if (s.status === "failed") {
+            console.error(
+              `[whatsapp/webhook] message ${s.id} to ${s.recipient_id} FAILED:`,
+              JSON.stringify(s.errors || s)
+            );
+          } else {
+            console.log(
+              `[whatsapp/webhook] status ${s.status} for ${s.id} (to ${s.recipient_id})`
+            );
+          }
           if (!useDatabase) continue;
           try {
             await pool.query(
