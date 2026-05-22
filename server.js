@@ -15,7 +15,7 @@ import { PDFDocument, rgb } from 'pdf-lib';
 import nodemailer from 'nodemailer';
 import { listStates, customerStateForBpStatus } from './orderPipelineMapper.js';
 import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
-import { deriveVariables } from './orderPipelineVariables.js';
+import { deriveVariables, smartTitleCase } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 const { Pool } = pkg;
@@ -4850,8 +4850,12 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
 
   // Template body: "Hi {{1}}, your proof for order {{2}} is ready... tap the
   // button below." The link is a dynamic URL button, NOT a body variable.
+  // Normalise the greeting name the same way the order emails do: ALL-CAPS
+  // and inconsistent casing (e.g. "GLYN LACEY") become Title Case ("Glyn
+  // Lacey"). Empty/missing -> "there".
+  const greetingName = customerName ? smartTitleCase(customerName) : "there";
   const bodyParams = [
-    { type: "text", text: (customerName || "there").toString().slice(0, 60) },
+    { type: "text", text: (greetingName || "there").toString().slice(0, 60) },
     { type: "text", text: (orderNumber || "your order").toString().slice(0, 60) },
   ];
 
