@@ -15,7 +15,7 @@ import { PDFDocument, rgb } from 'pdf-lib';
 import nodemailer from 'nodemailer';
 import { listStates, customerStateForBpStatus } from './orderPipelineMapper.js';
 import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
-import { deriveVariables, smartTitleCase } from './orderPipelineVariables.js';
+import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 const { Pool } = pkg;
@@ -4606,6 +4606,36 @@ function normaliseWhatsAppNumber(raw) {
   return digits;
 }
 
+// Fetch a Brightpearl order's parties so the WhatsApp greeting can use the
+// real customer name — same source the order-tracking emails use. Returns
+// null on any problem (creds missing, non-BP order id, API error) so the
+// caller falls back to "there".
+async function fetchBrightpearlParties(orderId) {
+  if (!orderId || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return null;
+  try {
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+      ? 'https://euw1.brightpearlconnect.com'
+      : 'https://use1.brightpearlconnect.com';
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json',
+      },
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const order = Array.isArray(data?.response)
+      ? data.response[0]
+      : (Array.isArray(data) ? data[0] : data);
+    return order?.parties || null;
+  } catch {
+    return null;
+  }
+}
+
 // Insert one message row into whatsapp_messages. Best-effort: a logging
 // failure must never break the actual send/receive path, so we swallow.
 async function recordWhatsAppMessage({
@@ -4854,10 +4884,20 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
 
   // Template body: "Hi {{1}}, your proof for order {{2}} is ready... tap the
   // button below." The link is a dynamic URL button, NOT a body variable.
-  // Normalise the greeting name the same way the order emails do: ALL-CAPS
-  // and inconsistent casing (e.g. "GLYN LACEY") become Title Case ("Glyn
-  // Lacey"). Empty/missing -> "there".
-  const greetingName = customerName ? smartTitleCase(customerName) : "there";
+  //
+  // Greeting name priority:
+  //   1. an explicit recipient name typed in the UI (customerName)
+  //   2. otherwise the customer's name from the Brightpearl order
+  //   3. deriveFirstName() handles title-casing + first-name extraction,
+  //      and returns "there" when there's genuinely no usable name —
+  //      identical to the order-tracking emails. So named orders greet
+  //      "Hi Glyn" and only nameless ones get "Hi there".
+  let nameSource = customerName;
+  if (!nameSource && orderNumber) {
+    const parties = await fetchBrightpearlParties(orderNumber);
+    if (parties) nameSource = pickCustomerName(parties);
+  }
+  const greetingName = deriveFirstName(nameSource);
   const nameParam = (greetingName || "there").toString().slice(0, 60);
   const orderParam = (orderNumber || "your order").toString().slice(0, 60);
   const bodyParams = [
