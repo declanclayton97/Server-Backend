@@ -4858,9 +4858,11 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
   // and inconsistent casing (e.g. "GLYN LACEY") become Title Case ("Glyn
   // Lacey"). Empty/missing -> "there".
   const greetingName = customerName ? smartTitleCase(customerName) : "there";
+  const nameParam = (greetingName || "there").toString().slice(0, 60);
+  const orderParam = (orderNumber || "your order").toString().slice(0, 60);
   const bodyParams = [
-    { type: "text", text: (greetingName || "there").toString().slice(0, 60) },
-    { type: "text", text: (orderNumber || "your order").toString().slice(0, 60) },
+    { type: "text", text: nameParam },
+    { type: "text", text: orderParam },
   ];
 
   // The button's URL is configured in WhatsApp Manager as
@@ -4910,11 +4912,19 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
 
     const messageId = data?.messages?.[0]?.id || null;
     console.log(`[whatsapp/send-proof] sent to ${to} (order ${orderNumber || "?"}) id=${messageId}`);
+    // Store the exact rendered message (matching the approved template
+    // body + button) so staff can verify in the inbox what the customer
+    // actually received. Keep this wording in sync with the WhatsApp
+    // Manager template.
+    const renderedBody =
+      `Hi ${nameParam}, your proof for order ${orderParam} is ready to ` +
+      `review. Tap the button below to approve or request changes.\n\n` +
+      `🔗 Review proof: ${fullUrl}`;
     await recordWhatsAppMessage({
       waMessageId: messageId,
       direction: "out",
       peerNumber: to,
-      body: `📄 Proof approval link sent for order ${orderNumber || "?"}`,
+      body: renderedBody,
       msgType: "template",
       status: "sent",
       orderNumber: orderNumber ? String(orderNumber) : null,
