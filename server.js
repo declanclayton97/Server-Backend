@@ -3086,6 +3086,10 @@ async function initializeWhatsAppTables() {
         ON whatsapp_messages(peer_number, created_at);
       CREATE INDEX IF NOT EXISTS idx_wa_messages_wamid
         ON whatsapp_messages(wa_message_id);
+      -- Dismissing a conversation stamps every current row for that peer.
+      -- A new inbound message (dismissed_at NULL) makes it resurface.
+      ALTER TABLE whatsapp_messages
+        ADD COLUMN IF NOT EXISTS dismissed_at TIMESTAMPTZ;
     `);
     console.log('✅ whatsapp_messages initialized');
   } catch (err) {
@@ -4996,6 +5000,7 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
              MAX(m.created_at) AS last_at,
              COUNT(*) FILTER (
                WHERE m.direction = 'in' AND m.read_at IS NULL
+                 AND m.dismissed_at IS NULL
              ) AS unread,
              MAX(m.created_at) FILTER (WHERE m.direction = 'in') AS last_in_at,
              (SELECT body FROM whatsapp_messages x
@@ -5009,6 +5014,7 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
                 ORDER BY x.created_at DESC LIMIT 1) AS order_number
         FROM whatsapp_messages m
        GROUP BY m.peer_number
+      HAVING bool_or(m.dismissed_at IS NULL)   -- hide fully-dismissed convos
        ORDER BY last_at DESC
     `);
     const now = Date.now();
@@ -5067,6 +5073,25 @@ app.post("/api/whatsapp/conversations/:phone/read", async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("[whatsapp/read] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Dismiss a conversation — stamps every current row for the peer so it
+// drops out of the conversation list (and the Unmatched panel). A later
+// inbound message has dismissed_at NULL, so the conversation resurfaces.
+app.post("/api/whatsapp/conversations/:phone/dismiss", async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  try {
+    await pool.query(
+      `UPDATE whatsapp_messages
+          SET dismissed_at = NOW()
+        WHERE peer_number = $1 AND dismissed_at IS NULL`,
+      [req.params.phone]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[whatsapp/dismiss] error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
