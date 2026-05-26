@@ -6,24 +6,31 @@
 // using stored credentials, caches the session cookies, fetches a CSRF
 // token from the form page, and POSTs files to that endpoint.
 //
-// Fragility note: this is undocumented BP internals. If BP changes their
-// login flow, CSRF mechanism, or upload endpoint, this breaks silently.
-// Watch for [bp-web] error logs.
+// Why tough-cookie: BP returns multiple cookies comma-joined inside ONE
+// Set-Cookie header, AND the Expires value contains its own comma
+// ("Expires=Tue, 26 May 2026..."). Naive split-on-comma corrupts both.
+// tough-cookie is the canonical parser that handles this correctly.
+//
+// Critical detail discovered via PowerShell trace: the login flow MUST
+// begin with a GET to /admin_login.php?clients_id=X first. That GET sets
+// __cf_bm + _cfuvid (Cloudflare bot-management cookies) plus an initial
+// pearlAdmin session-init token. Without those Cloudflare cookies, BP's
+// new edge routing serves the Sage SPA login shell instead of the
+// legacy iframe form.
+
+import { CookieJar } from 'tough-cookie';
 
 const BP_HOST = process.env.BP_WEB_HOST || 'https://euw1.brightpearlapp.com';
 const BP_CLIENT = process.env.BP_WEB_CLIENT_ID || 'tuffworkwear';
 const SESSION_TTL_MS = 25 * 60 * 1000; // BP sessions live ~30 min; refresh at 25
 
-// Pretend to be a real browser. BP serves different pages based on
-// User-Agent / Accept — without these we get the React SPA shell instead
-// of the legacy iframe form.
 const BROWSER_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
   'Accept-Language': 'en-GB,en;q=0.9',
 };
 
-let cachedSession = null; // { cookies: string, loggedInAt: number }
+let cachedSession = null; // { jar: CookieJar, loggedInAt: number }
 
 function extractSetCookies(res) {
   if (typeof res.headers.getSetCookie === 'function') {
@@ -36,60 +43,68 @@ function extractSetCookies(res) {
   return arr;
 }
 
-function cookieJarToHeader(setCookieArr) {
-  return setCookieArr.map((h) => h.split(';')[0]).join('; ');
-}
-
-// Merge new Set-Cookie headers into an existing "name=val; name2=val2" jar.
-// Later cookies overwrite earlier ones with the same name (browser behaviour).
-function mergeCookies(existingJar, newSetCookieArr) {
-  const map = new Map();
-  if (existingJar) {
-    for (const pair of existingJar.split('; ')) {
-      const eq = pair.indexOf('=');
-      if (eq > 0) map.set(pair.slice(0, eq).trim(), pair.slice(eq + 1));
+// Push every Set-Cookie value from a fetch response into the jar.
+// tough-cookie does the heavy lifting on parsing.
+async function ingestCookies(jar, res, url) {
+  const setCookies = extractSetCookies(res);
+  // Some servers (BP included) comma-join multiple cookies into ONE
+  // header value. getSetCookie() splits multi-header but not comma-
+  // joined-single-header. Detect and re-split if needed.
+  const allHeaderValues = [];
+  for (const raw of setCookies) {
+    // Heuristic: if raw contains ", <name>=" (a real cookie boundary,
+    // not a comma inside an Expires date), split. The Expires date
+    // pattern is "Expires=<day>, DD-<Mon>-YYYY" — the comma is always
+    // followed by " DD" (digit). A cookie boundary comma is followed
+    // by " <name>=" (alphanumeric + equals before semicolon).
+    const parts = raw.split(/,(?=\s*[a-zA-Z_][a-zA-Z0-9_\-]*=)/);
+    for (const p of parts) allHeaderValues.push(p.trim());
+  }
+  for (const hv of allHeaderValues) {
+    try {
+      await jar.setCookie(hv, url, { ignoreError: true });
+    } catch {
+      // ignore unparseable cookies
     }
   }
-  for (const sc of newSetCookieArr) {
-    const firstPart = sc.split(';')[0];
-    const eq = firstPart.indexOf('=');
-    if (eq > 0) map.set(firstPart.slice(0, eq).trim(), firstPart.slice(eq + 1));
-  }
-  return Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
-// Follow a redirect chain after a login POST, accumulating cookies from
-// each hop. Browsers do this automatically — fetch's redirect:'follow'
-// hides intermediate responses so we can't see their Set-Cookie headers,
-// hence the manual walk.
-async function followRedirectsAccumulatingCookies(initialRes, initialCookies) {
-  let cookies = initialCookies;
-  let res = initialRes;
-  let hops = 0;
-  const MAX_HOPS = 8;
-  while (hops < MAX_HOPS && [301, 302, 303, 307, 308].includes(res.status)) {
-    let location = res.headers.get('location');
-    if (!location) break;
-    if (location.startsWith('//')) {
-      location = `https:${location}`;
-    } else if (location.startsWith('/')) {
-      location = `${BP_HOST}${location}`;
-    } else if (!location.startsWith('http')) {
-      location = `${BP_HOST}/${location}`;
-    }
-    res = await fetch(location, {
-      headers: { ...BROWSER_HEADERS, Cookie: cookies },
-      redirect: 'manual',
-    });
-    const more = extractSetCookies(res);
-    if (more.length) cookies = mergeCookies(cookies, more);
-    hops++;
-  }
-  return { cookies, finalStatus: res.status, finalUrl: res.url };
+async function getCookieHeader(jar, url) {
+  return await jar.getCookieString(url);
 }
 
 function looksLikeLoginPage(html) {
-  return /name=["']email_address["']/i.test(html) && /name=["']password["']/i.test(html);
+  return (
+    /name=["']email_address["']/i.test(html) ||
+    /<title>Brightpearl - Login<\/title>/i.test(html) ||
+    /data-theme=["']sage["']/i.test(html)
+  );
+}
+
+// Walk a redirect chain manually, ingesting cookies from each hop.
+// Stops on first non-3xx, hits MAX_HOPS, or missing Location.
+async function followRedirects(jar, res, originUrl) {
+  let current = res;
+  let hops = 0;
+  const MAX_HOPS = 8;
+  let lastUrl = originUrl;
+  while (hops < MAX_HOPS && [301, 302, 303, 307, 308].includes(current.status)) {
+    let location = current.headers.get('location');
+    if (!location) break;
+    if (location.startsWith('//')) location = `https:${location}`;
+    else if (location.startsWith('/')) location = `${BP_HOST}${location}`;
+    else if (!/^https?:\/\//i.test(location)) location = `${BP_HOST}/${location}`;
+    const cookieHeader = await getCookieHeader(jar, location);
+    current = await fetch(location, {
+      method: 'GET',
+      headers: { ...BROWSER_HEADERS, Cookie: cookieHeader },
+      redirect: 'manual',
+    });
+    await ingestCookies(jar, current, location);
+    lastUrl = location;
+    hops++;
+  }
+  return { finalRes: current, finalUrl: lastUrl, hops };
 }
 
 async function login() {
@@ -99,6 +114,21 @@ async function login() {
     throw new Error('BP_WEB_EMAIL/BP_WEB_PASSWORD not configured');
   }
 
+  const jar = new CookieJar();
+
+  // Step 1: GET the login page first. This is where Cloudflare sets
+  // __cf_bm + _cfuvid (bot-management cookies) and BP sets the initial
+  // pearlAdmin session-init token. Without these, the post-login flow
+  // is routed to the new Sage SPA.
+  const loginPageUrl = `${BP_HOST}/admin_login.php?clients_id=${encodeURIComponent(BP_CLIENT)}`;
+  const getRes = await fetch(loginPageUrl, {
+    method: 'GET',
+    headers: { ...BROWSER_HEADERS },
+    redirect: 'manual',
+  });
+  await ingestCookies(jar, getRes, loginPageUrl);
+
+  // Step 2: POST credentials, carrying the cookies from Step 1.
   const body = new URLSearchParams({
     email_address: email,
     password,
@@ -107,33 +137,42 @@ async function login() {
     clients_id: BP_CLIENT,
   });
 
-  const res = await fetch(`${BP_HOST}/admin_login.php`, {
+  const postCookies = await getCookieHeader(jar, BP_HOST);
+  const postRes = await fetch(`${BP_HOST}/admin_login.php`, {
     method: 'POST',
     headers: {
       ...BROWSER_HEADERS,
       'Content-Type': 'application/x-www-form-urlencoded',
-      'Referer': `${BP_HOST}/admin_login.php?clients_id=${BP_CLIENT}`,
+      'Referer': loginPageUrl,
+      'Cookie': postCookies,
     },
     body,
     redirect: 'manual',
   });
+  await ingestCookies(jar, postRes, `${BP_HOST}/admin_login.php`);
 
-  const setCookies = extractSetCookies(res);
-  if (!setCookies.length && res.status !== 302 && res.status !== 303) {
-    const peek = await res.text().catch(() => '');
-    throw new Error(`BP login: no cookies returned (status ${res.status}). Body start: ${peek.slice(0, 200)}`);
+  // Step 3: Follow the redirect chain (/p.php?p=dash → /report.php → ...).
+  // Each hop may re-issue pearlAdmin with HttpOnly+Secure flags upgraded.
+  const { finalRes, finalUrl, hops } = await followRedirects(jar, postRes, `${BP_HOST}/admin_login.php`);
+
+  // Sanity check: jar should now contain pearlAdmin. If it doesn't, our
+  // credentials were wrong or BP changed the cookie name.
+  const finalCookieHeader = await getCookieHeader(jar, BP_HOST);
+  const cookieNames = finalCookieHeader
+    .split('; ')
+    .map((c) => c.split('=')[0])
+    .filter(Boolean);
+  if (!cookieNames.includes('pearlAdmin')) {
+    throw new Error(
+      `BP login: pearlAdmin not found in jar after login. ` +
+      `Cookies present: ${cookieNames.join(',') || 'none'}. ` +
+      `Final URL: ${finalUrl} (status ${finalRes.status}). ` +
+      `Likely cause: wrong email/password, or BP renamed the session cookie.`
+    );
   }
 
-  // Follow the redirect chain so we capture cookies set on /index.php
-  // and any intermediate hops the browser would naturally pick up.
-  let cookies = setCookies.length ? cookieJarToHeader(setCookies) : '';
-  const { cookies: finalCookies, finalStatus, finalUrl } = await followRedirectsAccumulatingCookies(res, cookies);
-  console.log(`[bp-web] logged in, followed redirects to ${finalUrl || '(no redirect)'} status=${finalStatus}, cookies: ${finalCookies.split('; ').map((c) => c.split('=')[0]).join(',')}`);
-
-  cachedSession = {
-    cookies: finalCookies,
-    loggedInAt: Date.now(),
-  };
+  console.log(`[bp-web] login OK after ${hops} redirect(s), cookies in jar: ${cookieNames.join(',')}`);
+  cachedSession = { jar, loggedInAt: Date.now() };
   return cachedSession;
 }
 
@@ -148,18 +187,17 @@ function invalidateSession() {
   cachedSession = null;
 }
 
-async function fetchCsrfToken(orderId, cookies) {
+async function fetchCsrfToken(jar, orderId) {
   const url = `${BP_HOST}/iframe_attach_file.php?e_name=orders_id&e_val=${encodeURIComponent(orderId)}`;
+  const cookieHeader = await getCookieHeader(jar, url);
   const res = await fetch(url, {
     headers: {
       ...BROWSER_HEADERS,
-      Cookie: cookies,
-      // Referer pointing at the order's edit page makes BP think we're
-      // inside the BP app and serves the legacy iframe form, not the new
-      // SPA shell.
+      Cookie: cookieHeader,
       'Referer': `${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`,
     },
   });
+  await ingestCookies(jar, res, url);
   const html = await res.text();
   if (looksLikeLoginPage(html)) {
     const err = new Error('SESSION_EXPIRED');
@@ -168,16 +206,12 @@ async function fetchCsrfToken(orderId, cookies) {
   }
   const match = html.match(/name=["']__fc_csrf_token["']\s+value=["']([^"']+)["']/i);
   if (!match) {
-    // Dump more body so we can diagnose what BP is serving instead of
-    // the iframe form. data-theme="sage" indicates BP's new SPA shell.
     const themeMatch = html.match(/data-theme=["']([^"']+)["']/);
     const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
     throw new Error(
       `CSRF token not found in iframe form for order ${orderId}. ` +
-      `status=${res.status} ` +
-      `theme=${themeMatch?.[1] || 'none'} ` +
-      `title="${titleMatch?.[1] || 'none'}" ` +
-      `body[0..2000]: ${html.slice(0, 2000)}`
+      `status=${res.status} theme=${themeMatch?.[1] || 'none'} ` +
+      `title="${titleMatch?.[1] || 'none'}" body[0..1000]: ${html.slice(0, 1000)}`
     );
   }
   return match[1];
@@ -185,9 +219,6 @@ async function fetchCsrfToken(orderId, cookies) {
 
 // Attach a single file to a Brightpearl sales order via the legacy web
 // upload endpoint. Re-logs in once if the cached session has expired.
-//
-// Returns { success: true } on confirmed upload, or
-// { success: false, status, body } on failure.
 async function attachFileToOrder(orderId, filename, buffer, mimeType = 'application/octet-stream') {
   let attempts = 0;
   while (attempts < 2) {
@@ -195,7 +226,7 @@ async function attachFileToOrder(orderId, filename, buffer, mimeType = 'applicat
     let session;
     try {
       session = await getSession();
-      const csrf = await fetchCsrfToken(orderId, session.cookies);
+      const csrf = await fetchCsrfToken(session.jar, orderId);
 
       const form = new FormData();
       form.append('MAX_FILE_SIZE', '20971520');
@@ -206,16 +237,18 @@ async function attachFileToOrder(orderId, filename, buffer, mimeType = 'applicat
       form.append('__fc_csrf_token', csrf);
 
       const url = `${BP_HOST}/iframe_attach_file.php?&e_name=orders_id&e_val=${encodeURIComponent(orderId)}&filePosted=1`;
+      const cookieHeader = await getCookieHeader(session.jar, url);
       const res = await fetch(url, {
         method: 'POST',
         headers: {
           ...BROWSER_HEADERS,
-          Cookie: session.cookies,
+          Cookie: cookieHeader,
           'Referer': `${BP_HOST}/iframe_attach_file.php?e_name=orders_id&e_val=${encodeURIComponent(orderId)}`,
         },
         body: form,
         redirect: 'manual',
       });
+      await ingestCookies(session.jar, res, url);
       const html = await res.text();
 
       if (res.ok && /<title>File store<\/title>/i.test(html)) {
