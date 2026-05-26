@@ -204,24 +204,17 @@ async function fetchCsrfToken(jar, orderId) {
     err.code = 'SESSION_EXPIRED';
     throw err;
   }
-  // Find the <input> element containing name="__fc_csrf_token", then
-  // extract its value attribute regardless of attribute order. Earlier
-  // pattern required name and value to be adjacent — too strict if BP
-  // interleaves type="hidden" between them.
-  const inputMatch = html.match(/<input[^>]*name=["']__fc_csrf_token["'][^>]*>/i)
-                  || html.match(/<input[^>]*value=["'][^"']+["'][^>]*name=["']__fc_csrf_token["'][^>]*>/i);
-  if (inputMatch) {
-    const tag = inputMatch[0];
-    const valueMatch = tag.match(/value=["']([^"']*)["']/i);
-    if (valueMatch && valueMatch[1]) return valueMatch[1];
-  }
-
-  // Fallback: locate the literal token name and grab the next value="...".
-  const idx = html.indexOf('__fc_csrf_token');
-  if (idx !== -1) {
-    const window = html.slice(Math.max(0, idx - 200), idx + 400);
-    const v = window.match(/value=["']([^"']+)["']/i);
-    if (v && v[1]) return v[1];
+  // BP exposes the token as <meta name="__fc_csrf_token" content="...">
+  // (the legacy form's JS reads it and posts it as a form field). It may
+  // also appear as <input name="..." value="..."> in some templates.
+  // Handle both attribute names (content / value) and both orders.
+  const patterns = [
+    /name=["']__fc_csrf_token["'][^>]*(?:content|value)=["']([^"']+)["']/i,
+    /(?:content|value)=["']([^"']+)["'][^>]*name=["']__fc_csrf_token["']/i,
+  ];
+  for (const p of patterns) {
+    const m = html.match(p);
+    if (m && m[1]) return m[1];
   }
 
   const themeMatch = html.match(/data-theme=["']([^"']+)["']/);
