@@ -5127,11 +5127,17 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
                  AND m.dismissed_at IS NULL
              ) AS unread,
              MAX(m.created_at) FILTER (WHERE m.direction = 'in') AS last_in_at,
+             -- Exclude auto-replies from "last message" derivation so the
+             -- inbox preview and the Approval-History WhatsApp pill reflect
+             -- the last human exchange, not the canned "proof-only" reply
+             -- that fires after every inbound message.
              (SELECT body FROM whatsapp_messages x
                 WHERE x.peer_number = m.peer_number
+                  AND x.msg_type <> 'auto_reply'
                 ORDER BY x.created_at DESC LIMIT 1) AS last_body,
              (SELECT direction FROM whatsapp_messages x
                 WHERE x.peer_number = m.peer_number
+                  AND x.msg_type <> 'auto_reply'
                 ORDER BY x.created_at DESC LIMIT 1) AS last_direction,
              (SELECT order_number FROM whatsapp_messages x
                 WHERE x.peer_number = m.peer_number AND x.order_number IS NOT NULL
