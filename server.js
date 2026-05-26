@@ -3097,9 +3097,21 @@ async function initializeWhatsAppTables() {
   }
 }
 
+// Kill-switch: set ORDER_PIPELINE_ENABLED=false on Render to fully stop the
+// order-pipeline poller (no boot run, no interval, manual trigger 503s).
+// Even in dry-run mode the poller hits Brightpearl, so this is the way to
+// stop burning BP quota while the pipeline is parked.
+function isOrderPipelineEnabled() {
+  return String(process.env.ORDER_PIPELINE_ENABLED ?? 'true').toLowerCase() !== 'false';
+}
+
 (async () => {
   await initializeOrderPipelineTables();
   await initializeWhatsAppTables();
+  if (!isOrderPipelineEnabled()) {
+    console.log('⏸️  Order-pipeline poller DISABLED via ORDER_PIPELINE_ENABLED=false. No polls will run.');
+    return;
+  }
   if (useDatabase && BRIGHTPEARL_API_TOKEN) {
     // Stagger initial run 4 min after boot so the urgent/stale/proof-chase
     // pollers settle first and we don't elbow them at the BP rate limit.
@@ -3857,6 +3869,9 @@ app.get('/api/order-pipeline/activity', async (req, res) => {
 // Body: { windowMins?: number } — optional wider window for audit runs
 app.post('/api/order-pipeline/poll/run', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  if (!isOrderPipelineEnabled()) {
+    return res.status(503).json({ error: 'order pipeline disabled (ORDER_PIPELINE_ENABLED=false)' });
+  }
   if (orderPipelinePollInFlight) {
     return res.status(409).json({ error: 'poll already in flight' });
   }
