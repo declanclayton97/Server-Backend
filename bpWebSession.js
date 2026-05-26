@@ -40,6 +40,54 @@ function cookieJarToHeader(setCookieArr) {
   return setCookieArr.map((h) => h.split(';')[0]).join('; ');
 }
 
+// Merge new Set-Cookie headers into an existing "name=val; name2=val2" jar.
+// Later cookies overwrite earlier ones with the same name (browser behaviour).
+function mergeCookies(existingJar, newSetCookieArr) {
+  const map = new Map();
+  if (existingJar) {
+    for (const pair of existingJar.split('; ')) {
+      const eq = pair.indexOf('=');
+      if (eq > 0) map.set(pair.slice(0, eq).trim(), pair.slice(eq + 1));
+    }
+  }
+  for (const sc of newSetCookieArr) {
+    const firstPart = sc.split(';')[0];
+    const eq = firstPart.indexOf('=');
+    if (eq > 0) map.set(firstPart.slice(0, eq).trim(), firstPart.slice(eq + 1));
+  }
+  return Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+// Follow a redirect chain after a login POST, accumulating cookies from
+// each hop. Browsers do this automatically — fetch's redirect:'follow'
+// hides intermediate responses so we can't see their Set-Cookie headers,
+// hence the manual walk.
+async function followRedirectsAccumulatingCookies(initialRes, initialCookies) {
+  let cookies = initialCookies;
+  let res = initialRes;
+  let hops = 0;
+  const MAX_HOPS = 8;
+  while (hops < MAX_HOPS && [301, 302, 303, 307, 308].includes(res.status)) {
+    let location = res.headers.get('location');
+    if (!location) break;
+    if (location.startsWith('//')) {
+      location = `https:${location}`;
+    } else if (location.startsWith('/')) {
+      location = `${BP_HOST}${location}`;
+    } else if (!location.startsWith('http')) {
+      location = `${BP_HOST}/${location}`;
+    }
+    res = await fetch(location, {
+      headers: { ...BROWSER_HEADERS, Cookie: cookies },
+      redirect: 'manual',
+    });
+    const more = extractSetCookies(res);
+    if (more.length) cookies = mergeCookies(cookies, more);
+    hops++;
+  }
+  return { cookies, finalStatus: res.status, finalUrl: res.url };
+}
+
 function looksLikeLoginPage(html) {
   return /name=["']email_address["']/i.test(html) && /name=["']password["']/i.test(html);
 }
@@ -71,16 +119,21 @@ async function login() {
   });
 
   const setCookies = extractSetCookies(res);
-  if (!setCookies.length) {
+  if (!setCookies.length && res.status !== 302 && res.status !== 303) {
     const peek = await res.text().catch(() => '');
     throw new Error(`BP login: no cookies returned (status ${res.status}). Body start: ${peek.slice(0, 200)}`);
   }
 
+  // Follow the redirect chain so we capture cookies set on /index.php
+  // and any intermediate hops the browser would naturally pick up.
+  let cookies = setCookies.length ? cookieJarToHeader(setCookies) : '';
+  const { cookies: finalCookies, finalStatus, finalUrl } = await followRedirectsAccumulatingCookies(res, cookies);
+  console.log(`[bp-web] logged in, followed redirects to ${finalUrl || '(no redirect)'} status=${finalStatus}, cookies: ${finalCookies.split('; ').map((c) => c.split('=')[0]).join(',')}`);
+
   cachedSession = {
-    cookies: cookieJarToHeader(setCookies),
+    cookies: finalCookies,
     loggedInAt: Date.now(),
   };
-  console.log('[bp-web] logged in, cached session');
   return cachedSession;
 }
 
