@@ -18,6 +18,7 @@ import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
+import { attachFileToOrder as bpAttachFileToOrder } from './bpWebSession.js';
 const { Pool } = pkg;
 
 // Get directory name for ES modules
@@ -3097,6 +3098,35 @@ async function initializeWhatsAppTables() {
   }
 }
 
+// bp_order_attachments — supplementary files (scanned thread-colour sheet,
+// embroidery digitised file) staged client-side at mockup creation and
+// pushed to the Brightpearl order along with the signed PDF when the
+// operator clicks "Attach to BP". Rows are deleted after a successful
+// upload to BP — this table is temporary staging, not an archive.
+async function initializeBpOrderAttachments() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bp_order_attachments (
+        id SERIAL PRIMARY KEY,
+        bp_order_id VARCHAR(50) NOT NULL,
+        kind VARCHAR(50) NOT NULL,           -- 'scanned_sheet' | 'embroidery_file'
+        filename VARCHAR(255) NOT NULL,
+        mime_type VARCHAR(100),
+        data BYTEA NOT NULL,
+        uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_bp_order_attachments_order
+        ON bp_order_attachments(bp_order_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_bp_order_attachments_kind
+        ON bp_order_attachments(bp_order_id, kind);
+    `);
+    console.log('✅ bp_order_attachments initialized');
+  } catch (err) {
+    console.error('❌ Error initializing bp_order_attachments table:', err.message);
+  }
+}
+
 // Kill-switch: set ORDER_PIPELINE_ENABLED=false on Render to fully stop the
 // order-pipeline poller (no boot run, no interval, manual trigger 503s).
 // Even in dry-run mode the poller hits Brightpearl, so this is the way to
@@ -3108,6 +3138,7 @@ function isOrderPipelineEnabled() {
 (async () => {
   await initializeOrderPipelineTables();
   await initializeWhatsAppTables();
+  await initializeBpOrderAttachments();
   if (!isOrderPipelineEnabled()) {
     console.log('⏸️  Order-pipeline poller DISABLED via ORDER_PIPELINE_ENABLED=false. No polls will run.');
     return;
@@ -4561,6 +4592,168 @@ Tuffshop`,
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// ============================================================
+// BP Order Attachments — staging + push to Brightpearl
+// ============================================================
+// Operator uploads scanned thread-colour sheet and embroidery digitised
+// file during mockup creation; both stage here until the "Attach to BP"
+// button fires. On successful BP upload, rows are deleted (this table is
+// temporary staging, not an archive — the signed PDF in approval_sessions
+// is the audit copy).
+
+const VALID_ATTACHMENT_KINDS = ['scanned_sheet', 'embroidery_file'];
+
+// Stage a single supplementary file for a BP order.
+// Body: { bpOrderId, kind, filename, mimeType, dataBase64 }
+app.post('/api/bp-order-attachments', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { bpOrderId, kind, filename, mimeType, dataBase64 } = req.body;
+    if (!bpOrderId || !kind || !filename || !dataBase64) {
+      return res.status(400).json({ error: 'bpOrderId, kind, filename, dataBase64 are required' });
+    }
+    if (!VALID_ATTACHMENT_KINDS.includes(kind)) {
+      return res.status(400).json({ error: `kind must be one of ${VALID_ATTACHMENT_KINDS.join(', ')}` });
+    }
+    const buf = Buffer.from(dataBase64, 'base64');
+    // Upsert by (order, kind) — one of each per order; re-upload replaces.
+    await pool.query(
+      `INSERT INTO bp_order_attachments (bp_order_id, kind, filename, mime_type, data)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (bp_order_id, kind)
+       DO UPDATE SET filename = EXCLUDED.filename, mime_type = EXCLUDED.mime_type,
+                     data = EXCLUDED.data, uploaded_at = NOW()`,
+      [String(bpOrderId), kind, filename, mimeType || null, buf]
+    );
+    res.json({ success: true, bytes: buf.length });
+  } catch (err) {
+    console.error('[bp-attachments] upload failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List staged attachments for an order (metadata only — no file bytes).
+app.get('/api/bp-order-attachments/:bpOrderId', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT id, kind, filename, mime_type, octet_length(data) AS size_bytes, uploaded_at
+         FROM bp_order_attachments WHERE bp_order_id = $1 ORDER BY uploaded_at`,
+      [String(req.params.bpOrderId)]
+    );
+    res.json({ attachments: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a single staged attachment (e.g. operator re-uploads).
+app.delete('/api/bp-order-attachments/:id', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(`DELETE FROM bp_order_attachments WHERE id = $1`, [req.params.id]);
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Push everything to Brightpearl.
+// Body: { bpOrderId, approvalSessionId }
+// Fetches signed PDF from approval_sessions + all staged attachments from
+// bp_order_attachments, uploads each to BP via the legacy web endpoint,
+// and on full success deletes the staged rows. Returns per-file status.
+app.post('/api/brightpearl/attach-files', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { bpOrderId, approvalSessionId } = req.body;
+    if (!bpOrderId) return res.status(400).json({ error: 'bpOrderId required' });
+
+    const files = [];
+
+    // 1. Signed PDF from approval_sessions (optional — not every attach
+    //    is post-approval; we accept the call without it).
+    if (approvalSessionId) {
+      const sessRes = await pool.query(
+        `SELECT pdf_data, order_number, customer_name, status
+           FROM approval_sessions WHERE id = $1`,
+        [approvalSessionId]
+      );
+      if (sessRes.rowCount === 0) {
+        return res.status(404).json({ error: 'approval session not found' });
+      }
+      const sess = sessRes.rows[0];
+      if (sess.pdf_data) {
+        const orderRef = sess.order_number || bpOrderId;
+        const suffix = sess.status === 'approved' ? 'Signed-Proof' : 'Proof';
+        files.push({
+          source: 'approval_session',
+          kind: 'signed_pdf',
+          filename: `${orderRef}-${suffix}.pdf`,
+          mimeType: 'application/pdf',
+          buffer: sess.pdf_data,
+        });
+      }
+    }
+
+    // 2. Staged attachments from bp_order_attachments.
+    const stagedRes = await pool.query(
+      `SELECT id, kind, filename, mime_type, data
+         FROM bp_order_attachments WHERE bp_order_id = $1 ORDER BY uploaded_at`,
+      [String(bpOrderId)]
+    );
+    for (const row of stagedRes.rows) {
+      files.push({
+        source: 'staged',
+        stagedId: row.id,
+        kind: row.kind,
+        filename: row.filename,
+        mimeType: row.mime_type || 'application/octet-stream',
+        buffer: row.data,
+      });
+    }
+
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'no files to attach (no signed PDF and no staged attachments)' });
+    }
+
+    // 3. Upload each to BP. Continue past individual failures so partial
+    //    success is reported back rather than aborting the whole batch.
+    const results = [];
+    for (const f of files) {
+      try {
+        const r = await bpAttachFileToOrder(bpOrderId, f.filename, f.buffer, f.mimeType);
+        results.push({ ...stripBuffer(f), ...r });
+      } catch (err) {
+        console.error(`[bp-attach] ${f.filename} failed:`, err.message);
+        results.push({ ...stripBuffer(f), success: false, error: err.message });
+      }
+    }
+
+    // 4. Clean up staged rows that uploaded successfully. Failures stay
+    //    in place so the operator can retry.
+    const successfulStagedIds = results
+      .filter((r) => r.source === 'staged' && r.success)
+      .map((r) => r.stagedId);
+    if (successfulStagedIds.length) {
+      await pool.query(
+        `DELETE FROM bp_order_attachments WHERE id = ANY($1::int[])`,
+        [successfulStagedIds]
+      );
+    }
+
+    const allOk = results.every((r) => r.success);
+    res.json({ success: allOk, results });
+  } catch (err) {
+    console.error('[bp-attach] orchestrator failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function stripBuffer({ buffer, ...rest }) {
+  return rest;
+}
 
 // ============================================================
 // Proof Approval System
