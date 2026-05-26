@@ -14,6 +14,15 @@ const BP_HOST = process.env.BP_WEB_HOST || 'https://euw1.brightpearlapp.com';
 const BP_CLIENT = process.env.BP_WEB_CLIENT_ID || 'tuffworkwear';
 const SESSION_TTL_MS = 25 * 60 * 1000; // BP sessions live ~30 min; refresh at 25
 
+// Pretend to be a real browser. BP serves different pages based on
+// User-Agent / Accept — without these we get the React SPA shell instead
+// of the legacy iframe form.
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-GB,en;q=0.9',
+};
+
 let cachedSession = null; // { cookies: string, loggedInAt: number }
 
 function extractSetCookies(res) {
@@ -52,7 +61,11 @@ async function login() {
 
   const res = await fetch(`${BP_HOST}/admin_login.php`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      ...BROWSER_HEADERS,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Referer': `${BP_HOST}/admin_login.php?clients_id=${BP_CLIENT}`,
+    },
     body,
     redirect: 'manual',
   });
@@ -84,7 +97,16 @@ function invalidateSession() {
 
 async function fetchCsrfToken(orderId, cookies) {
   const url = `${BP_HOST}/iframe_attach_file.php?e_name=orders_id&e_val=${encodeURIComponent(orderId)}`;
-  const res = await fetch(url, { headers: { Cookie: cookies } });
+  const res = await fetch(url, {
+    headers: {
+      ...BROWSER_HEADERS,
+      Cookie: cookies,
+      // Referer pointing at the order's edit page makes BP think we're
+      // inside the BP app and serves the legacy iframe form, not the new
+      // SPA shell.
+      'Referer': `${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`,
+    },
+  });
   const html = await res.text();
   if (looksLikeLoginPage(html)) {
     const err = new Error('SESSION_EXPIRED');
@@ -93,7 +115,17 @@ async function fetchCsrfToken(orderId, cookies) {
   }
   const match = html.match(/name=["']__fc_csrf_token["']\s+value=["']([^"']+)["']/i);
   if (!match) {
-    throw new Error(`CSRF token not found in iframe form for order ${orderId}. Body start: ${html.slice(0, 200)}`);
+    // Dump more body so we can diagnose what BP is serving instead of
+    // the iframe form. data-theme="sage" indicates BP's new SPA shell.
+    const themeMatch = html.match(/data-theme=["']([^"']+)["']/);
+    const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+    throw new Error(
+      `CSRF token not found in iframe form for order ${orderId}. ` +
+      `status=${res.status} ` +
+      `theme=${themeMatch?.[1] || 'none'} ` +
+      `title="${titleMatch?.[1] || 'none'}" ` +
+      `body[0..2000]: ${html.slice(0, 2000)}`
+    );
   }
   return match[1];
 }
@@ -123,7 +155,11 @@ async function attachFileToOrder(orderId, filename, buffer, mimeType = 'applicat
       const url = `${BP_HOST}/iframe_attach_file.php?&e_name=orders_id&e_val=${encodeURIComponent(orderId)}&filePosted=1`;
       const res = await fetch(url, {
         method: 'POST',
-        headers: { Cookie: session.cookies },
+        headers: {
+          ...BROWSER_HEADERS,
+          Cookie: session.cookies,
+          'Referer': `${BP_HOST}/iframe_attach_file.php?e_name=orders_id&e_val=${encodeURIComponent(orderId)}`,
+        },
         body: form,
         redirect: 'manual',
       });
