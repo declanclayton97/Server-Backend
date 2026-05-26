@@ -204,17 +204,38 @@ async function fetchCsrfToken(jar, orderId) {
     err.code = 'SESSION_EXPIRED';
     throw err;
   }
-  const match = html.match(/name=["']__fc_csrf_token["']\s+value=["']([^"']+)["']/i);
-  if (!match) {
-    const themeMatch = html.match(/data-theme=["']([^"']+)["']/);
-    const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-    throw new Error(
-      `CSRF token not found in iframe form for order ${orderId}. ` +
-      `status=${res.status} theme=${themeMatch?.[1] || 'none'} ` +
-      `title="${titleMatch?.[1] || 'none'}" body[0..1000]: ${html.slice(0, 1000)}`
-    );
+  // Find the <input> element containing name="__fc_csrf_token", then
+  // extract its value attribute regardless of attribute order. Earlier
+  // pattern required name and value to be adjacent — too strict if BP
+  // interleaves type="hidden" between them.
+  const inputMatch = html.match(/<input[^>]*name=["']__fc_csrf_token["'][^>]*>/i)
+                  || html.match(/<input[^>]*value=["'][^"']+["'][^>]*name=["']__fc_csrf_token["'][^>]*>/i);
+  if (inputMatch) {
+    const tag = inputMatch[0];
+    const valueMatch = tag.match(/value=["']([^"']*)["']/i);
+    if (valueMatch && valueMatch[1]) return valueMatch[1];
   }
-  return match[1];
+
+  // Fallback: locate the literal token name and grab the next value="...".
+  const idx = html.indexOf('__fc_csrf_token');
+  if (idx !== -1) {
+    const window = html.slice(Math.max(0, idx - 200), idx + 400);
+    const v = window.match(/value=["']([^"']+)["']/i);
+    if (v && v[1]) return v[1];
+  }
+
+  const themeMatch = html.match(/data-theme=["']([^"']+)["']/);
+  const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+  const tokenIdx = html.indexOf('__fc_csrf_token');
+  const tokenContext = tokenIdx >= 0
+    ? `csrf-context: ...${html.slice(Math.max(0, tokenIdx - 100), tokenIdx + 300)}...`
+    : 'csrf-context: token name string not present in body';
+  throw new Error(
+    `CSRF token not found in iframe form for order ${orderId}. ` +
+    `status=${res.status} theme=${themeMatch?.[1] || 'none'} ` +
+    `title="${titleMatch?.[1] || 'none'}" bodyLen=${html.length} ` +
+    tokenContext
+  );
 }
 
 // Attach a single file to a Brightpearl sales order via the legacy web
