@@ -4477,11 +4477,70 @@ app.patch("/api/customer-orders/:orderId/status", async (req, res) => {
     const { status } = req.body;
     if (!status) return res.status(400).json({ success: false, error: "status required" });
     const result = await pool.query(
-      "UPDATE customer_orders SET status = $1 WHERE id = $2 RETURNING id, status",
+      `UPDATE customer_orders SET status = $1 WHERE id = $2
+       RETURNING id, status, customer_name, contact_name, order_data, notes, created_at`,
       [status, orderId]
     );
     if (result.rowCount === 0) return res.status(404).json({ success: false, error: "Order not found" });
-    res.json({ success: true, id: result.rows[0].id, status: result.rows[0].status });
+
+    const row = result.rows[0];
+    res.json({ success: true, id: row.id, status: row.status });
+
+    // Fire-and-forget: notify Fitness Inc when a REQUEST (notes-only, no items)
+    // is marked complete. Regular product orders are intentionally excluded.
+    if (status === "completed") {
+      const items = row.order_data?.items || [];
+      const isFitnessInc = (row.customer_name || "").toLowerCase().includes("fitness inc");
+      const isRequest = items.length === 0 && !!row.notes;
+      if (isFitnessInc && isRequest && process.env.SMTP_PASS) {
+        const to = process.env.FITNESS_INC_NOTIFY_EMAIL || "info@fitnessincleeds.co.uk";
+        const requestText = String(row.notes).replace(/^REQUEST:\s*/i, "").replace(/^LOCATION REQUEST:\s*/i, "");
+        const submitted = new Date(row.created_at).toLocaleString("en-GB", { timeZone: "Europe/London" });
+        try {
+          const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
+            port: parseInt(process.env.SMTP_PORT || "2525"),
+            secure: false,
+            auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
+          });
+          await transporter.sendMail({
+            from: `"Fitness Inc Orders" <${process.env.SENDER_EMAIL || "fitnessincorders@tuffshop.co.uk"}>`,
+            to,
+            subject: "Your Fitness Inc request has been completed",
+            text: `Hi ${row.contact_name || "Fitness Inc"},
+
+Your request has been completed.
+
+Original request: ${requestText}
+Submitted: ${submitted}
+
+If you have any questions just reply to this email.
+
+Thanks,
+Tuffshop`,
+            html: `
+              <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+                <div style="background:#000;color:#fff;padding:16px 20px;border-bottom:3px solid #F3D014">
+                  <h2 style="margin:0;font-size:18px">Request Completed</h2>
+                </div>
+                <div style="padding:20px;color:#222">
+                  <p>Hi ${row.contact_name || "Fitness Inc"},</p>
+                  <p>Your request has been completed.</p>
+                  <p style="margin:16px 0;padding:12px;background:#fffbe6;border-left:3px solid #F3D014">
+                    <strong>Original request:</strong><br>${requestText.replace(/\n/g, "<br>")}
+                  </p>
+                  <p style="color:#888;font-size:12px">Submitted: ${submitted}</p>
+                  <p>If you have any questions just reply to this email.</p>
+                  <p>Thanks,<br>Tuffshop</p>
+                </div>
+              </div>`,
+          });
+          console.log(`[fitness-inc] request-complete email sent to ${to} for order ${row.id}`);
+        } catch (mailErr) {
+          console.error(`[fitness-inc] failed to send request-complete email for order ${row.id}:`, mailErr.message);
+        }
+      }
+    }
   } catch (err) {
     console.error("Failed to update order status:", err);
     res.status(500).json({ success: false, error: err.message });
