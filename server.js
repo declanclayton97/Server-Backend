@@ -47,6 +47,21 @@ if (useDatabase) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Targeted safety net: only swallow EPIPE/ECONNRESET on writes, which
+// just means a client (or upstream proxy) disconnected mid-response.
+// Anything else still crashes so genuine bugs stay visible. Without
+// this, a single mid-flight client abort can take the whole server
+// down on Render.
+process.on('uncaughtException', (err) => {
+  if (err && (err.code === 'EPIPE' || err.code === 'ECONNRESET') && err.syscall === 'write') {
+    console.warn(`[uncaught] swallowed ${err.code} on socket write — client disconnected`);
+    return;
+  }
+  console.error('[uncaught] FATAL:', err);
+  // Let Node take down the process — Render will restart cleanly.
+  process.exit(1);
+});
+
 // CORS MUST be registered before any body parser. If express.json runs
 // first and throws (e.g. payload too large, malformed JSON, memory
 // pressure), the error response goes out without CORS headers and the
@@ -4738,28 +4753,58 @@ app.post('/api/convert-eps', async (req, res) => {
     const errChunks = [];
     gs.stdout.on('data', (c) => chunks.push(c));
     gs.stderr.on('data', (c) => errChunks.push(c));
+    // Drain gs.stdout/stderr to /dev/null even after we've decided to
+    // ignore them, otherwise an unconsumed pipe can backpressure gs.
+    gs.stdout.on('error', (err) => console.warn('[convert-eps] stdout error:', err.message));
+    gs.stderr.on('error', (err) => console.warn('[convert-eps] stderr error:', err.message));
 
     let responded = false;
+    // Guarded response write: if the client has already disconnected
+    // (writableEnded / destroyed), res.json() throws EPIPE — which
+    // bubbles up as an uncaught socket error and can crash the Node
+    // process. Skip the write in that case.
     const finish = (status, payload) => {
       if (responded) return;
       responded = true;
       clearTimeout(timeoutHandle);
-      // Make sure the child process is gone — prevents zombie gs
-      // processes from accumulating across requests on long-lived
-      // Render instances.
       try { if (!gs.killed) gs.kill('SIGKILL'); } catch {}
-      res.status(status).json(payload);
+      if (res.writableEnded || res.destroyed) {
+        console.warn('[convert-eps] client gone, skipping response write');
+        return;
+      }
+      try {
+        res.status(status).json(payload);
+      } catch (err) {
+        console.warn('[convert-eps] response write failed:', err.message);
+      }
     };
 
     // Hard timeout. EPS rendering rarely takes more than a few seconds;
     // anything longer almost certainly means a malformed file is making
-    // gs hang waiting for input. Without this, a hang produces a CORS
-    // error in the browser (no headers ever sent).
+    // gs hang waiting for input.
     const TIMEOUT_MS = 30000;
     const timeoutHandle = setTimeout(() => {
       console.warn(`[convert-eps] timeout after ${TIMEOUT_MS}ms — killing gs`);
       finish(504, { error: `Ghostscript timed out after ${TIMEOUT_MS}ms — EPS may be malformed.` });
     }, TIMEOUT_MS);
+
+    // Client disconnected before we finished (closed tab, navigated
+    // away, fetch aborted). Kill gs so we don't waste CPU and mark the
+    // request as already-handled so finish() won't try to write to a
+    // dead socket — that's what was producing the EPIPE Socket errors
+    // in the Render logs.
+    req.on('close', () => {
+      if (!responded) {
+        console.warn('[convert-eps] client disconnected mid-request — aborting gs');
+        responded = true;
+        clearTimeout(timeoutHandle);
+        try { if (!gs.killed) gs.kill('SIGKILL'); } catch {}
+      }
+    });
+
+    res.on('error', (err) => {
+      console.warn('[convert-eps] response stream error:', err.message);
+    });
 
     gs.on('error', (err) => {
       if (err.code === 'ENOENT') {
@@ -4769,8 +4814,9 @@ app.post('/api/convert-eps', async (req, res) => {
     });
 
     gs.stdin.on('error', (err) => {
-      console.error('[convert-eps] stdin error:', err.message);
-      return finish(500, { error: `gs stdin error: ${err.message}` });
+      // EPIPE here means gs exited before we finished writing — close
+      // handler will fire shortly with the real exit code, so just log.
+      console.warn('[convert-eps] stdin error:', err.message);
     });
 
     gs.on('close', (code) => {
@@ -4785,11 +4831,15 @@ app.post('/api/convert-eps', async (req, res) => {
       return finish(200, { success: true, pngBase64: png.toString('base64'), bytes: png.length });
     });
 
-    gs.stdin.write(epsBuffer);
+    gs.stdin.write(epsBuffer, (writeErr) => {
+      if (writeErr) console.warn('[convert-eps] stdin write callback error:', writeErr.message);
+    });
     gs.stdin.end();
   } catch (err) {
     console.error('[convert-eps] handler error:', err.message);
-    if (!res.headersSent) res.status(500).json({ error: err.message });
+    if (!res.headersSent) {
+      try { res.status(500).json({ error: err.message }); } catch {}
+    }
   }
 });
 
