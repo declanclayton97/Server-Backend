@@ -4864,30 +4864,17 @@ app.post('/api/bp-order-attachments', async (req, res) => {
       return res.status(400).json({ error: `kind must be one of ${VALID_ATTACHMENT_KINDS.join(', ')}` });
     }
     const buf = Buffer.from(dataBase64, 'base64');
-    if (kind === 'scanned_sheet') {
-      // Single scanned sheet per order regardless of filename — replace
-      // any existing one so re-uploads don't accumulate.
-      await pool.query(
-        `DELETE FROM bp_order_attachments WHERE bp_order_id = $1 AND kind = $2`,
-        [String(bpOrderId), kind]
-      );
-      await pool.query(
-        `INSERT INTO bp_order_attachments (bp_order_id, kind, filename, mime_type, data)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [String(bpOrderId), kind, filename, mimeType || null, buf]
-      );
-    } else {
-      // Embroidery files (and any future multi-row kinds) dedup by
-      // filename — same name overwrites, different names coexist.
-      await pool.query(
-        `INSERT INTO bp_order_attachments (bp_order_id, kind, filename, mime_type, data)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (bp_order_id, kind, filename)
-         DO UPDATE SET mime_type = EXCLUDED.mime_type,
-                       data = EXCLUDED.data, uploaded_at = NOW()`,
-        [String(bpOrderId), kind, filename, mimeType || null, buf]
-      );
-    }
+    // All kinds (scanned_sheet, embroidery_file) dedup by filename —
+    // same name at multiple positions = one row = one BP upload;
+    // different filenames coexist as separate rows.
+    await pool.query(
+      `INSERT INTO bp_order_attachments (bp_order_id, kind, filename, mime_type, data)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (bp_order_id, kind, filename)
+       DO UPDATE SET mime_type = EXCLUDED.mime_type,
+                     data = EXCLUDED.data, uploaded_at = NOW()`,
+      [String(bpOrderId), kind, filename, mimeType || null, buf]
+    );
     res.json({ success: true, bytes: buf.length });
   } catch (err) {
     console.error('[bp-attachments] upload failed:', err.message);
