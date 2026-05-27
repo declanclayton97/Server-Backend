@@ -2326,6 +2326,34 @@ ${PROOF_CHASE_SIGNATURE_HTML}
   return { subject, text, html };
 }
 
+// Operator → email map. Used in two places:
+//   (a) routing approval-result emails to the operator who created the
+//       proof (existing flow at /api/approval-sessions/:id/respond).
+//   (b) setting the From address when an operator manually sends a proof
+//       via the new /api/proof/send-email endpoint.
+// Configurable via OPERATOR_EMAIL_MAP env var (JSON) to add operators
+// without a deploy.
+const DEFAULT_OPERATOR_EMAIL_MAP = {
+  "Dec": "dec@tuffshop.co.uk",
+  "Harry": "harry.b@tuffshop.co.uk",
+};
+function loadOperatorEmailMap() {
+  let map = { ...DEFAULT_OPERATOR_EMAIL_MAP };
+  if (process.env.OPERATOR_EMAIL_MAP) {
+    try {
+      const parsed = JSON.parse(process.env.OPERATOR_EMAIL_MAP);
+      if (parsed && typeof parsed === 'object') map = { ...map, ...parsed };
+    } catch (err) {
+      console.warn('[operator-email-map] OPERATOR_EMAIL_MAP env not valid JSON:', err.message);
+    }
+  }
+  return map;
+}
+const OPERATOR_EMAIL_MAP = loadOperatorEmailMap();
+function operatorEmailFor(operator) {
+  return OPERATOR_EMAIL_MAP[operator] || OPERATOR_EMAIL_MAP['Dec'] || 'dec@tuffshop.co.uk';
+}
+
 async function postBpOrderNote(orderId, noteText) {
   const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
     ? 'https://euw1.brightpearlconnect.com'
@@ -5499,6 +5527,110 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
   }
 });
 
+// Send a proof approval link to a customer via email. Mirrors the
+// WhatsApp send flow: From is the operator's email (so replies route
+// to them), display name is "Tuffshop Proofs". Fires the same BP
+// status 34 → 35 transition + BP note as the WhatsApp path so the
+// downstream automation behaves identically regardless of channel.
+//
+// Body: { to: string|string[], orderNumber, customerName, approvalUrl, sentBy }
+app.post('/api/proof/send-email', async (req, res) => {
+  if (!process.env.SMTP_PASS) {
+    return res.status(503).json({ error: 'SMTP not configured (SMTP_PASS missing)' });
+  }
+  try {
+    const { to, orderNumber, customerName, approvalUrl, sentBy } = req.body || {};
+    if (!to) return res.status(400).json({ error: 'to required' });
+    if (!approvalUrl) return res.status(400).json({ error: 'approvalUrl required' });
+
+    const recipients = Array.isArray(to) ? to.filter(Boolean) : [to];
+    if (recipients.length === 0) return res.status(400).json({ error: 'to is empty' });
+
+    const fromEmail = operatorEmailFor(sentBy);
+
+    // Greeting name resolution mirrors the WhatsApp template logic.
+    let nameSource = customerName;
+    if (!nameSource && orderNumber) {
+      const parties = await fetchBrightpearlParties(orderNumber);
+      if (parties) nameSource = pickCustomerName(parties);
+    }
+    const greeting = deriveFirstName(nameSource) || 'there';
+    const orderRef = orderNumber || 'your order';
+    const subject = `Your proof for order ${orderRef} is ready to review`;
+
+    const ctaButton = `
+      <table cellpadding="0" cellspacing="0" border="0" style="margin:24px 0">
+        <tr>
+          <td style="background:#F3D014;border-radius:8px;padding:0;text-align:center">
+            <a href="${approvalUrl}" target="_blank"
+               style="display:inline-block;padding:16px 32px;color:#000;text-decoration:none;font-weight:bold;font-size:16px;font-family:Arial,sans-serif;letter-spacing:0.5px">
+              ► REVIEW YOUR PROOF
+            </a>
+          </td>
+        </tr>
+      </table>`;
+
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#222;background:#fff">
+        <div style="background:#000;color:#fff;padding:16px 20px;border-bottom:3px solid #F3D014">
+          <h2 style="margin:0;font-size:18px">Your proof is ready</h2>
+        </div>
+        <div style="padding:20px;font-size:14px;line-height:1.5">
+          <p>Hi ${greeting},</p>
+          <p>Your proof for order <strong>${orderRef}</strong> is ready to review.</p>
+          <p>Click the button below to open your <strong>proof confirmation page</strong>, where you can approve each logo or request changes.</p>
+          ${ctaButton}
+          <p style="color:#666;font-size:12px;margin-top:24px">
+            Button not working? Copy and paste this link into your browser:<br>
+            <a href="${approvalUrl}" style="color:#666;word-break:break-all">${approvalUrl}</a>
+          </p>
+          ${SIGNATURE_HTML || ''}
+        </div>
+      </div>`;
+
+    const text = `Hi ${greeting},
+
+Your proof for order ${orderRef} is ready to review.
+
+Click here to open your proof confirmation page, where you can approve each logo or request changes:
+
+${approvalUrl}
+
+${SIGNATURE_TEXT || ''}`;
+
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
+      port: parseInt(process.env.SMTP_PORT || '2525'),
+      secure: false,
+      auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS },
+    });
+
+    await transporter.sendMail({
+      from: `"Tuffshop Proofs" <${fromEmail}>`,
+      to: recipients.join(', '),
+      replyTo: fromEmail,
+      subject,
+      text,
+      html,
+    });
+
+    console.log(`[proof-email] sent to ${recipients.join(', ')} from ${fromEmail} (order ${orderNumber || '?'})`);
+    res.json({ success: true, to: recipients });
+
+    // Best-effort BP status transition 34 → 35, same as WhatsApp path.
+    if (orderNumber) {
+      const noteText = sentBy
+        ? `${sentBy} sent Proof via Email to ${recipients.join(', ')}`
+        : `Proof sent via Email to ${recipients.join(', ')}`;
+      transitionBpStatusProofRequiredToSent(String(orderNumber), noteText)
+        .catch((err) => console.error(`[bp-status] ${orderNumber} transition unexpected error:`, err.message));
+    }
+  } catch (err) {
+    console.error('[proof-email] error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
 // Send a free-form reply to a customer. Only allowed inside the 24h
 // customer-service window (i.e. they messaged us within 24h); outside it
 // WhatsApp requires a template, so we 409 with windowClosed so the UI can
@@ -5826,12 +5958,9 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
         const sess = sessionData.rows[0];
         if (!sess) throw new Error("Session not found");
 
-        // Route email based on who created the proof
-        const emailMap = {
-          "Dec": "dec@tuffshop.co.uk",
-          "Harry": "harry.b@tuffshop.co.uk",
-        };
-        const recipientEmail = emailMap[sess.created_by] || "dec@tuffshop.co.uk";
+        // Route email based on who created the proof (uses the shared
+        // operator email map so adding new operators only needs one edit).
+        const recipientEmail = operatorEmailFor(sess.created_by);
 
         // Get item results
         const itemResults = await pool.query(
