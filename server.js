@@ -47,6 +47,14 @@ if (useDatabase) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// CORS MUST be registered before any body parser. If express.json runs
+// first and throws (e.g. payload too large, malformed JSON, memory
+// pressure), the error response goes out without CORS headers and the
+// browser reports it as a CORS failure — masking the real cause.
+app.use(cors({
+  origin: true,
+  credentials: true,
+}));
 // Stash the raw request body so the WhatsApp webhook can verify Meta's
 // X-Hub-Signature-256 HMAC (which is computed over the exact bytes sent).
 app.use(express.json({
@@ -54,10 +62,6 @@ app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
 app.use(express.raw({ limit: '50mb', type: 'application/octet-stream' }));
 
 // Static email assets (logo, social icons) referenced from chase-email HTML.
@@ -4736,29 +4740,49 @@ app.post('/api/convert-eps', async (req, res) => {
     gs.stderr.on('data', (c) => errChunks.push(c));
 
     let responded = false;
-    const finish = (code, status, payload) => {
+    const finish = (status, payload) => {
       if (responded) return;
       responded = true;
+      clearTimeout(timeoutHandle);
+      // Make sure the child process is gone — prevents zombie gs
+      // processes from accumulating across requests on long-lived
+      // Render instances.
+      try { if (!gs.killed) gs.kill('SIGKILL'); } catch {}
       res.status(status).json(payload);
     };
 
+    // Hard timeout. EPS rendering rarely takes more than a few seconds;
+    // anything longer almost certainly means a malformed file is making
+    // gs hang waiting for input. Without this, a hang produces a CORS
+    // error in the browser (no headers ever sent).
+    const TIMEOUT_MS = 30000;
+    const timeoutHandle = setTimeout(() => {
+      console.warn(`[convert-eps] timeout after ${TIMEOUT_MS}ms — killing gs`);
+      finish(504, { error: `Ghostscript timed out after ${TIMEOUT_MS}ms — EPS may be malformed.` });
+    }, TIMEOUT_MS);
+
     gs.on('error', (err) => {
       if (err.code === 'ENOENT') {
-        return finish(0, 503, { error: 'Ghostscript not installed on backend (gs binary missing).' });
+        return finish(503, { error: 'Ghostscript not installed on backend (gs binary missing).' });
       }
-      return finish(0, 500, { error: err.message });
+      return finish(500, { error: err.message });
+    });
+
+    gs.stdin.on('error', (err) => {
+      console.error('[convert-eps] stdin error:', err.message);
+      return finish(500, { error: `gs stdin error: ${err.message}` });
     });
 
     gs.on('close', (code) => {
       if (code !== 0) {
         const stderr = Buffer.concat(errChunks).toString().slice(0, 500);
-        return finish(code, 500, { error: `Ghostscript exit ${code}: ${stderr || '(no stderr)'}` });
+        return finish(500, { error: `Ghostscript exit ${code}: ${stderr || '(no stderr)'}` });
       }
       const png = Buffer.concat(chunks);
       if (png.length === 0) {
-        return finish(0, 500, { error: 'Ghostscript produced empty output' });
+        return finish(500, { error: 'Ghostscript produced empty output' });
       }
-      return finish(0, 200, { success: true, pngBase64: png.toString('base64'), bytes: png.length });
+      return finish(200, { success: true, pngBase64: png.toString('base64'), bytes: png.length });
     });
 
     gs.stdin.write(epsBuffer);
