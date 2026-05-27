@@ -3195,8 +3195,13 @@ async function initializeBpOrderAttachments() {
       );
       CREATE INDEX IF NOT EXISTS idx_bp_order_attachments_order
         ON bp_order_attachments(bp_order_id);
-      CREATE UNIQUE INDEX IF NOT EXISTS uniq_bp_order_attachments_kind
-        ON bp_order_attachments(bp_order_id, kind);
+      -- Old single-row-per-kind constraint replaced with filename-aware
+      -- dedup so orders can stage multiple emb files (different positions,
+      -- per-employee personalised names, etc.). scanned_sheet is still
+      -- enforced as single via the POST handler (DELETE-before-INSERT).
+      DROP INDEX IF EXISTS uniq_bp_order_attachments_kind;
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_bp_order_attachments_kind_file
+        ON bp_order_attachments(bp_order_id, kind, filename);
     `);
     console.log('✅ bp_order_attachments initialized');
   } catch (err) {
@@ -4831,15 +4836,30 @@ app.post('/api/bp-order-attachments', async (req, res) => {
       return res.status(400).json({ error: `kind must be one of ${VALID_ATTACHMENT_KINDS.join(', ')}` });
     }
     const buf = Buffer.from(dataBase64, 'base64');
-    // Upsert by (order, kind) — one of each per order; re-upload replaces.
-    await pool.query(
-      `INSERT INTO bp_order_attachments (bp_order_id, kind, filename, mime_type, data)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (bp_order_id, kind)
-       DO UPDATE SET filename = EXCLUDED.filename, mime_type = EXCLUDED.mime_type,
-                     data = EXCLUDED.data, uploaded_at = NOW()`,
-      [String(bpOrderId), kind, filename, mimeType || null, buf]
-    );
+    if (kind === 'scanned_sheet') {
+      // Single scanned sheet per order regardless of filename — replace
+      // any existing one so re-uploads don't accumulate.
+      await pool.query(
+        `DELETE FROM bp_order_attachments WHERE bp_order_id = $1 AND kind = $2`,
+        [String(bpOrderId), kind]
+      );
+      await pool.query(
+        `INSERT INTO bp_order_attachments (bp_order_id, kind, filename, mime_type, data)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [String(bpOrderId), kind, filename, mimeType || null, buf]
+      );
+    } else {
+      // Embroidery files (and any future multi-row kinds) dedup by
+      // filename — same name overwrites, different names coexist.
+      await pool.query(
+        `INSERT INTO bp_order_attachments (bp_order_id, kind, filename, mime_type, data)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (bp_order_id, kind, filename)
+         DO UPDATE SET mime_type = EXCLUDED.mime_type,
+                       data = EXCLUDED.data, uploaded_at = NOW()`,
+        [String(bpOrderId), kind, filename, mimeType || null, buf]
+      );
+    }
     res.json({ success: true, bytes: buf.length });
   } catch (err) {
     console.error('[bp-attachments] upload failed:', err.message);
