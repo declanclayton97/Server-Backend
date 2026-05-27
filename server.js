@@ -5359,7 +5359,7 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
     });
   }
 
-  const { phone, customerName, orderNumber, approvalUrl } = req.body || {};
+  const { phone, customerName, orderNumber, approvalUrl, sentBy } = req.body || {};
 
   const to = normaliseWhatsAppNumber(phone);
   if (!to) {
@@ -5467,7 +5467,10 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
     // "Proof Sent" (35) now the proof's gone out. Fires async after the
     // response so it doesn't delay the UI. No-op if already past 34.
     if (orderNumber) {
-      transitionBpStatusProofRequiredToSent(String(orderNumber), `Proof sent via WhatsApp to ${to}`)
+      const noteText = sentBy
+        ? `${sentBy} sent Proof via WhatsApp to ${to}`
+        : `Proof sent via WhatsApp to ${to}`;
+      transitionBpStatusProofRequiredToSent(String(orderNumber), noteText)
         .catch((err) => console.error(`[bp-status] ${orderNumber} transition unexpected error:`, err.message));
     }
   } catch (err) {
