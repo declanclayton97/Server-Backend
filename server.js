@@ -4604,6 +4604,77 @@ Tuffshop`,
 
 const VALID_ATTACHMENT_KINDS = ['scanned_sheet', 'embroidery_file'];
 
+// Stamp the customer's signature + name + IP onto every product page of
+// a proof PDF, mirroring /api/approval-sessions/:id/download. Returns
+// the stamped bytes, or the original on any stamp failure. No stamp
+// applied if there's nothing to stamp (returns original unchanged).
+async function stampSignatureOntoPdf(pdfBytes, { approverName, signatureData, submitterIp, logoPositions }) {
+  if (!approverName && !signatureData) return pdfBytes;
+  try {
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const pages = pdfDoc.getPages();
+    const positions = typeof logoPositions === 'string' ? JSON.parse(logoPositions) : logoPositions;
+
+    let sigImage = null;
+    if (signatureData) {
+      try {
+        const sigBase64 = signatureData.replace(/^data:image\/png;base64,/, '');
+        const sigBytes = Buffer.from(sigBase64, 'base64');
+        sigImage = await pdfDoc.embedPng(sigBytes);
+      } catch {}
+    }
+
+    const stampW = 150;
+    const stampH = 50;
+    const stampX = 179 + 373 - stampW;
+    const stampY = 296;
+    const borderW = 2;
+    const yellow = rgb(0.95, 0.82, 0.08);
+    const black = rgb(0, 0, 0);
+
+    const stampedPages = new Set();
+    for (const pos of (positions || [])) {
+      const pageIdx = (pos.page || 1) - 1;
+      if (pageIdx >= pages.length || stampedPages.has(pageIdx)) continue;
+      stampedPages.add(pageIdx);
+      const page = pages[pageIdx];
+
+      page.drawRectangle({
+        x: stampX, y: stampY, width: stampW, height: stampH,
+        borderColor: yellow, borderWidth: borderW,
+        color: rgb(1, 1, 1), opacity: 0.25,
+      });
+
+      if (sigImage) {
+        const sigAreaH = stampH - 14;
+        const sigDims = sigImage.scale(1);
+        const sigScale = Math.min((stampW - 8) / sigDims.width, sigAreaH / sigDims.height);
+        const sigW = sigDims.width * sigScale;
+        const sigH = sigDims.height * sigScale;
+        page.drawImage(sigImage, {
+          x: stampX + (stampW - sigW) / 2,
+          y: stampY + 14 + (sigAreaH - sigH) / 2,
+          width: sigW, height: sigH,
+        });
+      }
+
+      if (approverName) {
+        page.drawText(approverName, { x: stampX + 4, y: stampY + 4, size: 6, color: black });
+      }
+      if (submitterIp) {
+        const ipText = submitterIp;
+        const ipX = stampX + stampW - 4 - (ipText.length * 3.2);
+        page.drawText(ipText, { x: ipX, y: stampY + 4, size: 6, color: black });
+      }
+    }
+
+    return Buffer.from(await pdfDoc.save());
+  } catch (err) {
+    console.error('[stamp] signature overlay failed, returning unsigned PDF:', err.message);
+    return pdfBytes;
+  }
+}
+
 // Stage a single supplementary file for a BP order.
 // Body: { bpOrderId, kind, filename, mimeType, dataBase64 }
 app.post('/api/bp-order-attachments', async (req, res) => {
@@ -4672,11 +4743,15 @@ app.post('/api/brightpearl/attach-files', async (req, res) => {
 
     const files = [];
 
-    // 1. Signed PDF from approval_sessions (optional — not every attach
-    //    is post-approval; we accept the call without it).
+    // 1. Proof PDF from approval_sessions (optional — not every attach
+    //    is post-approval; we accept the call without it). If the
+    //    customer has signed (approver_name or signature_data present),
+    //    overlay the signature stamp before attaching so production gets
+    //    the signed-off version. Otherwise the raw unsigned proof goes up.
     if (approvalSessionId) {
       const sessRes = await pool.query(
-        `SELECT pdf_data, order_number, customer_name, status
+        `SELECT pdf_data, order_number, customer_name, status,
+                approver_name, signature_data, submitter_ip, logo_positions
            FROM approval_sessions WHERE id = $1`,
         [approvalSessionId]
       );
@@ -4686,13 +4761,19 @@ app.post('/api/brightpearl/attach-files', async (req, res) => {
       const sess = sessRes.rows[0];
       if (sess.pdf_data) {
         const orderRef = sess.order_number || bpOrderId;
-        const suffix = sess.status === 'approved' ? 'Signed-Proof' : 'Proof';
+        const isSigned = !!(sess.approver_name || sess.signature_data);
+        const pdfBuffer = await stampSignatureOntoPdf(sess.pdf_data, {
+          approverName: sess.approver_name,
+          signatureData: sess.signature_data,
+          submitterIp: sess.submitter_ip,
+          logoPositions: sess.logo_positions,
+        });
         files.push({
           source: 'approval_session',
-          kind: 'signed_pdf',
-          filename: `${orderRef}-${suffix}.pdf`,
+          kind: isSigned ? 'signed_pdf' : 'unsigned_proof',
+          filename: `${orderRef}-${isSigned ? 'Signed-Proof' : 'Proof'}.pdf`,
           mimeType: 'application/pdf',
-          buffer: sess.pdf_data,
+          buffer: pdfBuffer,
         });
       }
     }
