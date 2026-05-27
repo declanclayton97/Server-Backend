@@ -4730,13 +4730,43 @@ Tuffshop`,
 // Requires `gs` on PATH on the backend host — Render's Node images do
 // include it. If we ever see "ENOENT" / "Ghostscript not installed",
 // the deploy environment changed.
+// Ghostscript can spike memory on rasterisation. On small Render
+// instances, 4+ concurrent gs processes will OOM/stall and produce
+// the "fetches never complete" symptom we saw. Single-slot queue:
+// requests wait their turn instead of fighting for resources.
+let epsConvertBusy = false;
+const epsConvertWaiters = [];
+async function acquireEpsSlot() {
+  if (!epsConvertBusy) { epsConvertBusy = true; return; }
+  return new Promise((resolve) => epsConvertWaiters.push(resolve));
+}
+function releaseEpsSlot() {
+  const next = epsConvertWaiters.shift();
+  if (next) next();
+  else epsConvertBusy = false;
+}
+
 app.post('/api/convert-eps', async (req, res) => {
+  const reqId = Math.random().toString(36).slice(2, 8);
   try {
     const { dataBase64, dpi } = req.body || {};
     if (!dataBase64) return res.status(400).json({ error: 'dataBase64 required' });
     const epsBuffer = Buffer.from(dataBase64, 'base64');
     if (epsBuffer.length === 0) return res.status(400).json({ error: 'empty file' });
     const resolution = Math.min(Math.max(parseInt(dpi, 10) || 300, 72), 600);
+
+    console.log(`[convert-eps:${reqId}] received, eps=${epsBuffer.length}B, dpi=${resolution}, queue=${epsConvertWaiters.length}`);
+    const acquireStart = Date.now();
+    await acquireEpsSlot();
+    const waitedMs = Date.now() - acquireStart;
+    if (waitedMs > 50) console.log(`[convert-eps:${reqId}] waited ${waitedMs}ms in queue`);
+
+    // If the client gave up while we were queued, no point starting gs.
+    if (res.writableEnded || res.destroyed) {
+      console.warn(`[convert-eps:${reqId}] client gone before slot, skipping`);
+      releaseEpsSlot();
+      return;
+    }
 
     const gs = spawn('gs', [
       '-dNOPAUSE',
@@ -4759,6 +4789,7 @@ app.post('/api/convert-eps', async (req, res) => {
     gs.stderr.on('error', (err) => console.warn('[convert-eps] stderr error:', err.message));
 
     let responded = false;
+    const startedAt = Date.now();
     // Guarded response write: if the client has already disconnected
     // (writableEnded / destroyed), res.json() throws EPIPE — which
     // bubbles up as an uncaught socket error and can crash the Node
@@ -4768,14 +4799,17 @@ app.post('/api/convert-eps', async (req, res) => {
       responded = true;
       clearTimeout(timeoutHandle);
       try { if (!gs.killed) gs.kill('SIGKILL'); } catch {}
+      releaseEpsSlot();
+      const tookMs = Date.now() - startedAt;
+      console.log(`[convert-eps:${reqId}] done in ${tookMs}ms, status=${status}`);
       if (res.writableEnded || res.destroyed) {
-        console.warn('[convert-eps] client gone, skipping response write');
+        console.warn(`[convert-eps:${reqId}] client gone, skipping response write`);
         return;
       }
       try {
         res.status(status).json(payload);
       } catch (err) {
-        console.warn('[convert-eps] response write failed:', err.message);
+        console.warn(`[convert-eps:${reqId}] response write failed:`, err.message);
       }
     };
 
@@ -4836,7 +4870,11 @@ app.post('/api/convert-eps', async (req, res) => {
     });
     gs.stdin.end();
   } catch (err) {
-    console.error('[convert-eps] handler error:', err.message);
+    console.error(`[convert-eps:${reqId}] handler error:`, err.message);
+    // Best-effort slot release in case we crashed after acquiring.
+    if (epsConvertBusy) {
+      try { releaseEpsSlot(); } catch {}
+    }
     if (!res.headersSent) {
       try { res.status(500).json({ error: err.message }); } catch {}
     }
