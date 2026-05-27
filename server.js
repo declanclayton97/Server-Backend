@@ -19,6 +19,7 @@ import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from 
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder } from './bpWebSession.js';
+import { spawn } from 'child_process';
 const { Pool } = pkg;
 
 // Get directory name for ES modules
@@ -4666,6 +4667,72 @@ Tuffshop`,
   } catch (err) {
     console.error("Failed to update order status:", err);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================
+// EPS → PNG conversion (skip the manual Illustrator step)
+// ============================================================
+// POST /api/convert-eps with { dataBase64 } returns { pngBase64, bytes }.
+// Pipes the EPS into Ghostscript via stdin, captures the PNG from stdout.
+// Requires `gs` on PATH on the backend host — Render's Node images do
+// include it. If we ever see "ENOENT" / "Ghostscript not installed",
+// the deploy environment changed.
+app.post('/api/convert-eps', async (req, res) => {
+  try {
+    const { dataBase64, dpi } = req.body || {};
+    if (!dataBase64) return res.status(400).json({ error: 'dataBase64 required' });
+    const epsBuffer = Buffer.from(dataBase64, 'base64');
+    if (epsBuffer.length === 0) return res.status(400).json({ error: 'empty file' });
+    const resolution = Math.min(Math.max(parseInt(dpi, 10) || 300, 72), 600);
+
+    const gs = spawn('gs', [
+      '-dNOPAUSE',
+      '-dBATCH',
+      '-dQUIET',
+      '-dEPSCrop',           // crop to bounding box, no whitespace
+      '-sDEVICE=pngalpha',   // transparent PNG output
+      `-r${resolution}`,
+      '-sOutputFile=-',      // stdout
+      '-',                    // stdin
+    ]);
+
+    const chunks = [];
+    const errChunks = [];
+    gs.stdout.on('data', (c) => chunks.push(c));
+    gs.stderr.on('data', (c) => errChunks.push(c));
+
+    let responded = false;
+    const finish = (code, status, payload) => {
+      if (responded) return;
+      responded = true;
+      res.status(status).json(payload);
+    };
+
+    gs.on('error', (err) => {
+      if (err.code === 'ENOENT') {
+        return finish(0, 503, { error: 'Ghostscript not installed on backend (gs binary missing).' });
+      }
+      return finish(0, 500, { error: err.message });
+    });
+
+    gs.on('close', (code) => {
+      if (code !== 0) {
+        const stderr = Buffer.concat(errChunks).toString().slice(0, 500);
+        return finish(code, 500, { error: `Ghostscript exit ${code}: ${stderr || '(no stderr)'}` });
+      }
+      const png = Buffer.concat(chunks);
+      if (png.length === 0) {
+        return finish(0, 500, { error: 'Ghostscript produced empty output' });
+      }
+      return finish(0, 200, { success: true, pngBase64: png.toString('base64'), bytes: png.length });
+    });
+
+    gs.stdin.write(epsBuffer);
+    gs.stdin.end();
+  } catch (err) {
+    console.error('[convert-eps] handler error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
