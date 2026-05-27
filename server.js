@@ -2351,6 +2351,82 @@ async function postBpOrderNote(orderId, noteText) {
   return true;
 }
 
+// Status IDs configurable so they can be changed without a deploy if BP
+// is reconfigured. Defaults match the operator's current setup:
+//   34 = Proof Required (set when sales books a proof)
+//   35 = Proof Sent     (transition target once we've sent the proof)
+const BP_STATUS_PROOF_REQUIRED = parseInt(process.env.BP_STATUS_PROOF_REQUIRED || '34', 10);
+const BP_STATUS_PROOF_SENT = parseInt(process.env.BP_STATUS_PROOF_SENT || '35', 10);
+
+// Conditional status transition: only flips an order from "Proof Required"
+// to "Proof Sent" — if it's already in a later state (sent, approved, in
+// production, etc.) we leave it alone. Safe to call on any order; will
+// no-op when not in the source status. Fires a BP system note alongside
+// the transition so the audit trail shows what triggered it.
+async function transitionBpStatusProofRequiredToSent(orderId, noteText = 'Proof sent') {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    console.warn('[bp-status] BP creds missing; cannot transition');
+    return { ok: false, reason: 'no-creds' };
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+
+  // Probe current status. BP shapes the response slightly differently
+  // depending on endpoint version — try both common locations.
+  let currentStatusId = null;
+  try {
+    const getRes = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
+      { headers }
+    );
+    if (!getRes.ok) {
+      console.warn(`[bp-status] GET order ${orderId} returned ${getRes.status}`);
+      return { ok: false, reason: 'get-failed', status: getRes.status };
+    }
+    const data = await getRes.json();
+    const order = Array.isArray(data.response) ? data.response[0] : data.response;
+    currentStatusId = order?.orderStatus?.orderStatusId ?? order?.orderStatusId ?? null;
+  } catch (err) {
+    console.error(`[bp-status] GET order ${orderId} error:`, err.message);
+    return { ok: false, reason: 'get-error', error: err.message };
+  }
+
+  if (currentStatusId !== BP_STATUS_PROOF_REQUIRED) {
+    console.log(`[bp-status] order ${orderId} currently status ${currentStatusId}, not ${BP_STATUS_PROOF_REQUIRED} — leaving alone`);
+    return { ok: true, skipped: true, currentStatusId };
+  }
+
+  try {
+    const putRes = await fetch(
+      `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/status`,
+      {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          orderStatusId: BP_STATUS_PROOF_SENT,
+          orderNote: { text: noteText, isPublic: false },
+        }),
+      }
+    );
+    if (!putRes.ok) {
+      const errBody = await putRes.text();
+      console.error(`[bp-status] PUT ${orderId} status returned ${putRes.status}: ${errBody.slice(0, 300)}`);
+      return { ok: false, reason: 'put-failed', status: putRes.status, body: errBody };
+    }
+    console.log(`[bp-status] order ${orderId} transitioned ${BP_STATUS_PROOF_REQUIRED} → ${BP_STATUS_PROOF_SENT}`);
+    return { ok: true, transitioned: true };
+  } catch (err) {
+    console.error(`[bp-status] PUT ${orderId} status error:`, err.message);
+    return { ok: false, reason: 'put-error', error: err.message };
+  }
+}
+
 async function sendProofChaseEmail(order, dryRun) {
   const customer = order.parties?.customer || {};
   const recipient = customer.email;
@@ -5319,6 +5395,14 @@ app.post("/api/whatsapp/send-proof", async (req, res) => {
       raw: { template: templateName, approvalUrl: fullUrl },
     });
     res.json({ success: true, messageId, to });
+
+    // Best-effort: transition BP order from "Proof Required" (34) to
+    // "Proof Sent" (35) now the proof's gone out. Fires async after the
+    // response so it doesn't delay the UI. No-op if already past 34.
+    if (orderNumber) {
+      transitionBpStatusProofRequiredToSent(String(orderNumber), `Proof sent via WhatsApp to ${to}`)
+        .catch((err) => console.error(`[bp-status] ${orderNumber} transition unexpected error:`, err.message));
+    }
   } catch (err) {
     console.error("[whatsapp/send-proof] error:", err.message);
     res.status(500).json({ error: err.message });
