@@ -3256,6 +3256,33 @@ async function initializeBpOrderAttachments() {
   }
 }
 
+// fitness_inc_colour_additions — operator-added catalogue colours for
+// Fitness Inc products. Merged at runtime with the hardcoded
+// FITNESS_INC_PRODUCTS array so admins can add colours without a code
+// change. front_url/back_url are optional — null means fall back to the
+// product's _default placeholder in fitnessIncProductImages.json.
+async function initializeFitnessIncColourAdditions() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS fitness_inc_colour_additions (
+        id SERIAL PRIMARY KEY,
+        product_id VARCHAR(50) NOT NULL,
+        colour_name VARCHAR(100) NOT NULL,
+        front_url TEXT,
+        back_url TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_by VARCHAR(100)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_fitness_inc_colour_addition
+        ON fitness_inc_colour_additions(product_id, colour_name);
+    `);
+    console.log('✅ fitness_inc_colour_additions initialized');
+  } catch (err) {
+    console.error('❌ Error initializing fitness_inc_colour_additions:', err.message);
+  }
+}
+
 // Kill-switch: set ORDER_PIPELINE_ENABLED=false on Render to fully stop the
 // order-pipeline poller (no boot run, no interval, manual trigger 503s).
 // Even in dry-run mode the poller hits Brightpearl, so this is the way to
@@ -3268,6 +3295,7 @@ function isOrderPipelineEnabled() {
   await initializeOrderPipelineTables();
   await initializeWhatsAppTables();
   await initializeBpOrderAttachments();
+  await initializeFitnessIncColourAdditions();
   if (!isOrderPipelineEnabled()) {
     console.log('⏸️  Order-pipeline poller DISABLED via ORDER_PIPELINE_ENABLED=false. No polls will run.');
     return;
@@ -4719,6 +4747,68 @@ Tuffshop`,
   } catch (err) {
     console.error("Failed to update order status:", err);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================
+// Fitness Inc — operator-added catalogue colours
+// ============================================================
+// Lets admins add new colours to existing FI products without a code
+// change. Merged into the hardcoded catalogue at runtime by a frontend
+// hook (useFitnessIncCatalogue).
+
+// GET all additions — frontend merges into FITNESS_INC_PRODUCTS at runtime.
+app.get('/api/fitness-inc/colour-additions', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT id, product_id, colour_name, front_url, back_url, created_at, created_by
+         FROM fitness_inc_colour_additions
+        ORDER BY product_id, colour_name`
+    );
+    res.json({ additions: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST a new colour addition. Body: { productId, colourName, frontUrl?, backUrl?, createdBy? }
+// Upserts on (product_id, colour_name) so editing a colour's URLs just re-posts.
+app.post('/api/fitness-inc/colour-additions', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { productId, colourName, frontUrl, backUrl, createdBy } = req.body || {};
+    if (!productId || !colourName) {
+      return res.status(400).json({ error: 'productId and colourName are required' });
+    }
+    const r = await pool.query(
+      `INSERT INTO fitness_inc_colour_additions (product_id, colour_name, front_url, back_url, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (product_id, colour_name)
+       DO UPDATE SET front_url = EXCLUDED.front_url,
+                     back_url = EXCLUDED.back_url,
+                     created_by = COALESCE(EXCLUDED.created_by, fitness_inc_colour_additions.created_by)
+       RETURNING id, product_id, colour_name, front_url, back_url, created_at, created_by`,
+      [String(productId), String(colourName).trim(), frontUrl || null, backUrl || null, createdBy || null]
+    );
+    res.json({ success: true, addition: r.rows[0] });
+  } catch (err) {
+    console.error('[fitness-inc-colours] add failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE one — for removing colours added in error.
+app.delete('/api/fitness-inc/colour-additions/:id', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `DELETE FROM fitness_inc_colour_additions WHERE id = $1`,
+      [req.params.id]
+    );
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
