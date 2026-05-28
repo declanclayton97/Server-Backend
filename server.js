@@ -2446,8 +2446,16 @@ async function transitionBpStatusProofRequiredToSent(orderId, noteText = 'Proof 
   }
 
   if (currentStatusId !== BP_STATUS_PROOF_REQUIRED) {
-    console.log(`[bp-status] order ${orderId} currently status ${currentStatusId}, not ${BP_STATUS_PROOF_REQUIRED} — leaving alone`);
-    return { ok: true, skipped: true, currentStatusId };
+    // Status isn't "Proof Required" — don't transition, but still post
+    // the note so there's an audit trail of the send in BP regardless
+    // of where the order is in its lifecycle.
+    console.log(`[bp-status] order ${orderId} currently status ${currentStatusId}, not ${BP_STATUS_PROOF_REQUIRED} — skipping transition, still posting note`);
+    try {
+      await postBpOrderNote(orderId, noteText);
+    } catch (err) {
+      console.error(`[bp-status] note post failed for ${orderId}:`, err.message);
+    }
+    return { ok: true, skipped: true, currentStatusId, notePosted: true };
   }
 
   try {
