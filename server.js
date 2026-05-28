@@ -3291,6 +3291,44 @@ async function initializeFitnessIncColourAdditions() {
   }
 }
 
+// promo_offer_items — the configurable set of promotional items shown
+// on the proof-approval page as a time-limited up-sell. Operator-edited
+// via the admin UI (no code deploy needed to add/remove items or change
+// prices). promo_offer_uptake records each customer submission so we
+// can track conversion + audit what was actually requested.
+async function initializePromoOfferTables() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS promo_offer_items (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        image_url TEXT,
+        regular_price NUMERIC(10,2) NOT NULL,
+        deal_price NUMERIC(10,2) NOT NULL,
+        deal_window_minutes INT NOT NULL DEFAULT 10,
+        sort_order INT NOT NULL DEFAULT 0,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS promo_offer_uptake (
+        id SERIAL PRIMARY KEY,
+        approval_session_id UUID REFERENCES approval_sessions(id) ON DELETE SET NULL,
+        order_number VARCHAR(50),
+        customer_name VARCHAR(255),
+        items JSONB NOT NULL,
+        submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        customer_ip TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_promo_offer_uptake_session
+        ON promo_offer_uptake(approval_session_id);
+    `);
+    console.log('✅ promo_offer tables initialized');
+  } catch (err) {
+    console.error('❌ Error initializing promo_offer tables:', err.message);
+  }
+}
+
 // Kill-switch: set ORDER_PIPELINE_ENABLED=false on Render to fully stop the
 // order-pipeline poller (no boot run, no interval, manual trigger 503s).
 // Even in dry-run mode the poller hits Brightpearl, so this is the way to
@@ -3304,6 +3342,7 @@ function isOrderPipelineEnabled() {
   await initializeWhatsAppTables();
   await initializeBpOrderAttachments();
   await initializeFitnessIncColourAdditions();
+  await initializePromoOfferTables();
   if (!isOrderPipelineEnabled()) {
     console.log('⏸️  Order-pipeline poller DISABLED via ORDER_PIPELINE_ENABLED=false. No polls will run.');
     return;
@@ -4817,6 +4856,264 @@ app.delete('/api/fitness-inc/colour-additions/:id', async (req, res) => {
     res.json({ success: true, deleted: r.rowCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// Promo offer — up-sell on the proof-approval page
+// ============================================================
+// Operator configures a set of promo items + dual pricing. Customer
+// sees them on the approval page right after approving and can add
+// items at the deal price within a short window. Submission emails
+// sales@tuffshop.co.uk + attaches a PDF summary to the BP order.
+
+// Public: get the active offer items. Returns only enabled rows.
+app.get('/api/promo-offer-items', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order
+         FROM promo_offer_items
+        WHERE enabled = TRUE
+        ORDER BY sort_order, id`
+    );
+    res.json({ items: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: list everything including disabled.
+app.get('/api/promo-offer-items/admin', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, created_at
+         FROM promo_offer_items
+        ORDER BY sort_order, id`
+    );
+    res.json({ items: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: create or update by id.
+app.post('/api/promo-offer-items', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { id, name, imageUrl, regularPrice, dealPrice, dealWindowMinutes, sortOrder, enabled } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'name required' });
+    if (regularPrice == null || dealPrice == null) return res.status(400).json({ error: 'regularPrice and dealPrice required' });
+    if (id) {
+      const r = await pool.query(
+        `UPDATE promo_offer_items
+            SET name = $1, image_url = $2, regular_price = $3, deal_price = $4,
+                deal_window_minutes = $5, sort_order = $6, enabled = $7
+          WHERE id = $8
+          RETURNING *`,
+        [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, id]
+      );
+      return res.json({ success: true, item: r.rows[0] });
+    }
+    const r = await pool.query(
+      `INSERT INTO promo_offer_items (name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true]
+    );
+    res.json({ success: true, item: r.rows[0] });
+  } catch (err) {
+    console.error('[promo-offer] save failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/promo-offer-items/:id', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(`DELETE FROM promo_offer_items WHERE id = $1`, [req.params.id]);
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Customer submits their selection from the approval page. Records to
+// promo_offer_uptake, emails sales@tuffshop.co.uk with the line items
+// + customer ref, and attaches a PDF summary to the BP order if we can.
+app.post('/api/promo-offer/submit', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { approvalSessionId, items } = req.body || {};
+    if (!approvalSessionId) return res.status(400).json({ error: 'approvalSessionId required' });
+    if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'items[] required' });
+
+    // Pull the session for context (customer/order ref).
+    const sessRes = await pool.query(
+      `SELECT customer_name, order_number, recipient_name, approver_name
+         FROM approval_sessions WHERE id = $1`,
+      [approvalSessionId]
+    );
+    if (sessRes.rowCount === 0) return res.status(404).json({ error: 'approval session not found' });
+    const sess = sessRes.rows[0];
+
+    // Hydrate item details from the DB so we trust prices server-side
+    // rather than whatever the client posted.
+    const ids = items.map((i) => Number(i.itemId)).filter(Boolean);
+    const itemDetailsRes = await pool.query(
+      `SELECT id, name, regular_price, deal_price FROM promo_offer_items WHERE id = ANY($1::int[])`,
+      [ids]
+    );
+    const detailById = new Map(itemDetailsRes.rows.map((r) => [r.id, r]));
+    const lineItems = items
+      .map((i) => {
+        const d = detailById.get(Number(i.itemId));
+        if (!d) return null;
+        const qty = Math.max(1, parseInt(i.qty, 10) || 1);
+        return {
+          itemId: d.id,
+          name: d.name,
+          qty,
+          dealPrice: Number(d.deal_price),
+          regularPrice: Number(d.regular_price),
+          lineTotal: Number(d.deal_price) * qty,
+        };
+      })
+      .filter(Boolean);
+
+    if (lineItems.length === 0) return res.status(400).json({ error: 'no valid items selected' });
+
+    const orderTotal = lineItems.reduce((s, l) => s + l.lineTotal, 0);
+    const customerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || null;
+
+    // Record the uptake.
+    await pool.query(
+      `INSERT INTO promo_offer_uptake (approval_session_id, order_number, customer_name, items, customer_ip)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [approvalSessionId, sess.order_number, sess.customer_name, JSON.stringify(lineItems), customerIp]
+    );
+
+    // Build the email + the PDF summary in parallel.
+    const itemRows = lineItems.map((l) =>
+      `<tr>
+        <td style="padding:8px;border-bottom:1px solid #eee">${l.name}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:center">${l.qty}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">£${l.dealPrice.toFixed(2)}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right"><strong>£${l.lineTotal.toFixed(2)}</strong></td>
+      </tr>`
+    ).join('');
+
+    const subject = `Promo add-on for ${sess.customer_name || 'customer'}${sess.order_number ? ` (order ${sess.order_number})` : ''}`;
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:600px">
+        <div style="background:#000;color:#fff;padding:16px 20px;border-bottom:3px solid #F3D014">
+          <h2 style="margin:0;font-size:18px">Promo Add-On Request</h2>
+        </div>
+        <div style="padding:20px">
+          <p><strong>Customer:</strong> ${sess.customer_name || '?'}</p>
+          ${sess.order_number ? `<p><strong>Order:</strong> ${sess.order_number}</p>` : ''}
+          ${sess.approver_name ? `<p><strong>Approved by:</strong> ${sess.approver_name}</p>` : ''}
+          <p><strong>Submitted:</strong> ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })}</p>
+          <table style="width:100%;border-collapse:collapse;margin-top:16px">
+            <thead><tr style="background:#f5f5f5">
+              <th style="padding:8px;text-align:left">Item</th>
+              <th style="padding:8px;text-align:center">Qty</th>
+              <th style="padding:8px;text-align:right">Deal price</th>
+              <th style="padding:8px;text-align:right">Line total</th>
+            </tr></thead>
+            <tbody>${itemRows}</tbody>
+            <tfoot><tr>
+              <td colspan="3" style="padding:10px 8px;text-align:right;font-weight:bold">Order total</td>
+              <td style="padding:10px 8px;text-align:right;font-weight:bold">£${orderTotal.toFixed(2)}</td>
+            </tr></tfoot>
+          </table>
+          <p style="color:#666;font-size:12px;margin-top:20px">PDF summary attached.</p>
+        </div>
+      </div>`;
+    const textBody = `Promo Add-On Request
+
+Customer: ${sess.customer_name || '?'}${sess.order_number ? `\nOrder: ${sess.order_number}` : ''}
+Submitted: ${new Date().toISOString()}
+
+${lineItems.map((l) => `- ${l.name} x ${l.qty} @ £${l.dealPrice.toFixed(2)} = £${l.lineTotal.toFixed(2)}`).join('\n')}
+
+Total: £${orderTotal.toFixed(2)}`;
+
+    // Generate a small PDF summary so it can land on the BP order as
+    // a proper attachment, not just a note.
+    let pdfBuffer = null;
+    try {
+      const pdfDoc = await PDFDocument.create();
+      const page = pdfDoc.addPage([595, 842]); // A4 portrait
+      const font = await pdfDoc.embedFont('Helvetica');
+      const bold = await pdfDoc.embedFont('Helvetica-Bold');
+      let y = 800;
+      page.drawText('Promo Add-On Request', { x: 40, y, size: 18, font: bold });
+      y -= 30;
+      page.drawText(`Customer: ${sess.customer_name || '?'}`, { x: 40, y, size: 11, font });
+      y -= 16;
+      if (sess.order_number) { page.drawText(`Order: ${sess.order_number}`, { x: 40, y, size: 11, font }); y -= 16; }
+      page.drawText(`Submitted: ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })}`, { x: 40, y, size: 11, font }); y -= 24;
+      page.drawText('Item', { x: 40, y, size: 11, font: bold });
+      page.drawText('Qty', { x: 320, y, size: 11, font: bold });
+      page.drawText('Deal £', { x: 380, y, size: 11, font: bold });
+      page.drawText('Line £', { x: 460, y, size: 11, font: bold });
+      y -= 14;
+      for (const l of lineItems) {
+        page.drawText(l.name.slice(0, 50), { x: 40, y, size: 10, font });
+        page.drawText(String(l.qty), { x: 320, y, size: 10, font });
+        page.drawText(l.dealPrice.toFixed(2), { x: 380, y, size: 10, font });
+        page.drawText(l.lineTotal.toFixed(2), { x: 460, y, size: 10, font });
+        y -= 14;
+      }
+      y -= 8;
+      page.drawText(`Total: £${orderTotal.toFixed(2)}`, { x: 380, y, size: 12, font: bold });
+      pdfBuffer = Buffer.from(await pdfDoc.save());
+    } catch (pdfErr) {
+      console.warn('[promo-offer] PDF build failed:', pdfErr.message);
+    }
+
+    // Send email. Best-effort: failure doesn't block the customer's response.
+    if (process.env.SMTP_PASS) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
+          port: parseInt(process.env.SMTP_PORT || '2525'),
+          secure: false,
+          auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS },
+        });
+        const filename = `Promo-AddOn-${sess.order_number || 'order'}.pdf`;
+        await transporter.sendMail({
+          from: `"Tuffshop Proofs" <${process.env.SENDER_EMAIL || 'noreply@tuffshop.co.uk'}>`,
+          to: process.env.PROMO_OFFER_NOTIFY_EMAIL || 'sales@tuffshop.co.uk',
+          subject,
+          html,
+          text: textBody,
+          attachments: pdfBuffer ? [{ filename, content: pdfBuffer, contentType: 'application/pdf' }] : [],
+        });
+        console.log(`[promo-offer] uptake email sent for ${sess.order_number || approvalSessionId}`);
+      } catch (mailErr) {
+        console.error('[promo-offer] email send failed:', mailErr.message);
+      }
+    }
+
+    // Attach the same PDF to the BP order if we have one.
+    if (pdfBuffer && sess.order_number) {
+      try {
+        const filename = `Promo-AddOn-${sess.order_number}.pdf`;
+        const r = await bpAttachFileToOrder(sess.order_number, filename, pdfBuffer, 'application/pdf');
+        if (r.success) console.log(`[promo-offer] PDF attached to BP order ${sess.order_number}`);
+        else console.warn(`[promo-offer] BP attach failed:`, r);
+      } catch (attachErr) {
+        console.warn('[promo-offer] BP attach error:', attachErr.message);
+      }
+    }
+
+    res.json({ success: true, total: orderTotal, lineCount: lineItems.length });
+  } catch (err) {
+    console.error('[promo-offer] submit failed:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
