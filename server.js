@@ -3311,6 +3311,10 @@ async function initializePromoOfferTables() {
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      -- Added later: min qty + logo zone definition (x/y/width/height as
+      -- percentages of image + rotation in degrees).
+      ALTER TABLE promo_offer_items ADD COLUMN IF NOT EXISTS min_qty INT NOT NULL DEFAULT 1;
+      ALTER TABLE promo_offer_items ADD COLUMN IF NOT EXISTS logo_zone JSONB;
       CREATE TABLE IF NOT EXISTS promo_offer_uptake (
         id SERIAL PRIMARY KEY,
         approval_session_id UUID REFERENCES approval_sessions(id) ON DELETE SET NULL,
@@ -4885,7 +4889,7 @@ app.get('/api/promo-offer-items', async (req, res) => {
   }
   try {
     const r = await pool.query(
-      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order
+      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, min_qty, logo_zone
          FROM promo_offer_items
         WHERE enabled = TRUE
         ORDER BY sort_order, id`
@@ -4901,7 +4905,7 @@ app.get('/api/promo-offer-items/admin', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
     const r = await pool.query(
-      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, created_at
+      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, created_at, min_qty, logo_zone
          FROM promo_offer_items
         ORDER BY sort_order, id`
     );
@@ -4915,25 +4919,28 @@ app.get('/api/promo-offer-items/admin', async (req, res) => {
 app.post('/api/promo-offer-items', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
-    const { id, name, imageUrl, regularPrice, dealPrice, dealWindowMinutes, sortOrder, enabled } = req.body || {};
+    const { id, name, imageUrl, regularPrice, dealPrice, dealWindowMinutes, sortOrder, enabled, minQty, logoZone } = req.body || {};
     if (!name) return res.status(400).json({ error: 'name required' });
     if (regularPrice == null || dealPrice == null) return res.status(400).json({ error: 'regularPrice and dealPrice required' });
+    const minQtyClean = Math.max(1, parseInt(minQty, 10) || 1);
+    const logoZoneJson = logoZone ? JSON.stringify(logoZone) : null;
     if (id) {
       const r = await pool.query(
         `UPDATE promo_offer_items
             SET name = $1, image_url = $2, regular_price = $3, deal_price = $4,
-                deal_window_minutes = $5, sort_order = $6, enabled = $7
-          WHERE id = $8
+                deal_window_minutes = $5, sort_order = $6, enabled = $7,
+                min_qty = $8, logo_zone = $9
+          WHERE id = $10
           RETURNING *`,
-        [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, id]
+        [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson, id]
       );
       return res.json({ success: true, item: r.rows[0] });
     }
     const r = await pool.query(
-      `INSERT INTO promo_offer_items (name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO promo_offer_items (name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, min_qty, logo_zone)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true]
+      [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson]
     );
     res.json({ success: true, item: r.rows[0] });
   } catch (err) {
@@ -5573,6 +5580,10 @@ async function initApprovalDB() {
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS pdf_delete_after TIMESTAMP;
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS created_by VARCHAR(100);
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS opened_at TIMESTAMP;
+      -- Captured at proof-send time so the customer-facing promo panel
+      -- can overlay their actual logo onto promo item images.
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS primary_logo_data BYTEA;
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS primary_logo_mime VARCHAR(100);
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -5598,19 +5609,20 @@ app.post("/api/approval-sessions", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
 
   try {
-    const { pdfBase64, logoPositions, orderNumber, customerName, recipientName, createdBy } = req.body;
+    const { pdfBase64, logoPositions, orderNumber, customerName, recipientName, createdBy, primaryLogoBase64, primaryLogoMime } = req.body;
 
     if (!pdfBase64 || !logoPositions?.length) {
       return res.status(400).json({ error: "pdfBase64 and logoPositions are required" });
     }
 
     const pdfBuffer = Buffer.from(pdfBase64, "base64");
+    const primaryLogoBuffer = primaryLogoBase64 ? Buffer.from(primaryLogoBase64, "base64") : null;
 
     const sessionResult = await pool.query(
-      `INSERT INTO approval_sessions (order_number, customer_name, recipient_name, pdf_data, logo_positions, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO approval_sessions (order_number, customer_name, recipient_name, pdf_data, logo_positions, created_by, primary_logo_data, primary_logo_mime)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, status, created_at`,
-      [orderNumber || null, customerName || null, recipientName || null, pdfBuffer, JSON.stringify(logoPositions), createdBy || null]
+      [orderNumber || null, customerName || null, recipientName || null, pdfBuffer, JSON.stringify(logoPositions), createdBy || null, primaryLogoBuffer, primaryLogoMime || null]
     );
 
     const session = sessionResult.rows[0];
@@ -6598,6 +6610,46 @@ app.post("/api/approval-sessions/cleanup", async (req, res) => {
        RETURNING id`
     );
     res.json({ success: true, cleaned: result.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Public: serve the primary logo for the approval session so the
+// customer-facing promo panel can overlay it onto promo item images.
+app.get("/api/approval-sessions/:sessionId/primary-logo", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const result = await pool.query(
+      `SELECT primary_logo_data, primary_logo_mime FROM approval_sessions WHERE id = $1`,
+      [req.params.sessionId]
+    );
+    if (result.rowCount === 0 || !result.rows[0].primary_logo_data) {
+      return res.status(404).end();
+    }
+    const { primary_logo_data, primary_logo_mime } = result.rows[0];
+    res.setHeader("Content-Type", primary_logo_mime || "image/png");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.send(Buffer.from(primary_logo_data));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin-only: allow setting/updating the primary logo on an existing
+// session (so we can backfill or replace later if needed). Body:
+// { primaryLogoBase64, primaryLogoMime }
+app.post("/api/approval-sessions/:sessionId/primary-logo", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const { primaryLogoBase64, primaryLogoMime } = req.body || {};
+    if (!primaryLogoBase64) return res.status(400).json({ error: "primaryLogoBase64 required" });
+    const buf = Buffer.from(primaryLogoBase64, "base64");
+    await pool.query(
+      `UPDATE approval_sessions SET primary_logo_data = $1, primary_logo_mime = $2 WHERE id = $3`,
+      [buf, primaryLogoMime || "image/png", req.params.sessionId]
+    );
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
