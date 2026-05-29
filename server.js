@@ -11,7 +11,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import pkg from 'pg';
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument, rgb, degrees } from 'pdf-lib';
 import nodemailer from 'nodemailer';
 import { listStates, customerStateForBpStatus } from './orderPipelineMapper.js';
 import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
@@ -4978,9 +4978,13 @@ app.post('/api/promo-offer/submit', async (req, res) => {
     if (!approvalSessionId) return res.status(400).json({ error: 'approvalSessionId required' });
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'items[] required' });
 
-    // Pull the session for context (customer/order ref).
+    // Pull the session for context (customer/order ref + the captured
+    // logos so we can overlay them on the PDF preview).
     const sessRes = await pool.query(
-      `SELECT customer_name, order_number, recipient_name, approver_name
+      `SELECT customer_name, order_number, recipient_name, approver_name,
+              primary_logo_data, primary_logo_mime,
+              promo_logo_dark_data, promo_logo_dark_mime,
+              promo_logo_light_data, promo_logo_light_mime
          FROM approval_sessions WHERE id = $1`,
       [approvalSessionId]
     );
@@ -4988,10 +4992,12 @@ app.post('/api/promo-offer/submit', async (req, res) => {
     const sess = sessRes.rows[0];
 
     // Hydrate item details from the DB so we trust prices server-side
-    // rather than whatever the client posted.
+    // rather than whatever the client posted. Also pull image_url +
+    // logo_zone + logo_variant so we can render the PDF preview.
     const ids = items.map((i) => Number(i.itemId)).filter(Boolean);
     const itemDetailsRes = await pool.query(
-      `SELECT id, name, regular_price, deal_price FROM promo_offer_items WHERE id = ANY($1::int[])`,
+      `SELECT id, name, regular_price, deal_price, image_url, logo_zone, logo_variant
+         FROM promo_offer_items WHERE id = ANY($1::int[])`,
       [ids]
     );
     const detailById = new Map(itemDetailsRes.rows.map((r) => [r.id, r]));
@@ -5007,6 +5013,9 @@ app.post('/api/promo-offer/submit', async (req, res) => {
           dealPrice: Number(d.deal_price),
           regularPrice: Number(d.regular_price),
           lineTotal: Number(d.deal_price) * qty,
+          imageUrl: d.image_url,
+          logoZone: d.logo_zone,
+          logoVariant: d.logo_variant || 'auto',
         };
       })
       .filter(Boolean);
@@ -5069,35 +5078,163 @@ ${lineItems.map((l) => `- ${l.name} x ${l.qty} @ £${l.dealPrice.toFixed(2)} = �
 
 Total: £${orderTotal.toFixed(2)}`;
 
-    // Generate a small PDF summary so it can land on the BP order as
-    // a proper attachment, not just a note.
+    // Generate a PDF summary with per-row thumbnails (item image + the
+    // customer's logo overlaid in the configured zone, with rotation).
+    // The thumbnail mirrors what the customer saw on the approval page.
     let pdfBuffer = null;
     try {
       const pdfDoc = await PDFDocument.create();
       const page = pdfDoc.addPage([595, 842]); // A4 portrait
       const font = await pdfDoc.embedFont('Helvetica');
       const bold = await pdfDoc.embedFont('Helvetica-Bold');
+
+      // Helpers for image fetch + embed.
+      const fetchImageBuffer = async (url) => {
+        if (!url) return null;
+        try {
+          const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+          if (!r.ok) return null;
+          return Buffer.from(await r.arrayBuffer());
+        } catch (err) {
+          console.warn(`[promo-offer-pdf] fetch ${url}: ${err.message}`);
+          return null;
+        }
+      };
+      const embedImageGuess = async (buf) => {
+        if (!buf || buf.length < 4) return null;
+        try {
+          if (buf[0] === 0x89 && buf[1] === 0x50) return await pdfDoc.embedPng(buf);
+          if (buf[0] === 0xFF && buf[1] === 0xD8) return await pdfDoc.embedJpg(buf);
+          try { return await pdfDoc.embedPng(buf); } catch { return await pdfDoc.embedJpg(buf); }
+        } catch (err) {
+          console.warn(`[promo-offer-pdf] embed: ${err.message}`);
+          return null;
+        }
+      };
+
+      // Compute the (x, y) bottom-left to pass to drawImage so that
+      // rotation around the bottom-left lands the image's centre at
+      // (cx, cy). pdf-lib rotates around bottom-left, so we offset.
+      const rotatedDrawCoords = (cx, cy, w, h, rotDeg) => {
+        if (!rotDeg) return { x: cx - w / 2, y: cy - h / 2 };
+        const r = (rotDeg * Math.PI) / 180;
+        const cosR = Math.cos(r), sinR = Math.sin(r);
+        return {
+          x: cx - (w / 2) * cosR + (h / 2) * sinR,
+          y: cy - (w / 2) * sinR - (h / 2) * cosR,
+        };
+      };
+
+      // Pre-embed customer logos (only the variants we need).
+      const variantsUsed = new Set(lineItems.map((l) => l.logoVariant || 'auto'));
+      const logosByVariant = {};
+      const pickLogoBuf = (v) => {
+        if (v === 'dark' && sess.promo_logo_dark_data) return sess.promo_logo_dark_data;
+        if (v === 'light' && sess.promo_logo_light_data) return sess.promo_logo_light_data;
+        return sess.primary_logo_data || null;
+      };
+      for (const v of variantsUsed) {
+        const buf = pickLogoBuf(v);
+        if (buf) logosByVariant[v] = await embedImageGuess(Buffer.from(buf));
+      }
+
+      // Pre-fetch + embed item images (dedup by URL across line items).
+      const itemImageByUrl = {};
+      for (const l of lineItems) {
+        if (l.imageUrl && !(l.imageUrl in itemImageByUrl)) {
+          const buf = await fetchImageBuffer(l.imageUrl);
+          itemImageByUrl[l.imageUrl] = buf ? await embedImageGuess(buf) : null;
+        }
+      }
+
       let y = 800;
       page.drawText('Promo Add-On Request', { x: 40, y, size: 18, font: bold });
-      y -= 30;
+      y -= 26;
       page.drawText(`Customer: ${sess.customer_name || '?'}`, { x: 40, y, size: 11, font });
-      y -= 16;
-      if (sess.order_number) { page.drawText(`Order: ${sess.order_number}`, { x: 40, y, size: 11, font }); y -= 16; }
-      page.drawText(`Submitted: ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })}`, { x: 40, y, size: 11, font }); y -= 24;
-      page.drawText('Item', { x: 40, y, size: 11, font: bold });
-      page.drawText('Qty', { x: 320, y, size: 11, font: bold });
-      page.drawText('Deal £', { x: 380, y, size: 11, font: bold });
-      page.drawText('Line £', { x: 460, y, size: 11, font: bold });
       y -= 14;
+      if (sess.order_number) { page.drawText(`Order: ${sess.order_number}`, { x: 40, y, size: 11, font }); y -= 14; }
+      page.drawText(`Submitted: ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })}`, { x: 40, y, size: 11, font });
+      y -= 22;
+
+      // Column headers.
+      page.drawText('Preview', { x: 40, y, size: 10, font: bold });
+      page.drawText('Item', { x: 130, y, size: 10, font: bold });
+      page.drawText('Qty', { x: 350, y, size: 10, font: bold });
+      page.drawText('Deal £', { x: 410, y, size: 10, font: bold });
+      page.drawText('Line £', { x: 480, y, size: 10, font: bold });
+      y -= 10;
+      page.drawLine({ start: { x: 40, y, }, end: { x: 555, y }, thickness: 0.5, color: rgb(0.8, 0.8, 0.8) });
+      y -= 10;
+
+      const ROW_HEIGHT = 75;
+      const THUMB_SIZE = 60;
       for (const l of lineItems) {
-        page.drawText(l.name.slice(0, 50), { x: 40, y, size: 10, font });
-        page.drawText(String(l.qty), { x: 320, y, size: 10, font });
-        page.drawText(l.dealPrice.toFixed(2), { x: 380, y, size: 10, font });
-        page.drawText(l.lineTotal.toFixed(2), { x: 460, y, size: 10, font });
-        y -= 14;
+        // y here is the TOP of the row; draw thumbnail from top-down.
+        const rowTop = y;
+        const rowBottom = y - ROW_HEIGHT;
+        const thumbX = 40;
+        const thumbY = rowBottom + (ROW_HEIGHT - THUMB_SIZE) / 2;
+
+        // Draw item image, scaled to fit THUMB_SIZE×THUMB_SIZE.
+        const itemImg = itemImageByUrl[l.imageUrl];
+        let imgDims = { width: THUMB_SIZE, height: THUMB_SIZE };
+        let imgDrawX = thumbX, imgDrawY = thumbY;
+        if (itemImg) {
+          imgDims = itemImg.scaleToFit(THUMB_SIZE, THUMB_SIZE);
+          imgDrawX = thumbX + (THUMB_SIZE - imgDims.width) / 2;
+          imgDrawY = thumbY + (THUMB_SIZE - imgDims.height) / 2;
+          page.drawImage(itemImg, { x: imgDrawX, y: imgDrawY, width: imgDims.width, height: imgDims.height });
+        } else {
+          // Stub box if image couldn't be fetched.
+          page.drawRectangle({ x: thumbX, y: thumbY, width: THUMB_SIZE, height: THUMB_SIZE, borderColor: rgb(0.8, 0.8, 0.8), borderWidth: 0.5 });
+        }
+
+        // Overlay customer logo at the zone (with rotation, swapped
+        // dimensions for 90/270, same as the customer-facing CSS).
+        const z = l.logoZone;
+        const logoImg = logosByVariant[l.logoVariant || 'auto'];
+        if (logoImg && z && z.width > 0 && z.height > 0) {
+          // Zone in PDF coords (Y flipped vs CSS: image's visual top
+          // sits at imgDrawY + imgDims.height in PDF space).
+          const zoneW = (z.width / 100) * imgDims.width;
+          const zoneH = (z.height / 100) * imgDims.height;
+          const zoneX = imgDrawX + (z.x / 100) * imgDims.width;
+          const zoneY = imgDrawY + imgDims.height - ((z.y + z.height) / 100) * imgDims.height;
+          const isQuarter = z.rotation === 90 || z.rotation === 270;
+          const containerW = isQuarter ? zoneH : zoneW;
+          const containerH = isQuarter ? zoneW : zoneH;
+          const logoFit = logoImg.scaleToFit(containerW, containerH);
+          const cx = zoneX + zoneW / 2;
+          const cy = zoneY + zoneH / 2;
+          const { x: lx, y: ly } = rotatedDrawCoords(cx, cy, logoFit.width, logoFit.height, z.rotation || 0);
+          try {
+            page.drawImage(logoImg, {
+              x: lx, y: ly, width: logoFit.width, height: logoFit.height,
+              rotate: z.rotation ? degrees(z.rotation) : undefined,
+            });
+          } catch (drawErr) {
+            console.warn(`[promo-offer-pdf] logo draw: ${drawErr.message}`);
+          }
+        }
+
+        // Text columns aligned to thumbnail vertical centre.
+        const textY = thumbY + THUMB_SIZE / 2 - 4;
+        page.drawText(l.name.slice(0, 36), { x: 130, y: textY, size: 10, font });
+        page.drawText(String(l.qty), { x: 350, y: textY, size: 10, font });
+        page.drawText(l.dealPrice.toFixed(2), { x: 410, y: textY, size: 10, font });
+        page.drawText(l.lineTotal.toFixed(2), { x: 480, y: textY, size: 10, font });
+
+        y -= ROW_HEIGHT;
+        if (y < 80) break; // ran out of page; could add multi-page later if needed
       }
-      y -= 8;
-      page.drawText(`Total: £${orderTotal.toFixed(2)}`, { x: 380, y, size: 12, font: bold });
+
+      // Total row.
+      y -= 6;
+      page.drawLine({ start: { x: 350, y }, end: { x: 555, y }, thickness: 0.5, color: rgb(0.8, 0.8, 0.8) });
+      y -= 16;
+      page.drawText('Total', { x: 410, y, size: 12, font: bold });
+      page.drawText(`£${orderTotal.toFixed(2)}`, { x: 480, y, size: 12, font: bold });
+
       pdfBuffer = Buffer.from(await pdfDoc.save());
     } catch (pdfErr) {
       console.warn('[promo-offer] PDF build failed:', pdfErr.message);
