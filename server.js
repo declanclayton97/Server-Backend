@@ -5805,6 +5805,10 @@ async function initApprovalDB() {
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_logo_dark_mime VARCHAR(100);
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_logo_light_data BYTEA;
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_logo_light_mime VARCHAR(100);
+      -- Tracks operator resends so the Approval History timeline shows
+      -- "Resent on email/whatsapp at <date>" alongside Sent / Opened.
+      -- Each entry: { channel, recipient, sentBy, ts }
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS resend_log JSONB NOT NULL DEFAULT '[]'::jsonb;
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -7054,12 +7058,44 @@ app.put("/api/approval-sessions/:sessionId/archive", async (req, res) => {
 });
 
 // List sessions
+// Append a resend event to the session's resend_log. Frontend calls
+// this after a successful /api/whatsapp/send-proof or /api/proof/send-email
+// triggered from the Approval History "Resend" button so the timeline
+// metadata gets updated.
+// Body: { channel: 'whatsapp' | 'email', recipient: string, sentBy?: string }
+app.post("/api/approval-sessions/:sessionId/log-resend", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const { sessionId } = req.params;
+    const { channel, recipient, sentBy } = req.body || {};
+    if (!channel || !recipient) {
+      return res.status(400).json({ error: "channel and recipient required" });
+    }
+    if (!['whatsapp', 'email'].includes(channel)) {
+      return res.status(400).json({ error: "channel must be 'whatsapp' or 'email'" });
+    }
+    const entry = { channel, recipient, sentBy: sentBy || null, ts: new Date().toISOString() };
+    const r = await pool.query(
+      `UPDATE approval_sessions
+          SET resend_log = COALESCE(resend_log, '[]'::jsonb) || $1::jsonb
+        WHERE id = $2
+        RETURNING resend_log`,
+      [JSON.stringify(entry), sessionId]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: "session not found" });
+    res.json({ success: true, resendLog: r.rows[0].resend_log });
+  } catch (err) {
+    console.error("[approval] log-resend failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/approval-sessions", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
 
   try {
     const { orderNumber, includeArchived } = req.query;
-    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, opened_at, submitter_ip, approver_name, signature_data, created_by, (pdf_data IS NOT NULL) AS has_pdf
+    let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, opened_at, submitter_ip, approver_name, signature_data, created_by, resend_log, (pdf_data IS NOT NULL) AS has_pdf
                  FROM approval_sessions`;
     const conditions = [];
     const params = [];
@@ -7099,6 +7135,7 @@ app.get("/api/approval-sessions", async (req, res) => {
           signatureData: session.signature_data,
           createdBy: session.created_by,
           hasPdf: session.has_pdf,
+          resendLog: session.resend_log || [],
           items: itemsResult.rows,
         };
       })
