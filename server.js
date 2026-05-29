@@ -2411,6 +2411,86 @@ const BP_STATUS_PROOF_SENT = parseInt(process.env.BP_STATUS_PROOF_SENT || '35', 
 // production, etc.) we leave it alone. Safe to call on any order; will
 // no-op when not in the source status. Fires a BP system note alongside
 // the transition so the audit trail shows what triggered it.
+// Lookup a Brightpearl product by SKU. Returns the product ID or null
+// if not found / lookup failed.
+async function bpLookupProductBySku(sku) {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID || !sku) return null;
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/product-service/product-search?SKU=${encodeURIComponent(sku)}&pageSize=1`;
+  try {
+    const r = await fetch(url, {
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+      },
+    });
+    if (!r.ok) {
+      console.warn(`[bp-product-lookup] SKU ${sku} → HTTP ${r.status}`);
+      return null;
+    }
+    const data = await r.json();
+    const results = data.response?.results || [];
+    if (results.length === 0) {
+      console.warn(`[bp-product-lookup] no product for SKU ${sku}`);
+      return null;
+    }
+    // BP returns results as positional arrays. The metadata describes
+    // which column is which. Find productId by column name.
+    const fields = data.response?.metaData?.resultDescription || data.response?.metaData?.columns || [];
+    let idx = 0;
+    for (let i = 0; i < fields.length; i++) {
+      const fname = (fields[i]?.name || fields[i] || '').toString().toLowerCase();
+      if (fname === 'productid' || fname === 'id') { idx = i; break; }
+    }
+    return Number(results[0][idx]);
+  } catch (err) {
+    console.warn(`[bp-product-lookup] SKU ${sku} error: ${err.message}`);
+    return null;
+  }
+}
+
+// Add a row to an existing BP sales order. rowNetExVat is the ex-VAT
+// line total (qty * unit price after discount). Tax computed at 20%
+// VAT to match the customer-facing presentation.
+async function bpAddOrderRow(orderId, productId, quantity, rowNetExVat) {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return { ok: false, reason: 'no-creds' };
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/row`;
+  const tax = rowNetExVat * 0.20;
+  const body = {
+    productId,
+    quantity: { magnitude: quantity },
+    rowValue: {
+      rowNet: { currency: 'GBP', value: rowNetExVat.toFixed(2) },
+      rowTax: { currency: 'GBP', value: tax.toFixed(2) },
+    },
+  };
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+        'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const errBody = await r.text();
+      console.error(`[bp-add-row] order ${orderId} product ${productId} → ${r.status}: ${errBody.slice(0, 300)}`);
+      return { ok: false, status: r.status, body: errBody };
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error(`[bp-add-row] order ${orderId} product ${productId} error: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
 async function transitionBpStatusProofRequiredToSent(orderId, noteText = 'Proof sent') {
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
     console.warn('[bp-status] BP creds missing; cannot transition');
@@ -3319,6 +3399,9 @@ async function initializePromoOfferTables() {
       -- /coasters (need a dark logo to be visible on light items), 'light'
       -- for notepads, 'auto' (default) falls back to the primary logo.
       ALTER TABLE promo_offer_items ADD COLUMN IF NOT EXISTS logo_variant VARCHAR(10) NOT NULL DEFAULT 'auto';
+      -- Brightpearl SKU — if set, the item is auto-added as an order row
+      -- to the customer's BP order on successful up-sell submit.
+      ALTER TABLE promo_offer_items ADD COLUMN IF NOT EXISTS bp_sku VARCHAR(100);
       CREATE TABLE IF NOT EXISTS promo_offer_uptake (
         id SERIAL PRIMARY KEY,
         approval_session_id UUID REFERENCES approval_sessions(id) ON DELETE SET NULL,
@@ -4893,7 +4976,7 @@ app.get('/api/promo-offer-items', async (req, res) => {
   }
   try {
     const r = await pool.query(
-      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, min_qty, logo_zone, logo_variant
+      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, min_qty, logo_zone, logo_variant, bp_sku
          FROM promo_offer_items
         WHERE enabled = TRUE
         ORDER BY sort_order, id`
@@ -4909,7 +4992,7 @@ app.get('/api/promo-offer-items/admin', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
     const r = await pool.query(
-      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, created_at, min_qty, logo_zone, logo_variant
+      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, created_at, min_qty, logo_zone, logo_variant, bp_sku
          FROM promo_offer_items
         ORDER BY sort_order, id`
     );
@@ -4923,29 +5006,30 @@ app.get('/api/promo-offer-items/admin', async (req, res) => {
 app.post('/api/promo-offer-items', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
-    const { id, name, imageUrl, regularPrice, dealPrice, dealWindowMinutes, sortOrder, enabled, minQty, logoZone, logoVariant } = req.body || {};
+    const { id, name, imageUrl, regularPrice, dealPrice, dealWindowMinutes, sortOrder, enabled, minQty, logoZone, logoVariant, bpSku } = req.body || {};
     if (!name) return res.status(400).json({ error: 'name required' });
     if (regularPrice == null || dealPrice == null) return res.status(400).json({ error: 'regularPrice and dealPrice required' });
     const minQtyClean = Math.max(1, parseInt(minQty, 10) || 1);
     const logoZoneJson = logoZone ? JSON.stringify(logoZone) : null;
     const variantClean = ['dark', 'light', 'auto'].includes(logoVariant) ? logoVariant : 'auto';
+    const skuClean = bpSku?.trim() || null;
     if (id) {
       const r = await pool.query(
         `UPDATE promo_offer_items
             SET name = $1, image_url = $2, regular_price = $3, deal_price = $4,
                 deal_window_minutes = $5, sort_order = $6, enabled = $7,
-                min_qty = $8, logo_zone = $9, logo_variant = $10
-          WHERE id = $11
+                min_qty = $8, logo_zone = $9, logo_variant = $10, bp_sku = $11
+          WHERE id = $12
           RETURNING *`,
-        [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson, variantClean, id]
+        [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson, variantClean, skuClean, id]
       );
       return res.json({ success: true, item: r.rows[0] });
     }
     const r = await pool.query(
-      `INSERT INTO promo_offer_items (name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, min_qty, logo_zone, logo_variant)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO promo_offer_items (name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, min_qty, logo_zone, logo_variant, bp_sku)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
-      [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson, variantClean]
+      [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson, variantClean, skuClean]
     );
     res.json({ success: true, item: r.rows[0] });
   } catch (err) {
@@ -4996,7 +5080,7 @@ app.post('/api/promo-offer/submit', async (req, res) => {
     // logo_zone + logo_variant so we can render the PDF preview.
     const ids = items.map((i) => Number(i.itemId)).filter(Boolean);
     const itemDetailsRes = await pool.query(
-      `SELECT id, name, regular_price, deal_price, image_url, logo_zone, logo_variant
+      `SELECT id, name, regular_price, deal_price, image_url, logo_zone, logo_variant, bp_sku
          FROM promo_offer_items WHERE id = ANY($1::int[])`,
       [ids]
     );
@@ -5023,6 +5107,7 @@ app.post('/api/promo-offer/submit', async (req, res) => {
           imageUrl: d.image_url,
           logoZone: d.logo_zone,
           logoVariant: d.logo_variant || 'auto',
+          bpSku: d.bp_sku || null,
         };
       })
       .filter(Boolean);
@@ -5051,6 +5136,36 @@ app.post('/api/promo-offer/submit', async (req, res) => {
        VALUES ($1, $2, $3, $4, $5)`,
       [approvalSessionId, sess.order_number, sess.customer_name, JSON.stringify(lineItems), customerIp]
     );
+
+    // Auto-add rows to the BP order at the agreed deal price (with the
+    // bundle discount distributed proportionally per line). Only fires
+    // for items that have a BP SKU configured in the admin AND when not
+    // in preview mode. Each failure is logged but doesn't block the
+    // rest of the response — the email still goes out so the operator
+    // sees what should have been added if any addition failed.
+    const bpRowResults = [];
+    if (sess.order_number && !previewBypass) {
+      for (const l of lineItems) {
+        if (!l.bpSku) {
+          bpRowResults.push({ name: l.name, sku: null, ok: false, reason: 'no SKU configured' });
+          continue;
+        }
+        const productId = await bpLookupProductBySku(l.bpSku);
+        if (!productId) {
+          bpRowResults.push({ name: l.name, sku: l.bpSku, ok: false, reason: 'SKU not found in BP' });
+          continue;
+        }
+        const lineExVatAfterDiscount = l.lineTotalExVat * (1 - bundleDiscountPct);
+        const addRes = await bpAddOrderRow(sess.order_number, productId, l.qty, lineExVatAfterDiscount);
+        bpRowResults.push({
+          name: l.name, sku: l.bpSku, productId, ok: addRes.ok,
+          reason: addRes.ok ? null : (addRes.body || addRes.error || `status ${addRes.status}`),
+        });
+        if (addRes.ok) {
+          console.log(`[promo-offer] added ${l.qty}x ${l.name} (SKU ${l.bpSku}, productId ${productId}) to BP order ${sess.order_number} @ £${lineExVatAfterDiscount.toFixed(2)} ex VAT`);
+        }
+      }
+    }
 
     // Build the email + the PDF summary in parallel.
     const itemRows = lineItems.map((l) =>
@@ -5099,6 +5214,7 @@ app.post('/api/promo-offer/submit', async (req, res) => {
             <tbody>${itemRows}</tbody>
             <tfoot>${totalsRows}</tfoot>
           </table>
+          ${bpRowResults.length > 0 ? `<p style="color:${bpRowResults.every(r => r.ok) ? '#48C549' : '#dc0032'};font-size:12px;margin-top:12px"><strong>Auto-added to BP order:</strong> ${bpRowResults.filter(r => r.ok).length}/${bpRowResults.length} item(s).${bpRowResults.some(r => !r.ok) ? '<br>Failed:<br>' + bpRowResults.filter(r => !r.ok).map(r => `• ${r.name}${r.sku ? ` (SKU ${r.sku})` : ''}: ${r.reason}`).join('<br>') : ''}</p>` : ''}
           <p style="color:#666;font-size:12px;margin-top:20px">All prices ex-VAT. PDF summary attached.</p>
         </div>
       </div>`;
