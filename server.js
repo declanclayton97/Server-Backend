@@ -5122,26 +5122,54 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
       const font = await pdfDoc.embedFont('Helvetica');
       const bold = await pdfDoc.embedFont('Helvetica-Bold');
 
-      // Helpers for image fetch + embed.
+      // Helpers for image fetch + embed. Detailed logging so we can
+      // diagnose which item's image failed and why.
       const fetchImageBuffer = async (url) => {
         if (!url) return null;
         try {
-          const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
-          if (!r.ok) return null;
-          return Buffer.from(await r.arrayBuffer());
+          const r = await fetch(url, {
+            signal: AbortSignal.timeout(10000),
+            redirect: 'follow',
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TuffshopBot/1.0)' },
+          });
+          if (!r.ok) {
+            console.warn(`[promo-offer-pdf] fetch ${url} → HTTP ${r.status}`);
+            return null;
+          }
+          const buf = Buffer.from(await r.arrayBuffer());
+          const ct = r.headers.get('content-type') || 'unknown';
+          console.log(`[promo-offer-pdf] fetched ${url} (${buf.length}B, content-type=${ct})`);
+          return buf;
         } catch (err) {
-          console.warn(`[promo-offer-pdf] fetch ${url}: ${err.message}`);
+          console.warn(`[promo-offer-pdf] fetch ${url} failed: ${err.message}`);
           return null;
         }
       };
-      const embedImageGuess = async (buf) => {
-        if (!buf || buf.length < 4) return null;
+      const embedImageGuess = async (buf, sourceUrl) => {
+        if (!buf || buf.length < 4) {
+          console.warn(`[promo-offer-pdf] embed: empty/short buffer for ${sourceUrl || '?'}`);
+          return null;
+        }
+        const magic = `${buf[0].toString(16)} ${buf[1].toString(16)} ${buf[2].toString(16)} ${buf[3].toString(16)}`;
+        // WebP starts "RIFF ???? WEBP" → pdf-lib can't embed natively.
+        const isWebp = buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP';
+        if (isWebp) {
+          console.warn(`[promo-offer-pdf] embed: WebP not supported by pdf-lib (${sourceUrl || '?'}). Use a PNG/JPG URL instead.`);
+          return null;
+        }
         try {
           if (buf[0] === 0x89 && buf[1] === 0x50) return await pdfDoc.embedPng(buf);
           if (buf[0] === 0xFF && buf[1] === 0xD8) return await pdfDoc.embedJpg(buf);
-          try { return await pdfDoc.embedPng(buf); } catch { return await pdfDoc.embedJpg(buf); }
+          try { return await pdfDoc.embedPng(buf); }
+          catch (pngErr) {
+            try { return await pdfDoc.embedJpg(buf); }
+            catch (jpgErr) {
+              console.warn(`[promo-offer-pdf] embed failed (${sourceUrl || '?'}, magic=${magic}): PNG=${pngErr.message}; JPG=${jpgErr.message}`);
+              return null;
+            }
+          }
         } catch (err) {
-          console.warn(`[promo-offer-pdf] embed: ${err.message}`);
+          console.warn(`[promo-offer-pdf] embed ${sourceUrl || '?'}: ${err.message}`);
           return null;
         }
       };
@@ -5169,7 +5197,7 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
       };
       for (const v of variantsUsed) {
         const buf = pickLogoBuf(v);
-        if (buf) logosByVariant[v] = await embedImageGuess(Buffer.from(buf));
+        if (buf) logosByVariant[v] = await embedImageGuess(Buffer.from(buf), `customer-logo-${v}`);
       }
 
       // Pre-fetch + embed item images (dedup by URL across line items).
@@ -5177,7 +5205,7 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
       for (const l of lineItems) {
         if (l.imageUrl && !(l.imageUrl in itemImageByUrl)) {
           const buf = await fetchImageBuffer(l.imageUrl);
-          itemImageByUrl[l.imageUrl] = buf ? await embedImageGuess(buf) : null;
+          itemImageByUrl[l.imageUrl] = buf ? await embedImageGuess(buf, l.imageUrl) : null;
         }
       }
 
