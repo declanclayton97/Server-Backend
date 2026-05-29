@@ -3315,6 +3315,10 @@ async function initializePromoOfferTables() {
       -- percentages of image + rotation in degrees).
       ALTER TABLE promo_offer_items ADD COLUMN IF NOT EXISTS min_qty INT NOT NULL DEFAULT 1;
       ALTER TABLE promo_offer_items ADD COLUMN IF NOT EXISTS logo_zone JSONB;
+      -- Which logo variant this item should render: 'dark' for mugs/pens
+      -- /coasters (need a dark logo to be visible on light items), 'light'
+      -- for notepads, 'auto' (default) falls back to the primary logo.
+      ALTER TABLE promo_offer_items ADD COLUMN IF NOT EXISTS logo_variant VARCHAR(10) NOT NULL DEFAULT 'auto';
       CREATE TABLE IF NOT EXISTS promo_offer_uptake (
         id SERIAL PRIMARY KEY,
         approval_session_id UUID REFERENCES approval_sessions(id) ON DELETE SET NULL,
@@ -4889,7 +4893,7 @@ app.get('/api/promo-offer-items', async (req, res) => {
   }
   try {
     const r = await pool.query(
-      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, min_qty, logo_zone
+      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, min_qty, logo_zone, logo_variant
          FROM promo_offer_items
         WHERE enabled = TRUE
         ORDER BY sort_order, id`
@@ -4905,7 +4909,7 @@ app.get('/api/promo-offer-items/admin', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
     const r = await pool.query(
-      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, created_at, min_qty, logo_zone
+      `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, created_at, min_qty, logo_zone, logo_variant
          FROM promo_offer_items
         ORDER BY sort_order, id`
     );
@@ -4919,28 +4923,29 @@ app.get('/api/promo-offer-items/admin', async (req, res) => {
 app.post('/api/promo-offer-items', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
-    const { id, name, imageUrl, regularPrice, dealPrice, dealWindowMinutes, sortOrder, enabled, minQty, logoZone } = req.body || {};
+    const { id, name, imageUrl, regularPrice, dealPrice, dealWindowMinutes, sortOrder, enabled, minQty, logoZone, logoVariant } = req.body || {};
     if (!name) return res.status(400).json({ error: 'name required' });
     if (regularPrice == null || dealPrice == null) return res.status(400).json({ error: 'regularPrice and dealPrice required' });
     const minQtyClean = Math.max(1, parseInt(minQty, 10) || 1);
     const logoZoneJson = logoZone ? JSON.stringify(logoZone) : null;
+    const variantClean = ['dark', 'light', 'auto'].includes(logoVariant) ? logoVariant : 'auto';
     if (id) {
       const r = await pool.query(
         `UPDATE promo_offer_items
             SET name = $1, image_url = $2, regular_price = $3, deal_price = $4,
                 deal_window_minutes = $5, sort_order = $6, enabled = $7,
-                min_qty = $8, logo_zone = $9
-          WHERE id = $10
+                min_qty = $8, logo_zone = $9, logo_variant = $10
+          WHERE id = $11
           RETURNING *`,
-        [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson, id]
+        [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson, variantClean, id]
       );
       return res.json({ success: true, item: r.rows[0] });
     }
     const r = await pool.query(
-      `INSERT INTO promo_offer_items (name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, min_qty, logo_zone)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO promo_offer_items (name, image_url, regular_price, deal_price, deal_window_minutes, sort_order, enabled, min_qty, logo_zone, logo_variant)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
-      [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson]
+      [name, imageUrl || null, regularPrice, dealPrice, dealWindowMinutes ?? 10, sortOrder ?? 0, enabled ?? true, minQtyClean, logoZoneJson, variantClean]
     );
     res.json({ success: true, item: r.rows[0] });
   } catch (err) {
@@ -5584,6 +5589,14 @@ async function initApprovalDB() {
       -- can overlay their actual logo onto promo item images.
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS primary_logo_data BYTEA;
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS primary_logo_mime VARCHAR(100);
+      -- Dedicated dark + light promo logos uploaded by the operator.
+      -- These take precedence over primary_logo_data on the promo panel.
+      -- Operator picks the right variant per item type (dark for mugs/
+      -- pens/coasters, light for notepads etc.).
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_logo_dark_data BYTEA;
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_logo_dark_mime VARCHAR(100);
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_logo_light_data BYTEA;
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_logo_light_mime VARCHAR(100);
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -5609,7 +5622,12 @@ app.post("/api/approval-sessions", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
 
   try {
-    const { pdfBase64, logoPositions, orderNumber, customerName, recipientName, createdBy, primaryLogoBase64, primaryLogoMime } = req.body;
+    const {
+      pdfBase64, logoPositions, orderNumber, customerName, recipientName, createdBy,
+      primaryLogoBase64, primaryLogoMime,
+      promoLogoDarkBase64, promoLogoDarkMime,
+      promoLogoLightBase64, promoLogoLightMime,
+    } = req.body;
 
     if (!pdfBase64 || !logoPositions?.length) {
       return res.status(400).json({ error: "pdfBase64 and logoPositions are required" });
@@ -5617,12 +5635,24 @@ app.post("/api/approval-sessions", async (req, res) => {
 
     const pdfBuffer = Buffer.from(pdfBase64, "base64");
     const primaryLogoBuffer = primaryLogoBase64 ? Buffer.from(primaryLogoBase64, "base64") : null;
+    const promoDarkBuffer = promoLogoDarkBase64 ? Buffer.from(promoLogoDarkBase64, "base64") : null;
+    const promoLightBuffer = promoLogoLightBase64 ? Buffer.from(promoLogoLightBase64, "base64") : null;
 
     const sessionResult = await pool.query(
-      `INSERT INTO approval_sessions (order_number, customer_name, recipient_name, pdf_data, logo_positions, created_by, primary_logo_data, primary_logo_mime)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO approval_sessions
+         (order_number, customer_name, recipient_name, pdf_data, logo_positions, created_by,
+          primary_logo_data, primary_logo_mime,
+          promo_logo_dark_data, promo_logo_dark_mime,
+          promo_logo_light_data, promo_logo_light_mime)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id, status, created_at`,
-      [orderNumber || null, customerName || null, recipientName || null, pdfBuffer, JSON.stringify(logoPositions), createdBy || null, primaryLogoBuffer, primaryLogoMime || null]
+      [
+        orderNumber || null, customerName || null, recipientName || null, pdfBuffer,
+        JSON.stringify(logoPositions), createdBy || null,
+        primaryLogoBuffer, primaryLogoMime || null,
+        promoDarkBuffer, promoLogoDarkMime || null,
+        promoLightBuffer, promoLogoLightMime || null,
+      ]
     );
 
     const session = sessionResult.rows[0];
@@ -6615,8 +6645,46 @@ app.post("/api/approval-sessions/cleanup", async (req, res) => {
   }
 });
 
-// Public: serve the primary logo for the approval session so the
+// Public: serve a logo variant for the approval session so the
 // customer-facing promo panel can overlay it onto promo item images.
+// Variant 'dark', 'light', or 'primary' (fallback). For dark/light,
+// falls back to primary if the requested variant wasn't uploaded.
+app.get("/api/approval-sessions/:sessionId/promo-logo/:variant", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  const variant = req.params.variant;
+  if (!['dark', 'light', 'primary', 'auto'].includes(variant)) {
+    return res.status(400).json({ error: 'variant must be dark, light, primary or auto' });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT primary_logo_data, primary_logo_mime,
+              promo_logo_dark_data, promo_logo_dark_mime,
+              promo_logo_light_data, promo_logo_light_mime
+         FROM approval_sessions WHERE id = $1`,
+      [req.params.sessionId]
+    );
+    if (result.rowCount === 0) return res.status(404).end();
+    const row = result.rows[0];
+    let data = null, mime = null;
+    if (variant === 'dark' && row.promo_logo_dark_data) {
+      data = row.promo_logo_dark_data; mime = row.promo_logo_dark_mime;
+    } else if (variant === 'light' && row.promo_logo_light_data) {
+      data = row.promo_logo_light_data; mime = row.promo_logo_light_mime;
+    }
+    // Fallback to primary if the dedicated variant wasn't uploaded.
+    if (!data && row.primary_logo_data) {
+      data = row.primary_logo_data; mime = row.primary_logo_mime;
+    }
+    if (!data) return res.status(404).end();
+    res.setHeader("Content-Type", mime || "image/png");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.send(Buffer.from(data));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backwards-compatible primary endpoint.
 app.get("/api/approval-sessions/:sessionId/primary-logo", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
   try {
