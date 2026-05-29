@@ -5001,18 +5001,25 @@ app.post('/api/promo-offer/submit', async (req, res) => {
       [ids]
     );
     const detailById = new Map(itemDetailsRes.rows.map((r) => [r.id, r]));
+    // Stored prices are inc-VAT (UK 20%). Internal & customer-facing
+    // figures are ex-VAT with a "+ VAT" note on the total.
+    const VAT_RATE = 0.20;
+    const exVat = (incVat) => Number(incVat) / (1 + VAT_RATE);
+
     const lineItems = items
       .map((i) => {
         const d = detailById.get(Number(i.itemId));
         if (!d) return null;
         const qty = Math.max(1, parseInt(i.qty, 10) || 1);
+        const dealExVat = exVat(d.deal_price);
         return {
           itemId: d.id,
           name: d.name,
           qty,
-          dealPrice: Number(d.deal_price),
-          regularPrice: Number(d.regular_price),
-          lineTotal: Number(d.deal_price) * qty,
+          dealPriceExVat: dealExVat,
+          regularPriceExVat: exVat(d.regular_price),
+          dealPriceIncVat: Number(d.deal_price),
+          lineTotalExVat: dealExVat * qty,
           imageUrl: d.image_url,
           logoZone: d.logo_zone,
           logoVariant: d.logo_variant || 'auto',
@@ -5022,7 +5029,20 @@ app.post('/api/promo-offer/submit', async (req, res) => {
 
     if (lineItems.length === 0) return res.status(400).json({ error: 'no valid items selected' });
 
-    const orderTotal = lineItems.reduce((s, l) => s + l.lineTotal, 0);
+    // Bundle discount tiers — mirror frontend exactly so totals match.
+    //   1 unique item  →  no discount
+    //   2 unique items →  10% off
+    //   3 unique items →  15% off
+    //   4+             →  20% off
+    const uniqueItemCount = lineItems.length;
+    const bundleDiscountPct = uniqueItemCount >= 4 ? 0.20 : uniqueItemCount === 3 ? 0.15 : uniqueItemCount === 2 ? 0.10 : 0;
+    const subtotalExVat = lineItems.reduce((s, l) => s + l.lineTotalExVat, 0);
+    const bundleDiscount = subtotalExVat * bundleDiscountPct;
+    const orderTotalExVat = subtotalExVat - bundleDiscount;
+    // Keep `orderTotal` name as an alias so the rest of the handler /
+    // PDF code (further down) doesn't need rewriting — but it's now
+    // ex-VAT after bundle discount.
+    const orderTotal = orderTotalExVat;
     const customerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || null;
 
     // Record the uptake.
@@ -5037,10 +5057,26 @@ app.post('/api/promo-offer/submit', async (req, res) => {
       `<tr>
         <td style="padding:8px;border-bottom:1px solid #eee">${l.name}</td>
         <td style="padding:8px;border-bottom:1px solid #eee;text-align:center">${l.qty}</td>
-        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">£${l.dealPrice.toFixed(2)}</td>
-        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right"><strong>£${l.lineTotal.toFixed(2)}</strong></td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">£${l.dealPriceExVat.toFixed(2)}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right"><strong>£${l.lineTotalExVat.toFixed(2)}</strong></td>
       </tr>`
     ).join('');
+
+    // Discount + totals row (rendered separately so the discount line
+    // only appears when applicable).
+    const totalsRows = `
+      <tr>
+        <td colspan="3" style="padding:8px 8px 4px;text-align:right">Subtotal</td>
+        <td style="padding:8px 8px 4px;text-align:right">£${subtotalExVat.toFixed(2)}</td>
+      </tr>
+      ${bundleDiscountPct > 0 ? `<tr>
+        <td colspan="3" style="padding:4px 8px;text-align:right;color:#48C549">Bundle discount (${Math.round(bundleDiscountPct * 100)}%)</td>
+        <td style="padding:4px 8px;text-align:right;color:#48C549">−£${bundleDiscount.toFixed(2)}</td>
+      </tr>` : ''}
+      <tr>
+        <td colspan="3" style="padding:8px;text-align:right;font-weight:bold;border-top:1px solid #eee">Total + VAT</td>
+        <td style="padding:8px;text-align:right;font-weight:bold;border-top:1px solid #eee">£${orderTotalExVat.toFixed(2)}</td>
+      </tr>`;
 
     const subject = `${previewBypass ? '[PREVIEW] ' : ''}Promo add-on for ${sess.customer_name || 'customer'}${sess.order_number ? ` (order ${sess.order_number})` : ''}`;
     const html = `
@@ -5057,16 +5093,13 @@ app.post('/api/promo-offer/submit', async (req, res) => {
             <thead><tr style="background:#f5f5f5">
               <th style="padding:8px;text-align:left">Item</th>
               <th style="padding:8px;text-align:center">Qty</th>
-              <th style="padding:8px;text-align:right">Deal price</th>
-              <th style="padding:8px;text-align:right">Line total</th>
+              <th style="padding:8px;text-align:right">Deal £ (ex VAT)</th>
+              <th style="padding:8px;text-align:right">Line £ (ex VAT)</th>
             </tr></thead>
             <tbody>${itemRows}</tbody>
-            <tfoot><tr>
-              <td colspan="3" style="padding:10px 8px;text-align:right;font-weight:bold">Order total</td>
-              <td style="padding:10px 8px;text-align:right;font-weight:bold">£${orderTotal.toFixed(2)}</td>
-            </tr></tfoot>
+            <tfoot>${totalsRows}</tfoot>
           </table>
-          <p style="color:#666;font-size:12px;margin-top:20px">PDF summary attached.</p>
+          <p style="color:#666;font-size:12px;margin-top:20px">All prices ex-VAT. PDF summary attached.</p>
         </div>
       </div>`;
     const textBody = `Promo Add-On Request
@@ -5074,9 +5107,10 @@ app.post('/api/promo-offer/submit', async (req, res) => {
 Customer: ${sess.customer_name || '?'}${sess.order_number ? `\nOrder: ${sess.order_number}` : ''}
 Submitted: ${new Date().toISOString()}
 
-${lineItems.map((l) => `- ${l.name} x ${l.qty} @ £${l.dealPrice.toFixed(2)} = £${l.lineTotal.toFixed(2)}`).join('\n')}
+${lineItems.map((l) => `- ${l.name} x ${l.qty} @ £${l.dealPriceExVat.toFixed(2)} = £${l.lineTotalExVat.toFixed(2)} (ex VAT)`).join('\n')}
 
-Total: £${orderTotal.toFixed(2)}`;
+Subtotal: £${subtotalExVat.toFixed(2)}
+${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100)}%): -£${bundleDiscount.toFixed(2)}\n` : ''}Total + VAT: £${orderTotalExVat.toFixed(2)}`;
 
     // Generate a PDF summary with per-row thumbnails (item image + the
     // customer's logo overlaid in the configured zone, with rotation).
@@ -5217,23 +5251,32 @@ Total: £${orderTotal.toFixed(2)}`;
           }
         }
 
-        // Text columns aligned to thumbnail vertical centre.
+        // Text columns aligned to thumbnail vertical centre. Prices ex-VAT.
         const textY = thumbY + THUMB_SIZE / 2 - 4;
         page.drawText(l.name.slice(0, 36), { x: 130, y: textY, size: 10, font });
         page.drawText(String(l.qty), { x: 350, y: textY, size: 10, font });
-        page.drawText(l.dealPrice.toFixed(2), { x: 410, y: textY, size: 10, font });
-        page.drawText(l.lineTotal.toFixed(2), { x: 480, y: textY, size: 10, font });
+        page.drawText(l.dealPriceExVat.toFixed(2), { x: 410, y: textY, size: 10, font });
+        page.drawText(l.lineTotalExVat.toFixed(2), { x: 480, y: textY, size: 10, font });
 
         y -= ROW_HEIGHT;
-        if (y < 80) break; // ran out of page; could add multi-page later if needed
+        if (y < 100) break; // ran out of page; could add multi-page later if needed
       }
 
-      // Total row.
+      // Totals block — subtotal, optional bundle discount, final + VAT.
       y -= 6;
       page.drawLine({ start: { x: 350, y }, end: { x: 555, y }, thickness: 0.5, color: rgb(0.8, 0.8, 0.8) });
+      y -= 14;
+      page.drawText('Subtotal (ex VAT)', { x: 350, y, size: 10, font });
+      page.drawText(`£${subtotalExVat.toFixed(2)}`, { x: 480, y, size: 10, font });
+      if (bundleDiscountPct > 0) {
+        y -= 14;
+        page.drawText(`Bundle discount (${Math.round(bundleDiscountPct * 100)}%)`, { x: 350, y, size: 10, font, color: rgb(0.28, 0.77, 0.29) });
+        page.drawText(`-£${bundleDiscount.toFixed(2)}`, { x: 480, y, size: 10, font, color: rgb(0.28, 0.77, 0.29) });
+      }
       y -= 16;
-      page.drawText('Total', { x: 410, y, size: 12, font: bold });
-      page.drawText(`£${orderTotal.toFixed(2)}`, { x: 480, y, size: 12, font: bold });
+      page.drawLine({ start: { x: 350, y: y + 6 }, end: { x: 555, y: y + 6 }, thickness: 0.5, color: rgb(0.8, 0.8, 0.8) });
+      page.drawText('Total + VAT', { x: 380, y, size: 12, font: bold });
+      page.drawText(`£${orderTotalExVat.toFixed(2)}`, { x: 480, y, size: 12, font: bold });
 
       pdfBuffer = Buffer.from(await pdfDoc.save());
     } catch (pdfErr) {
