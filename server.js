@@ -6701,17 +6701,19 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
     const allReviewed = allItems.rows.every((i) => i.status !== "pending");
 
     let sessionStatus = "pending";
+    let completedAt = null;
     if (allReviewed) {
       sessionStatus = hasRejected ? "changes_requested" : "approved";
       // Set status + clear the PDF data + capture submitter IP + approver info
       const submitterIp = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || null;
-      await pool.query(
-        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), submitter_ip = $3, approver_name = $4, signature_data = $5 WHERE id = $2`,
+      const upd = await pool.query(
+        `UPDATE approval_sessions SET status = $1, completed_at = NOW(), submitter_ip = $3, approver_name = $4, signature_data = $5 WHERE id = $2 RETURNING completed_at`,
         [sessionStatus, sessionId, submitterIp, approverName || null, signatureData || null]
       );
+      completedAt = upd.rows[0]?.completed_at || null;
     }
 
-    res.json({ success: true, sessionStatus });
+    res.json({ success: true, sessionStatus, completedAt });
 
     // Send email notification to the person who created this proof (async, don't block response)
     if (allReviewed && process.env.SMTP_PASS) {
