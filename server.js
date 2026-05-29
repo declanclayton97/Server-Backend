@@ -4867,9 +4867,22 @@ app.delete('/api/fitness-inc/colour-additions/:id', async (req, res) => {
 // items at the deal price within a short window. Submission emails
 // sales@tuffshop.co.uk + attaches a PDF summary to the BP order.
 
+// Master switch: customer-facing promo offer is OFF by default until
+// PROMO_OFFER_ENABLED=true is set on Render. `?preview=1` on the
+// request bypasses the gate so the team can test the customer flow
+// while real customers see nothing.
+function isPromoOfferEnabled() {
+  return String(process.env.PROMO_OFFER_ENABLED ?? 'false').toLowerCase() === 'true';
+}
+
 // Public: get the active offer items. Returns only enabled rows.
+// Gated by PROMO_OFFER_ENABLED env var; preview=1 bypasses the gate.
 app.get('/api/promo-offer-items', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  const previewBypass = req.query.preview === '1' || req.query.preview === 'true';
+  if (!isPromoOfferEnabled() && !previewBypass) {
+    return res.json({ items: [], gated: true });
+  }
   try {
     const r = await pool.query(
       `SELECT id, name, image_url, regular_price, deal_price, deal_window_minutes, sort_order
@@ -4877,7 +4890,7 @@ app.get('/api/promo-offer-items', async (req, res) => {
         WHERE enabled = TRUE
         ORDER BY sort_order, id`
     );
-    res.json({ items: r.rows });
+    res.json({ items: r.rows, preview: previewBypass });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -4945,6 +4958,10 @@ app.delete('/api/promo-offer-items/:id', async (req, res) => {
 app.post('/api/promo-offer/submit', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
+    const previewBypass = req.query.preview === '1' || req.query.preview === 'true' || req.body?.preview === true;
+    if (!isPromoOfferEnabled() && !previewBypass) {
+      return res.status(503).json({ error: 'Promo offer not currently enabled' });
+    }
     const { approvalSessionId, items } = req.body || {};
     if (!approvalSessionId) return res.status(400).json({ error: 'approvalSessionId required' });
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'items[] required' });
@@ -5004,7 +5021,7 @@ app.post('/api/promo-offer/submit', async (req, res) => {
       </tr>`
     ).join('');
 
-    const subject = `Promo add-on for ${sess.customer_name || 'customer'}${sess.order_number ? ` (order ${sess.order_number})` : ''}`;
+    const subject = `${previewBypass ? '[PREVIEW] ' : ''}Promo add-on for ${sess.customer_name || 'customer'}${sess.order_number ? ` (order ${sess.order_number})` : ''}`;
     const html = `
       <div style="font-family:Arial,sans-serif;max-width:600px">
         <div style="background:#000;color:#fff;padding:16px 20px;border-bottom:3px solid #F3D014">
@@ -5098,8 +5115,9 @@ Total: £${orderTotal.toFixed(2)}`;
       }
     }
 
-    // Attach the same PDF to the BP order if we have one.
-    if (pdfBuffer && sess.order_number) {
+    // Attach the same PDF to the BP order if we have one. Skipped in
+    // preview mode so test submissions don't pollute real BP orders.
+    if (pdfBuffer && sess.order_number && !previewBypass) {
       try {
         const filename = `Promo-AddOn-${sess.order_number}.pdf`;
         const r = await bpAttachFileToOrder(sess.order_number, filename, pdfBuffer, 'application/pdf');
