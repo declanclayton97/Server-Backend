@@ -2464,6 +2464,7 @@ async function bpAddOrderRow(orderId, productId, quantity, rowNetExVat) {
   const body = {
     productId,
     quantity: { magnitude: quantity },
+    taxCode: process.env.BRIGHTPEARL_DEFAULT_TAX_CODE || 'T1',
     rowValue: {
       rowNet: { currency: 'GBP', value: rowNetExVat.toFixed(2) },
       rowTax: { currency: 'GBP', value: tax.toFixed(2) },
