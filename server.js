@@ -2461,19 +2461,17 @@ async function bpAddOrderRow(orderId, productId, quantity, rowNetExVat) {
     : 'https://use1.brightpearlconnect.com';
   const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/row`;
   const tax = rowNetExVat * 0.20;
-  const taxCode = process.env.BRIGHTPEARL_DEFAULT_TAX_CODE || 'T1';
+  // taxCode MUST be inside rowValue — at top level BP ignores it and
+  // returns ORDC-040 "you have not supplied a tax code".
   const body = {
     productId,
     quantity: { magnitude: quantity },
-    taxCode,
     rowValue: {
-      taxCode,
+      taxCode: process.env.BRIGHTPEARL_DEFAULT_TAX_CODE || 'T1',
       rowNet: { currency: 'GBP', value: rowNetExVat.toFixed(2) },
       rowTax: { currency: 'GBP', value: tax.toFixed(2) },
     },
   };
-  console.log(`[bp-add-row] POST ${url}`);
-  console.log(`[bp-add-row] body: ${JSON.stringify(body)}`);
   try {
     const r = await fetch(url, {
       method: 'POST',
@@ -2489,7 +2487,6 @@ async function bpAddOrderRow(orderId, productId, quantity, rowNetExVat) {
       console.error(`[bp-add-row] order ${orderId} product ${productId} → ${r.status}: ${errBody.slice(0, 300)}`);
       return { ok: false, status: r.status, body: errBody };
     }
-    console.log(`[bp-add-row] order ${orderId} product ${productId} → OK`);
     return { ok: true };
   } catch (err) {
     console.error(`[bp-add-row] order ${orderId} product ${productId} error: ${err.message}`);
