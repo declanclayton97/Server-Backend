@@ -5928,6 +5928,10 @@ async function initApprovalDB() {
       -- "Resent on email/whatsapp at <date>" alongside Sent / Opened.
       -- Each entry: { channel, recipient, sentBy, ts }
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS resend_log JSONB NOT NULL DEFAULT '[]'::jsonb;
+      -- When true, the customer-facing promo item up-sell panel is
+      -- suppressed on this session's approval page. Set per-link by the
+      -- operator at proof-send time.
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_offer_disabled BOOLEAN NOT NULL DEFAULT FALSE;
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -5958,6 +5962,7 @@ app.post("/api/approval-sessions", async (req, res) => {
       primaryLogoBase64, primaryLogoMime,
       promoLogoDarkBase64, promoLogoDarkMime,
       promoLogoLightBase64, promoLogoLightMime,
+      disablePromoOffer,
     } = req.body;
 
     if (!pdfBase64 || !logoPositions?.length) {
@@ -5974,8 +5979,9 @@ app.post("/api/approval-sessions", async (req, res) => {
          (order_number, customer_name, recipient_name, pdf_data, logo_positions, created_by,
           primary_logo_data, primary_logo_mime,
           promo_logo_dark_data, promo_logo_dark_mime,
-          promo_logo_light_data, promo_logo_light_mime)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          promo_logo_light_data, promo_logo_light_mime,
+          promo_offer_disabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING id, status, created_at`,
       [
         orderNumber || null, customerName || null, recipientName || null, pdfBuffer,
@@ -5983,6 +5989,7 @@ app.post("/api/approval-sessions", async (req, res) => {
         primaryLogoBuffer, primaryLogoMime || null,
         promoDarkBuffer, promoLogoDarkMime || null,
         promoLightBuffer, promoLogoLightMime || null,
+        disablePromoOffer === true,
       ]
     );
 
@@ -6700,7 +6707,7 @@ app.get("/api/approval-sessions/:sessionId", async (req, res) => {
 
     const sessionResult = await pool.query(
       `SELECT id, order_number, customer_name, recipient_name, logo_positions,
-              status, created_at, completed_at, opened_at
+              status, created_at, completed_at, opened_at, promo_offer_disabled
        FROM approval_sessions WHERE id = $1`,
       [sessionId]
     );
@@ -6735,6 +6742,7 @@ app.get("/api/approval-sessions/:sessionId", async (req, res) => {
         status: session.status,
         createdAt: session.created_at,
         completedAt: session.completed_at,
+        promoOfferDisabled: session.promo_offer_disabled === true,
         items: itemsResult.rows.map((item) => ({
           id: item.id,
           positionIndex: item.position_index,
