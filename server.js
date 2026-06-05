@@ -5493,7 +5493,7 @@ app.get('/api/promo-offer/uptake', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
     const r = await pool.query(
-      `SELECT order_number, customer_name, items, submitted_at
+      `SELECT id, order_number, customer_name, items, submitted_at
          FROM promo_offer_uptake
         ORDER BY submitted_at DESC`
     );
@@ -5521,6 +5521,7 @@ app.get('/api/promo-offer/uptake', async (req, res) => {
 
     const totals = Array.from(byItem.values()).sort((a, b) => b.units - a.units);
     const recent = r.rows.slice(0, 50).map((row) => ({
+      id: row.id,
       orderNumber: row.order_number,
       customerName: row.customer_name,
       submittedAt: row.submitted_at,
@@ -5538,6 +5539,21 @@ app.get('/api/promo-offer/uptake', async (req, res) => {
     });
   } catch (err) {
     console.error('[promo-offer] uptake report failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/promo-offer/uptake/:id — remove a single uptake row (e.g. a
+// test submission added during setup). Internal admin tool; no undo.
+app.delete('/api/promo-offer/uptake/:id', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const r = await pool.query('DELETE FROM promo_offer_uptake WHERE id = $1', [id]);
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (err) {
+    console.error('[promo-offer] uptake delete failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
