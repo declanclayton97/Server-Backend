@@ -5061,7 +5061,7 @@ app.post('/api/promo-offer/submit', async (req, res) => {
     if (!isPromoOfferEnabled() && !previewBypass) {
       return res.status(503).json({ error: 'Promo offer not currently enabled' });
     }
-    const { approvalSessionId, items } = req.body || {};
+    const { approvalSessionId, items, testEmail } = req.body || {};
     if (!approvalSessionId) return res.status(400).json({ error: 'approvalSessionId required' });
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'items[] required' });
 
@@ -5430,6 +5430,15 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
       console.warn('[promo-offer] PDF build failed:', pdfErr.message);
     }
 
+    // In preview mode the operator can redirect this test email to a chosen
+    // address (the "send test to" box on a ?preview=1 link); otherwise it
+    // always goes to the configured notify inbox. The override is ignored
+    // for real customer submissions so production always notifies sales.
+    const emailLooksValid = (e) => typeof e === 'string' && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.trim());
+    const promoEmailTo = (previewBypass && emailLooksValid(testEmail))
+      ? testEmail.trim()
+      : (process.env.PROMO_OFFER_NOTIFY_EMAIL || 'sales@tuffshop.co.uk');
+
     // Send email. Best-effort: failure doesn't block the customer's response.
     if (process.env.SMTP_PASS) {
       try {
@@ -5442,13 +5451,13 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
         const filename = `Promo-AddOn-${sess.order_number || 'order'}.pdf`;
         await transporter.sendMail({
           from: `"Tuffshop Proofs" <${process.env.SENDER_EMAIL || 'noreply@tuffshop.co.uk'}>`,
-          to: process.env.PROMO_OFFER_NOTIFY_EMAIL || 'sales@tuffshop.co.uk',
+          to: promoEmailTo,
           subject,
           html,
           text: textBody,
           attachments: pdfBuffer ? [{ filename, content: pdfBuffer, contentType: 'application/pdf' }] : [],
         });
-        console.log(`[promo-offer] uptake email sent for ${sess.order_number || approvalSessionId}`);
+        console.log(`[promo-offer] uptake email sent for ${sess.order_number || approvalSessionId} → ${promoEmailTo}`);
       } catch (mailErr) {
         console.error('[promo-offer] email send failed:', mailErr.message);
       }
@@ -5467,7 +5476,7 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
       }
     }
 
-    res.json({ success: true, total: orderTotal, lineCount: lineItems.length });
+    res.json({ success: true, total: orderTotal, lineCount: lineItems.length, emailedTo: process.env.SMTP_PASS ? promoEmailTo : null });
   } catch (err) {
     console.error('[promo-offer] submit failed:', err.message);
     if (!res.headersSent) res.status(500).json({ error: err.message });
