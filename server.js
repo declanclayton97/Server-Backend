@@ -5133,12 +5133,15 @@ app.post('/api/promo-offer/submit', async (req, res) => {
     const orderTotal = orderTotalExVat;
     const customerIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || null;
 
-    // Record the uptake.
-    await pool.query(
-      `INSERT INTO promo_offer_uptake (approval_session_id, order_number, customer_name, items, customer_ip)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [approvalSessionId, sess.order_number, sess.customer_name, JSON.stringify(lineItems), customerIp]
-    );
+    // Record the uptake — but never for preview/test submissions, so the
+    // reported order numbers / revenue stay clean.
+    if (!previewBypass) {
+      await pool.query(
+        `INSERT INTO promo_offer_uptake (approval_session_id, order_number, customer_name, items, customer_ip)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [approvalSessionId, sess.order_number, sess.customer_name, JSON.stringify(lineItems), customerIp]
+      );
+    }
 
     // Auto-add rows to the BP order at the agreed deal price (with the
     // bundle discount distributed proportionally per line). Only fires
@@ -5480,6 +5483,62 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
   } catch (err) {
     console.error('[promo-offer] submit failed:', err.message);
     if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/promo-offer/uptake — report of real (non-preview) submissions.
+// Returns per-item totals (units + value at deal price ex VAT, before any
+// bundle discount) and the most recent submissions, for the admin view.
+app.get('/api/promo-offer/uptake', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT order_number, customer_name, items, submitted_at
+         FROM promo_offer_uptake
+        ORDER BY submitted_at DESC`
+    );
+
+    // Aggregate per item across every submission. `items` is the JSONB
+    // array of line items recorded at submit time.
+    const byItem = new Map(); // name -> { itemId, name, units, valueExVat, orders }
+    let totalUnits = 0;
+    let totalValueExVat = 0;
+    for (const row of r.rows) {
+      const lines = Array.isArray(row.items) ? row.items : [];
+      for (const l of lines) {
+        const key = l.name || `#${l.itemId}`;
+        const qty = Number(l.qty) || 0;
+        const lineValue = Number(l.lineTotalExVat) || 0;
+        const agg = byItem.get(key) || { itemId: l.itemId ?? null, name: key, units: 0, valueExVat: 0, orders: 0 };
+        agg.units += qty;
+        agg.valueExVat += lineValue;
+        agg.orders += 1;
+        byItem.set(key, agg);
+        totalUnits += qty;
+        totalValueExVat += lineValue;
+      }
+    }
+
+    const totals = Array.from(byItem.values()).sort((a, b) => b.units - a.units);
+    const recent = r.rows.slice(0, 50).map((row) => ({
+      orderNumber: row.order_number,
+      customerName: row.customer_name,
+      submittedAt: row.submitted_at,
+      items: (Array.isArray(row.items) ? row.items : []).map((l) => ({
+        name: l.name, qty: Number(l.qty) || 0, lineTotalExVat: Number(l.lineTotalExVat) || 0,
+      })),
+    }));
+
+    res.json({
+      submissionCount: r.rows.length,
+      totalUnits,
+      totalValueExVat,
+      totals,
+      recent,
+    });
+  } catch (err) {
+    console.error('[promo-offer] uptake report failed:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
