@@ -6782,6 +6782,31 @@ app.post("/api/whatsapp/conversations/:phone/dismiss", async (req, res) => {
   }
 });
 
+// Lightweight: every order number that has ever had an approval session,
+// regardless of age or status. Used by the Approval-History UI to decide
+// whether an incoming WhatsApp conversation is "matched" — the full
+// /api/approval-sessions list is capped at LIMIT 200, so old-but-genuine
+// orders would otherwise be mis-classed as Unmatched once they age out of
+// that window. Returns just the distinct order numbers (no PDFs, items or
+// row payload), so it stays cheap even with thousands of sessions.
+//
+// NOTE: must be registered BEFORE the "/:sessionId" route below, or Express
+// would capture "order-numbers" as a sessionId and try to load it as a UUID.
+app.get("/api/approval-sessions/order-numbers", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const r = await pool.query(
+      `SELECT DISTINCT order_number
+         FROM approval_sessions
+        WHERE order_number IS NOT NULL AND order_number <> ''`
+    );
+    res.json({ success: true, orderNumbers: r.rows.map((row) => row.order_number) });
+  } catch (err) {
+    console.error("[approval] order-numbers failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get approval session metadata
 app.get("/api/approval-sessions/:sessionId", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
