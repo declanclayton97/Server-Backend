@@ -5124,9 +5124,15 @@ app.post('/api/promo-offer/submit', async (req, res) => {
     //   4+             →  20% off
     const uniqueItemCount = lineItems.length;
     const bundleDiscountPct = uniqueItemCount >= 4 ? 0.20 : uniqueItemCount === 3 ? 0.15 : uniqueItemCount === 2 ? 0.10 : 0;
-    const subtotalExVat = lineItems.reduce((s, l) => s + l.lineTotalExVat, 0);
-    const bundleDiscount = subtotalExVat * bundleDiscountPct;
-    const orderTotalExVat = subtotalExVat - bundleDiscount;
+    // Round each figure to the penny and derive the next from the rounded
+    // value so the displayed breakdown reconciles (subtotal − discount =
+    // total), matching the customer-facing card. Display-only — the BP row
+    // amounts below are computed per-line independently (and BP rounds each
+    // row itself), so this doesn't change what's actually charged.
+    const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+    const subtotalExVat = round2(lineItems.reduce((s, l) => s + l.lineTotalExVat, 0));
+    const bundleDiscount = round2(subtotalExVat * bundleDiscountPct);
+    const orderTotalExVat = round2(subtotalExVat - bundleDiscount);
     // Keep `orderTotal` name as an alias so the rest of the handler /
     // PDF code (further down) doesn't need rewriting — but it's now
     // ex-VAT after bundle discount.
