@@ -1,2 +1,5 @@
 node_modules/
 docusign-logs.json
+.env
+.env.local
+*.log

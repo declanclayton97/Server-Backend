@@ -19,6 +19,7 @@ import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from 
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder } from './bpWebSession.js';
+import { convertDesignToPng } from './wilcomClient.js';
 import { spawn } from 'child_process';
 const { Pool } = pkg;
 
@@ -107,6 +108,37 @@ app.use((req, res, next) => {
 // Home route
 app.get("/", (req, res) => {
   res.send("SFTP Proxy for Mockup Sheets is running");
+});
+
+// Convert a Wilcom .EMB embroidery file to a transparent TrueView PNG.
+// Body: { embBase64: string, dpi?: number (96-300), inputExt?: string }
+// Returns: { png: <base64>, widthMm, heightMm, numColours, numStitches }
+app.post("/api/emb-to-png", async (req, res) => {
+  try {
+    const { embBase64, dpi, inputExt } = req.body || {};
+    if (!embBase64 || typeof embBase64 !== "string") {
+      return res.status(400).json({ error: 'Missing "embBase64" (base64-encoded design file)' });
+    }
+    const buf = Buffer.from(embBase64, "base64");
+    if (!buf.length) return res.status(400).json({ error: "embBase64 did not decode to any bytes" });
+
+    const { png, widthMm, heightMm, designInfo } = await convertDesignToPng(buf, {
+      dpi: Number(dpi) || 300,
+      inputExt: inputExt || "EMB",
+    });
+
+    res.json({
+      png: png.toString("base64"),
+      widthMm,
+      heightMm,
+      numColours: designInfo.num_colours ?? null,
+      numStitches: designInfo.num_stitches ?? null,
+    });
+  } catch (err) {
+    console.error("[emb-to-png] failed:", err.message);
+    const isAuth = /WILCOM_USERNAME|login failed|MFA|new password/i.test(err.message);
+    res.status(isAuth ? 502 : 500).json({ error: err.message });
+  }
 });
 
 // SFTP image route
