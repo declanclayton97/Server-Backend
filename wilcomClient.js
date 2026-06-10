@@ -96,33 +96,47 @@ export async function getIdToken() {
 export async function convertDesignToPng(designBuffer, opts = {}) {
   const dpi = Math.min(300, Math.max(96, opts.dpi || 300));
   const inputExt = (opts.inputExt || "EMB").toUpperCase();
-  const token = await getIdToken();
 
-  const { data } = await axios.post(
-    `${API_BASE}/transform`,
-    {
-      DesignFileBase64: designBuffer.toString("base64"),
-      InputFileExtension: inputExt,
-      OutputFileExtension: "PNG",
-      OutputFileName: "out.PNG",
-      DPI: dpi,
-      design: { transform: {}, recolor: {}, colorway: "" },
-    },
-    {
-      headers: {
-        "content-type": "application/json; charset=UTF-8",
-        authorization: `Bearer ${token}`,
-        accept: "application/json",
-        origin: "https://apps.wilcom.com",
-        referer: "https://apps.wilcom.com/",
-      },
-      timeout: 60_000,
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
+  const payload = {
+    DesignFileBase64: designBuffer.toString("base64"),
+    InputFileExtension: inputExt,
+    OutputFileExtension: "PNG",
+    OutputFileName: "out.PNG",
+    DPI: dpi,
+    design: { transform: {}, recolor: {}, colorway: "" },
+  };
+
+  // Wilcom's gateway occasionally returns a transient 502/503/504 (cold/slow
+  // backend); retry a few times with backoff before giving up.
+  let data, lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const token = await getIdToken();
+      const resp = await axios.post(`${API_BASE}/transform`, payload, {
+        headers: {
+          "content-type": "application/json; charset=UTF-8",
+          authorization: `Bearer ${token}`,
+          accept: "application/json",
+          origin: "https://apps.wilcom.com",
+          referer: "https://apps.wilcom.com/",
+        },
+        timeout: 90_000,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      });
+      data = resp.data;
+      break;
+    } catch (err) {
+      lastErr = err;
+      const status = err.response && err.response.status;
+      const transient = !status || [429, 500, 502, 503, 504].includes(status) || err.code === "ECONNABORTED";
+      if (!transient) throw err;
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
     }
-  );
+  }
+  if (!data) throw new Error(`Wilcom transform failed: ${lastErr && lastErr.message}`);
 
-  if (!data || !data.ResultFileBase64) {
+  if (!data.ResultFileBase64) {
     throw new Error("Wilcom transform returned no image");
   }
   const png = Buffer.from(data.ResultFileBase64, "base64");
