@@ -5148,6 +5148,34 @@ app.delete('/api/promo-offer-items/:id', async (req, res) => {
   }
 });
 
+// Build the Brightpearl/Bolt "Pay Now Online" link for an order. Confirmed the
+// order-only form works (no invoice needed) — pays the order balance, which now
+// includes the just-added promo items. Returns null if creds/contactId missing.
+async function buildOrderPaymentLink(orderId) {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID || !orderId) return null;
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  try {
+    const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`, { headers });
+    if (!r.ok) return null;
+    const data = await r.json();
+    const order = Array.isArray(data.response) ? data.response[0] : data.response;
+    const contactId = order?.parties?.customer?.contactId ?? order?.contactId ?? null;
+    if (!contactId) return null;
+    const ACCOUNT = process.env.BOLT_ACCOUNT_CODE || 'tuffworkwear';
+    return `https://bpp.withbolt.com/c/bpp/s/invoice.html?accountCode=${ACCOUNT}&channelKey=bpp&salesOrderId=${orderId}&contactId=${contactId}`;
+  } catch (err) {
+    console.error('[promo-offer] buildOrderPaymentLink failed:', err.message);
+    return null;
+  }
+}
+
 // Diagnostic: build candidate Brightpearl/Bolt "Pay Now" payment links for an
 // order, so we can test which form the portal accepts (order-only vs needs an
 // invoice). Read-only. GET /api/promo-offer/payment-link/:orderId
@@ -5719,7 +5747,17 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
       }
     }
 
-    res.json({ success: true, total: orderTotal, lineCount: lineItems.length, emailedTo: process.env.SMTP_PASS ? promoEmailTo : null });
+    // "Pay Now Online" link — OFF for real customers until PROMO_PAYMENT_ENABLED=true,
+    // but always built for preview submits so the team can test the journey.
+    // Real submits only offer it if a promo item actually got added to the order.
+    let paymentUrl = null;
+    const paymentEnabled = String(process.env.PROMO_PAYMENT_ENABLED ?? 'false').toLowerCase() === 'true';
+    if (sess.order_number && (paymentEnabled || previewBypass)) {
+      const anyAdded = previewBypass ? true : bpRowResults.some((r) => r.ok);
+      if (anyAdded) paymentUrl = await buildOrderPaymentLink(sess.order_number);
+    }
+
+    res.json({ success: true, total: orderTotal, lineCount: lineItems.length, emailedTo: process.env.SMTP_PASS ? promoEmailTo : null, paymentUrl });
   } catch (err) {
     console.error('[promo-offer] submit failed:', err.message);
     if (!res.headersSent) res.status(500).json({ error: err.message });
