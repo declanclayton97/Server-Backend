@@ -5148,6 +5148,57 @@ app.delete('/api/promo-offer-items/:id', async (req, res) => {
   }
 });
 
+// Diagnostic: build candidate Brightpearl/Bolt "Pay Now" payment links for an
+// order, so we can test which form the portal accepts (order-only vs needs an
+// invoice). Read-only. GET /api/promo-offer/payment-link/:orderId
+app.get('/api/promo-offer/payment-link/:orderId', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(503).json({ error: 'Brightpearl credentials missing' });
+  }
+  const orderId = String(req.params.orderId).replace(/[^0-9]/g, '');
+  if (!orderId) return res.status(400).json({ error: 'numeric orderId required' });
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  try {
+    const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`, { headers });
+    if (!r.ok) return res.status(502).json({ error: `BP order fetch returned ${r.status}` });
+    const data = await r.json();
+    const order = Array.isArray(data.response) ? data.response[0] : data.response;
+    if (!order) return res.status(404).json({ error: 'order not found' });
+
+    const contactId = order?.parties?.customer?.contactId ?? order?.contactId ?? null;
+    // Best-effort: surface any invoice reference the order object exposes so we
+    // can see whether an invoice exists at this stage.
+    const invoiceRef =
+      order?.invoices?.[0]?.invoiceReference ||
+      order?.invoiceReference ||
+      order?.invoice?.invoiceReference ||
+      null;
+
+    const ACCOUNT = process.env.BOLT_ACCOUNT_CODE || 'tuffworkwear';
+    const base = `https://bpp.withbolt.com/c/bpp/s/invoice.html?accountCode=${ACCOUNT}&channelKey=bpp`;
+    const links = {
+      orderOnly: `${base}&salesOrderId=${orderId}&contactId=${contactId ?? ''}`,
+      invoiceAsOrderRef: `${base}&salesInvoiceId=${orderId}&salesOrderId=${orderId}&contactId=${contactId ?? ''}`,
+      withInvoice: invoiceRef ? `${base}&salesInvoiceId=${invoiceRef}&salesOrderId=${orderId}&contactId=${contactId ?? ''}` : null,
+    };
+    res.json({
+      orderId, contactId, invoiceRef,
+      hasInvoicesField: order?.invoices !== undefined,
+      links,
+    });
+  } catch (err) {
+    console.error('[promo-offer/payment-link]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============================================================
 // WhatsApp cross-sell — admin CRUD for the source→companion rules.
 // ============================================================
