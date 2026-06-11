@@ -3455,6 +3455,59 @@ async function initializePromoOfferTables() {
   }
 }
 
+// WhatsApp post-approval cross-sell. crosssell_rules maps what a customer
+// ordered (by product code / prefix / brand) to a matching companion item;
+// crosssell_sends logs each message so the inbound "Yes, add it" reply can be
+// matched back to the offer and auto-added to the BP order.
+async function initializeCrossSellTables() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS crosssell_rules (
+        id SERIAL PRIMARY KEY,
+        source_match_type VARCHAR(20) NOT NULL DEFAULT 'code_prefix',
+        source_match_value TEXT NOT NULL,
+        ordered_label TEXT,
+        companion_sku VARCHAR(100) NOT NULL,
+        companion_name TEXT NOT NULL,
+        companion_image_url TEXT,
+        match_colour BOOLEAN NOT NULL DEFAULT TRUE,
+        logo_variant VARCHAR(10) NOT NULL DEFAULT 'auto',
+        logo_zone JSONB,
+        priority INT NOT NULL DEFAULT 0,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        origin VARCHAR(10) NOT NULL DEFAULT 'manual',
+        approved BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_crosssell_rules_match
+        ON crosssell_rules(source_match_type, source_match_value);
+
+      CREATE TABLE IF NOT EXISTS crosssell_sends (
+        id SERIAL PRIMARY KEY,
+        approval_session_id UUID REFERENCES approval_sessions(id) ON DELETE SET NULL,
+        order_number VARCHAR(50),
+        customer_phone VARCHAR(32),
+        rule_id INT REFERENCES crosssell_rules(id) ON DELETE SET NULL,
+        companion_sku VARCHAR(100),
+        companion_name TEXT,
+        mockup_url TEXT,
+        wa_message_id TEXT,
+        sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        response VARCHAR(10),
+        responded_at TIMESTAMPTZ,
+        bp_added BOOLEAN NOT NULL DEFAULT FALSE,
+        bp_order_row_id BIGINT
+      );
+      CREATE INDEX IF NOT EXISTS idx_crosssell_sends_phone
+        ON crosssell_sends(customer_phone, sent_at);
+    `);
+    console.log('✅ crosssell tables initialized');
+  } catch (err) {
+    console.error('❌ Error initializing crosssell tables:', err.message);
+  }
+}
+
 // Kill-switch: set ORDER_PIPELINE_ENABLED=false on Render to fully stop the
 // order-pipeline poller (no boot run, no interval, manual trigger 503s).
 // Even in dry-run mode the poller hits Brightpearl, so this is the way to
@@ -3469,6 +3522,7 @@ function isOrderPipelineEnabled() {
   await initializeBpOrderAttachments();
   await initializeFitnessIncColourAdditions();
   await initializePromoOfferTables();
+  await initializeCrossSellTables();
   if (!isOrderPipelineEnabled()) {
     console.log('⏸️  Order-pipeline poller DISABLED via ORDER_PIPELINE_ENABLED=false. No polls will run.');
     return;
@@ -5077,6 +5131,87 @@ app.delete('/api/promo-offer-items/:id', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
     const r = await pool.query(`DELETE FROM promo_offer_items WHERE id = $1`, [req.params.id]);
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// WhatsApp cross-sell — admin CRUD for the source→companion rules.
+// ============================================================
+
+// Master switch: auto-send of the post-approval cross-sell message is OFF
+// until CROSSSELL_ENABLED=true on Render. Building/admin works regardless;
+// this only gates actually messaging customers (marketing opt-in required).
+function isCrossSellEnabled() {
+  return String(process.env.CROSSSELL_ENABLED ?? 'false').toLowerCase() === 'true';
+}
+
+// Admin: list every rule (including disabled / unapproved Claude suggestions).
+app.get('/api/crosssell/rules', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT id, source_match_type, source_match_value, ordered_label, companion_sku,
+              companion_name, companion_image_url, match_colour, logo_variant, logo_zone,
+              priority, enabled, origin, approved, created_at
+         FROM crosssell_rules
+        ORDER BY priority DESC, id`
+    );
+    res.json({ rules: r.rows, enabled: isCrossSellEnabled() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: create or update a rule by id.
+app.post('/api/crosssell/rules', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const {
+      id, sourceMatchType, sourceMatchValue, orderedLabel, companionSku, companionName,
+      companionImageUrl, matchColour, logoVariant, logoZone, priority, enabled, origin, approved,
+    } = req.body || {};
+    if (!sourceMatchValue) return res.status(400).json({ error: 'sourceMatchValue required' });
+    if (!companionSku) return res.status(400).json({ error: 'companionSku required' });
+    if (!companionName) return res.status(400).json({ error: 'companionName required' });
+    const matchType = ['product_code', 'code_prefix', 'brand'].includes(sourceMatchType) ? sourceMatchType : 'code_prefix';
+    const variantClean = ['dark', 'light', 'auto'].includes(logoVariant) ? logoVariant : 'auto';
+    const originClean = origin === 'claude' ? 'claude' : 'manual';
+    const logoZoneJson = logoZone ? JSON.stringify(logoZone) : null;
+    const cols = [matchType, sourceMatchValue.trim(), orderedLabel?.trim() || null, companionSku.trim(),
+      companionName.trim(), companionImageUrl?.trim() || null, matchColour ?? true, variantClean,
+      logoZoneJson, priority ?? 0, enabled ?? true, originClean, approved ?? true];
+    if (id) {
+      const r = await pool.query(
+        `UPDATE crosssell_rules SET
+           source_match_type=$1, source_match_value=$2, ordered_label=$3, companion_sku=$4,
+           companion_name=$5, companion_image_url=$6, match_colour=$7, logo_variant=$8,
+           logo_zone=$9, priority=$10, enabled=$11, origin=$12, approved=$13
+         WHERE id=$14 RETURNING *`,
+        [...cols, id]
+      );
+      return res.json({ success: true, rule: r.rows[0] });
+    }
+    const r = await pool.query(
+      `INSERT INTO crosssell_rules
+         (source_match_type, source_match_value, ordered_label, companion_sku, companion_name,
+          companion_image_url, match_colour, logo_variant, logo_zone, priority, enabled, origin, approved)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+      cols
+    );
+    res.json({ success: true, rule: r.rows[0] });
+  } catch (err) {
+    console.error('[crosssell] save failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/crosssell/rules/:id', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(`DELETE FROM crosssell_rules WHERE id = $1`, [req.params.id]);
     res.json({ success: true, deleted: r.rowCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
