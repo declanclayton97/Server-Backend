@@ -3466,9 +3466,9 @@ async function initializeCrossSellTables() {
       CREATE TABLE IF NOT EXISTS crosssell_rules (
         id SERIAL PRIMARY KEY,
         source_match_type VARCHAR(20) NOT NULL DEFAULT 'code_prefix',
-        source_match_value TEXT NOT NULL,
+        source_match_value TEXT,
         ordered_label TEXT,
-        companion_sku VARCHAR(100) NOT NULL,
+        companion_sku VARCHAR(100),
         companion_name TEXT NOT NULL,
         companion_image_url TEXT,
         match_colour BOOLEAN NOT NULL DEFAULT TRUE,
@@ -3480,8 +3480,17 @@ async function initializeCrossSellTables() {
         approved BOOLEAN NOT NULL DEFAULT TRUE,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-      CREATE INDEX IF NOT EXISTS idx_crosssell_rules_match
-        ON crosssell_rules(source_match_type, source_match_value);
+      -- Brand + garment-type keyed matching (the chosen model): a rule matches
+      -- an ordered line by brand + garment type and offers a companion product.
+      -- companion_product_code drives the image grab (brand-specific resolver);
+      -- companion_sku drives the Brightpearl add (falls back to the code).
+      ALTER TABLE crosssell_rules ALTER COLUMN source_match_value DROP NOT NULL;
+      ALTER TABLE crosssell_rules ALTER COLUMN companion_sku DROP NOT NULL;
+      ALTER TABLE crosssell_rules ADD COLUMN IF NOT EXISTS source_brand TEXT;
+      ALTER TABLE crosssell_rules ADD COLUMN IF NOT EXISTS source_garment_type TEXT;
+      ALTER TABLE crosssell_rules ADD COLUMN IF NOT EXISTS companion_product_code TEXT;
+      CREATE INDEX IF NOT EXISTS idx_crosssell_rules_brand_garment
+        ON crosssell_rules(source_brand, source_garment_type);
 
       CREATE TABLE IF NOT EXISTS crosssell_sends (
         id SERIAL PRIMARY KEY,
@@ -5153,9 +5162,9 @@ app.get('/api/crosssell/rules', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
     const r = await pool.query(
-      `SELECT id, source_match_type, source_match_value, ordered_label, companion_sku,
-              companion_name, companion_image_url, match_colour, logo_variant, logo_zone,
-              priority, enabled, origin, approved, created_at
+      `SELECT id, source_brand, source_garment_type, ordered_label, companion_product_code,
+              companion_sku, companion_name, companion_image_url, match_colour, logo_variant,
+              logo_zone, priority, enabled, origin, approved, created_at
          FROM crosssell_rules
         ORDER BY priority DESC, id`
     );
@@ -5170,35 +5179,39 @@ app.post('/api/crosssell/rules', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
     const {
-      id, sourceMatchType, sourceMatchValue, orderedLabel, companionSku, companionName,
-      companionImageUrl, matchColour, logoVariant, logoZone, priority, enabled, origin, approved,
+      id, sourceBrand, sourceGarmentType, orderedLabel, companionProductCode, companionSku,
+      companionName, companionImageUrl, matchColour, logoVariant, logoZone, priority, enabled, origin, approved,
     } = req.body || {};
-    if (!sourceMatchValue) return res.status(400).json({ error: 'sourceMatchValue required' });
-    if (!companionSku) return res.status(400).json({ error: 'companionSku required' });
-    if (!companionName) return res.status(400).json({ error: 'companionName required' });
-    const matchType = ['product_code', 'code_prefix', 'brand'].includes(sourceMatchType) ? sourceMatchType : 'code_prefix';
+    if (!sourceBrand?.trim()) return res.status(400).json({ error: 'sourceBrand required' });
+    if (!sourceGarmentType?.trim()) return res.status(400).json({ error: 'sourceGarmentType required' });
+    if (!companionName?.trim()) return res.status(400).json({ error: 'companionName required' });
+    if (!companionProductCode?.trim() && !companionSku?.trim()) {
+      return res.status(400).json({ error: 'companionProductCode or companionSku required' });
+    }
     const variantClean = ['dark', 'light', 'auto'].includes(logoVariant) ? logoVariant : 'auto';
     const originClean = origin === 'claude' ? 'claude' : 'manual';
     const logoZoneJson = logoZone ? JSON.stringify(logoZone) : null;
-    const cols = [matchType, sourceMatchValue.trim(), orderedLabel?.trim() || null, companionSku.trim(),
-      companionName.trim(), companionImageUrl?.trim() || null, matchColour ?? true, variantClean,
-      logoZoneJson, priority ?? 0, enabled ?? true, originClean, approved ?? true];
+    const cols = [sourceBrand.trim(), sourceGarmentType.trim().toLowerCase(), orderedLabel?.trim() || null,
+      companionProductCode?.trim() || null, companionSku?.trim() || null, companionName.trim(),
+      companionImageUrl?.trim() || null, matchColour ?? true, variantClean, logoZoneJson,
+      priority ?? 0, enabled ?? true, originClean, approved ?? true];
     if (id) {
       const r = await pool.query(
         `UPDATE crosssell_rules SET
-           source_match_type=$1, source_match_value=$2, ordered_label=$3, companion_sku=$4,
-           companion_name=$5, companion_image_url=$6, match_colour=$7, logo_variant=$8,
-           logo_zone=$9, priority=$10, enabled=$11, origin=$12, approved=$13
-         WHERE id=$14 RETURNING *`,
+           source_brand=$1, source_garment_type=$2, ordered_label=$3, companion_product_code=$4,
+           companion_sku=$5, companion_name=$6, companion_image_url=$7, match_colour=$8,
+           logo_variant=$9, logo_zone=$10, priority=$11, enabled=$12, origin=$13, approved=$14
+         WHERE id=$15 RETURNING *`,
         [...cols, id]
       );
       return res.json({ success: true, rule: r.rows[0] });
     }
     const r = await pool.query(
       `INSERT INTO crosssell_rules
-         (source_match_type, source_match_value, ordered_label, companion_sku, companion_name,
-          companion_image_url, match_colour, logo_variant, logo_zone, priority, enabled, origin, approved)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+         (source_brand, source_garment_type, ordered_label, companion_product_code, companion_sku,
+          companion_name, companion_image_url, match_colour, logo_variant, logo_zone, priority,
+          enabled, origin, approved)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       cols
     );
     res.json({ success: true, rule: r.rows[0] });
