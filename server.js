@@ -3489,6 +3489,8 @@ async function initializeCrossSellTables() {
       ALTER TABLE crosssell_rules ADD COLUMN IF NOT EXISTS source_brand TEXT;
       ALTER TABLE crosssell_rules ADD COLUMN IF NOT EXISTS source_garment_type TEXT;
       ALTER TABLE crosssell_rules ADD COLUMN IF NOT EXISTS companion_product_code TEXT;
+      -- Optional indicative price shown as a "from £X each" badge on the mockup.
+      ALTER TABLE crosssell_rules ADD COLUMN IF NOT EXISTS price_each NUMERIC(10,2);
       CREATE INDEX IF NOT EXISTS idx_crosssell_rules_brand_garment
         ON crosssell_rules(source_brand, source_garment_type);
 
@@ -5163,8 +5165,8 @@ app.get('/api/crosssell/rules', async (req, res) => {
   try {
     const r = await pool.query(
       `SELECT id, source_brand, source_garment_type, ordered_label, companion_product_code,
-              companion_sku, companion_name, companion_image_url, match_colour, logo_variant,
-              logo_zone, priority, enabled, origin, approved, created_at
+              companion_sku, companion_name, companion_image_url, price_each, match_colour,
+              logo_variant, logo_zone, priority, enabled, origin, approved, created_at
          FROM crosssell_rules
         ORDER BY priority DESC, id`
     );
@@ -5180,7 +5182,7 @@ app.post('/api/crosssell/rules', async (req, res) => {
   try {
     const {
       id, sourceBrand, sourceGarmentType, orderedLabel, companionProductCode, companionSku,
-      companionName, companionImageUrl, matchColour, logoVariant, logoZone, priority, enabled, origin, approved,
+      companionName, companionImageUrl, priceEach, matchColour, logoVariant, logoZone, priority, enabled, origin, approved,
     } = req.body || {};
     if (!sourceBrand?.trim()) return res.status(400).json({ error: 'sourceBrand required' });
     if (!sourceGarmentType?.trim()) return res.status(400).json({ error: 'sourceGarmentType required' });
@@ -5191,17 +5193,18 @@ app.post('/api/crosssell/rules', async (req, res) => {
     const variantClean = ['dark', 'light', 'auto'].includes(logoVariant) ? logoVariant : 'auto';
     const originClean = origin === 'claude' ? 'claude' : 'manual';
     const logoZoneJson = logoZone ? JSON.stringify(logoZone) : null;
+    const priceClean = (priceEach == null || priceEach === '' || isNaN(parseFloat(priceEach))) ? null : parseFloat(priceEach);
     const cols = [sourceBrand.trim(), sourceGarmentType.trim().toLowerCase(), orderedLabel?.trim() || null,
       companionProductCode?.trim() || null, companionSku?.trim() || null, companionName.trim(),
-      companionImageUrl?.trim() || null, matchColour ?? true, variantClean, logoZoneJson,
+      companionImageUrl?.trim() || null, priceClean, matchColour ?? true, variantClean, logoZoneJson,
       priority ?? 0, enabled ?? true, originClean, approved ?? true];
     if (id) {
       const r = await pool.query(
         `UPDATE crosssell_rules SET
            source_brand=$1, source_garment_type=$2, ordered_label=$3, companion_product_code=$4,
-           companion_sku=$5, companion_name=$6, companion_image_url=$7, match_colour=$8,
-           logo_variant=$9, logo_zone=$10, priority=$11, enabled=$12, origin=$13, approved=$14
-         WHERE id=$15 RETURNING *`,
+           companion_sku=$5, companion_name=$6, companion_image_url=$7, price_each=$8, match_colour=$9,
+           logo_variant=$10, logo_zone=$11, priority=$12, enabled=$13, origin=$14, approved=$15
+         WHERE id=$16 RETURNING *`,
         [...cols, id]
       );
       return res.json({ success: true, rule: r.rows[0] });
@@ -5209,9 +5212,9 @@ app.post('/api/crosssell/rules', async (req, res) => {
     const r = await pool.query(
       `INSERT INTO crosssell_rules
          (source_brand, source_garment_type, ordered_label, companion_product_code, companion_sku,
-          companion_name, companion_image_url, match_colour, logo_variant, logo_zone, priority,
+          companion_name, companion_image_url, price_each, match_colour, logo_variant, logo_zone, priority,
           enabled, origin, approved)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       cols
     );
     res.json({ success: true, rule: r.rows[0] });
