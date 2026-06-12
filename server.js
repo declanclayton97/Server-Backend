@@ -20,7 +20,7 @@ import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder } from './bpWebSession.js';
 import { convertDesignToPng } from './wilcomClient.js';
-import { generateJigEps, placementsFromTemplate } from './jigEps.js';
+import { generateJigEps, tileVectorEps, placementsFromTemplate } from './jigEps.js';
 import { spawn } from 'child_process';
 const { Pool } = pkg;
 
@@ -5451,19 +5451,14 @@ app.post('/api/jig/generate', async (req, res) => {
     const tRes = await pool.query(`SELECT * FROM jig_templates WHERE item_key = $1`, [itemKey]);
     if (tRes.rowCount === 0) return res.status(404).json({ error: `no jig template for '${itemKey}'` });
     const t = tRes.rows[0];
-    if (t.vector_required) {
-      // Vector items (pens) need the operator's vector source + tiling — not
-      // the raster path. Built in a later phase.
-      return res.status(422).json({ error: `'${itemKey}' needs vector artwork — raster EPS not supported for this item yet` });
-    }
-    const logoBuffer = Buffer.from(logoBase64, 'base64');
+    const fileBuffer = Buffer.from(logoBase64, 'base64');
     const placements = placementsFromTemplate({ placements: t.placements, grid: t.grid });
-    const eps = await generateJigEps({
-      logoBuffer,
-      pageWmm: Number(t.page_w_mm),
-      pageHmm: Number(t.page_h_mm),
-      placements,
-    });
+    const pageWmm = Number(t.page_w_mm), pageHmm = Number(t.page_h_mm);
+    // Vector items (pen) expect an uploaded vector EPS and tile it as true
+    // vector; raster items embed the image.
+    const eps = t.vector_required
+      ? tileVectorEps({ vectorBuffer: fileBuffer, pageWmm, pageHmm, placements })
+      : await generateJigEps({ logoBuffer: fileBuffer, pageWmm, pageHmm, placements });
     res.setHeader('Content-Type', 'application/postscript');
     res.setHeader('Content-Disposition', `attachment; filename="jig-${itemKey}.eps"`);
     res.send(eps);

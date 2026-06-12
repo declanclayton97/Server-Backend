@@ -74,6 +74,80 @@ export async function generateJigEps({ logoBuffer, pageWmm, pageHmm, placements 
   return Buffer.from(out, "latin1");
 }
 
+// ── Vector track ─────────────────────────────────────────────────────
+// Strip a binary DOS-EPS preview header (if any) and read the BoundingBox.
+function parseEps(buffer) {
+  let buf = buffer;
+  if (buf.length > 30 && buf[0] === 0xc5 && buf[1] === 0xd0 && buf[2] === 0xd3 && buf[3] === 0xc6) {
+    // DOS EPS binary container: bytes 4-7 = PS offset, 8-11 = PS length.
+    const psStart = buf.readUInt32LE(4);
+    const psLen = buf.readUInt32LE(8);
+    buf = buf.subarray(psStart, psStart + psLen);
+  }
+  const text = buf.toString("latin1");
+  const hi = text.match(/%%HiResBoundingBox:\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+  const lo = text.match(/%%BoundingBox:\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+  const m = hi || lo;
+  if (!m) return { text, bbox: null };
+  return { text, bbox: { llx: +m[1], lly: +m[2], urx: +m[3], ury: +m[4] } };
+}
+
+// Adobe-recommended prologue to safely embed an EPS (isolates graphics state,
+// neutralises showpage, balances the stack/dict stack).
+const EPS_PROLOGUE = `/BeginEPSF {
+  /b4_Inc_state save def
+  /dict_count countdictstack def
+  /op_count count 1 sub def
+  userdict begin
+  /showpage {} def
+  0 setgray 0 setlinecap 1 setlinewidth 0 setlinejoin
+  10 setmiterlimit [] 0 setdash newpath
+  /languagelevel where { pop languagelevel 1 ne { false setstrokeadjust false setoverprint } if } if
+} bind def
+/EndEPSF {
+  count op_count sub { pop } repeat
+  countdictstack dict_count sub { end } repeat
+  b4_Inc_state restore
+} bind def
+`;
+
+/**
+ * Tile an uploaded vector EPS logo across the jig placements as true vector EPS.
+ * @param {Buffer} vectorBuffer  the operator's vector logo (.eps)
+ */
+export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements }) {
+  const { text, bbox } = parseEps(vectorBuffer);
+  if (!bbox) throw new Error("Uploaded EPS has no BoundingBox — is it a valid vector EPS?");
+  const bw = (bbox.urx - bbox.llx) || 1, bh = (bbox.ury - bbox.lly) || 1;
+  const pageWpt = pageWmm * MM_TO_PT, pageHpt = pageHmm * MM_TO_PT;
+
+  let out =
+    `%!PS-Adobe-3.0 EPSF-3.0\n` +
+    `%%Creator: TuffShop jig generator (vector)\n` +
+    `%%BoundingBox: 0 0 ${Math.ceil(pageWpt)} ${Math.ceil(pageHpt)}\n` +
+    `%%HiResBoundingBox: 0 0 ${pageWpt.toFixed(4)} ${pageHpt.toFixed(4)}\n` +
+    `%%LanguageLevel: 2\n%%EndComments\n` +
+    EPS_PROLOGUE +
+    `/DrawLogo {\nBeginEPSF\n%%BeginDocument: logo.eps\n${text}\n%%EndDocument\nEndEPSF\n} bind def\n`;
+
+  for (const p of placements || []) {
+    // Fit the logo's bbox inside the placement box, keep aspect, centre it.
+    let drawWmm = p.wmm, drawHmm = p.wmm * (bh / bw);
+    if (drawHmm > p.hmm) { drawHmm = p.hmm; drawWmm = p.hmm * (bw / bh); }
+    const cxPt = (p.xmm + p.wmm / 2) * MM_TO_PT;
+    const cyPt = (p.ymm + p.hmm / 2) * MM_TO_PT;
+    const s = (drawWmm * MM_TO_PT) / bw; // uniform (aspect kept)
+    const rot = Number(p.rotation) || 0;
+    out += `gsave\n${cxPt.toFixed(3)} ${cyPt.toFixed(3)} translate\n`;
+    if (rot) out += `${rot} rotate\n`;
+    out += `${s.toFixed(6)} ${s.toFixed(6)} scale\n`;
+    out += `${(-(bbox.llx + bw / 2)).toFixed(3)} ${(-(bbox.lly + bh / 2)).toFixed(3)} translate\n`;
+    out += `DrawLogo\ngrestore\n`;
+  }
+  out += `%%EOF\n`;
+  return Buffer.from(out, "latin1");
+}
+
 // Expand a saved template into concrete placements. For grid templates (pens)
 // this lays out rows×cols of identical boxes across the page.
 export function placementsFromTemplate(t) {
