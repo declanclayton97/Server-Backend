@@ -3521,8 +3521,47 @@ async function initializeCrossSellTables() {
 }
 
 // Promo-item production jig templates: page size (mm) + logo placement(s) per
-// item, used to generate print-ready EPS. Seeded with sensible defaults that
-// the admin can fine-tune; ON CONFLICT DO NOTHING so re-deploys don't clobber edits.
+// item, used to generate print-ready EPS. Validated specs below are the
+// defaults; the admin can fine-tune. Seeded with DO NOTHING so re-deploys don't
+// clobber edits; the reset-defaults endpoint re-applies these exactly.
+const JIG_DEFAULTS = [
+  // Notepad: A5, logo fits a 100×100mm box centred.
+  { item_key: 'notepad', label: 'Notepad (A5)', page_w_mm: 148, page_h_mm: 210, vector_required: false,
+    placements: [{ xmm: 24, ymm: 55, wmm: 100, hmm: 100, rotation: 0 }], grid: null },
+  // Coaster: logo fits a 60×60mm box centred inside the 90mm circle.
+  { item_key: 'coaster', label: 'Coaster (90mm circle)', page_w_mm: 90, page_h_mm: 90, vector_required: false,
+    placements: [{ xmm: 15, ymm: 15, wmm: 60, hmm: 60, rotation: 0 }], grid: null },
+  // Mug: 80×200 sheet, two 65×65 boxes rotated 90°, centred across the 80mm
+  // width, 3mm from the top edge and 3mm from the bottom edge.
+  { item_key: 'mug', label: 'Mug (80×200 sublimation)', page_w_mm: 80, page_h_mm: 200, vector_required: false,
+    placements: [{ xmm: 7.5, ymm: 132, wmm: 65, hmm: 65, rotation: 90 }, { xmm: 7.5, ymm: 3, wmm: 65, hmm: 65, rotation: 90 }], grid: null },
+  // Pen jig: 710×510 bed, 72-up. Two interleaved facings per column computed
+  // from a single bottom-right anchor (validated against the real jig). VECTOR.
+  { item_key: 'pen', label: 'Pen jig (72-up)', page_w_mm: 710, page_h_mm: 510, vector_required: true,
+    placements: null, grid: {
+      kind: 'pen', cols: 4, perColumn: 9, colGapMm: 188.918, vGapMm: 58.0207,
+      boxWmm: 69.019, boxHmm: 12.085, anchorXmm: 584.85, anchorYmm: 0.733,
+      leftDxMm: 37.2, leftDyMm: 28.911, rightRotation: 0, leftRotation: 180,
+    } },
+];
+
+async function upsertJigDefaults(overwrite) {
+  const conflict = overwrite
+    ? `ON CONFLICT (item_key) DO UPDATE SET label=EXCLUDED.label, page_w_mm=EXCLUDED.page_w_mm,
+         page_h_mm=EXCLUDED.page_h_mm, placements=EXCLUDED.placements, grid=EXCLUDED.grid,
+         vector_required=EXCLUDED.vector_required, updated_at=NOW()`
+    : `ON CONFLICT (item_key) DO NOTHING`;
+  for (const d of JIG_DEFAULTS) {
+    await pool.query(
+      `INSERT INTO jig_templates (item_key, label, page_w_mm, page_h_mm, placements, grid, vector_required)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) ${conflict}`,
+      [d.item_key, d.label, d.page_w_mm, d.page_h_mm,
+       d.placements ? JSON.stringify(d.placements) : null,
+       d.grid ? JSON.stringify(d.grid) : null, d.vector_required]
+    );
+  }
+}
+
 async function initializeJigTemplates() {
   if (!useDatabase) return;
   try {
@@ -3540,32 +3579,7 @@ async function initializeJigTemplates() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-    const seed = [
-      // Notepad: A5, logo fits a 100×100mm box centred.
-      ['notepad', 'Notepad (A5)', 148, 210, JSON.stringify([{ xmm: 24, ymm: 55, wmm: 100, hmm: 100, rotation: 0 }]), null, false],
-      // Coaster: logo fits a 60×60mm box centred inside the 90mm circle.
-      ['coaster', 'Coaster (90mm circle)', 90, 90, JSON.stringify([{ xmm: 15, ymm: 15, wmm: 60, hmm: 60, rotation: 0 }]), null, false],
-      // Mug: 80×200 sheet, two 65×65 boxes rotated 90°, centred across the 80mm
-      // width, 3mm gap from the top edge and 3mm from the bottom edge.
-      ['mug', 'Mug (80×200 sublimation)', 80, 200, JSON.stringify([
-        { xmm: 7.5, ymm: 132, wmm: 65, hmm: 65, rotation: 90 },
-        { xmm: 7.5, ymm: 3, wmm: 65, hmm: 65, rotation: 90 },
-      ]), null, false],
-      // Pen jig: 710.5×510.5 bed, 4 cols × 18 rows = 72. Orientation flips every
-      // row going up (bottom-right = position 1, right way up). VECTOR track —
-      // cell size/spacing are estimates pending the exact print-area dims.
-      ['pen', 'Pen jig (72-up)', 710.5, 510.5, null, JSON.stringify({
-        cols: 4, rows: 18, marginXmm: 60, marginYmm: 12, cellWmm: 40, cellHmm: 8,
-        gapXmm: 137, gapYmm: 19.5, rotation: 0, alternateRowRotation: true,
-      }), true],
-    ];
-    for (const [key, label, w, h, placements, grid, vec] of seed) {
-      await pool.query(
-        `INSERT INTO jig_templates (item_key, label, page_w_mm, page_h_mm, placements, grid, vector_required)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (item_key) DO NOTHING`,
-        [key, label, w, h, placements, grid, vec]
-      );
-    }
+    await upsertJigDefaults(false);
     console.log('✅ jig_templates initialized');
   } catch (err) {
     console.error('❌ Error initializing jig_templates:', err.message);
@@ -5380,6 +5394,21 @@ app.get('/api/jig/templates', async (req, res) => {
          FROM jig_templates ORDER BY item_key`
     );
     res.json({ templates: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Re-apply the built-in validated defaults (overwrites current templates).
+app.post('/api/jig/templates/reset-defaults', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    await upsertJigDefaults(true);
+    const r = await pool.query(
+      `SELECT id, item_key, label, page_w_mm, page_h_mm, placements, grid, vector_required, enabled, updated_at
+         FROM jig_templates ORDER BY item_key`
+    );
+    res.json({ success: true, templates: r.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

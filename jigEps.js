@@ -77,7 +77,27 @@ export async function generateJigEps({ logoBuffer, pageWmm, pageHmm, placements 
 // Expand a saved template into concrete placements. For grid templates (pens)
 // this lays out rows×cols of identical boxes across the page.
 export function placementsFromTemplate(t) {
-  if (t.grid && t.grid.cols && t.grid.rows) {
+  const g = t.grid;
+  // Pen jig: two interleaved facings per column. Everything is computed from a
+  // single bottom-right anchor (right-facing) + the left-facing offset + gaps,
+  // so editing the anchor shifts the whole bed and the rest follow.
+  if (g && g.kind === 'pen') {
+    const {
+      cols, perColumn, colGapMm, vGapMm, boxWmm, boxHmm,
+      anchorXmm, anchorYmm, leftDxMm, leftDyMm,
+      rightRotation = 0, leftRotation = 180,
+    } = g;
+    const out = [];
+    for (let col = 0; col < cols; col++) {
+      const dx = -col * colGapMm; // columns go left from the rightmost
+      for (let n = 0; n < perColumn; n++) {
+        out.push({ xmm: anchorXmm + dx, ymm: anchorYmm + n * vGapMm, wmm: boxWmm, hmm: boxHmm, rotation: rightRotation });
+        out.push({ xmm: anchorXmm + leftDxMm + dx, ymm: anchorYmm + leftDyMm + n * vGapMm, wmm: boxWmm, hmm: boxHmm, rotation: leftRotation });
+      }
+    }
+    return out;
+  }
+  if (g && g.cols && g.rows) {
     const {
       cols, rows, marginXmm = 0, marginYmm = 0, cellWmm, cellHmm,
       gapXmm = 0, gapYmm = 0, rotation = 0, alternateRowRotation = false,
