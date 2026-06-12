@@ -78,14 +78,21 @@ export async function generateJigEps({ logoBuffer, pageWmm, pageHmm, placements 
 // this lays out rows×cols of identical boxes across the page.
 export function placementsFromTemplate(t) {
   if (t.grid && t.grid.cols && t.grid.rows) {
-    const { cols, rows, marginXmm = 0, marginYmm = 0, cellWmm, cellHmm, gapXmm = 0, gapYmm = 0, rotation = 0 } = t.grid;
+    const {
+      cols, rows, marginXmm = 0, marginYmm = 0, cellWmm, cellHmm,
+      gapXmm = 0, gapYmm = 0, rotation = 0, alternateRowRotation = false,
+    } = t.grid;
     const out = [];
+    // r=0 is the BOTTOM row (PS y increases upward) — matches "bottom-right is
+    // position 1, right way up". With alternateRowRotation, each row up flips
+    // 180° (so odd rows from the bottom are upside down).
     for (let r = 0; r < rows; r++) {
+      const rot = rotation + (alternateRowRotation && r % 2 === 1 ? 180 : 0);
       for (let c = 0; c < cols; c++) {
         out.push({
           xmm: marginXmm + c * (cellWmm + gapXmm),
           ymm: marginYmm + r * (cellHmm + gapYmm),
-          wmm: cellWmm, hmm: cellHmm, rotation,
+          wmm: cellWmm, hmm: cellHmm, rotation: rot,
         });
       }
     }

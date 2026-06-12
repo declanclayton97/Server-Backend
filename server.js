@@ -3541,14 +3541,22 @@ async function initializeJigTemplates() {
       );
     `);
     const seed = [
-      ['notepad', 'Notepad (A5)', 148, 210, JSON.stringify([{ xmm: 24, ymm: 75, wmm: 100, hmm: 60, rotation: 0 }]), null, false],
-      ['coaster', 'Coaster (90mm circle)', 90, 90, JSON.stringify([{ xmm: 15, ymm: 30, wmm: 60, hmm: 30, rotation: 0 }]), null, false],
+      // Notepad: A5, logo fits a 100×100mm box centred.
+      ['notepad', 'Notepad (A5)', 148, 210, JSON.stringify([{ xmm: 24, ymm: 55, wmm: 100, hmm: 100, rotation: 0 }]), null, false],
+      // Coaster: logo fits a 60×60mm box centred inside the 90mm circle.
+      ['coaster', 'Coaster (90mm circle)', 90, 90, JSON.stringify([{ xmm: 15, ymm: 15, wmm: 60, hmm: 60, rotation: 0 }]), null, false],
+      // Mug: 80×200 sheet, two 65×65 boxes rotated 90°, centred across the 80mm
+      // width, 3mm gap from the top edge and 3mm from the bottom edge.
       ['mug', 'Mug (80×200 sublimation)', 80, 200, JSON.stringify([
-        { xmm: 10, ymm: 150, wmm: 60, hmm: 40, rotation: 0 },
-        { xmm: 10, ymm: 10, wmm: 60, hmm: 40, rotation: 0 },
+        { xmm: 7.5, ymm: 132, wmm: 65, hmm: 65, rotation: 90 },
+        { xmm: 7.5, ymm: 3, wmm: 65, hmm: 65, rotation: 90 },
       ]), null, false],
-      ['pen', 'Pen jig (72-up)', 280, 200, null, JSON.stringify({
-        cols: 8, rows: 9, marginXmm: 10, marginYmm: 10, cellWmm: 30, cellHmm: 18, gapXmm: 3, gapYmm: 3, rotation: 0,
+      // Pen jig: 710.5×510.5 bed, 4 cols × 18 rows = 72. Orientation flips every
+      // row going up (bottom-right = position 1, right way up). VECTOR track —
+      // cell size/spacing are estimates pending the exact print-area dims.
+      ['pen', 'Pen jig (72-up)', 710.5, 510.5, null, JSON.stringify({
+        cols: 4, rows: 18, marginXmm: 60, marginYmm: 12, cellWmm: 40, cellHmm: 8,
+        gapXmm: 137, gapYmm: 19.5, rotation: 0, alternateRowRotation: true,
       }), true],
     ];
     for (const [key, label, w, h, placements, grid, vec] of seed) {
