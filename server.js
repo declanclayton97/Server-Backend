@@ -5444,6 +5444,35 @@ app.post('/api/jig/generate', async (req, res) => {
   }
 });
 
+// Generate a jig EPS for a specific order using that order's stored logo —
+// driven from the promo uptake report ("click the job, generate the jigs").
+// Body: { sessionId, itemKey } → EPS download.
+app.post('/api/jig/generate-for-session', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { sessionId, itemKey } = req.body || {};
+    if (!sessionId || !itemKey) return res.status(400).json({ error: 'sessionId and itemKey required' });
+    const tRes = await pool.query(`SELECT * FROM jig_templates WHERE item_key = $1`, [itemKey]);
+    if (tRes.rowCount === 0) return res.status(404).json({ error: `no jig template for '${itemKey}'` });
+    const t = tRes.rows[0];
+    if (t.vector_required) return res.status(422).json({ error: `'${itemKey}' needs vector artwork — not supported yet` });
+    const sRes = await pool.query(`SELECT primary_logo_data FROM approval_sessions WHERE id = $1`, [sessionId]);
+    if (sRes.rowCount === 0) return res.status(404).json({ error: 'order/session not found' });
+    const logoBuffer = sRes.rows[0].primary_logo_data;
+    if (!logoBuffer) return res.status(422).json({ error: 'no logo stored for this order' });
+    const placements = placementsFromTemplate({ placements: t.placements, grid: t.grid });
+    const eps = await generateJigEps({
+      logoBuffer, pageWmm: Number(t.page_w_mm), pageHmm: Number(t.page_h_mm), placements,
+    });
+    res.setHeader('Content-Type', 'application/postscript');
+    res.setHeader('Content-Disposition', `attachment; filename="jig-${itemKey}-${String(sessionId).slice(0, 8)}.eps"`);
+    res.send(eps);
+  } catch (err) {
+    console.error('[jig] generate-for-session failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Customer submits their selection from the approval page. Records to
 // promo_offer_uptake, emails sales@tuffshop.co.uk with the line items
 // + customer ref, and attaches a PDF summary to the BP order if we can.
@@ -5902,7 +5931,7 @@ app.get('/api/promo-offer/uptake', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
     const r = await pool.query(
-      `SELECT id, order_number, customer_name, items, submitted_at
+      `SELECT id, approval_session_id, order_number, customer_name, items, submitted_at
          FROM promo_offer_uptake
         ORDER BY submitted_at DESC`
     );
@@ -5931,6 +5960,7 @@ app.get('/api/promo-offer/uptake', async (req, res) => {
     const totals = Array.from(byItem.values()).sort((a, b) => b.units - a.units);
     const recent = r.rows.slice(0, 50).map((row) => ({
       id: row.id,
+      sessionId: row.approval_session_id,
       orderNumber: row.order_number,
       customerName: row.customer_name,
       submittedAt: row.submitted_at,
