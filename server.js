@@ -20,6 +20,7 @@ import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder } from './bpWebSession.js';
 import { convertDesignToPng } from './wilcomClient.js';
+import { generateJigEps, placementsFromTemplate } from './jigEps.js';
 import { spawn } from 'child_process';
 const { Pool } = pkg;
 
@@ -3519,6 +3520,50 @@ async function initializeCrossSellTables() {
   }
 }
 
+// Promo-item production jig templates: page size (mm) + logo placement(s) per
+// item, used to generate print-ready EPS. Seeded with sensible defaults that
+// the admin can fine-tune; ON CONFLICT DO NOTHING so re-deploys don't clobber edits.
+async function initializeJigTemplates() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS jig_templates (
+        id SERIAL PRIMARY KEY,
+        item_key TEXT UNIQUE NOT NULL,
+        label TEXT NOT NULL,
+        page_w_mm NUMERIC(8,2) NOT NULL,
+        page_h_mm NUMERIC(8,2) NOT NULL,
+        placements JSONB,
+        grid JSONB,
+        vector_required BOOLEAN NOT NULL DEFAULT FALSE,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    const seed = [
+      ['notepad', 'Notepad (A5)', 148, 210, JSON.stringify([{ xmm: 24, ymm: 75, wmm: 100, hmm: 60, rotation: 0 }]), null, false],
+      ['coaster', 'Coaster (90mm circle)', 90, 90, JSON.stringify([{ xmm: 15, ymm: 30, wmm: 60, hmm: 30, rotation: 0 }]), null, false],
+      ['mug', 'Mug (80×200 sublimation)', 80, 200, JSON.stringify([
+        { xmm: 10, ymm: 150, wmm: 60, hmm: 40, rotation: 0 },
+        { xmm: 10, ymm: 10, wmm: 60, hmm: 40, rotation: 0 },
+      ]), null, false],
+      ['pen', 'Pen jig (72-up)', 280, 200, null, JSON.stringify({
+        cols: 8, rows: 9, marginXmm: 10, marginYmm: 10, cellWmm: 30, cellHmm: 18, gapXmm: 3, gapYmm: 3, rotation: 0,
+      }), true],
+    ];
+    for (const [key, label, w, h, placements, grid, vec] of seed) {
+      await pool.query(
+        `INSERT INTO jig_templates (item_key, label, page_w_mm, page_h_mm, placements, grid, vector_required)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (item_key) DO NOTHING`,
+        [key, label, w, h, placements, grid, vec]
+      );
+    }
+    console.log('✅ jig_templates initialized');
+  } catch (err) {
+    console.error('❌ Error initializing jig_templates:', err.message);
+  }
+}
+
 // Kill-switch: set ORDER_PIPELINE_ENABLED=false on Render to fully stop the
 // order-pipeline poller (no boot run, no interval, manual trigger 503s).
 // Even in dry-run mode the poller hits Brightpearl, so this is the way to
@@ -3534,6 +3579,7 @@ function isOrderPipelineEnabled() {
   await initializeFitnessIncColourAdditions();
   await initializePromoOfferTables();
   await initializeCrossSellTables();
+  await initializeJigTemplates();
   if (!isOrderPipelineEnabled()) {
     console.log('⏸️  Order-pipeline poller DISABLED via ORDER_PIPELINE_ENABLED=false. No polls will run.');
     return;
@@ -5309,6 +5355,83 @@ app.delete('/api/crosssell/rules/:id', async (req, res) => {
     const r = await pool.query(`DELETE FROM crosssell_rules WHERE id = $1`, [req.params.id]);
     res.json({ success: true, deleted: r.rowCount });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// Promo-item production jigs — templates + EPS generation.
+// ============================================================
+
+// List jig templates (notepad / coaster / mug / pen).
+app.get('/api/jig/templates', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT id, item_key, label, page_w_mm, page_h_mm, placements, grid, vector_required, enabled, updated_at
+         FROM jig_templates ORDER BY item_key`
+    );
+    res.json({ templates: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Upsert a jig template by item_key (admin fine-tuning).
+app.post('/api/jig/templates', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { itemKey, label, pageWmm, pageHmm, placements, grid, vectorRequired, enabled } = req.body || {};
+    if (!itemKey?.trim()) return res.status(400).json({ error: 'itemKey required' });
+    if (pageWmm == null || pageHmm == null) return res.status(400).json({ error: 'pageWmm and pageHmm required' });
+    const r = await pool.query(
+      `INSERT INTO jig_templates (item_key, label, page_w_mm, page_h_mm, placements, grid, vector_required, enabled, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8, NOW())
+       ON CONFLICT (item_key) DO UPDATE SET
+         label=EXCLUDED.label, page_w_mm=EXCLUDED.page_w_mm, page_h_mm=EXCLUDED.page_h_mm,
+         placements=EXCLUDED.placements, grid=EXCLUDED.grid, vector_required=EXCLUDED.vector_required,
+         enabled=EXCLUDED.enabled, updated_at=NOW()
+       RETURNING *`,
+      [itemKey.trim(), label || itemKey, pageWmm, pageHmm,
+       placements ? JSON.stringify(placements) : null,
+       grid ? JSON.stringify(grid) : null,
+       vectorRequired ?? false, enabled ?? true]
+    );
+    res.json({ success: true, template: r.rows[0] });
+  } catch (err) {
+    console.error('[jig] save failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Generate a print-ready EPS for an item from a (raster) logo.
+// Body: { itemKey, logoBase64 } → EPS download.
+app.post('/api/jig/generate', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { itemKey, logoBase64 } = req.body || {};
+    if (!itemKey || !logoBase64) return res.status(400).json({ error: 'itemKey and logoBase64 required' });
+    const tRes = await pool.query(`SELECT * FROM jig_templates WHERE item_key = $1`, [itemKey]);
+    if (tRes.rowCount === 0) return res.status(404).json({ error: `no jig template for '${itemKey}'` });
+    const t = tRes.rows[0];
+    if (t.vector_required) {
+      // Vector items (pens) need the operator's vector source + tiling — not
+      // the raster path. Built in a later phase.
+      return res.status(422).json({ error: `'${itemKey}' needs vector artwork — raster EPS not supported for this item yet` });
+    }
+    const logoBuffer = Buffer.from(logoBase64, 'base64');
+    const placements = placementsFromTemplate({ placements: t.placements, grid: t.grid });
+    const eps = await generateJigEps({
+      logoBuffer,
+      pageWmm: Number(t.page_w_mm),
+      pageHmm: Number(t.page_h_mm),
+      placements,
+    });
+    res.setHeader('Content-Type', 'application/postscript');
+    res.setHeader('Content-Disposition', `attachment; filename="jig-${itemKey}.eps"`);
+    res.send(eps);
+  } catch (err) {
+    console.error('[jig] generate failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
