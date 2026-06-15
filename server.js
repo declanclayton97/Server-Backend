@@ -7313,7 +7313,24 @@ app.get("/api/approval-sessions/db-stats", async (req, res) => {
         ORDER BY n_dead_tup DESC
         LIMIT 8`
     );
-    res.json({ db_size: db.rows[0].db_size, approval_breakdown: breakdown.rows[0], tables: tables.rows, dead_tuples: deadrows.rows });
+    // The Render "storage" metric = whole Postgres disk (all DBs + WAL), not
+    // just this DB. Surface those so a gap vs db_size is explained (usually a
+    // WAL spike after VACUUM FULL, which recycles on the next checkpoint).
+    let databases = null, wal = null;
+    try {
+      const r = await pool.query(
+        `SELECT datname, pg_size_pretty(pg_database_size(datname)) AS size, pg_database_size(datname) AS bytes
+           FROM pg_database ORDER BY pg_database_size(datname) DESC`
+      );
+      databases = r.rows;
+    } catch (e) { databases = `unavailable: ${e.message}`; }
+    try {
+      const r = await pool.query(
+        `SELECT pg_size_pretty(COALESCE(sum(size),0)) AS wal_total, count(*) AS wal_files FROM pg_ls_waldir()`
+      );
+      wal = r.rows[0];
+    } catch (e) { wal = `unavailable: ${e.message}`; }
+    res.json({ db_size: db.rows[0].db_size, databases, wal, approval_breakdown: breakdown.rows[0], tables: tables.rows, dead_tuples: deadrows.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
