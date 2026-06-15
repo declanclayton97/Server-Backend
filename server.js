@@ -7275,6 +7275,50 @@ app.get("/api/approval-sessions/order-numbers", async (req, res) => {
   }
 });
 
+// Read-only DB bloat diagnostics: per-table sizes + what's actually taking
+// space inside approval_sessions (PDFs vs logos vs signatures, and how much is
+// on pending sessions the purge can't touch). Defined BEFORE /:sessionId so
+// "db-stats" isn't parsed as a session UUID.
+app.get("/api/approval-sessions/db-stats", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  try {
+    const db = await pool.query(
+      `SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size`
+    );
+    const tables = await pool.query(
+      `SELECT relname AS table,
+              pg_size_pretty(pg_total_relation_size(c.oid)) AS total,
+              pg_size_pretty(pg_total_relation_size(c.oid) - pg_relation_size(c.oid)) AS toast_and_index
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r'
+        ORDER BY pg_total_relation_size(c.oid) DESC
+        LIMIT 12`
+    );
+    const breakdown = await pool.query(
+      `SELECT count(*) AS rows,
+              count(pdf_data) AS rows_with_pdf,
+              count(*) FILTER (WHERE pdf_data IS NOT NULL AND status = 'pending') AS pending_with_pdf,
+              count(*) FILTER (WHERE pdf_data IS NOT NULL AND status IN ('approved','changes_requested','archived')) AS completed_with_pdf,
+              pg_size_pretty(COALESCE(sum(length(pdf_data)), 0)) AS pdf_live_total,
+              pg_size_pretty(COALESCE(sum(COALESCE(length(primary_logo_data),0)
+                                        + COALESCE(length(promo_logo_dark_data),0)
+                                        + COALESCE(length(promo_logo_light_data),0)), 0)) AS logo_live_total,
+              pg_size_pretty(COALESCE(sum(COALESCE(length(signature_data),0)), 0)) AS signature_live_total,
+              min(created_at) AS oldest, max(created_at) AS newest
+         FROM approval_sessions`
+    );
+    const deadrows = await pool.query(
+      `SELECT relname AS table, n_live_tup AS live_rows, n_dead_tup AS dead_rows, last_autovacuum
+         FROM pg_stat_user_tables
+        ORDER BY n_dead_tup DESC
+        LIMIT 8`
+    );
+    res.json({ db_size: db.rows[0].db_size, approval_breakdown: breakdown.rows[0], tables: tables.rows, dead_tuples: deadrows.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get approval session metadata
 app.get("/api/approval-sessions/:sessionId", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
