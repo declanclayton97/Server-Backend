@@ -124,11 +124,20 @@ const EPS_PROLOGUE = `/BeginEPSF {
  * Tile an uploaded vector EPS logo across the jig placements as true vector EPS.
  * @param {Buffer} vectorBuffer  the operator's vector logo (.eps)
  */
-export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements }) {
+export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements, logoAdjust }) {
   const { text, bbox } = parseEps(vectorBuffer);
   if (!bbox) throw new Error("Uploaded EPS has no BoundingBox — is it a valid vector EPS?");
   const bw = (bbox.urx - bbox.llx) || 1, bh = (bbox.ury - bbox.lly) || 1;
   const pageWpt = pageWmm * MM_TO_PT, pageHpt = pageHmm * MM_TO_PT;
+
+  // Optional per-job logo nudge, applied IDENTICALLY to every placement so the
+  // operator can tune one pen and have it apply to the whole bed. scale is a
+  // multiplier on the fit-to-box size; offsets are in box-local mm (measured in
+  // the box's own frame after rotation, so the logo sits the same on each pen
+  // regardless of facing).
+  const adjScale = Math.max(0.05, Number(logoAdjust?.scale) || 1);
+  const adjDxPt = (Number(logoAdjust?.offsetXmm) || 0) * MM_TO_PT;
+  const adjDyPt = (Number(logoAdjust?.offsetYmm) || 0) * MM_TO_PT;
 
   // EOD marker that ends each inlined copy of the logo's bytes. Must not occur
   // in the logo itself.
@@ -164,10 +173,11 @@ export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements }) {
     if (drawHmm > p.hmm) { drawHmm = p.hmm; drawWmm = p.hmm * (bw / bh); }
     const cxPt = (p.xmm + p.wmm / 2) * MM_TO_PT;
     const cyPt = (p.ymm + p.hmm / 2) * MM_TO_PT;
-    const s = (drawWmm * MM_TO_PT) / bw; // uniform (aspect kept)
+    const s = (drawWmm * MM_TO_PT) / bw * adjScale; // fit (aspect kept) × per-job scale
     const rot = Number(p.rotation) || 0;
     out += `gsave\n${cxPt.toFixed(3)} ${cyPt.toFixed(3)} translate\n`;
     if (rot) out += `${rot} rotate\n`;
+    if (adjDxPt || adjDyPt) out += `${adjDxPt.toFixed(3)} ${adjDyPt.toFixed(3)} translate\n`; // box-local nudge
     out += `${s.toFixed(6)} ${s.toFixed(6)} scale\n`;
     out += `${(-(bbox.llx + bw / 2)).toFixed(3)} ${(-(bbox.lly + bh / 2)).toFixed(3)} translate\n`;
     out += logoBlock + `grestore\n`;

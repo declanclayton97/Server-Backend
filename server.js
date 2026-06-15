@@ -5446,7 +5446,7 @@ app.post('/api/jig/templates', async (req, res) => {
 app.post('/api/jig/generate', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
-    const { itemKey, logoBase64 } = req.body || {};
+    const { itemKey, logoBase64, logoAdjust } = req.body || {};
     if (!itemKey || !logoBase64) return res.status(400).json({ error: 'itemKey and logoBase64 required' });
     const tRes = await pool.query(`SELECT * FROM jig_templates WHERE item_key = $1`, [itemKey]);
     if (tRes.rowCount === 0) return res.status(404).json({ error: `no jig template for '${itemKey}'` });
@@ -5462,7 +5462,7 @@ app.post('/api/jig/generate', async (req, res) => {
       return res.status(422).json({ error: `'${itemKey}' needs a vector .eps logo` });
     }
     const eps = uploadIsVector
-      ? tileVectorEps({ vectorBuffer: fileBuffer, pageWmm, pageHmm, placements })
+      ? tileVectorEps({ vectorBuffer: fileBuffer, pageWmm, pageHmm, placements, logoAdjust })
       : await generateJigEps({ logoBuffer: fileBuffer, pageWmm, pageHmm, placements });
     res.setHeader('Content-Type', 'application/postscript');
     res.setHeader('Content-Disposition', `attachment; filename="jig-${itemKey}.eps"`);
