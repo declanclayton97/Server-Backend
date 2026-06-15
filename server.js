@@ -7595,10 +7595,16 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
 // approval_sessions once to actually return that space to the OS.
 async function purgeOldApprovalPdfs() {
   if (!pool) return 0;
+  // Purge the PDF blob from any NON-pending session older than 14 days. We use
+  // COALESCE(completed_at, created_at) because completed_at is NULL on archived
+  // / older sessions, which previously let them escape the purge forever (the
+  // root cause of the DB bloat). Pending sessions keep their PDF (customer
+  // hasn't responded yet). The pdf_delete_after branch handles the 24h-after-
+  // archive fast path.
   const result = await pool.query(
     `UPDATE approval_sessions SET pdf_data = NULL, pdf_delete_after = NULL
      WHERE pdf_data IS NOT NULL AND (
-       (status IN ('approved', 'changes_requested', 'archived') AND completed_at < NOW() - INTERVAL '14 days')
+       (status <> 'pending' AND COALESCE(completed_at, created_at) < NOW() - INTERVAL '14 days')
        OR (pdf_delete_after IS NOT NULL AND pdf_delete_after < NOW())
      )
      RETURNING id`
@@ -7613,6 +7619,27 @@ app.post("/api/approval-sessions/cleanup", async (req, res) => {
     res.json({ success: true, cleaned });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// One-off disk reclaim: VACUUM FULL rewrites approval_sessions (+ its TOAST blob
+// storage) into fresh files, returning dead space to the OS — the only way to
+// actually shrink the on-disk size after purging PDFs. Takes an ACCESS EXCLUSIVE
+// lock (approvals pause for the duration) and needs free disk ~= the live data
+// size to write the new copy. Run after a purge, during a quiet period.
+app.post("/api/approval-sessions/vacuum", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "Database not configured" });
+  const client = await pool.connect();
+  try {
+    await client.query("SET statement_timeout = 0"); // VACUUM FULL may take minutes
+    const before = await client.query(`SELECT pg_size_pretty(pg_total_relation_size('approval_sessions')) AS s`);
+    await client.query("VACUUM (FULL, ANALYZE) approval_sessions");
+    const after = await client.query(`SELECT pg_size_pretty(pg_total_relation_size('approval_sessions')) AS s`);
+    res.json({ success: true, before: before.rows[0].s, after: after.rows[0].s });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
