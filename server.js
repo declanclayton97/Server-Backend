@@ -7544,20 +7544,29 @@ app.post("/api/approval-sessions/:sessionId/submit", async (req, res) => {
   }
 });
 
-// Clean up: purge PDF data from signed/completed sessions older than 14 days
-// Pending sessions keep their PDF indefinitely (customer hasn't responded yet)
+// Purge PDF data from signed/completed sessions older than 14 days (or past an
+// explicit pdf_delete_after). Pending sessions keep their PDF indefinitely
+// (customer hasn't responded yet). NOTE: nulling the BYTEA frees space for reuse
+// inside Postgres but does NOT shrink the on-disk files — run VACUUM FULL
+// approval_sessions once to actually return that space to the OS.
+async function purgeOldApprovalPdfs() {
+  if (!pool) return 0;
+  const result = await pool.query(
+    `UPDATE approval_sessions SET pdf_data = NULL, pdf_delete_after = NULL
+     WHERE pdf_data IS NOT NULL AND (
+       (status IN ('approved', 'changes_requested', 'archived') AND completed_at < NOW() - INTERVAL '14 days')
+       OR (pdf_delete_after IS NOT NULL AND pdf_delete_after < NOW())
+     )
+     RETURNING id`
+  );
+  return result.rowCount;
+}
+
 app.post("/api/approval-sessions/cleanup", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
   try {
-    const result = await pool.query(
-      `UPDATE approval_sessions SET pdf_data = NULL, pdf_delete_after = NULL
-       WHERE pdf_data IS NOT NULL AND (
-         (status IN ('approved', 'changes_requested', 'archived') AND completed_at < NOW() - INTERVAL '14 days')
-         OR (pdf_delete_after IS NOT NULL AND pdf_delete_after < NOW())
-       )
-       RETURNING id`
-    );
-    res.json({ success: true, cleaned: result.rowCount });
+    const cleaned = await purgeOldApprovalPdfs();
+    res.json({ success: true, cleaned });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -7853,6 +7862,18 @@ app.get("/api/approval-sessions", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Auto-purge old proof PDFs so approval_sessions doesn't grow unbounded.
+// Runs ~30s after boot, then every 12h. (Disk only shrinks after a one-off
+// VACUUM FULL approval_sessions — nulling alone just frees space for reuse.)
+if (pool) {
+  const runPdfPurge = () =>
+    purgeOldApprovalPdfs()
+      .then((n) => { if (n > 0) console.log(`[approval-cleanup] purged PDF data from ${n} old session(s)`); })
+      .catch((err) => console.error('[approval-cleanup] failed:', err.message));
+  setTimeout(runPdfPurge, 30 * 1000);
+  setInterval(runPdfPurge, 12 * 60 * 60 * 1000);
+}
 
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
