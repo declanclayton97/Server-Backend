@@ -130,14 +130,33 @@ export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements }) {
   const bw = (bbox.urx - bbox.llx) || 1, bh = (bbox.ury - bbox.lly) || 1;
   const pageWpt = pageWmm * MM_TO_PT, pageHpt = pageHmm * MM_TO_PT;
 
+  // EOD marker that ends each inlined copy of the logo's bytes. Must not occur
+  // in the logo itself.
+  const EOD = "%%TUFFSHOP-END-OF-LOGO-DATA";
+  if (text.includes(EOD)) throw new Error("Logo EPS contains the reserved EOD marker");
+
   let out =
     `%!PS-Adobe-3.0 EPSF-3.0\n` +
     `%%Creator: TuffShop jig generator (vector)\n` +
     `%%BoundingBox: 0 0 ${Math.ceil(pageWpt)} ${Math.ceil(pageHpt)}\n` +
     `%%HiResBoundingBox: 0 0 ${pageWpt.toFixed(4)} ${pageHpt.toFixed(4)}\n` +
     `%%LanguageLevel: 2\n%%EndComments\n` +
-    EPS_PROLOGUE +
-    `/DrawLogo {\nBeginEPSF\n%%BeginDocument: logo.eps\n${text}\n%%EndDocument\nEndEPSF\n} bind def\n`;
+    EPS_PROLOGUE;
+
+  // Draw the logo by re-embedding its EPS bytes INLINE at each placement, run via
+  // SubFileDecode+exec. Two compact alternatives were rejected: wrapping the
+  // logo in one /DrawLogo procedure throws /limitcheck for any real logo
+  // (>65535 tokens per PostScript array), and a ReusableStreamDecode "define
+  // once, replay" stream is broken over currentfile in Ghostscript. Inlining is
+  // the portable, reliable option — compact for true vector logos (the right
+  // input for a pen jig), larger only for image-heavy artwork.
+  // currentfile inside the SubFileDecode block reads the logo's own inline data
+  // (embedded images), so image-bearing logos work too.
+  const logoBlock =
+    `BeginEPSF\n` +
+    `currentfile 0 (${EOD}) /SubFileDecode filter cvx exec\n` +
+    `${text}\n${EOD}\n` +
+    `EndEPSF\n`;
 
   for (const p of placements || []) {
     // Fit the logo's bbox inside the placement box, keep aspect, centre it.
@@ -151,7 +170,7 @@ export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements }) {
     if (rot) out += `${rot} rotate\n`;
     out += `${s.toFixed(6)} ${s.toFixed(6)} scale\n`;
     out += `${(-(bbox.llx + bw / 2)).toFixed(3)} ${(-(bbox.lly + bh / 2)).toFixed(3)} translate\n`;
-    out += `DrawLogo\ngrestore\n`;
+    out += logoBlock + `grestore\n`;
   }
   out += `%%EOF\n`;
   return Buffer.from(out, "latin1");
