@@ -75,6 +75,15 @@ export async function generateJigEps({ logoBuffer, pageWmm, pageHmm, placements 
 }
 
 // ── Vector track ─────────────────────────────────────────────────────
+// Sniff whether an uploaded file is an EPS/PostScript (vector) rather than a
+// raster image, so any jig can take either: ASCII EPS starts with "%!PS",
+// DOS-EPS binaries with the C5 D0 D3 C6 magic.
+export function isVectorEps(buffer) {
+  if (!buffer || buffer.length < 4) return false;
+  if (buffer[0] === 0xc5 && buffer[1] === 0xd0 && buffer[2] === 0xd3 && buffer[3] === 0xc6) return true;
+  return buffer[0] === 0x25 && buffer[1] === 0x21 && buffer[2] === 0x50 && buffer[3] === 0x53; // "%!PS"
+}
+
 // Strip a binary DOS-EPS preview header (if any) and read the BoundingBox.
 function parseEps(buffer) {
   let buf = buffer;

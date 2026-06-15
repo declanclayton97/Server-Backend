@@ -20,7 +20,7 @@ import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder } from './bpWebSession.js';
 import { convertDesignToPng } from './wilcomClient.js';
-import { generateJigEps, tileVectorEps, placementsFromTemplate } from './jigEps.js';
+import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps } from './jigEps.js';
 import { spawn } from 'child_process';
 const { Pool } = pkg;
 
@@ -5454,9 +5454,14 @@ app.post('/api/jig/generate', async (req, res) => {
     const fileBuffer = Buffer.from(logoBase64, 'base64');
     const placements = placementsFromTemplate({ placements: t.placements, grid: t.grid });
     const pageWmm = Number(t.page_w_mm), pageHmm = Number(t.page_h_mm);
-    // Vector items (pen) expect an uploaded vector EPS and tile it as true
-    // vector; raster items embed the image.
-    const eps = t.vector_required
+    // Route on the actual uploaded file, not the template flag: a vector .eps is
+    // tiled as TRUE vector for any item (best quality); a raster image is
+    // embedded. vector_required (pen) still rejects a raster upload.
+    const uploadIsVector = isVectorEps(fileBuffer);
+    if (t.vector_required && !uploadIsVector) {
+      return res.status(422).json({ error: `'${itemKey}' needs a vector .eps logo` });
+    }
+    const eps = uploadIsVector
       ? tileVectorEps({ vectorBuffer: fileBuffer, pageWmm, pageHmm, placements })
       : await generateJigEps({ logoBuffer: fileBuffer, pageWmm, pageHmm, placements });
     res.setHeader('Content-Type', 'application/postscript');
