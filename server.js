@@ -2487,7 +2487,7 @@ async function bpLookupProductBySku(sku) {
 // Add a row to an existing BP sales order. rowNetExVat is the ex-VAT
 // line total (qty * unit price after discount). Tax computed at 20%
 // VAT to match the customer-facing presentation.
-async function bpAddOrderRow(orderId, productId, quantity, rowNetExVat) {
+async function bpAddOrderRow(orderId, productId, quantity, rowNetExVat, productName) {
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return { ok: false, reason: 'no-creds' };
   const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
     ? 'https://euw1.brightpearlconnect.com'
@@ -2496,8 +2496,11 @@ async function bpAddOrderRow(orderId, productId, quantity, rowNetExVat) {
   const tax = rowNetExVat * 0.20;
   // taxCode MUST be inside rowValue — at top level BP ignores it and
   // returns ORDC-040 "you have not supplied a tax code".
+  // Optional productName overrides the row's displayed name (still linked to
+  // productId for stock) — used to suffix promo lines with "+ PRINTED LOGO".
   const body = {
     productId,
+    ...(productName ? { productName } : {}),
     quantity: { magnitude: quantity },
     rowValue: {
       taxCode: process.env.BRIGHTPEARL_DEFAULT_TAX_CODE || 'T1',
@@ -5619,7 +5622,7 @@ app.post('/api/promo-offer/submit', async (req, res) => {
           continue;
         }
         const lineExVatAfterDiscount = l.lineTotalExVat * (1 - bundleDiscountPct);
-        const addRes = await bpAddOrderRow(sess.order_number, productId, l.qty, lineExVatAfterDiscount);
+        const addRes = await bpAddOrderRow(sess.order_number, productId, l.qty, lineExVatAfterDiscount, `${l.name} + PRINTED LOGO`);
         bpRowResults.push({
           name: l.name, sku: l.bpSku, productId, ok: addRes.ok,
           reason: addRes.ok ? null : (addRes.body || addRes.error || `status ${addRes.status}`),
