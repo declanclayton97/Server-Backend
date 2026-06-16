@@ -85,7 +85,7 @@ export function isVectorEps(buffer) {
 }
 
 // Strip a binary DOS-EPS preview header (if any) and read the BoundingBox.
-function parseEps(buffer) {
+export function parseEps(buffer) {
   let buf = buffer;
   if (buf.length > 30 && buf[0] === 0xc5 && buf[1] === 0xd0 && buf[2] === 0xd3 && buf[3] === 0xc6) {
     // DOS EPS binary container: bytes 4-7 = PS offset, 8-11 = PS length.
@@ -231,4 +231,55 @@ export function placementsFromTemplate(t) {
     return out;
   }
   return t.placements || [];
+}
+
+// mm size of a parsed EPS bbox (assumes the file is at 1:1 print scale).
+export function epsSizeMm(bbox) {
+  return { wmm: (bbox.urx - bbox.llx) / MM_TO_PT, hmm: (bbox.ury - bbox.lly) / MM_TO_PT };
+}
+
+/**
+ * Build a DTF gang-sheet EPS: place many DIFFERENT vector logos at given spots.
+ * Unlike tileVectorEps (one logo tiled), each placement carries its own art.
+ * @param {object}   p
+ * @param {number}   p.pageWmm
+ * @param {number}   p.pageHmm
+ * @param {Array}    p.placements  [{ text, bbox, xmm, ymm, scale=1, rotation=0 }]
+ *   xmm/ymm = bottom-left of the placement's footprint on the sheet (PS origin
+ *   bottom-left). rotation is 0 or 90 (degrees CCW). scale defaults to 1 (files
+ *   are pre-sized at 1:1, so the bbox already is the print size).
+ */
+export function buildGangSheetEps({ pageWmm, pageHmm, placements }) {
+  const pageWpt = pageWmm * MM_TO_PT, pageHpt = pageHmm * MM_TO_PT;
+  const EOD = "%%TUFFSHOP-END-OF-LOGO-DATA";
+
+  let out =
+    `%!PS-Adobe-3.0 EPSF-3.0\n` +
+    `%%Creator: TuffShop gang-sheet generator\n` +
+    `%%BoundingBox: 0 0 ${Math.ceil(pageWpt)} ${Math.ceil(pageHpt)}\n` +
+    `%%HiResBoundingBox: 0 0 ${pageWpt.toFixed(4)} ${pageHpt.toFixed(4)}\n` +
+    `%%LanguageLevel: 2\n%%EndComments\n` +
+    EPS_PROLOGUE;
+
+  for (const p of placements || []) {
+    const { text, bbox } = p;
+    if (!text || !bbox) continue;
+    if (text.includes(EOD)) throw new Error("Logo EPS contains the reserved EOD marker");
+    const bw = (bbox.urx - bbox.llx) || 1, bh = (bbox.ury - bbox.lly) || 1;
+    const s = p.scale || 1;
+    const xPt = p.xmm * MM_TO_PT, yPt = p.ymm * MM_TO_PT;
+    const rot = Number(p.rotation) || 0;
+    out += `gsave\n${xPt.toFixed(3)} ${yPt.toFixed(3)} translate\n`;
+    if (rot === 90) {
+      // 90° CCW: footprint width becomes bh*s; shift right by it so the rotated
+      // art lands in [0,footprintW]×[0,footprintH] of the cell.
+      out += `${(bh * s).toFixed(3)} 0 translate\n90 rotate\n`;
+    }
+    out += `${s.toFixed(6)} ${s.toFixed(6)} scale\n`;
+    out += `${(-bbox.llx).toFixed(3)} ${(-bbox.lly).toFixed(3)} translate\n`;
+    out += `BeginEPSF\ncurrentfile 0 (${EOD}) /SubFileDecode filter cvx exec\n${text}\n${EOD}\nEndEPSF\n`;
+    out += `grestore\n`;
+  }
+  out += `%%EOF\n`;
+  return Buffer.from(out, "latin1");
 }
