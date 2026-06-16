@@ -21,6 +21,7 @@ import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder } from './bpWebSession.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps } from './jigEps.js';
+import { printJobsFromRows } from './printLines.js';
 import { spawn } from 'child_process';
 const { Pool } = pkg;
 
@@ -1817,6 +1818,132 @@ app.get('/api/urgent-orders/inspect/:orderId', async (req, res) => {
       pcfAsap: cfData?.response?.PCF_ASAP,
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// DTF Print Queue — orders flagged PCF_PRINTSNE ("Prints Needed") + their print
+// lines (position/qty), to feed the gang-sheet builder. Custom fields aren't
+// searchable in BP order-search, so we scan recent sales orders and check the
+// flag in batches.
+// ============================================================
+const PRINTS_NEEDED_PCF = process.env.PRINTS_NEEDED_PCF || 'PCF_PRINTSNE';
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Custom fields for a set of order IDs. Tries BP's id-set batch; if the account
+// returns a flat map (batch unsupported) it falls back to per-order. Returns
+// { [orderId]: { PCF_...: value } }.
+async function bpCustomFieldsForIds(ids, baseUrl, headers) {
+  if (!ids.length) return {};
+  try {
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${ids.join(',')}/custom-field`;
+    const r = await fetch(url, { headers });
+    if (r.ok) {
+      const resp = (await r.json().catch(() => null))?.response || {};
+      const keys = Object.keys(resp);
+      const keyedById = keys.length > 0 && keys.every((k) => /^\d+$/.test(k));
+      if (keyedById) return resp;                       // batch worked
+      if (ids.length === 1) return { [ids[0]]: resp };  // single order
+      // multi-id but flat map → batch not supported; fall through to per-order
+    }
+  } catch { /* fall through */ }
+  const out = {};
+  for (const id of ids) {
+    try {
+      const rr = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}/custom-field`, { headers });
+      if (rr.ok) out[id] = (await rr.json().catch(() => null))?.response || {};
+    } catch { /* skip */ }
+    await sleepMs(80);
+  }
+  return out;
+}
+
+app.get('/api/print-queue', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  const days = Math.min(parseInt(req.query.days, 10) || 120, 365);
+  const maxOrders = Math.min(parseInt(req.query.maxOrders, 10) || 800, 3000);
+
+  const orderToQueueItem = (o) => {
+    const prints = printJobsFromRows(o.orderRows);
+    if (!prints.length) return null;
+    return {
+      orderId: o.id,
+      reference: o.reference,
+      customer: o.parties?.customer?.companyName || o.parties?.customer?.contactName || null,
+      prints,
+      totalPrints: prints.reduce((a, p) => a + p.qty, 0),
+    };
+  };
+
+  try {
+    // Single-order test mode: ?orderId=NNN → flag + parsed prints, no scan.
+    if (req.query.orderId) {
+      const id = req.query.orderId;
+      const cf = await bpCustomFieldsForIds([id], baseUrl, headers);
+      const flagged = isBadgeYes(cf[id]?.[PRINTS_NEEDED_PCF]);
+      const od = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}`, { headers });
+      const order = (await od.json().catch(() => null))?.response?.[0];
+      return res.json({ orderId: id, printsNeeded: flagged, pcfValue: cf[id]?.[PRINTS_NEEDED_PCF] ?? null, item: order ? orderToQueueItem(order) : null });
+    }
+
+    // 1) recent sales orders
+    const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const updatedFilter = encodeURIComponent(`${fromIso}/`);
+    const ids = [];
+    let firstResult = 1;
+    while (ids.length < maxOrders) {
+      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
+      const r = await fetch(url, { headers });
+      if (!r.ok) break;
+      const d = await r.json().catch(() => null);
+      const results = d?.response?.results || [];
+      results.forEach((row) => ids.push(Array.isArray(row) ? row[0] : row));
+      const total = d?.response?.metaData?.resultsAvailable || 0;
+      firstResult += 500;
+      if (results.length < 500 || firstResult > total) break;
+      await sleepMs(120);
+    }
+    const scanIds = ids.slice(0, maxOrders);
+
+    // 2) batch-check the Prints Needed flag
+    const flaggedIds = [];
+    for (let i = 0; i < scanIds.length; i += 50) {
+      const batch = scanIds.slice(i, i + 50);
+      const cf = await bpCustomFieldsForIds(batch, baseUrl, headers);
+      for (const oid of batch) if (isBadgeYes(cf[oid]?.[PRINTS_NEEDED_PCF])) flaggedIds.push(oid);
+      await sleepMs(120);
+    }
+
+    // 3) details for flagged orders → parse print lines
+    const queue = [];
+    for (let i = 0; i < flaggedIds.length; i += 20) {
+      const batch = flaggedIds.slice(i, i + 20);
+      const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${batch.join(',')}`, { headers });
+      if (r.ok) {
+        const d = await r.json().catch(() => null);
+        const orders = d?.response || [];
+        (Array.isArray(orders) ? orders : Object.values(orders)).forEach((o) => {
+          const item = orderToQueueItem(o);
+          if (item) queue.push(item);
+        });
+      }
+      await sleepMs(120);
+    }
+
+    res.json({ scanned: scanIds.length, flagged: flaggedIds.length, jobs: queue.length, queue });
+  } catch (err) {
+    console.error('[print-queue] failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
