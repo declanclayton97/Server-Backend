@@ -8,7 +8,10 @@
 // returns { sheets: [{ lengthMm, efficiency, placements:[{ item, xmm, ymm,
 //          wmm, hmm, rotated }] }], oversized: [item] }
 //   xmm/ymm = bottom-left of the footprint (PS origin bottom-left).
-export function nestPrints({ items, sheetWmm, maxSheetLmm = 1000, gapMm = 5, marginMm = 5 }) {
+// maxSheetLmm defaults to 1200 — a longer roll fits more per sheet (fewer sheet
+// breaks = less wasted film). The Print Queue UI will expose this so it can be
+// tuned per run.
+export function nestPrints({ items, sheetWmm, maxSheetLmm = 1200, gapMm = 5, marginMm = 5 }) {
   const usableW = sheetWmm - 2 * marginMm;
   const usableL = maxSheetLmm - 2 * marginMm;
 
