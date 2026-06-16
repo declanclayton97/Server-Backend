@@ -1830,6 +1830,34 @@ app.get('/api/urgent-orders/inspect/:orderId', async (req, res) => {
 // ============================================================
 const PRINTS_NEEDED_PCF = process.env.PRINTS_NEEDED_PCF || 'PCF_PRINTSNE';
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+function bpBase() {
+  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
+    ? 'https://euw1.brightpearlconnect.com'
+    : 'https://use1.brightpearlconnect.com';
+  const headers = {
+    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+    'Content-Type': 'application/json',
+  };
+  return { baseUrl, headers };
+}
+// Run async fn over items, `size` concurrently at a time.
+async function mapPool(items, size, fn) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) out.push(...await Promise.all(items.slice(i, i + size).map(fn)));
+  return out;
+}
+const orderToQueueItem = (o) => {
+  const prints = printJobsFromRows(o.orderRows);
+  if (!prints.length) return null;
+  return {
+    orderId: o.id,
+    reference: o.reference,
+    customer: o.parties?.customer?.companyName || o.parties?.customer?.contactName || null,
+    prints,
+    totalPrints: prints.reduce((a, p) => a + p.qty, 0),
+  };
+};
 
 // Custom fields for a set of order IDs. Tries BP's id-set batch; if the account
 // returns a flat map (batch unsupported) it falls back to per-order. Returns
@@ -1848,56 +1876,28 @@ async function bpCustomFieldsForIds(ids, baseUrl, headers) {
       // multi-id but flat map → batch not supported; fall through to per-order
     }
   } catch { /* fall through */ }
-  const out = {};
-  for (const id of ids) {
+  // per-order, 6 concurrent (id-set batch isn't supported on this account)
+  const pairs = await mapPool(ids, 6, async (id) => {
     try {
       const rr = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}/custom-field`, { headers });
-      if (rr.ok) out[id] = (await rr.json().catch(() => null))?.response || {};
-    } catch { /* skip */ }
-    await sleepMs(80);
-  }
-  return out;
+      return [id, rr.ok ? ((await rr.json().catch(() => null))?.response || {}) : {}];
+    } catch { return [id, {}]; }
+  });
+  return Object.fromEntries(pairs);
 }
 
-app.get('/api/print-queue', async (req, res) => {
-  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
-    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
-  }
-  const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
-    ? 'https://euw1.brightpearlconnect.com'
-    : 'https://use1.brightpearlconnect.com';
-  const headers = {
-    'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
-    'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
-    'Content-Type': 'application/json',
-  };
-  const days = Math.min(parseInt(req.query.days, 10) || 120, 365);
-  const maxOrders = Math.min(parseInt(req.query.maxOrders, 10) || 800, 3000);
+// Background-built cache (the scan is too slow for a synchronous request — BP
+// can't filter by custom field, so we per-order check the flag off-request).
+let printQueueCache = { generatedAt: null, refreshing: false, error: null, scanned: 0, flagged: 0, jobs: 0, queue: [], tookMs: null, days: null };
 
-  const orderToQueueItem = (o) => {
-    const prints = printJobsFromRows(o.orderRows);
-    if (!prints.length) return null;
-    return {
-      orderId: o.id,
-      reference: o.reference,
-      customer: o.parties?.customer?.companyName || o.parties?.customer?.contactName || null,
-      prints,
-      totalPrints: prints.reduce((a, p) => a + p.qty, 0),
-    };
-  };
-
+async function refreshPrintQueue({ days = 60, maxOrders = 3000 } = {}) {
+  if (printQueueCache.refreshing) return printQueueCache;
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) { printQueueCache.error = 'no BP creds'; return printQueueCache; }
+  printQueueCache = { ...printQueueCache, refreshing: true };
+  const started = Date.now();
   try {
-    // Single-order test mode: ?orderId=NNN → flag + parsed prints, no scan.
-    if (req.query.orderId) {
-      const id = req.query.orderId;
-      const cf = await bpCustomFieldsForIds([id], baseUrl, headers);
-      const flagged = isBadgeYes(cf[id]?.[PRINTS_NEEDED_PCF]);
-      const od = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}`, { headers });
-      const order = (await od.json().catch(() => null))?.response?.[0];
-      return res.json({ orderId: id, printsNeeded: flagged, pcfValue: cf[id]?.[PRINTS_NEEDED_PCF] ?? null, item: order ? orderToQueueItem(order) : null });
-    }
-
-    // 1) recent sales orders
+    const { baseUrl, headers } = bpBase();
+    // 1) recent sales order IDs (updatedOn window)
     const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const updatedFilter = encodeURIComponent(`${fromIso}/`);
     const ids = [];
@@ -1912,17 +1912,16 @@ app.get('/api/print-queue', async (req, res) => {
       const total = d?.response?.metaData?.resultsAvailable || 0;
       firstResult += 500;
       if (results.length < 500 || firstResult > total) break;
-      await sleepMs(120);
+      await sleepMs(100);
     }
     const scanIds = ids.slice(0, maxOrders);
 
-    // 2) batch-check the Prints Needed flag
+    // 2) check the Prints Needed flag (per-order, concurrent inside batches)
     const flaggedIds = [];
-    for (let i = 0; i < scanIds.length; i += 50) {
-      const batch = scanIds.slice(i, i + 50);
+    for (let i = 0; i < scanIds.length; i += 60) {
+      const batch = scanIds.slice(i, i + 60);
       const cf = await bpCustomFieldsForIds(batch, baseUrl, headers);
       for (const oid of batch) if (isBadgeYes(cf[oid]?.[PRINTS_NEEDED_PCF])) flaggedIds.push(oid);
-      await sleepMs(120);
     }
 
     // 3) details for flagged orders → parse print lines
@@ -1938,14 +1937,45 @@ app.get('/api/print-queue', async (req, res) => {
           if (item) queue.push(item);
         });
       }
-      await sleepMs(120);
+      await sleepMs(80);
     }
-
-    res.json({ scanned: scanIds.length, flagged: flaggedIds.length, jobs: queue.length, queue });
+    queue.sort((a, b) => String(a.customer || '').localeCompare(String(b.customer || '')));
+    printQueueCache = {
+      generatedAt: new Date().toISOString(), refreshing: false, error: null,
+      scanned: scanIds.length, flagged: flaggedIds.length, jobs: queue.length, queue,
+      tookMs: Date.now() - started, days,
+    };
   } catch (err) {
-    console.error('[print-queue] failed:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[print-queue] refresh failed:', err.message);
+    printQueueCache = { ...printQueueCache, refreshing: false, error: err.message };
   }
+  return printQueueCache;
+}
+
+// Serve the cached queue instantly. ?orderId=NNN is a live single-order test.
+app.get('/api/print-queue', async (req, res) => {
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
+    return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  if (req.query.orderId) {
+    const { baseUrl, headers } = bpBase();
+    const id = req.query.orderId;
+    const cf = await bpCustomFieldsForIds([id], baseUrl, headers);
+    const od = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}`, { headers });
+    const order = (await od.json().catch(() => null))?.response?.[0];
+    return res.json({ orderId: id, printsNeeded: isBadgeYes(cf[id]?.[PRINTS_NEEDED_PCF]), pcfValue: cf[id]?.[PRINTS_NEEDED_PCF] ?? null, item: order ? orderToQueueItem(order) : null });
+  }
+  // first ever hit → kick a build so the next poll has data
+  if (!printQueueCache.generatedAt && !printQueueCache.refreshing) refreshPrintQueue().catch(() => {});
+  res.json(printQueueCache);
+});
+
+// Trigger a background rebuild; returns immediately (poll GET for the result).
+app.post('/api/print-queue/refresh', (req, res) => {
+  if (printQueueCache.refreshing) return res.json({ started: false, refreshing: true });
+  const days = Math.min(parseInt(req.body?.days, 10) || 60, 365);
+  refreshPrintQueue({ days }).catch(() => {});
+  res.json({ started: true });
 });
 
 // Force-process a single order: fetches its custom fields + details and
@@ -8091,6 +8121,13 @@ if (pool) {
       .catch((err) => console.error('[approval-cleanup] failed:', err.message));
   setTimeout(runPdfPurge, 30 * 1000);
   setInterval(runPdfPurge, 12 * 60 * 60 * 1000);
+}
+
+// Build the DTF print queue in the background (the scan is slow) so the page
+// loads instantly. First build shortly after boot, then refresh every 30 min.
+if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
+  setTimeout(() => refreshPrintQueue().catch((e) => console.error('[print-queue] boot build failed:', e.message)), 45 * 1000);
+  setInterval(() => refreshPrintQueue().catch((e) => console.error('[print-queue] poll failed:', e.message)), 30 * 60 * 1000);
 }
 
 app.listen(PORT, () => {
