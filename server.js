@@ -23,6 +23,7 @@ import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
 import { printJobsFromRows, extractLogoUrls, extractPrintedGarments } from './printLines.js';
+import Anthropic from '@anthropic-ai/sdk';
 import { spawn } from 'child_process';
 const { Pool } = pkg;
 
@@ -2193,6 +2194,66 @@ app.get('/api/print-queue/colours', async (req, res) => {
     const r = await pool.query('SELECT colour, is_dark FROM colour_variants ORDER BY colour');
     res.json({ overrides: r.rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Identify the company/brand in a customer-uploaded logo image (website orders
+// with no company name to match a file on). Uses Claude vision to read the text
+// in the logo. Results are cached by image URL so the same logo is never billed
+// twice. Costs a fraction of a penny per new logo; only called for jobs that
+// have nothing else to match on. Requires ANTHROPIC_API_KEY on the backend.
+const LOGO_IDENT_PROMPT =
+  'This is a company logo a customer uploaded for printing. Reply with ONLY the ' +
+  'company or brand name as written in the logo (read the text). If the logo has ' +
+  'no readable company/brand name, reply with exactly: UNKNOWN. No quotes, no ' +
+  'punctuation, no extra words — just the name or UNKNOWN.';
+const SUPPORTED_IMG = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+async function ensureLogoIdentTable() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS logo_ident (
+    url_hash TEXT PRIMARY KEY, url TEXT, name TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`);
+}
+
+app.post('/api/identify-logo', async (req, res) => {
+  const imageUrl = req.body?.imageUrl;
+  if (!imageUrl || typeof imageUrl !== 'string') return res.status(400).json({ error: 'imageUrl required' });
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(501).json({ error: 'ANTHROPIC_API_KEY not configured on the backend' });
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    await ensureLogoIdentTable();
+    const key = crypto.createHash('md5').update(imageUrl).digest('hex');
+    const hit = await pool.query('SELECT name FROM logo_ident WHERE url_hash = $1', [key]);
+    if (hit.rows[0]) return res.json({ name: hit.rows[0].name || '', cached: true });
+
+    const ir = await fetch(imageUrl);
+    if (!ir.ok) return res.status(502).json({ error: `could not fetch image (${ir.status})` });
+    const ct = (ir.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!SUPPORTED_IMG.includes(ct)) return res.status(415).json({ error: `unsupported image type${ct ? ` (${ct})` : ''}` });
+    const b64 = Buffer.from(await ir.arrayBuffer()).toString('base64');
+
+    const client = new Anthropic();
+    const msg = await client.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 60,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: ct, data: b64 } },
+          { type: 'text', text: LOGO_IDENT_PROMPT },
+        ],
+      }],
+    });
+    let name = (msg.content?.find((b) => b.type === 'text')?.text || '').trim();
+    if (!name || /^unknown$/i.test(name)) name = '';
+    await pool.query(
+      `INSERT INTO logo_ident (url_hash, url, name, created_at) VALUES ($1,$2,$3,NOW())
+       ON CONFLICT (url_hash) DO UPDATE SET name = EXCLUDED.name`,
+      [key, imageUrl, name]
+    );
+    res.json({ name });
+  } catch (e) {
+    console.error('[identify-logo] failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Mark a job as printed: clear PCF_PRINTSNE in Brightpearl (so it leaves the
