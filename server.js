@@ -1838,9 +1838,12 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 const DARK_COLOUR_KW = ['black', 'navy', 'bottle', 'forest', 'racing green', 'charcoal', 'maroon', 'burgundy', 'purple', 'royal', 'brown', 'olive', 'slate', 'graphite', 'anthracite', 'dark'];
 const LIGHT_COLOUR_KW = ['white', 'hi vis', 'hi-vis', 'hivis', 'high vis', 'yellow', 'orange', 'natural', 'ivory', 'cream', 'sky', 'heather', 'grey', 'gray', 'silver', 'beige', 'sand', 'lime', 'pink', 'light'];
 const colourOverrides = new Map(); // normalised colour -> isDark (true/false)
+// Normalise a colour for matching: lowercase, strip ()[] and collapse spaces, so
+// "(Steel Grey)" and "Steel Grey" classify the same.
+const normColour = (c) => String(c || '').toLowerCase().replace(/[()[\]]/g, '').replace(/\s+/g, ' ').trim();
 
 function classifyGarmentLogo(colour) {
-  const lc = String(colour || '').toLowerCase().trim();
+  const lc = normColour(colour);
   if (!lc) return null;
   if (colourOverrides.has(lc)) return colourOverrides.get(lc) ? 'white' : 'black';
   if (DARK_COLOUR_KW.some((k) => lc.includes(k))) return 'white';
@@ -1853,7 +1856,7 @@ async function loadColourOverrides() {
   try {
     const r = await pool.query('SELECT colour, is_dark FROM colour_variants');
     colourOverrides.clear();
-    for (const row of r.rows) colourOverrides.set(String(row.colour).toLowerCase().trim(), row.is_dark);
+    for (const row of r.rows) colourOverrides.set(normColour(row.colour), row.is_dark);
   } catch (e) { console.error('[print-queue] loadColourOverrides:', e.message); }
 }
 function bpBase() {
