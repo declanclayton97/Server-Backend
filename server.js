@@ -20,7 +20,8 @@ import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch } from './bpWebSession.js';
 import { convertDesignToPng } from './wilcomClient.js';
-import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps } from './jigEps.js';
+import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
+import { nestPrints } from './gangNest.js';
 import { printJobsFromRows, extractLogoUrls, extractPrintedGarments } from './printLines.js';
 import { spawn } from 'child_process';
 const { Pool } = pkg;
@@ -2212,6 +2213,44 @@ app.post('/api/print-queue/mark-printed', async (req, res) => {
     await pool.query('DELETE FROM print_queue WHERE order_id = $1', [orderId]);
     res.json({ success: true, orderId });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Build DTF gang sheets from uploaded artwork + quantities. Each item is one
+// EPS (base64) with a qty; we nest all copies onto 570mm-wide sheets (full
+// width, no edge margin) and return the sheet EPS(s).
+app.post('/api/print-queue/build', async (req, res) => {
+  const { items, sheetWmm = 570, maxSheetLmm = 1200, gapMm = 5, marginMm = 0 } = req.body || {};
+  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items required' });
+  try {
+    const parsed = items.map((it) => {
+      try {
+        const buf = Buffer.from(it.epsBase64 || '', 'base64');
+        const { text, bbox } = parseEps(buf);
+        if (!bbox) return null;
+        const { wmm, hmm } = epsSizeMm(bbox);
+        return { text, bbox, wmm, hmm, qty: Math.max(0, Math.round(Number(it.qty) || 0)), label: it.label || '' };
+      } catch { return null; }
+    }).filter(Boolean);
+    if (!parsed.length) return res.status(400).json({ error: 'no valid EPS items' });
+
+    const nestItems = [];
+    parsed.forEach((p, pi) => { for (let i = 0; i < p.qty; i++) nestItems.push({ id: `${pi}-${i}`, wmm: p.wmm, hmm: p.hmm, allowRotate: true, _p: pi }); });
+    if (!nestItems.length) return res.status(400).json({ error: 'no prints (all quantities 0)' });
+
+    const { sheets, oversized } = nestPrints({ items: nestItems, sheetWmm, maxSheetLmm, gapMm, marginMm });
+    const out = sheets.map((sh, si) => {
+      const placements = sh.placements.map((pl) => {
+        const p = parsed[pl.item._p];
+        return { text: p.text, bbox: p.bbox, xmm: pl.xmm, ymm: pl.ymm, scale: 1, rotation: pl.rotated ? 90 : 0 };
+      });
+      const eps = buildGangSheetEps({ pageWmm: sheetWmm, pageHmm: sh.lengthMm, placements });
+      return { sheet: si + 1, lengthMm: Math.round(sh.lengthMm), efficiencyPct: Math.round(sh.efficiency * 100), prints: sh.placements.length, epsBase64: eps.toString('base64') };
+    });
+    res.json({ sheets: out, sheetWmm, totalPrints: nestItems.length, oversized: oversized.map((o) => parsed[o._p]?.label || o.id) });
+  } catch (e) {
+    console.error('[print-queue] build failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Diagnostic: test the BP web-session login (used for proof/EMB/colour-sheet
