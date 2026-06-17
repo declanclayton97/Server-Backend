@@ -1854,8 +1854,9 @@ const orderToQueueItem = (o) => {
   return {
     orderId: o.id,
     reference: o.reference,
-    customer: cust.companyName || cust.contactName || null,
-    contactName: cust.contactName || null,
+    // companyName for trade; addressFullName (person) for individuals/website.
+    customer: cust.companyName || cust.addressFullName || cust.contactName || null,
+    contactName: cust.addressFullName || cust.contactName || null,
     logoUrls: extractLogoUrls(o.orderRows), // website orders embed the artwork URL
     prints,
     totalPrints: prints.reduce((a, p) => a + p.qty, 0),
