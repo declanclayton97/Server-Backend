@@ -102,7 +102,23 @@ export function printJobsFromRows(rows) {
     // "Print Left Breast" (the position).
     const cleanName = String(row.productName || "").replace(/\s+/g, " ").trim();
     const detailM = cleanName.match(/^print\s*(?:\([^)]*\)\s*[-:+–—]?|[-:+–—])\s*(.+)$/i);
-    const logoDetail = detailM ? detailM[1].trim() : null;
+    let logoDetail = detailM ? detailM[1].trim() : null;
+    // Fallback for "Print <Position> <Logo>" (e.g. "Print Left Breast PPS
+    // Decorating"): strip "Print" + a leading position phrase; the rest is the
+    // logo. Multi-word phrases first so "Large Rear" isn't cut to "Rear".
+    if (!logoDetail) {
+      const m2 = cleanName.match(/^print\s+(.+)$/i);
+      if (m2) {
+        let rest = m2[1];
+        const phrases = ["left breast", "right breast", "left chest", "right chest", "large rear", "full back", "centre back", "center back", "left sleeve", "right sleeve", "left arm", "right arm", "back", "front", "rear", "sleeve", "nape", "leg"];
+        for (const ph of phrases) {
+          const re = new RegExp("^" + ph.replace(/ /g, "\\s+") + "\\b", "i");
+          if (re.test(rest)) { rest = rest.replace(re, "").trim(); break; }
+        }
+        rest = rest.replace(/^[-:+–—\s]+/, "").trim();
+        if (rest && !/^(our garments|customers?\s*own)\b/i.test(rest)) logoDetail = rest;
+      }
+    }
     const base = { qty, rawName: row.productName || "", logoDetail, sku: row.productSku || null };
     const optPos = row.productOptions?.["Print Position"] || row.productOptions?.["Location"];
 
