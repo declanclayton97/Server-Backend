@@ -1890,7 +1890,7 @@ async function bpCustomFieldsForIds(ids, baseUrl, headers) {
 // can't filter by custom field, so we per-order check the flag off-request).
 let printQueueCache = { generatedAt: null, refreshing: false, error: null, scanned: 0, flagged: 0, jobs: 0, queue: [], tookMs: null, days: null };
 
-async function refreshPrintQueue({ days = 90, maxOrders = 4000 } = {}) {
+async function refreshPrintQueue({ days = 21, maxOrders = 10000 } = {}) {
   if (printQueueCache.refreshing) return printQueueCache;
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) { printQueueCache.error = 'no BP creds'; return printQueueCache; }
   printQueueCache = { ...printQueueCache, refreshing: true };
@@ -1901,23 +1901,24 @@ async function refreshPrintQueue({ days = 90, maxOrders = 4000 } = {}) {
     const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const updatedFilter = encodeURIComponent(`${fromIso}/`);
 
-    // 1) Collect the NEWEST `maxOrders` order IDs in the window. BP returns
-    // results oldest-first (orderId asc), so we page from the END — otherwise a
-    // capped scan grabs the oldest orders and misses the recently-flagged ones.
-    const totalRes = await fetch(`${searchBase}&updatedOn=${updatedFilter}&pageSize=1&firstResult=1`, { headers });
-    const total = (await totalRes.json().catch(() => null))?.response?.metaData?.resultsAvailable || 0;
+    // 1) Collect ALL order IDs updated in the window (a flagged order can have
+    // any orderId — it's recently UPDATED, not necessarily recently created —
+    // so we scan the whole window, not a newest-by-id subset).
     const ids = [];
-    let start = Math.max(1, total - 500 + 1);
-    while (ids.length < maxOrders && start >= 1) {
-      const r = await fetch(`${searchBase}&updatedOn=${updatedFilter}&pageSize=500&firstResult=${start}`, { headers });
+    let total = 0;
+    let firstResult = 1;
+    while (ids.length < maxOrders) {
+      const r = await fetch(`${searchBase}&updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`, { headers });
       if (!r.ok) break;
-      const results = (await r.json().catch(() => null))?.response?.results || [];
+      const d = await r.json().catch(() => null);
+      const results = d?.response?.results || [];
+      total = d?.response?.metaData?.resultsAvailable || total;
       results.forEach((row) => ids.push(Number(Array.isArray(row) ? row[0] : row)));
-      if (start === 1) break;
-      start = Math.max(1, start - 500);
+      if (results.length < 500) break;
+      firstResult += 500;
       await sleepMs(80);
     }
-    const scanIds = [...new Set(ids)].sort((a, b) => b - a).slice(0, maxOrders); // newest first
+    const scanIds = [...new Set(ids)].slice(0, maxOrders);
 
     // 2) check the Prints Needed flag (per-order, concurrent inside batches)
     const flaggedIds = [];
@@ -1927,22 +1928,16 @@ async function refreshPrintQueue({ days = 90, maxOrders = 4000 } = {}) {
       for (const oid of batch) if (isBadgeYes(cf[oid]?.[PRINTS_NEEDED_PCF])) flaggedIds.push(oid);
     }
 
-    // 3) details for flagged orders → parse print lines
-    const queue = [];
-    for (let i = 0; i < flaggedIds.length; i += 20) {
-      const batch = flaggedIds.slice(i, i + 20);
-      const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${batch.join(',')}`, { headers });
-      if (r.ok) {
-        const d = await r.json().catch(() => null);
-        const orders = d?.response || [];
-        (Array.isArray(orders) ? orders : Object.values(orders)).forEach((o) => {
-          const item = orderToQueueItem(o);
-          if (item) queue.push(item);
-        });
-      }
-      await sleepMs(80);
-    }
-    queue.sort((a, b) => String(a.customer || '').localeCompare(String(b.customer || '')));
+    // 3) details for flagged orders → parse print lines. Fetch per-order (the
+    // single GET reliably includes orderRows; the id-set batch GET does not).
+    const items = await mapPool(flaggedIds, 6, async (id) => {
+      try {
+        const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}`, { headers });
+        const o = (await r.json().catch(() => null))?.response?.[0];
+        return o ? orderToQueueItem(o) : null;
+      } catch { return null; }
+    });
+    const queue = items.filter(Boolean).sort((a, b) => String(a.customer || '').localeCompare(String(b.customer || '')));
     printQueueCache = {
       generatedAt: new Date().toISOString(), refreshing: false, error: null,
       windowTotal: total, scanned: scanIds.length, flagged: flaggedIds.length, jobs: queue.length, queue,
@@ -1985,7 +1980,7 @@ app.get('/api/print-queue', async (req, res) => {
 // Trigger a background rebuild; returns immediately (poll GET for the result).
 app.post('/api/print-queue/refresh', (req, res) => {
   if (printQueueCache.refreshing) return res.json({ started: false, refreshing: true });
-  const days = Math.min(parseInt(req.body?.days, 10) || 60, 365);
+  const days = Math.min(parseInt(req.body?.days, 10) || 21, 365);
   refreshPrintQueue({ days }).catch(() => {});
   res.json({ started: true });
 });
