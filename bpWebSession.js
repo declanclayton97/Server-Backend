@@ -288,4 +288,24 @@ async function attachFileToOrder(orderId, filename, buffer, mimeType = 'applicat
   return { success: false, error: 'Max retry attempts exceeded' };
 }
 
-export { attachFileToOrder, login, invalidateSession };
+// GET an authenticated Brightpearl web page using the cached session (re-logs
+// in once if expired). Follows redirects. Returns { status, html, finalUrl }.
+async function fetchAuthed(url) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const session = await getSession();
+    const cookieHeader = await getCookieHeader(session.jar, url);
+    let res = await fetch(url, { headers: { ...BROWSER_HEADERS, Cookie: cookieHeader }, redirect: 'manual' });
+    await ingestCookies(session.jar, res, url);
+    let finalUrl = url;
+    if ([301, 302, 303, 307, 308].includes(res.status)) {
+      const r = await followRedirects(session.jar, res, url);
+      res = r.finalRes; finalUrl = r.finalUrl;
+    }
+    const html = await res.text();
+    if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(); continue; }
+    return { status: res.status, html, finalUrl };
+  }
+  return { status: 0, html: '', finalUrl: url };
+}
+
+export { attachFileToOrder, login, invalidateSession, fetchAuthed };

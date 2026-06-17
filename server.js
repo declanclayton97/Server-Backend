@@ -18,7 +18,7 @@ import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
-import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate } from './bpWebSession.js';
+import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch } from './bpWebSession.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps } from './jigEps.js';
 import { printJobsFromRows } from './printLines.js';
@@ -2079,6 +2079,31 @@ app.get('/api/bp-web/login-test', async (req, res) => {
     res.json({ ok: true, ...info, cookieNames: cookies.split('; ').map((c) => c.split('=')[0]).filter(Boolean) });
   } catch (err) {
     res.json({ ok: false, ...info, error: err.message });
+  }
+});
+
+// Diagnostic: fetch the BP "Prints Needed" saved report via the fileuploader@
+// web session and surface its structure + candidate order ids, so we can write
+// the parser. ?url= overrides the default report.
+const PRINTS_REPORT_URL = process.env.PRINTS_REPORT_URL || 'https://euw1.brightpearlapp.com/report.php?report_type=sales&preset_id=422';
+app.get('/api/print-queue/filter-debug', async (req, res) => {
+  try {
+    const url = req.query.url || PRINTS_REPORT_URL;
+    const { status, html, finalUrl } = await bpWebFetch(url);
+    const uniq = (re) => [...new Set([...html.matchAll(re)].map((m) => m[1]))];
+    const oIDs = uniq(/oID=(\d+)/gi);
+    const ordersId = uniq(/orders?[_-]?id["'=\/:\s]+(\d+)/gi);
+    const ordNum = uniq(/order(?:Number|_number|num)["'=:\s]+(\d+)/gi);
+    res.json({
+      status, finalUrl, htmlLength: html.length,
+      looksLikeLogin: /name=["']email_address["']/i.test(html),
+      oIDcount: oIDs.length, oIDsample: oIDs.slice(0, 30),
+      ordersIdSample: ordersId.slice(0, 30),
+      ordNumSample: ordNum.slice(0, 30),
+      htmlHead: html.slice(0, 2000),
+    });
+  } catch (err) {
+    res.json({ error: err.message });
   }
 });
 
