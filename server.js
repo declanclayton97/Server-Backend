@@ -2194,6 +2194,26 @@ app.get('/api/print-queue/colours', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Mark a job as printed: clear PCF_PRINTSNE in Brightpearl (so it leaves the
+// filter) and remove it from the queue table.
+app.post('/api/print-queue/mark-printed', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  const orderId = req.body?.orderId;
+  if (!orderId) return res.status(400).json({ error: 'orderId required' });
+  try {
+    const { baseUrl, headers } = bpBase();
+    const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
+    const r = await fetch(url, {
+      method: 'PATCH', headers,
+      body: JSON.stringify([{ op: 'replace', path: `/${PRINTS_NEEDED_PCF}`, value: false }]),
+    });
+    if (!r.ok) { const t = await r.text(); return res.status(r.status).json({ error: `Brightpearl update failed: ${t.slice(0, 300)}` }); }
+    await pool.query('DELETE FROM print_queue WHERE order_id = $1', [orderId]);
+    res.json({ success: true, orderId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Diagnostic: test the BP web-session login (used for proof/EMB/colour-sheet
 // uploads). Echoes which account it's using + the exact login result/error.
 app.get('/api/bp-web/login-test', async (req, res) => {
