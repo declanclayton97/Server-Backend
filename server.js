@@ -1886,8 +1886,56 @@ async function bpCustomFieldsForIds(ids, baseUrl, headers) {
   return Object.fromEntries(pairs);
 }
 
-// Background-built cache (the scan is too slow for a synchronous request — BP
-// can't filter by custom field, so we per-order check the flag off-request).
+// Persistent queue table — kept live by the BP webhook (per-order), with the
+// scan only as an occasional reconcile backstop.
+async function initializePrintQueueTable() {
+  if (!pool) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS print_queue (
+        order_id BIGINT PRIMARY KEY,
+        reference TEXT,
+        customer TEXT,
+        prints JSONB NOT NULL DEFAULT '[]'::jsonb,
+        total_prints INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+  } catch (err) {
+    console.error('[print-queue] table init failed:', err.message);
+  }
+}
+
+// Re-evaluate ONE order: if flagged (PCF_PRINTSNE) and it has print lines, upsert
+// it into print_queue; otherwise remove it. This is what the webhook calls.
+async function evaluatePrintOrder(orderId) {
+  if (!pool) return { orderId, error: 'no db' };
+  const { baseUrl, headers } = bpBase();
+  const cf = await bpCustomFieldsForIds([orderId], baseUrl, headers);
+  const flagged = isBadgeYes(cf[orderId]?.[PRINTS_NEEDED_PCF]);
+  if (!flagged) {
+    await pool.query('DELETE FROM print_queue WHERE order_id = $1', [orderId]);
+    return { orderId, flagged: false, removed: true };
+  }
+  const od = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`, { headers });
+  const o = (await od.json().catch(() => null))?.response?.[0];
+  const item = o ? orderToQueueItem(o) : null;
+  if (!item) {
+    await pool.query('DELETE FROM print_queue WHERE order_id = $1', [orderId]);
+    return { orderId, flagged: true, noPrints: true, removed: true };
+  }
+  await pool.query(
+    `INSERT INTO print_queue (order_id, reference, customer, prints, total_prints, updated_at)
+     VALUES ($1,$2,$3,$4,$5, NOW())
+     ON CONFLICT (order_id) DO UPDATE SET
+       reference = EXCLUDED.reference, customer = EXCLUDED.customer,
+       prints = EXCLUDED.prints, total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
+    [orderId, item.reference, item.customer, JSON.stringify(item.prints), item.totalPrints]
+  );
+  return { orderId, flagged: true, upserted: true, item };
+}
+
+// Background reconcile cache state (the scan is the backstop, not the primary).
 let printQueueCache = { generatedAt: null, refreshing: false, error: null, scanned: 0, flagged: 0, jobs: 0, queue: [], tookMs: null, days: null };
 
 async function refreshPrintQueue({ days = 21, maxOrders = 10000 } = {}) {
@@ -1938,6 +1986,28 @@ async function refreshPrintQueue({ days = 21, maxOrders = 10000 } = {}) {
       } catch { return null; }
     });
     const queue = items.filter(Boolean).sort((a, b) => String(a.customer || '').localeCompare(String(b.customer || '')));
+
+    // Sync the table: upsert the flagged-with-prints orders, and drop any rows
+    // in the scanned window that are no longer flagged (caught an unflag the
+    // webhook may have missed).
+    if (pool) {
+      for (const it of queue) {
+        await pool.query(
+          `INSERT INTO print_queue (order_id, reference, customer, prints, total_prints, updated_at)
+           VALUES ($1,$2,$3,$4,$5, NOW())
+           ON CONFLICT (order_id) DO UPDATE SET
+             reference = EXCLUDED.reference, customer = EXCLUDED.customer,
+             prints = EXCLUDED.prints, total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
+          [it.orderId, it.reference, it.customer, JSON.stringify(it.prints), it.totalPrints]
+        );
+      }
+      const keepIds = queue.map((q) => q.orderId);
+      await pool.query(
+        'DELETE FROM print_queue WHERE order_id = ANY($1::bigint[]) AND NOT (order_id = ANY($2::bigint[]))',
+        [scanIds, keepIds.length ? keepIds : [-1]]
+      );
+    }
+
     printQueueCache = {
       generatedAt: new Date().toISOString(), refreshing: false, error: null,
       windowTotal: total, scanned: scanIds.length, flagged: flaggedIds.length, jobs: queue.length, queue,
@@ -1972,17 +2042,53 @@ app.get('/api/print-queue', async (req, res) => {
     const order = (await od.json().catch(() => null))?.response?.[0];
     return res.json({ orderId: id, printsNeeded: isBadgeYes(cf[id]?.[PRINTS_NEEDED_PCF]), pcfValue: cf[id]?.[PRINTS_NEEDED_PCF] ?? null, item: order ? orderToQueueItem(order) : null });
   }
-  // first ever hit → kick a build so the next poll has data
-  if (!printQueueCache.generatedAt && !printQueueCache.refreshing) refreshPrintQueue().catch(() => {});
-  res.json(printQueueCache);
+  // Normal path: read the live queue from the table (kept current by the
+  // webhook + reconcile). No scanning on request.
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query('SELECT order_id, reference, customer, prints, total_prints, updated_at FROM print_queue ORDER BY customer NULLS LAST, order_id');
+    const queue = r.rows.map((row) => ({
+      orderId: Number(row.order_id), reference: row.reference, customer: row.customer,
+      prints: row.prints, totalPrints: row.total_prints, updatedAt: row.updated_at,
+    }));
+    res.json({
+      source: 'table', jobs: queue.length, queue,
+      reconcile: { generatedAt: printQueueCache.generatedAt, refreshing: printQueueCache.refreshing, scanned: printQueueCache.scanned, error: printQueueCache.error },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Trigger a background rebuild; returns immediately (poll GET for the result).
+// Trigger a background reconcile scan; returns immediately.
 app.post('/api/print-queue/refresh', (req, res) => {
   if (printQueueCache.refreshing) return res.json({ started: false, refreshing: true });
   const days = Math.min(parseInt(req.body?.days, 10) || 21, 365);
   refreshPrintQueue({ days }).catch(() => {});
   res.json({ started: true });
+});
+
+// BP webhook receiver: BP calls this when an order changes (set up a BP
+// automation: when PCF_PRINTSNE changes → call this URL with the order id).
+// Accepts the id from ?orderId=, body.id/orderId/resourceId, or an array of
+// such events. Re-evaluates each order → upsert/remove in print_queue. Always
+// 200 so BP doesn't retry-storm on our errors.
+app.all('/api/print-queue/webhook', async (req, res) => {
+  try {
+    const body = req.body;
+    const ids = new Set();
+    const pick = (o) => { const v = o?.id ?? o?.orderId ?? o?.resourceId ?? o?.resourceKey; if (v != null && /^\d+$/.test(String(v))) ids.add(String(v)); };
+    if (req.query.orderId) String(req.query.orderId).split(',').forEach((v) => /^\d+$/.test(v.trim()) && ids.add(v.trim()));
+    if (Array.isArray(body)) body.forEach(pick);
+    else if (body && typeof body === 'object') { pick(body); if (Array.isArray(body.events)) body.events.forEach(pick); }
+    const idList = [...ids];
+    if (!idList.length) return res.json({ ok: true, processed: 0, note: 'no order id found in webhook' });
+    const results = await mapPool(idList, 4, (id) => evaluatePrintOrder(id).catch((e) => ({ orderId: id, error: e.message })));
+    res.json({ ok: true, processed: idList.length, results });
+  } catch (err) {
+    console.error('[print-queue] webhook error:', err.message);
+    res.json({ ok: false, error: err.message });
+  }
 });
 
 // Force-process a single order: fetches its custom fields + details and
@@ -3769,6 +3875,7 @@ function isOrderPipelineEnabled() {
   await initializePromoOfferTables();
   await initializeCrossSellTables();
   await initializeJigTemplates();
+  await initializePrintQueueTable();
   if (!isOrderPipelineEnabled()) {
     console.log('⏸️  Order-pipeline poller DISABLED via ORDER_PIPELINE_ENABLED=false. No polls will run.');
     return;
@@ -8130,11 +8237,11 @@ if (pool) {
   setInterval(runPdfPurge, 12 * 60 * 60 * 1000);
 }
 
-// Build the DTF print queue in the background (the scan is slow) so the page
-// loads instantly. First build shortly after boot, then refresh every 30 min.
+// The webhook keeps print_queue live; this scan is a reconcile backstop only —
+// seed shortly after boot, then every 6h.
 if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
-  setTimeout(() => refreshPrintQueue().catch((e) => console.error('[print-queue] boot build failed:', e.message)), 45 * 1000);
-  setInterval(() => refreshPrintQueue().catch((e) => console.error('[print-queue] poll failed:', e.message)), 30 * 60 * 1000);
+  setTimeout(() => refreshPrintQueue().catch((e) => console.error('[print-queue] boot reconcile failed:', e.message)), 60 * 1000);
+  setInterval(() => refreshPrintQueue().catch((e) => console.error('[print-queue] reconcile failed:', e.message)), 6 * 60 * 60 * 1000);
 }
 
 app.listen(PORT, () => {
