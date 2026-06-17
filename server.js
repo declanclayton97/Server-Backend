@@ -2020,6 +2020,56 @@ async function refreshPrintQueue({ days = 21, maxOrders = 10000 } = {}) {
   return printQueueCache;
 }
 
+// PRIMARY refresh: read the operator's curated "Prints Needed" saved report via
+// the fileuploader@ web session, then sync the table to exactly those orders.
+// Cheap (~one report fetch + one GET per listed order) — no scanning.
+async function refreshPrintQueueFromFilter() {
+  if (printQueueCache.refreshing) return printQueueCache;
+  if (!pool) { printQueueCache.error = 'no db'; return printQueueCache; }
+  printQueueCache = { ...printQueueCache, refreshing: true };
+  const started = Date.now();
+  try {
+    const { baseUrl, headers } = bpBase();
+    const { status, html } = await bpWebFetch(PRINTS_REPORT_URL);
+    if (status !== 200 || /name=["']email_address["']/i.test(html)) {
+      throw new Error(`filter fetch failed (status ${status}${/email_address/i.test(html) ? ', got login page' : ''})`);
+    }
+    const ids = [...new Set([...html.matchAll(/oID=(\d+)/gi)].map((m) => Number(m[1])))];
+
+    const items = await mapPool(ids, 6, async (id) => {
+      try {
+        const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}`, { headers });
+        const o = (await r.json().catch(() => null))?.response?.[0];
+        return o ? orderToQueueItem(o) : null;
+      } catch { return null; }
+    });
+    const queue = items.filter(Boolean).sort((a, b) => String(a.customer || '').localeCompare(String(b.customer || '')));
+
+    // Sync the table to exactly the filter result.
+    for (const it of queue) {
+      await pool.query(
+        `INSERT INTO print_queue (order_id, reference, customer, prints, total_prints, updated_at)
+         VALUES ($1,$2,$3,$4,$5, NOW())
+         ON CONFLICT (order_id) DO UPDATE SET
+           reference = EXCLUDED.reference, customer = EXCLUDED.customer,
+           prints = EXCLUDED.prints, total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
+        [it.orderId, it.reference, it.customer, JSON.stringify(it.prints), it.totalPrints]
+      );
+    }
+    const keepIds = queue.map((q) => q.orderId);
+    await pool.query('DELETE FROM print_queue WHERE NOT (order_id = ANY($1::bigint[]))', [keepIds.length ? keepIds : [-1]]);
+
+    printQueueCache = {
+      generatedAt: new Date().toISOString(), refreshing: false, error: null, source: 'filter',
+      filterOrders: ids.length, jobs: queue.length, queue, tookMs: Date.now() - started,
+    };
+  } catch (err) {
+    console.error('[print-queue] filter refresh failed:', err.message);
+    printQueueCache = { ...printQueueCache, refreshing: false, error: err.message };
+  }
+  return printQueueCache;
+}
+
 // Serve the cached queue instantly. ?orderId=NNN is a live single-order test.
 app.get('/api/print-queue', async (req, res) => {
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
@@ -2060,12 +2110,17 @@ app.get('/api/print-queue', async (req, res) => {
   }
 });
 
-// Trigger a background reconcile scan; returns immediately.
+// Trigger a refresh; returns immediately. Default reads the saved filter;
+// ?scan=1 forces the heavy full-window scan fallback.
 app.post('/api/print-queue/refresh', (req, res) => {
   if (printQueueCache.refreshing) return res.json({ started: false, refreshing: true });
-  const days = Math.min(parseInt(req.body?.days, 10) || 21, 365);
-  refreshPrintQueue({ days }).catch(() => {});
-  res.json({ started: true });
+  if (req.query.scan === '1' || req.body?.scan) {
+    const days = Math.min(parseInt(req.body?.days, 10) || 21, 365);
+    refreshPrintQueue({ days }).catch(() => {});
+    return res.json({ started: true, mode: 'scan' });
+  }
+  refreshPrintQueueFromFilter().catch(() => {});
+  res.json({ started: true, mode: 'filter' });
 });
 
 // Diagnostic: test the BP web-session login (used for proof/EMB/colour-sheet
@@ -8279,11 +8334,12 @@ if (pool) {
   setInterval(runPdfPurge, 12 * 60 * 60 * 1000);
 }
 
-// The webhook keeps print_queue live; this scan is a reconcile backstop only —
-// seed shortly after boot, then every 6h.
+// Keep print_queue in sync with the operator's saved "Prints Needed" filter via
+// the web session — cheap, so refresh on boot then every 10 min. (The webhook,
+// if set up, gives instant updates between refreshes.)
 if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
-  setTimeout(() => refreshPrintQueue().catch((e) => console.error('[print-queue] boot reconcile failed:', e.message)), 60 * 1000);
-  setInterval(() => refreshPrintQueue().catch((e) => console.error('[print-queue] reconcile failed:', e.message)), 6 * 60 * 60 * 1000);
+  setTimeout(() => refreshPrintQueueFromFilter().catch((e) => console.error('[print-queue] boot filter refresh failed:', e.message)), 60 * 1000);
+  setInterval(() => refreshPrintQueueFromFilter().catch((e) => console.error('[print-queue] filter refresh failed:', e.message)), 10 * 60 * 1000);
 }
 
 app.listen(PORT, () => {
