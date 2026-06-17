@@ -18,7 +18,7 @@ import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
-import { attachFileToOrder as bpAttachFileToOrder } from './bpWebSession.js';
+import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate } from './bpWebSession.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps } from './jigEps.js';
 import { printJobsFromRows } from './printLines.js';
@@ -2066,6 +2066,20 @@ app.post('/api/print-queue/refresh', (req, res) => {
   const days = Math.min(parseInt(req.body?.days, 10) || 21, 365);
   refreshPrintQueue({ days }).catch(() => {});
   res.json({ started: true });
+});
+
+// Diagnostic: test the BP web-session login (used for proof/EMB/colour-sheet
+// uploads). Echoes which account it's using + the exact login result/error.
+app.get('/api/bp-web/login-test', async (req, res) => {
+  const info = { email: process.env.BP_WEB_EMAIL || null, client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear', host: process.env.BP_WEB_HOST || 'https://euw1.brightpearlapp.com' };
+  try {
+    bpWebInvalidate();
+    const s = await bpWebLogin();
+    const cookies = await s.jar.getCookieString(info.host);
+    res.json({ ok: true, ...info, cookieNames: cookies.split('; ').map((c) => c.split('=')[0]).filter(Boolean) });
+  } catch (err) {
+    res.json({ ok: false, ...info, error: err.message });
+  }
 });
 
 // BP webhook receiver: BP calls this when an order changes (set up a BP
