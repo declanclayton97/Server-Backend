@@ -40,12 +40,28 @@ export function parsePosition(text) {
 }
 
 // Is this row a DTF print charge line (not embroidery, not a plain garment)?
+// Covers both trade orders ("Print (Our Garments)" + Print Position option) and
+// website orders ("Print Left Breast"/"Print Large Rear" + Location option /
+// Personalisation=Print).
 export function isPrintRow(row) {
   const name = String(row.productName || "");
   const opts = row.productOptions || {};
   if (/embroid/i.test(name) || "Embroidery Position" in opts) return false;
   if ("Print Position" in opts) return true;
-  return /^\s*print\s*[\(\-:]/i.test(name); // "Print (Our Garments)", "Print -", "Print:"
+  if (String(opts.Personalisation || "").toLowerCase() === "print") return true;
+  return /^\s*print\b/i.test(name); // "Print (Our Garments)", "Print Left Breast", "Print -", "Print:"
+}
+
+// Extract customer-uploaded logo URLs (website orders embed them in a garment
+// row's text as "Upload Logo - <url>" / downloadCustomOption links).
+export function extractLogoUrls(rows) {
+  const list = Array.isArray(rows) ? rows : Object.values(rows || {});
+  const urls = new Set();
+  for (const row of list) {
+    const text = String(row.productName || "");
+    for (const m of text.matchAll(/https?:\/\/[^\s"'<>]*downloadCustomOption[^\s"'<>]*/gi)) urls.add(m[0]);
+  }
+  return [...urls];
 }
 
 // Turn an order's rows into print jobs. Position comes from the
@@ -57,7 +73,7 @@ export function printJobsFromRows(rows) {
     if (!isPrintRow(row)) continue;
     const qty = Math.round(Number(row.quantity?.magnitude ?? row.quantityMagnitude ?? 0)) || 0;
     const base = { qty, rawName: row.productName || "", sku: row.productSku || null };
-    const optPos = row.productOptions?.["Print Position"];
+    const optPos = row.productOptions?.["Print Position"] || row.productOptions?.["Location"];
 
     let hit, rawPos;
     if (optPos) { hit = matchPosition(optPos); rawPos = optPos; }

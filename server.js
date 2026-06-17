@@ -21,7 +21,7 @@ import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch } from './bpWebSession.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps } from './jigEps.js';
-import { printJobsFromRows } from './printLines.js';
+import { printJobsFromRows, extractLogoUrls } from './printLines.js';
 import { spawn } from 'child_process';
 const { Pool } = pkg;
 
@@ -1850,10 +1850,13 @@ async function mapPool(items, size, fn) {
 const orderToQueueItem = (o) => {
   const prints = printJobsFromRows(o.orderRows);
   if (!prints.length) return null;
+  const cust = o.parties?.customer || {};
   return {
     orderId: o.id,
     reference: o.reference,
-    customer: o.parties?.customer?.companyName || o.parties?.customer?.contactName || null,
+    customer: cust.companyName || cust.contactName || null,
+    contactName: cust.contactName || null,
+    logoUrls: extractLogoUrls(o.orderRows), // website orders embed the artwork URL
     prints,
     totalPrints: prints.reduce((a, p) => a + p.qty, 0),
   };
@@ -1896,14 +1899,31 @@ async function initializePrintQueueTable() {
         order_id BIGINT PRIMARY KEY,
         reference TEXT,
         customer TEXT,
+        contact_name TEXT,
+        logo_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
         prints JSONB NOT NULL DEFAULT '[]'::jsonb,
         total_prints INTEGER NOT NULL DEFAULT 0,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      ALTER TABLE print_queue ADD COLUMN IF NOT EXISTS contact_name TEXT;
+      ALTER TABLE print_queue ADD COLUMN IF NOT EXISTS logo_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
     `);
   } catch (err) {
     console.error('[print-queue] table init failed:', err.message);
   }
+}
+
+// Upsert one queue item (shared by the filter refresh, scan, and webhook).
+async function upsertPrintQueueRow(item) {
+  await pool.query(
+    `INSERT INTO print_queue (order_id, reference, customer, contact_name, logo_urls, prints, total_prints, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7, NOW())
+     ON CONFLICT (order_id) DO UPDATE SET
+       reference = EXCLUDED.reference, customer = EXCLUDED.customer, contact_name = EXCLUDED.contact_name,
+       logo_urls = EXCLUDED.logo_urls, prints = EXCLUDED.prints, total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
+    [item.orderId, item.reference, item.customer, item.contactName || null,
+     JSON.stringify(item.logoUrls || []), JSON.stringify(item.prints), item.totalPrints]
+  );
 }
 
 // Re-evaluate ONE order: if flagged (PCF_PRINTSNE) and it has print lines, upsert
@@ -1924,14 +1944,7 @@ async function evaluatePrintOrder(orderId) {
     await pool.query('DELETE FROM print_queue WHERE order_id = $1', [orderId]);
     return { orderId, flagged: true, noPrints: true, removed: true };
   }
-  await pool.query(
-    `INSERT INTO print_queue (order_id, reference, customer, prints, total_prints, updated_at)
-     VALUES ($1,$2,$3,$4,$5, NOW())
-     ON CONFLICT (order_id) DO UPDATE SET
-       reference = EXCLUDED.reference, customer = EXCLUDED.customer,
-       prints = EXCLUDED.prints, total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
-    [orderId, item.reference, item.customer, JSON.stringify(item.prints), item.totalPrints]
-  );
+  await upsertPrintQueueRow(item);
   return { orderId, flagged: true, upserted: true, item };
 }
 
@@ -1991,16 +2004,7 @@ async function refreshPrintQueue({ days = 21, maxOrders = 10000 } = {}) {
     // in the scanned window that are no longer flagged (caught an unflag the
     // webhook may have missed).
     if (pool) {
-      for (const it of queue) {
-        await pool.query(
-          `INSERT INTO print_queue (order_id, reference, customer, prints, total_prints, updated_at)
-           VALUES ($1,$2,$3,$4,$5, NOW())
-           ON CONFLICT (order_id) DO UPDATE SET
-             reference = EXCLUDED.reference, customer = EXCLUDED.customer,
-             prints = EXCLUDED.prints, total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
-          [it.orderId, it.reference, it.customer, JSON.stringify(it.prints), it.totalPrints]
-        );
-      }
+      for (const it of queue) await upsertPrintQueueRow(it);
       const keepIds = queue.map((q) => q.orderId);
       await pool.query(
         'DELETE FROM print_queue WHERE order_id = ANY($1::bigint[]) AND NOT (order_id = ANY($2::bigint[]))',
@@ -2046,16 +2050,7 @@ async function refreshPrintQueueFromFilter() {
     const queue = items.filter(Boolean).sort((a, b) => String(a.customer || '').localeCompare(String(b.customer || '')));
 
     // Sync the table to exactly the filter result.
-    for (const it of queue) {
-      await pool.query(
-        `INSERT INTO print_queue (order_id, reference, customer, prints, total_prints, updated_at)
-         VALUES ($1,$2,$3,$4,$5, NOW())
-         ON CONFLICT (order_id) DO UPDATE SET
-           reference = EXCLUDED.reference, customer = EXCLUDED.customer,
-           prints = EXCLUDED.prints, total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
-        [it.orderId, it.reference, it.customer, JSON.stringify(it.prints), it.totalPrints]
-      );
-    }
+    for (const it of queue) await upsertPrintQueueRow(it);
     const keepIds = queue.map((q) => q.orderId);
     await pool.query('DELETE FROM print_queue WHERE NOT (order_id = ANY($1::bigint[]))', [keepIds.length ? keepIds : [-1]]);
 
@@ -2096,9 +2091,10 @@ app.get('/api/print-queue', async (req, res) => {
   // webhook + reconcile). No scanning on request.
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
-    const r = await pool.query('SELECT order_id, reference, customer, prints, total_prints, updated_at FROM print_queue ORDER BY customer NULLS LAST, order_id');
+    const r = await pool.query('SELECT order_id, reference, customer, contact_name, logo_urls, prints, total_prints, updated_at FROM print_queue ORDER BY customer NULLS LAST, order_id');
     const queue = r.rows.map((row) => ({
       orderId: Number(row.order_id), reference: row.reference, customer: row.customer,
+      contactName: row.contact_name, logoUrls: row.logo_urls,
       prints: row.prints, totalPrints: row.total_prints, updatedAt: row.updated_at,
     }));
     res.json({
