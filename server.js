@@ -1890,31 +1890,34 @@ async function bpCustomFieldsForIds(ids, baseUrl, headers) {
 // can't filter by custom field, so we per-order check the flag off-request).
 let printQueueCache = { generatedAt: null, refreshing: false, error: null, scanned: 0, flagged: 0, jobs: 0, queue: [], tookMs: null, days: null };
 
-async function refreshPrintQueue({ days = 60, maxOrders = 3000 } = {}) {
+async function refreshPrintQueue({ days = 90, maxOrders = 4000 } = {}) {
   if (printQueueCache.refreshing) return printQueueCache;
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) { printQueueCache.error = 'no BP creds'; return printQueueCache; }
   printQueueCache = { ...printQueueCache, refreshing: true };
   const started = Date.now();
   try {
     const { baseUrl, headers } = bpBase();
-    // 1) recent sales order IDs (updatedOn window)
+    const searchBase = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1`;
     const fromIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const updatedFilter = encodeURIComponent(`${fromIso}/`);
+
+    // 1) Collect the NEWEST `maxOrders` order IDs in the window. BP returns
+    // results oldest-first (orderId asc), so we page from the END — otherwise a
+    // capped scan grabs the oldest orders and misses the recently-flagged ones.
+    const totalRes = await fetch(`${searchBase}&updatedOn=${updatedFilter}&pageSize=1&firstResult=1`, { headers });
+    const total = (await totalRes.json().catch(() => null))?.response?.metaData?.resultsAvailable || 0;
     const ids = [];
-    let firstResult = 1;
-    while (ids.length < maxOrders) {
-      const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&updatedOn=${updatedFilter}&pageSize=500&firstResult=${firstResult}`;
-      const r = await fetch(url, { headers });
+    let start = Math.max(1, total - 500 + 1);
+    while (ids.length < maxOrders && start >= 1) {
+      const r = await fetch(`${searchBase}&updatedOn=${updatedFilter}&pageSize=500&firstResult=${start}`, { headers });
       if (!r.ok) break;
-      const d = await r.json().catch(() => null);
-      const results = d?.response?.results || [];
-      results.forEach((row) => ids.push(Array.isArray(row) ? row[0] : row));
-      const total = d?.response?.metaData?.resultsAvailable || 0;
-      firstResult += 500;
-      if (results.length < 500 || firstResult > total) break;
-      await sleepMs(100);
+      const results = (await r.json().catch(() => null))?.response?.results || [];
+      results.forEach((row) => ids.push(Number(Array.isArray(row) ? row[0] : row)));
+      if (start === 1) break;
+      start = Math.max(1, start - 500);
+      await sleepMs(80);
     }
-    const scanIds = ids.slice(0, maxOrders);
+    const scanIds = [...new Set(ids)].sort((a, b) => b - a).slice(0, maxOrders); // newest first
 
     // 2) check the Prints Needed flag (per-order, concurrent inside batches)
     const flaggedIds = [];
@@ -1942,7 +1945,7 @@ async function refreshPrintQueue({ days = 60, maxOrders = 3000 } = {}) {
     queue.sort((a, b) => String(a.customer || '').localeCompare(String(b.customer || '')));
     printQueueCache = {
       generatedAt: new Date().toISOString(), refreshing: false, error: null,
-      scanned: scanIds.length, flagged: flaggedIds.length, jobs: queue.length, queue,
+      windowTotal: total, scanned: scanIds.length, flagged: flaggedIds.length, jobs: queue.length, queue,
       tookMs: Date.now() - started, days,
     };
   } catch (err) {
@@ -1956,6 +1959,15 @@ async function refreshPrintQueue({ days = 60, maxOrders = 3000 } = {}) {
 app.get('/api/print-queue', async (req, res) => {
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) {
     return res.status(500).json({ error: 'Brightpearl credentials not configured' });
+  }
+  // ?count=N → just the order count in an N-day updatedOn window (diagnostic).
+  if (req.query.count) {
+    const { baseUrl, headers } = bpBase();
+    const d = Math.min(parseInt(req.query.count, 10) || 30, 365);
+    const fromIso = new Date(Date.now() - d * 24 * 60 * 60 * 1000).toISOString();
+    const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&updatedOn=${encodeURIComponent(`${fromIso}/`)}&pageSize=1&firstResult=1`, { headers });
+    const total = (await r.json().catch(() => null))?.response?.metaData?.resultsAvailable ?? null;
+    return res.json({ days: d, ordersUpdatedInWindow: total });
   }
   if (req.query.orderId) {
     const { baseUrl, headers } = bpBase();
