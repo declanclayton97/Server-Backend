@@ -96,9 +96,12 @@ export function printJobsFromRows(rows) {
     // Logo/personalisation detail = the text after the "Print (…)" bracket
     // (with or without a -, :, + or dash separator), e.g.
     // "Print (Our Garments) + AC SECURE LOGO", "Print (Our Garments) - TABS LOGO",
-    // "Print (Our Garments) CARLTON CC". The bracket-or-separator requirement
-    // avoids mis-capturing website lines like "Print Left Breast" (the position).
-    const detailM = String(row.productName || "").match(/^print\s*(?:\([^)]*\)\s*[-:+–—]?|[-:+–—])\s*(.+)$/i);
+    // "Print (Our Garments) CARLTON CC". Whitespace (incl. newlines) is collapsed
+    // first so multi-line lines like "… BELOW TEXT '…'" are captured whole. The
+    // bracket-or-separator requirement avoids mis-capturing website lines like
+    // "Print Left Breast" (the position).
+    const cleanName = String(row.productName || "").replace(/\s+/g, " ").trim();
+    const detailM = cleanName.match(/^print\s*(?:\([^)]*\)\s*[-:+–—]?|[-:+–—])\s*(.+)$/i);
     const logoDetail = detailM ? detailM[1].trim() : null;
     const base = { qty, rawName: row.productName || "", logoDetail, sku: row.productSku || null };
     const optPos = row.productOptions?.["Print Position"] || row.productOptions?.["Location"];
