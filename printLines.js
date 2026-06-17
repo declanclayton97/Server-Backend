@@ -72,7 +72,11 @@ export function printJobsFromRows(rows) {
   for (const row of list) {
     if (!isPrintRow(row)) continue;
     const qty = Math.round(Number(row.quantity?.magnitude ?? row.quantityMagnitude ?? 0)) || 0;
-    const base = { qty, rawName: row.productName || "", sku: row.productSku || null };
+    // Logo/personalisation detail = the text after "Print (…) -" in the name.
+    // Sportswear orders put the actual logo here (e.g. "TABS LOGO", "NAME: X").
+    const detailM = String(row.productName || "").match(/^print\s*(?:\([^)]*\))?\s*[-:]\s*(.+)$/i);
+    const logoDetail = detailM ? detailM[1].trim() : null;
+    const base = { qty, rawName: row.productName || "", logoDetail, sku: row.productSku || null };
     const optPos = row.productOptions?.["Print Position"] || row.productOptions?.["Location"];
 
     let hit, rawPos;

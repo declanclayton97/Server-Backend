@@ -1829,6 +1829,7 @@ app.get('/api/urgent-orders/inspect/:orderId', async (req, res) => {
 // flag in batches.
 // ============================================================
 const PRINTS_NEEDED_PCF = process.env.PRINTS_NEEDED_PCF || 'PCF_PRINTSNE';
+const TUFF_SPORTSWEAR_CHANNEL_ID = Number(process.env.TUFF_SPORTSWEAR_CHANNEL_ID || 18);
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 function bpBase() {
   const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
@@ -1851,12 +1852,17 @@ const orderToQueueItem = (o) => {
   const prints = printJobsFromRows(o.orderRows);
   if (!prints.length) return null;
   const cust = o.parties?.customer || {};
+  const channelId = o.assignment?.current?.channelId ?? null;
   return {
     orderId: o.id,
     reference: o.reference,
     // companyName for trade; addressFullName (person) for individuals/website.
     customer: cust.companyName || cust.addressFullName || cust.contactName || null,
     contactName: cust.addressFullName || cust.contactName || null,
+    channelId,
+    // Sportswear orders: the logo per print line is in its description (logoDetail),
+    // not the customer's OneDrive file.
+    sportswear: channelId === TUFF_SPORTSWEAR_CHANNEL_ID,
     logoUrls: extractLogoUrls(o.orderRows), // website orders embed the artwork URL
     prints,
     totalPrints: prints.reduce((a, p) => a + p.qty, 0),
@@ -1901,12 +1907,14 @@ async function initializePrintQueueTable() {
         reference TEXT,
         customer TEXT,
         contact_name TEXT,
+        channel_id BIGINT,
         logo_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
         prints JSONB NOT NULL DEFAULT '[]'::jsonb,
         total_prints INTEGER NOT NULL DEFAULT 0,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       ALTER TABLE print_queue ADD COLUMN IF NOT EXISTS contact_name TEXT;
+      ALTER TABLE print_queue ADD COLUMN IF NOT EXISTS channel_id BIGINT;
       ALTER TABLE print_queue ADD COLUMN IF NOT EXISTS logo_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
     `);
   } catch (err) {
@@ -1917,12 +1925,13 @@ async function initializePrintQueueTable() {
 // Upsert one queue item (shared by the filter refresh, scan, and webhook).
 async function upsertPrintQueueRow(item) {
   await pool.query(
-    `INSERT INTO print_queue (order_id, reference, customer, contact_name, logo_urls, prints, total_prints, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7, NOW())
+    `INSERT INTO print_queue (order_id, reference, customer, contact_name, channel_id, logo_urls, prints, total_prints, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, NOW())
      ON CONFLICT (order_id) DO UPDATE SET
        reference = EXCLUDED.reference, customer = EXCLUDED.customer, contact_name = EXCLUDED.contact_name,
-       logo_urls = EXCLUDED.logo_urls, prints = EXCLUDED.prints, total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
-    [item.orderId, item.reference, item.customer, item.contactName || null,
+       channel_id = EXCLUDED.channel_id, logo_urls = EXCLUDED.logo_urls, prints = EXCLUDED.prints,
+       total_prints = EXCLUDED.total_prints, updated_at = NOW()`,
+    [item.orderId, item.reference, item.customer, item.contactName || null, item.channelId ?? null,
      JSON.stringify(item.logoUrls || []), JSON.stringify(item.prints), item.totalPrints]
   );
 }
@@ -2092,11 +2101,12 @@ app.get('/api/print-queue', async (req, res) => {
   // webhook + reconcile). No scanning on request.
   if (!pool) return res.status(503).json({ error: 'Database not configured' });
   try {
-    const r = await pool.query('SELECT order_id, reference, customer, contact_name, logo_urls, prints, total_prints, updated_at FROM print_queue ORDER BY customer NULLS LAST, order_id');
+    const r = await pool.query('SELECT order_id, reference, customer, contact_name, channel_id, logo_urls, prints, total_prints, updated_at FROM print_queue ORDER BY customer NULLS LAST, order_id');
     const queue = r.rows.map((row) => ({
       orderId: Number(row.order_id), reference: row.reference, customer: row.customer,
-      contactName: row.contact_name, logoUrls: row.logo_urls,
-      prints: row.prints, totalPrints: row.total_prints, updatedAt: row.updated_at,
+      contactName: row.contact_name, channelId: row.channel_id != null ? Number(row.channel_id) : null,
+      sportswear: row.channel_id != null && Number(row.channel_id) === TUFF_SPORTSWEAR_CHANNEL_ID,
+      logoUrls: row.logo_urls, prints: row.prints, totalPrints: row.total_prints, updatedAt: row.updated_at,
     }));
     res.json({
       source: 'table', jobs: queue.length, queue,
