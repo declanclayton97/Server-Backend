@@ -2075,6 +2075,9 @@ app.post('/api/print-queue/refresh', (req, res) => {
 // 200 so BP doesn't retry-storm on our errors.
 app.all('/api/print-queue/webhook', async (req, res) => {
   try {
+    // Optional shared-secret: if PRINT_QUEUE_WEBHOOK_TOKEN is set, require it.
+    const want = process.env.PRINT_QUEUE_WEBHOOK_TOKEN;
+    if (want && req.query.token !== want) return res.status(401).json({ ok: false, error: 'bad token' });
     const body = req.body;
     const ids = new Set();
     const pick = (o) => { const v = o?.id ?? o?.orderId ?? o?.resourceId ?? o?.resourceKey; if (v != null && /^\d+$/.test(String(v))) ids.add(String(v)); };
