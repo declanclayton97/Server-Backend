@@ -52,6 +52,27 @@ export function isPrintRow(row) {
   return /^\s*print\b/i.test(name); // "Print (Our Garments)", "Print Left Breast", "Print -", "Print:"
 }
 
+// Garment colour breakdown of the PRINTED items only. A garment line has a
+// Colour option (and isn't a Print/Embroidery charge row); we count it when its
+// description indicates printing ("...PRINTED...", "Add ... Print", etc.).
+// Returns [{ colour, qty }] summed per colour.
+export function extractPrintedGarments(rows) {
+  const list = Array.isArray(rows) ? rows : Object.values(rows || {});
+  const byColour = new Map();
+  for (const row of list) {
+    const opts = row.productOptions || {};
+    const colour = opts.Colour || opts.Color;
+    if (!colour) continue;                                  // not a garment (charge rows have no Colour)
+    if ("Print Position" in opts || "Embroidery Position" in opts || "Location" in opts) continue;
+    const name = String(row.productName || "");
+    if (!/\bprint/i.test(name)) continue;                   // only printed garments
+    const qty = Math.round(Number(row.quantity?.magnitude ?? row.quantityMagnitude ?? 0)) || 0;
+    if (!qty) continue;
+    byColour.set(colour, (byColour.get(colour) || 0) + qty);
+  }
+  return [...byColour.entries()].map(([colour, qty]) => ({ colour, qty }));
+}
+
 // Extract customer-uploaded logo URLs (website orders embed them in a garment
 // row's text as "Upload Logo - <url>" / downloadCustomOption links).
 export function extractLogoUrls(rows) {
