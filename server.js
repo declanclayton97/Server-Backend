@@ -7301,6 +7301,131 @@ async function maybeSendAutoReply(peer) {
   }
 }
 
+// Send a free-typed WhatsApp text to a customer (only valid inside the 24h
+// service window opened by their inbound message). Records it as an outbound
+// 'text' so the generic auto-reply cooldown also suppresses the proof-only
+// message during an active conversation. Returns the wa message id or null.
+async function sendWhatsAppText(peer, body, msgType = "text") {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token || !phoneNumberId || !peer || !body) return null;
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  try {
+    const gRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", to: peer, type: "text", text: { body } }),
+    });
+    const data = await gRes.json().catch(() => ({}));
+    if (!gRes.ok) { console.error("[whatsapp/text] Graph error:", JSON.stringify(data?.error || data)); return null; }
+    const messageId = data?.messages?.[0]?.id || null;
+    await recordWhatsAppMessage({ waMessageId: messageId, direction: "out", peerNumber: peer, body, msgType, status: "sent" });
+    return messageId;
+  } catch (err) {
+    console.error("[whatsapp/text] send failed:", err.message);
+    return null;
+  }
+}
+
+// Classify a reply to the cross-sell offer. Button titles are definitive; free
+// text is matched so a customer who types "yes please" instead of tapping the
+// button is still understood.
+function classifyCrossSellReply(text) {
+  const t = (text || "").trim().toLowerCase();
+  if (!t) return "other";
+  if (t === "yes, add it") return "yes";
+  if (t === "no thanks") return "no";
+  if (/\b(yes|yeah|yep|yup|yup|sure|ok|okay|please do|go on|go ahead|add it|add one|i'?ll take|sounds good|definitely|love it)\b/.test(t)) return "yes";
+  if (/\b(no|nah|nope|not interested|no thanks|don'?t|do not|leave it)\b/.test(t)) return "no";
+  return "other";
+}
+
+const DEFAULT_CROSSSELL_REPLY =
+  "Great! 🙌 What size, colour and quantity would you like? A member of the team " +
+  "will get it added to your order.";
+
+// Handle an inbound message as a reply to a recent cross-sell offer. Returns
+// true if it was a cross-sell reply (so the generic proof-only auto-reply is
+// suppressed). YES → free-typed reply to the customer + notify sales. NO → just
+// logged. Anything else during an open offer → notify sales so a human handles.
+async function handleCrossSellReply(peer, text, contactName) {
+  if (!useDatabase || !peer) return false;
+  let send;
+  try {
+    const r = await pool.query(
+      `SELECT * FROM crosssell_sends
+        WHERE customer_phone = $1 AND response IS NULL
+          AND sent_at > NOW() - INTERVAL '7 days'
+        ORDER BY sent_at DESC LIMIT 1`,
+      [peer]
+    );
+    send = r.rows[0];
+  } catch (err) {
+    console.error("[crosssell/reply] lookup failed:", err.message);
+    return false;
+  }
+  if (!send) return false; // no pending offer → not a cross-sell reply
+
+  const verdict = classifyCrossSellReply(text); // 'yes' | 'no' | 'other'
+  try {
+    await pool.query(
+      `UPDATE crosssell_sends SET response = $1, responded_at = NOW() WHERE id = $2`,
+      [verdict, send.id]
+    );
+  } catch (err) { console.error("[crosssell/reply] update failed:", err.message); }
+
+  if (verdict === "yes" && process.env.CROSSSELL_AUTO_REPLY_DISABLED !== "1") {
+    const body = process.env.CROSSSELL_REPLY_TEXT || DEFAULT_CROSSSELL_REPLY;
+    await sendWhatsAppText(peer, body, "crosssell_reply");
+  }
+  // Notify sales on a yes, or on an unclear first reply so a human follows up.
+  // A clear "no" is just logged.
+  if (verdict === "yes" || verdict === "other") {
+    notifyCrossSellReply(send, contactName, text, verdict).catch((e) =>
+      console.error("[crosssell/reply] notify failed:", e.message)
+    );
+  }
+  console.log(`[crosssell/reply] ${peer} → ${verdict} (order ${send.order_number || "?"})`);
+  return true;
+}
+
+// Email sales when a customer responds to a cross-sell offer (yes, or an
+// unclear reply). They confirm size/colour/qty with the customer and add it to
+// Brightpearl manually.
+async function notifyCrossSellReply(send, contactName, rawText, verdict) {
+  if (!process.env.SMTP_PASS) { console.warn("[crosssell/reply] SMTP_PASS unset — sales not emailed"); return; }
+  const to = process.env.CROSSSELL_NOTIFY_EMAIL || process.env.PROMO_OFFER_NOTIFY_EMAIL || "sales@tuffshop.co.uk";
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
+    port: parseInt(process.env.SMTP_PORT || "2525", 10),
+    secure: false,
+    auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
+  });
+  const name = contactName || "Customer";
+  const isYes = verdict === "yes";
+  const item = [send.companion_name, send.companion_sku && `(${send.companion_sku})`].filter(Boolean).join(" ");
+  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
+    <h2 style="margin:0 0 12px">WhatsApp cross-sell — ${isYes ? "customer said YES 🙌" : "customer replied — needs a look 👀"}</h2>
+    <p>${isYes
+      ? `<strong>${name}</strong> wants to add the offered item to their order. Confirm size, colour and quantity, then add it in Brightpearl.`
+      : `<strong>${name}</strong> replied to the cross-sell offer but it wasn't a clear yes/no. Take a look and follow up.`}</p>
+    <table style="border-collapse:collapse;font-size:14px">
+      <tr><td style="padding:3px 10px 3px 0;color:#666">Order</td><td><strong>#${send.order_number || "—"}</strong></td></tr>
+      <tr><td style="padding:3px 10px 3px 0;color:#666">Phone</td><td><a href="https://wa.me/${(send.customer_phone || "").replace(/[^\d]/g, "")}">${send.customer_phone || "—"}</a></td></tr>
+      <tr><td style="padding:3px 10px 3px 0;color:#666">Offered item</td><td>${item || "—"}</td></tr>
+      <tr><td style="padding:3px 10px 3px 0;color:#666">Their reply</td><td>${(rawText || "").replace(/</g, "&lt;")}</td></tr>
+    </table>
+    ${send.mockup_url ? `<p style="margin-top:12px"><img src="${send.mockup_url}" alt="mockup" style="max-width:280px;border:1px solid #e5e7eb;border-radius:6px"></p>` : ""}
+  </div>`;
+  await transporter.sendMail({
+    from: "Tuff Shop <ordertracking@tuffshop.co.uk>",
+    to,
+    subject: `WhatsApp cross-sell: ${name} ${isYes ? "said YES" : "replied"} (order #${send.order_number || "?"})`,
+    html,
+  });
+  console.log(`[crosssell/reply] sales notified at ${to}`);
+}
+
 // GET webhook — Meta's one-time verification handshake. Echoes
 // hub.challenge only when the verify token matches.
 app.get("/api/whatsapp/webhook", (req, res) => {
@@ -7362,10 +7487,12 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             raw: { message: m, contactName: nameByWaId[peer] || null },
           });
           console.log(`[whatsapp/webhook] inbound from ${peer}: ${text?.slice(0, 80)}`);
-          // Fire-and-forget auto-reply (rate-limited inside the helper).
-          maybeSendAutoReply(peer).catch((err) =>
-            console.error("[whatsapp/auto-reply] unhandled:", err.message)
-          );
+          // If this is a reply to a cross-sell offer, handle it (auto-reply +
+          // notify sales) and skip the generic proof-only auto-reply. Otherwise
+          // fall back to the rate-limited generic auto-reply.
+          handleCrossSellReply(peer, text, nameByWaId[peer] || null)
+            .then((handled) => { if (!handled) return maybeSendAutoReply(peer); })
+            .catch((err) => console.error("[whatsapp/reply] unhandled:", err.message));
         }
 
         // Delivery-status updates for our outbound messages
