@@ -5943,6 +5943,80 @@ app.delete('/api/crosssell/rules/:id', async (req, res) => {
   }
 });
 
+// Admin: ask Claude to PROPOSE cross-sell rules (brand + garment → companion).
+// Returns suggestions only — nothing is saved; the operator reviews each, adds
+// the real product code, and clicks Add. Used occasionally, so cost is trivial.
+const CROSSSELL_GARMENT_TYPES = [
+  'softshell', 'bodywarmer', 'hoodie', 'sweatshirt', 'fleece', 'polo', 't-shirt',
+  'jacket', 'trousers', 'shorts', 'shirt', 'beanie', 'cap', 'hi-vis', 'overall', 'apron',
+];
+app.post('/api/crosssell/suggest', async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(501).json({ error: 'ANTHROPIC_API_KEY not configured on the backend' });
+  const context = (req.body?.context || '').toString().slice(0, 300);
+  const count = Math.min(Math.max(parseInt(req.body?.count, 10) || 6, 1), 12);
+  try {
+    let existing = [];
+    if (pool) {
+      const r = await pool.query('SELECT source_brand, source_garment_type, companion_name FROM crosssell_rules');
+      existing = r.rows.map((x) => `${x.source_brand} ${x.source_garment_type} → ${x.companion_name}`);
+    }
+    const prompt =
+      `You propose WhatsApp cross-sell rules for Tuff Shop, a UK workwear & promotional ` +
+      `decorating company. After a customer approves a proof, we offer them ONE complementary ` +
+      `item from the SAME brand with their logo printed/embroidered on it.\n\n` +
+      `Garment-type tokens to use for sourceGarmentType and companionGarmentType (use these exact strings): ` +
+      `${CROSSSELL_GARMENT_TYPES.join(', ')}.\n\n` +
+      `Existing rules — do NOT duplicate these brand+garment pairings:\n` +
+      `${existing.length ? existing.map((e) => `- ${e}`).join('\n') : '(none yet)'}\n\n` +
+      (context ? `Operator focus: ${context}\n\n` : '') +
+      `Propose up to ${count} NEW, sensible rules. Only decoratable garments, companion from the SAME brand, ` +
+      `natural pairings (e.g. polo→sweatshirt, jacket→fleece, t-shirt→hoodie). Favour brands common in UK ` +
+      `workwear (Blaklader, Snickers, Uneek, Portwest, Regatta, Result, Fruit of the Loom, Gildan). ` +
+      `For suggestedCompanionCode give the real style code ONLY if you are confident (e.g. Blaklader 3340 ` +
+      `sweatshirt); otherwise return an empty string — never invent a code. priceEach: indicative GBP per ` +
+      `item if known, else 0. orderedLabel: a natural phrase like "a Blaklader polo". rationale: one short sentence.`;
+
+    const schema = {
+      type: 'object', additionalProperties: false,
+      properties: {
+        suggestions: {
+          type: 'array',
+          items: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              sourceBrand: { type: 'string' },
+              sourceGarmentType: { type: 'string' },
+              companionGarmentType: { type: 'string' },
+              companionName: { type: 'string' },
+              suggestedCompanionCode: { type: 'string' },
+              orderedLabel: { type: 'string' },
+              priceEach: { type: 'number' },
+              rationale: { type: 'string' },
+            },
+            required: ['sourceBrand', 'sourceGarmentType', 'companionGarmentType', 'companionName', 'suggestedCompanionCode', 'orderedLabel', 'priceEach', 'rationale'],
+          },
+        },
+      },
+      required: ['suggestions'],
+    };
+
+    const client = new Anthropic();
+    const msg = await client.messages.create({
+      model: 'claude-opus-4-8',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }],
+      output_config: { format: { type: 'json_schema', schema } },
+    });
+    const text = msg.content?.find((b) => b.type === 'text')?.text || '{}';
+    let parsed = {};
+    try { parsed = JSON.parse(text); } catch { return res.status(502).json({ error: 'Claude returned malformed JSON' }); }
+    res.json({ suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [] });
+  } catch (e) {
+    console.error('[crosssell/suggest] failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ============================================================
 // Promo-item production jigs — templates + EPS generation.
 // ============================================================
