@@ -7717,6 +7717,9 @@ async function handleCrossSellReply(peer, text, contactName) {
 // unclear reply). They confirm size/colour/qty with the customer and add it to
 // Brightpearl manually.
 async function notifyCrossSellReply(send, contactName, rawText, verdict) {
+  // Test sends (logged with order "TEST") must never email sales — they're the
+  // operator trying the flow, not a real customer.
+  if (send?.order_number === "TEST") { console.log("[crosssell/reply] TEST send — sales NOT emailed"); return; }
   if (!process.env.SMTP_PASS) { console.warn("[crosssell/reply] SMTP_PASS unset — sales not emailed"); return; }
   const to = process.env.CROSSSELL_NOTIFY_EMAIL || process.env.PROMO_OFFER_NOTIFY_EMAIL || "sales@tuffshop.co.uk";
   const transporter = nodemailer.createTransport({
