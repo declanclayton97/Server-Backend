@@ -4124,6 +4124,11 @@ const JIG_DEFAULTS = [
       boxWmm: 69.019, boxHmm: 12.085, anchorXmm: 584.85, anchorYmm: 0.733,
       leftDxMm: 37.2, leftDyMm: 28.911, rightRotation: 0, leftRotation: 180,
     } },
+  // Banner: 1000×500mm, logo as large as possible centred inside a 50mm border
+  // (box 900×400 → the logo fits keeping aspect). Border adjustable in the Jig
+  // Templates admin. Takes a raster image OR a vector .eps.
+  { item_key: 'banner', label: 'Banner (1000×500mm)', page_w_mm: 1000, page_h_mm: 500, vector_required: false,
+    placements: [{ xmm: 50, ymm: 50, wmm: 900, hmm: 400, rotation: 0 }], grid: null },
 ];
 
 async function upsertJigDefaults(overwrite) {
