@@ -6004,18 +6004,30 @@ app.get('/api/whatsapp/templates', async (req, res) => {
 app.get('/api/crosssell/mockup', async (req, res) => {
   if (!pool) return res.status(503).send('Database not configured');
   const { sessionId, ruleId, variant } = req.query;
-  if (!sessionId || !ruleId) return res.status(400).send('sessionId and ruleId required');
+  if (!sessionId) return res.status(400).send('sessionId required');
   try {
-    const rr = await pool.query(`SELECT companion_image_url, logo_zone FROM crosssell_rules WHERE id = $1`, [ruleId]);
-    const rule = rr.rows[0];
-    if (!rule?.companion_image_url) return res.status(404).send('Rule or companion image not found');
-
     const sr = await pool.query(
-      `SELECT primary_logo_data, promo_logo_dark_data, promo_logo_light_data FROM approval_sessions WHERE id = $1`,
+      `SELECT primary_logo_data, promo_logo_dark_data, promo_logo_light_data, crosssell_candidate
+         FROM approval_sessions WHERE id = $1`,
       [sessionId]
     );
     const s = sr.rows[0];
     if (!s) return res.status(404).send('Session not found');
+
+    // Prefer the session's stored candidate (companion already assembled in the
+    // ORDERED colour). Fall back to a rule lookup (default colour) for legacy
+    // sessions / explicit ruleId tests.
+    const cand = s.crosssell_candidate || null;
+    let companionUrl = cand?.companionImageUrl || null;
+    let companionUrlFallback = cand?.companionImageUrlDefault || null;
+    let zone = cand?.logoZone || null;
+    if (!companionUrl && ruleId) {
+      const rr = await pool.query(`SELECT companion_image_url, logo_zone FROM crosssell_rules WHERE id = $1`, [ruleId]);
+      const rule = rr.rows[0];
+      if (rule?.companion_image_url) { companionUrl = rule.companion_image_url; zone = rule.logo_zone; }
+    }
+    if (!companionUrl) return res.status(404).send('No companion image (no candidate and no usable rule)');
+
     const logoBuffer =
       variant === 'dark' ? (s.promo_logo_dark_data || s.primary_logo_data)
       : variant === 'light' ? (s.promo_logo_light_data || s.primary_logo_data)
@@ -6023,10 +6035,19 @@ app.get('/api/crosssell/mockup', async (req, res) => {
     if (!logoBuffer) return res.status(404).send('No logo on this session');
 
     const { default: Jimp } = await import('jimp');
-    const companion = await Jimp.read(rule.companion_image_url);
+    // Try the colour-matched image; if that exact colour isn't stocked (our
+    // /image route 500s on a missing code), fall back to the default colour.
+    let companion;
+    try {
+      companion = await Jimp.read(companionUrl);
+    } catch (e) {
+      if (!companionUrlFallback) throw e;
+      console.warn(`[crosssell/mockup] colour image failed (${companionUrl}); using default`);
+      companion = await Jimp.read(companionUrlFallback);
+    }
     const logo = await Jimp.read(Buffer.from(logoBuffer));
     const W = companion.bitmap.width, H = companion.bitmap.height;
-    const z = rule.logo_zone || { x: 50, y: 30, width: 14, height: 10, rotation: 0 };
+    const z = zone || { x: 50, y: 30, width: 14, height: 10, rotation: 0 };
     const zw = (z.width / 100) * W, zh = (z.height / 100) * H;
     const zx = (z.x / 100) * W, zy = (z.y / 100) * H;
     if (z.rotation) logo.rotate(z.rotation); // degrees; zones are usually 0
@@ -6062,23 +6083,31 @@ app.post('/api/crosssell/test-send', async (req, res) => {
   if (!to) return res.status(400).json({ error: 'A valid test phone number is required' });
 
   try {
-    // Pick the rule: the requested one, else the first enabled rule with an image.
+    // If a session with a stored candidate is given, use it (companion already
+    // colour-matched + the matched wording). Otherwise fall back to a rule.
+    let candidate = null;
+    if (sessionId) {
+      const cr = await pool.query(`SELECT crosssell_candidate FROM approval_sessions WHERE id = $1`, [sessionId]);
+      candidate = cr.rows[0]?.crosssell_candidate || null;
+    }
     const rRes = ruleId
       ? await pool.query(`SELECT * FROM crosssell_rules WHERE id = $1`, [ruleId])
+      : candidate?.ruleId
+      ? await pool.query(`SELECT * FROM crosssell_rules WHERE id = $1`, [candidate.ruleId])
       : await pool.query(`SELECT * FROM crosssell_rules WHERE enabled = true AND companion_image_url IS NOT NULL ORDER BY id LIMIT 1`);
     const rule = rRes.rows[0];
-    if (!rule) return res.status(400).json({ error: 'No usable cross-sell rule (need one enabled with a companion image)' });
-    if (!rule.companion_image_url) return res.status(400).json({ error: 'That rule has no companion image URL to use as the header' });
+    if (!rule && !candidate) return res.status(400).json({ error: 'No usable cross-sell rule or session candidate' });
 
     const name = (firstName || 'there').toString().slice(0, 60);
-    const ordered = (rule.ordered_label || 'your order').toString().slice(0, 60);
-    const companion = (rule.companion_name || 'matching item').toString().slice(0, 60);
+    const ordered = (candidate?.orderedLabel || rule?.ordered_label || 'your order').toString().slice(0, 60);
+    const companion = (candidate?.companionName || rule?.companion_name || 'matching item').toString().slice(0, 60);
 
     // Header image: if a session is given, composite that customer's logo onto
-    // the companion (the real mockup). Otherwise the bare companion product.
+    // the (colour-matched) companion via the mockup endpoint. Otherwise the bare
+    // companion product image from the rule.
     const publicBackend = process.env.PUBLIC_BACKEND_URL || 'https://server-backend-1i47.onrender.com';
     const headerImageUrl = sessionId
-      ? `${publicBackend}/api/crosssell/mockup?sessionId=${encodeURIComponent(sessionId)}&ruleId=${rule.id}&variant=${encodeURIComponent(logoVariant || 'primary')}`
+      ? `${publicBackend}/api/crosssell/mockup?sessionId=${encodeURIComponent(sessionId)}${rule ? `&ruleId=${rule.id}` : ''}&variant=${encodeURIComponent(logoVariant || 'primary')}`
       : rule.companion_image_url;
     const templateName = (tplOverride || '').trim() || process.env.CROSSSELL_TEMPLATE_NAME || 'proof_approved_crosssell';
     // The cross-sell template was approved in plain English ("en"), NOT en_GB
@@ -6118,19 +6147,20 @@ app.post('/api/crosssell/test-send', async (req, res) => {
     const renderedBody =
       `Hi ${name}, thanks for approving your proof! As you've ordered ${ordered}, ` +
       `we've popped your logo onto a matching ${companion} reply YES and we'll add it to your order. 🙌`;
+    const ruleIdForLog = rule?.id || candidate?.ruleId || null;
     await recordWhatsAppMessage({
       waMessageId: messageId, direction: 'out', peerNumber: to, body: renderedBody,
       msgType: 'template', status: 'sent', sentBy: 'cross-sell test',
-      raw: { template: templateName, test: true, ruleId: rule.id },
+      raw: { template: templateName, test: true, ruleId: ruleIdForLog },
     });
     await pool.query(
       `INSERT INTO crosssell_sends (order_number, customer_phone, rule_id, companion_sku, companion_name, mockup_url, wa_message_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      ['TEST', to, rule.id, rule.companion_sku || null, rule.companion_name, headerImageUrl, messageId]
+      ['TEST', to, ruleIdForLog, rule?.companion_sku || null, companion, headerImageUrl, messageId]
     );
 
-    console.log(`[crosssell/test-send] sent rule ${rule.id} to ${to} id=${messageId}`);
-    res.json({ success: true, messageId, to, ruleUsed: { id: rule.id, brand: rule.source_brand, garment: rule.source_garment_type, companion: rule.companion_name } });
+    console.log(`[crosssell/test-send] sent to ${to} id=${messageId} (rule ${ruleIdForLog}, colour ${candidate?.orderedColour || 'default'})`);
+    res.json({ success: true, messageId, to, ruleUsed: { id: ruleIdForLog, companion, colour: candidate?.orderedColour || 'default (no candidate)' } });
   } catch (err) {
     console.error('[crosssell/test-send] failed:', err.message);
     res.status(500).json({ error: err.message });
@@ -7368,6 +7398,9 @@ async function initApprovalDB() {
       -- suppressed on this session's approval page. Set per-link by the
       -- operator at proof-send time.
       ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS promo_offer_disabled BOOLEAN NOT NULL DEFAULT FALSE;
+      -- WhatsApp cross-sell candidate computed at proof-send (matched rule +
+      -- companion image assembled in the ORDERED colour + logo zone/variant).
+      ALTER TABLE approval_sessions ADD COLUMN IF NOT EXISTS crosssell_candidate JSONB;
       CREATE TABLE IF NOT EXISTS approval_items (
         id SERIAL PRIMARY KEY,
         session_id UUID REFERENCES approval_sessions(id) ON DELETE CASCADE,
@@ -7398,7 +7431,7 @@ app.post("/api/approval-sessions", async (req, res) => {
       primaryLogoBase64, primaryLogoMime,
       promoLogoDarkBase64, promoLogoDarkMime,
       promoLogoLightBase64, promoLogoLightMime,
-      disablePromoOffer,
+      disablePromoOffer, crossSellCandidate,
     } = req.body;
 
     if (!pdfBase64 || !logoPositions?.length) {
@@ -7416,8 +7449,8 @@ app.post("/api/approval-sessions", async (req, res) => {
           primary_logo_data, primary_logo_mime,
           promo_logo_dark_data, promo_logo_dark_mime,
           promo_logo_light_data, promo_logo_light_mime,
-          promo_offer_disabled)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          promo_offer_disabled, crosssell_candidate)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING id, status, created_at`,
       [
         orderNumber || null, customerName || null, recipientName || null, pdfBuffer,
@@ -7426,6 +7459,7 @@ app.post("/api/approval-sessions", async (req, res) => {
         promoDarkBuffer, promoLogoDarkMime || null,
         promoLightBuffer, promoLogoLightMime || null,
         disablePromoOffer === true,
+        crossSellCandidate ? JSON.stringify(crossSellCandidate) : null,
       ]
     );
 
