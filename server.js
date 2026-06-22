@@ -5997,6 +5997,54 @@ app.get('/api/whatsapp/templates', async (req, res) => {
   }
 });
 
+// Composite a customer's logo onto a companion product image in the rule's
+// logo zone — the real cross-sell mockup. Served at a PUBLIC url so WhatsApp
+// can fetch it as the template's image header. Generated on demand (not stored).
+//   GET /api/crosssell/mockup?sessionId=<uuid>&ruleId=<n>&variant=primary|dark|light
+app.get('/api/crosssell/mockup', async (req, res) => {
+  if (!pool) return res.status(503).send('Database not configured');
+  const { sessionId, ruleId, variant } = req.query;
+  if (!sessionId || !ruleId) return res.status(400).send('sessionId and ruleId required');
+  try {
+    const rr = await pool.query(`SELECT companion_image_url, logo_zone FROM crosssell_rules WHERE id = $1`, [ruleId]);
+    const rule = rr.rows[0];
+    if (!rule?.companion_image_url) return res.status(404).send('Rule or companion image not found');
+
+    const sr = await pool.query(
+      `SELECT primary_logo_data, promo_logo_dark_data, promo_logo_light_data FROM approval_sessions WHERE id = $1`,
+      [sessionId]
+    );
+    const s = sr.rows[0];
+    if (!s) return res.status(404).send('Session not found');
+    const logoBuffer =
+      variant === 'dark' ? (s.promo_logo_dark_data || s.primary_logo_data)
+      : variant === 'light' ? (s.promo_logo_light_data || s.primary_logo_data)
+      : s.primary_logo_data;
+    if (!logoBuffer) return res.status(404).send('No logo on this session');
+
+    const { default: Jimp } = await import('jimp');
+    const companion = await Jimp.read(rule.companion_image_url);
+    const logo = await Jimp.read(Buffer.from(logoBuffer));
+    const W = companion.bitmap.width, H = companion.bitmap.height;
+    const z = rule.logo_zone || { x: 50, y: 30, width: 14, height: 10, rotation: 0 };
+    const zw = (z.width / 100) * W, zh = (z.height / 100) * H;
+    const zx = (z.x / 100) * W, zy = (z.y / 100) * H;
+    if (z.rotation) logo.rotate(z.rotation); // degrees; zones are usually 0
+    const scale = Math.min(zw / logo.bitmap.width, zh / logo.bitmap.height);
+    if (scale > 0 && isFinite(scale)) logo.scale(scale);
+    const lx = Math.round(zx + (zw - logo.bitmap.width) / 2);
+    const ly = Math.round(zy + (zh - logo.bitmap.height) / 2);
+    companion.composite(logo, lx, ly);
+    const out = await companion.getBufferAsync(Jimp.MIME_PNG);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=600');
+    res.send(out);
+  } catch (err) {
+    console.error('[crosssell/mockup] failed:', err.message);
+    res.status(500).send('Mockup generation failed');
+  }
+});
+
 // Admin TEST SEND: fire the real proof_approved_crosssell WhatsApp template to
 // an EXPLICIT test number (never a customer), using a chosen rule's companion
 // image + wording. Confirms the template/image/buttons render on WhatsApp
@@ -6009,7 +6057,7 @@ app.post('/api/crosssell/test-send', async (req, res) => {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   if (!token || !phoneNumberId) return res.status(503).json({ error: 'WhatsApp not configured' });
 
-  const { toPhone, ruleId, firstName, templateName: tplOverride, templateLang: langOverride } = req.body || {};
+  const { toPhone, ruleId, firstName, templateName: tplOverride, templateLang: langOverride, sessionId, logoVariant } = req.body || {};
   const to = normaliseWhatsAppNumber(toPhone);
   if (!to) return res.status(400).json({ error: 'A valid test phone number is required' });
 
@@ -6025,6 +6073,13 @@ app.post('/api/crosssell/test-send', async (req, res) => {
     const name = (firstName || 'there').toString().slice(0, 60);
     const ordered = (rule.ordered_label || 'your order').toString().slice(0, 60);
     const companion = (rule.companion_name || 'matching item').toString().slice(0, 60);
+
+    // Header image: if a session is given, composite that customer's logo onto
+    // the companion (the real mockup). Otherwise the bare companion product.
+    const publicBackend = process.env.PUBLIC_BACKEND_URL || 'https://server-backend-1i47.onrender.com';
+    const headerImageUrl = sessionId
+      ? `${publicBackend}/api/crosssell/mockup?sessionId=${encodeURIComponent(sessionId)}&ruleId=${rule.id}&variant=${encodeURIComponent(logoVariant || 'primary')}`
+      : rule.companion_image_url;
     const templateName = (tplOverride || '').trim() || process.env.CROSSSELL_TEMPLATE_NAME || 'proof_approved_crosssell';
     // The cross-sell template was approved in plain English ("en"), NOT en_GB
     // (unlike the proof template). Confirmed by the user 2026-06-22.
@@ -6042,7 +6097,7 @@ app.post('/api/crosssell/test-send', async (req, res) => {
           name: templateName,
           language: { code: templateLang },
           components: [
-            { type: 'header', parameters: [{ type: 'image', image: { link: rule.companion_image_url } }] },
+            { type: 'header', parameters: [{ type: 'image', image: { link: headerImageUrl } }] },
             { type: 'body', parameters: [
               { type: 'text', text: name },
               { type: 'text', text: ordered },
@@ -6071,7 +6126,7 @@ app.post('/api/crosssell/test-send', async (req, res) => {
     await pool.query(
       `INSERT INTO crosssell_sends (order_number, customer_phone, rule_id, companion_sku, companion_name, mockup_url, wa_message_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      ['TEST', to, rule.id, rule.companion_sku || null, rule.companion_name, rule.companion_image_url, messageId]
+      ['TEST', to, rule.id, rule.companion_sku || null, rule.companion_name, headerImageUrl, messageId]
     );
 
     console.log(`[crosssell/test-send] sent rule ${rule.id} to ${to} id=${messageId}`);
