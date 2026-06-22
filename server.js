@@ -3900,6 +3900,10 @@ async function initializeWhatsAppTables() {
       -- A new inbound message (dismissed_at NULL) makes it resurface.
       ALTER TABLE whatsapp_messages
         ADD COLUMN IF NOT EXISTS dismissed_at TIMESTAMPTZ;
+      -- Graph media id for image/document/video/audio/sticker messages, so the
+      -- chat can fetch the media on demand via the proxy (no media stored).
+      ALTER TABLE whatsapp_messages
+        ADD COLUMN IF NOT EXISTS media_id TEXT;
     `);
     console.log('✅ whatsapp_messages initialized');
   } catch (err) {
@@ -7265,15 +7269,16 @@ async function recordWhatsAppMessage({
   msgType = "text",
   status = null,
   orderNumber = null,
+  mediaId = null,
   raw = null,
 }) {
   if (!useDatabase) return;
   try {
     await pool.query(
       `INSERT INTO whatsapp_messages
-         (wa_message_id, direction, peer_number, body, msg_type, status, order_number, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [waMessageId, direction, peerNumber, body, msgType, status, orderNumber,
+         (wa_message_id, direction, peer_number, body, msg_type, status, order_number, media_id, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [waMessageId, direction, peerNumber, body, msgType, status, orderNumber, mediaId,
        raw ? JSON.stringify(raw) : null]
     );
   } catch (err) {
@@ -7543,6 +7548,11 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
         // Inbound customer messages
         for (const m of value.messages || []) {
           const peer = m.from;
+          // Media messages (image/document/video/audio/sticker) carry a Graph
+          // media id + optional caption. We store the id (not the bytes) and
+          // fetch on demand via /api/whatsapp/media/:id.
+          const media = m.image || m.document || m.video || m.audio || m.sticker || null;
+          const mediaId = media?.id || null;
           let text = null;
           if (m.type === "text") text = m.text?.body || null;
           else if (m.type === "button") text = m.button?.text || null;
@@ -7551,6 +7561,9 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
               m.interactive?.button_reply?.title ||
               m.interactive?.list_reply?.title ||
               null;
+          else if (mediaId)
+            // Use the caption as the bubble text; the image itself renders from media_id.
+            text = media?.caption || media?.filename || null;
           else text = `[${m.type} message]`;
           await recordWhatsAppMessage({
             waMessageId: m.id,
@@ -7558,6 +7571,7 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             peerNumber: peer,
             body: text,
             msgType: m.type || "text",
+            mediaId,
             raw: { message: m, contactName: nameByWaId[peer] || null },
           });
           console.log(`[whatsapp/webhook] inbound from ${peer}: ${text?.slice(0, 80)}`);
@@ -7956,6 +7970,38 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
   }
 });
 
+// Proxy a WhatsApp media object so the chat can show images without storing
+// them. Graph media ids aren't directly fetchable: first resolve the id to a
+// short-lived signed URL, then fetch THAT with the bearer token. Streams the
+// bytes straight back (and lets the browser cache for a few minutes).
+app.get("/api/whatsapp/media/:mediaId", async (req, res) => {
+  const token = process.env.WHATSAPP_TOKEN;
+  if (!token) return res.status(503).send("WhatsApp not configured");
+  const mediaId = req.params.mediaId;
+  if (!/^\d+$/.test(mediaId)) return res.status(400).send("Bad media id");
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  try {
+    const metaRes = await fetch(
+      `https://graph.facebook.com/${graphVersion}/${mediaId}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!metaRes.ok) {
+      return res.status(metaRes.status === 404 ? 404 : 502).send("Media lookup failed");
+    }
+    const meta = await metaRes.json();
+    if (!meta?.url) return res.status(404).send("No media url");
+    const binRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!binRes.ok) return res.status(502).send("Media fetch failed");
+    res.setHeader("Content-Type", meta.mime_type || binRes.headers.get("content-type") || "application/octet-stream");
+    res.setHeader("Cache-Control", "private, max-age=300");
+    const buf = Buffer.from(await binRes.arrayBuffer());
+    res.send(buf);
+  } catch (err) {
+    console.error("[whatsapp/media] error:", err.message);
+    res.status(500).send("Media proxy error");
+  }
+});
+
 // Full message thread for one customer number.
 app.get("/api/whatsapp/conversations/:phone/messages", async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
@@ -7963,7 +8009,7 @@ app.get("/api/whatsapp/conversations/:phone/messages", async (req, res) => {
     const phone = req.params.phone;
     const r = await pool.query(
       `SELECT id, wa_message_id, direction, peer_number, body, msg_type,
-              status, order_number, read_at, created_at
+              status, order_number, read_at, created_at, media_id
          FROM whatsapp_messages
         WHERE peer_number = $1
         ORDER BY created_at ASC`,
