@@ -6026,7 +6026,9 @@ app.post('/api/crosssell/test-send', async (req, res) => {
     const ordered = (rule.ordered_label || 'your order').toString().slice(0, 60);
     const companion = (rule.companion_name || 'matching item').toString().slice(0, 60);
     const templateName = (tplOverride || '').trim() || process.env.CROSSSELL_TEMPLATE_NAME || 'proof_approved_crosssell';
-    const templateLang = (langOverride || '').trim() || process.env.CROSSSELL_TEMPLATE_LANG || 'en_GB';
+    // The cross-sell template was approved in plain English ("en"), NOT en_GB
+    // (unlike the proof template). Confirmed by the user 2026-06-22.
+    const templateLang = (langOverride || '').trim() || process.env.CROSSSELL_TEMPLATE_LANG || 'en';
     const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || 'v21.0';
 
     const gRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
