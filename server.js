@@ -3905,6 +3905,22 @@ async function initializeWhatsAppTables() {
       ALTER TABLE whatsapp_messages
         ADD COLUMN IF NOT EXISTS media_id TEXT;
     `);
+    // Back-fill media_id for media rows received before the column existed —
+    // the id was always kept in the raw webhook payload. Idempotent (only
+    // touches rows still missing it). Media older than ~30d may have expired
+    // on Meta's side, but the id costs nothing to store and recent ones load.
+    await pool.query(`
+      UPDATE whatsapp_messages
+         SET media_id = COALESCE(
+               raw->'message'->'image'->>'id',
+               raw->'message'->'document'->>'id',
+               raw->'message'->'video'->>'id',
+               raw->'message'->'audio'->>'id',
+               raw->'message'->'sticker'->>'id')
+       WHERE media_id IS NULL
+         AND msg_type IN ('image','document','video','audio','sticker')
+         AND raw IS NOT NULL
+    `);
     console.log('✅ whatsapp_messages initialized');
   } catch (err) {
     console.error('❌ Error initializing whatsapp_messages table:', err.message);
