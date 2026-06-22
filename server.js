@@ -5972,6 +5972,31 @@ app.delete('/api/crosssell/rules/:id', async (req, res) => {
   }
 });
 
+// Diagnostic: list the account's WhatsApp message templates (name + language +
+// status) so we can see the EXACT name/locale to use. Needs WHATSAPP_WABA_ID
+// (the WhatsApp Business Account id) — set it on Render once; it's in WhatsApp
+// Manager → Account tools / API setup.
+app.get('/api/whatsapp/templates', async (req, res) => {
+  const token = process.env.WHATSAPP_TOKEN;
+  const wabaId = process.env.WHATSAPP_WABA_ID;
+  if (!token) return res.status(503).json({ error: 'WhatsApp not configured' });
+  if (!wabaId) return res.status(400).json({ error: 'Set WHATSAPP_WABA_ID env (WhatsApp Business Account id) to list templates' });
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || 'v21.0';
+  try {
+    const r = await fetch(
+      `https://graph.facebook.com/${graphVersion}/${wabaId}/message_templates?fields=name,language,status,category&limit=200`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ error: data?.error?.message || `Graph API ${r.status}`, details: data?.error || null });
+    const templates = (data.data || []).map((t) => ({ name: t.name, language: t.language, status: t.status, category: t.category }));
+    res.json({ count: templates.length, templates });
+  } catch (err) {
+    console.error('[whatsapp/templates] failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Admin TEST SEND: fire the real proof_approved_crosssell WhatsApp template to
 // an EXPLICIT test number (never a customer), using a chosen rule's companion
 // image + wording. Confirms the template/image/buttons render on WhatsApp
@@ -5984,7 +6009,7 @@ app.post('/api/crosssell/test-send', async (req, res) => {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   if (!token || !phoneNumberId) return res.status(503).json({ error: 'WhatsApp not configured' });
 
-  const { toPhone, ruleId, firstName } = req.body || {};
+  const { toPhone, ruleId, firstName, templateName: tplOverride, templateLang: langOverride } = req.body || {};
   const to = normaliseWhatsAppNumber(toPhone);
   if (!to) return res.status(400).json({ error: 'A valid test phone number is required' });
 
@@ -6000,8 +6025,8 @@ app.post('/api/crosssell/test-send', async (req, res) => {
     const name = (firstName || 'there').toString().slice(0, 60);
     const ordered = (rule.ordered_label || 'your order').toString().slice(0, 60);
     const companion = (rule.companion_name || 'matching item').toString().slice(0, 60);
-    const templateName = process.env.CROSSSELL_TEMPLATE_NAME || 'proof_approved_crosssell';
-    const templateLang = process.env.CROSSSELL_TEMPLATE_LANG || 'en_GB';
+    const templateName = (tplOverride || '').trim() || process.env.CROSSSELL_TEMPLATE_NAME || 'proof_approved_crosssell';
+    const templateLang = (langOverride || '').trim() || process.env.CROSSSELL_TEMPLATE_LANG || 'en_GB';
     const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || 'v21.0';
 
     const gRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
