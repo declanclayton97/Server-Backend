@@ -5972,6 +5972,89 @@ app.delete('/api/crosssell/rules/:id', async (req, res) => {
   }
 });
 
+// Admin TEST SEND: fire the real proof_approved_crosssell WhatsApp template to
+// an EXPLICIT test number (never a customer), using a chosen rule's companion
+// image + wording. Confirms the template/image/buttons render on WhatsApp
+// before the full auto-send pipeline exists. NOT gated by CROSSSELL_ENABLED —
+// the recipient is explicit. Logs a crosssell_sends row so the "Yes" reply
+// loop can also be tested from the test phone.
+app.post('/api/crosssell/test-send', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token || !phoneNumberId) return res.status(503).json({ error: 'WhatsApp not configured' });
+
+  const { toPhone, ruleId, firstName } = req.body || {};
+  const to = normaliseWhatsAppNumber(toPhone);
+  if (!to) return res.status(400).json({ error: 'A valid test phone number is required' });
+
+  try {
+    // Pick the rule: the requested one, else the first enabled rule with an image.
+    const rRes = ruleId
+      ? await pool.query(`SELECT * FROM crosssell_rules WHERE id = $1`, [ruleId])
+      : await pool.query(`SELECT * FROM crosssell_rules WHERE enabled = true AND companion_image_url IS NOT NULL ORDER BY id LIMIT 1`);
+    const rule = rRes.rows[0];
+    if (!rule) return res.status(400).json({ error: 'No usable cross-sell rule (need one enabled with a companion image)' });
+    if (!rule.companion_image_url) return res.status(400).json({ error: 'That rule has no companion image URL to use as the header' });
+
+    const name = (firstName || 'there').toString().slice(0, 60);
+    const ordered = (rule.ordered_label || 'your order').toString().slice(0, 60);
+    const companion = (rule.companion_name || 'matching item').toString().slice(0, 60);
+    const templateName = process.env.CROSSSELL_TEMPLATE_NAME || 'proof_approved_crosssell';
+    const templateLang = process.env.CROSSSELL_TEMPLATE_LANG || 'en_GB';
+    const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || 'v21.0';
+
+    const gRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: templateLang },
+          components: [
+            { type: 'header', parameters: [{ type: 'image', image: { link: rule.companion_image_url } }] },
+            { type: 'body', parameters: [
+              { type: 'text', text: name },
+              { type: 'text', text: ordered },
+              { type: 'text', text: companion },
+            ] },
+          ],
+        },
+      }),
+    });
+    const data = await gRes.json().catch(() => ({}));
+    if (!gRes.ok) {
+      console.error('[crosssell/test-send] Graph error:', JSON.stringify(data?.error || data));
+      return res.status(502).json({ error: data?.error?.message || `Graph API returned ${gRes.status}`, details: data?.error || null });
+    }
+    const messageId = data?.messages?.[0]?.id || null;
+
+    // Record for visibility in the chat thread + enable the reply-loop test.
+    const renderedBody =
+      `Hi ${name}, thanks for approving your proof! As you've ordered ${ordered}, ` +
+      `we've popped your logo onto a matching ${companion} reply YES and we'll add it to your order. 🙌`;
+    await recordWhatsAppMessage({
+      waMessageId: messageId, direction: 'out', peerNumber: to, body: renderedBody,
+      msgType: 'template', status: 'sent', sentBy: 'cross-sell test',
+      raw: { template: templateName, test: true, ruleId: rule.id },
+    });
+    await pool.query(
+      `INSERT INTO crosssell_sends (order_number, customer_phone, rule_id, companion_sku, companion_name, mockup_url, wa_message_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      ['TEST', to, rule.id, rule.companion_sku || null, rule.companion_name, rule.companion_image_url, messageId]
+    );
+
+    console.log(`[crosssell/test-send] sent rule ${rule.id} to ${to} id=${messageId}`);
+    res.json({ success: true, messageId, to, ruleUsed: { id: rule.id, brand: rule.source_brand, garment: rule.source_garment_type, companion: rule.companion_name } });
+  } catch (err) {
+    console.error('[crosssell/test-send] failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Admin: ask Claude to PROPOSE cross-sell rules (brand + garment → companion).
 // Returns suggestions only — nothing is saved; the operator reviews each, adds
 // the real product code, and clicks Add. Used occasionally, so cost is trivial.
