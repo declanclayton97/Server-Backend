@@ -3904,6 +3904,10 @@ async function initializeWhatsAppTables() {
       -- chat can fetch the media on demand via the proxy (no media stored).
       ALTER TABLE whatsapp_messages
         ADD COLUMN IF NOT EXISTS media_id TEXT;
+      -- Which staff member sent an outbound message (operator identity from the
+      -- app's ?user= param). Null for automated sends (auto-reply, cross-sell).
+      ALTER TABLE whatsapp_messages
+        ADD COLUMN IF NOT EXISTS sent_by TEXT;
     `);
     // Back-fill media_id for media rows received before the column existed —
     // the id was always kept in the raw webhook payload. Idempotent (only
@@ -7345,15 +7349,16 @@ async function recordWhatsAppMessage({
   status = null,
   orderNumber = null,
   mediaId = null,
+  sentBy = null,
   raw = null,
 }) {
   if (!useDatabase) return;
   try {
     await pool.query(
       `INSERT INTO whatsapp_messages
-         (wa_message_id, direction, peer_number, body, msg_type, status, order_number, media_id, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [waMessageId, direction, peerNumber, body, msgType, status, orderNumber, mediaId,
+         (wa_message_id, direction, peer_number, body, msg_type, status, order_number, media_id, sent_by, raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [waMessageId, direction, peerNumber, body, msgType, status, orderNumber, mediaId, sentBy,
        raw ? JSON.stringify(raw) : null]
     );
   } catch (err) {
@@ -7937,7 +7942,7 @@ app.post("/api/whatsapp/send-message", async (req, res) => {
   if (!token || !phoneNumberId) {
     return res.status(503).json({ error: "WhatsApp not configured" });
   }
-  const { phone, body } = req.body || {};
+  const { phone, body, sentBy } = req.body || {};
   const to = normaliseWhatsAppNumber(phone);
   if (!to) return res.status(400).json({ error: "A valid phone number is required" });
   const text = (body || "").toString().trim();
@@ -7983,6 +7988,7 @@ app.post("/api/whatsapp/send-message", async (req, res) => {
       body: text,
       msgType: "text",
       status: "sent",
+      sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
     });
     res.json({ success: true, messageId, to });
   } catch (err) {
@@ -8001,7 +8007,7 @@ app.post("/api/whatsapp/send-image", async (req, res) => {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   if (!token || !phoneNumberId) return res.status(503).json({ error: "WhatsApp not configured" });
 
-  const { phone, imageBase64, mimeType, caption } = req.body || {};
+  const { phone, imageBase64, mimeType, caption, sentBy } = req.body || {};
   const to = normaliseWhatsAppNumber(phone);
   if (!to) return res.status(400).json({ error: "A valid phone number is required" });
   const mime = (mimeType || "").toLowerCase();
@@ -8062,6 +8068,7 @@ app.post("/api/whatsapp/send-image", async (req, res) => {
       msgType: "image",
       status: "sent",
       mediaId,
+      sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
     });
     res.json({ success: true, messageId, to });
   } catch (err) {
@@ -8163,7 +8170,7 @@ app.get("/api/whatsapp/conversations/:phone/messages", async (req, res) => {
     const phone = req.params.phone;
     const r = await pool.query(
       `SELECT id, wa_message_id, direction, peer_number, body, msg_type,
-              status, order_number, read_at, created_at, media_id
+              status, order_number, read_at, created_at, media_id, sent_by
          FROM whatsapp_messages
         WHERE peer_number = $1
         ORDER BY created_at ASC`,
