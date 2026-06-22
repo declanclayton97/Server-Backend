@@ -7991,6 +7991,85 @@ app.post("/api/whatsapp/send-message", async (req, res) => {
   }
 });
 
+// Send an image to a customer (within the 24h service window). The operator
+// uploads the bytes; we upload them to WhatsApp media, send an image message,
+// and record it with the returned media id so the chat can render it back via
+// the media proxy.
+const WA_SEND_IMAGE_TYPES = ["image/jpeg", "image/png"];
+app.post("/api/whatsapp/send-image", async (req, res) => {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token || !phoneNumberId) return res.status(503).json({ error: "WhatsApp not configured" });
+
+  const { phone, imageBase64, mimeType, caption } = req.body || {};
+  const to = normaliseWhatsAppNumber(phone);
+  if (!to) return res.status(400).json({ error: "A valid phone number is required" });
+  const mime = (mimeType || "").toLowerCase();
+  if (!imageBase64 || !WA_SEND_IMAGE_TYPES.includes(mime)) {
+    return res.status(400).json({ error: "A JPEG or PNG image is required" });
+  }
+  const buf = Buffer.from(imageBase64, "base64");
+  if (!buf.length) return res.status(400).json({ error: "Empty image" });
+  if (buf.length > 5 * 1024 * 1024) return res.status(413).json({ error: "Image too large (max 5MB)" });
+
+  const win = await whatsAppWindow(to);
+  if (!win.open) {
+    return res.status(409).json({ error: "The 24-hour reply window has closed for this customer.", windowClosed: true });
+  }
+
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  const cap = (caption || "").toString().trim().slice(0, 1024);
+  try {
+    // 1) Upload the media to get a reusable id.
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("type", mime);
+    form.append("file", new Blob([buf], { type: mime }), mime === "image/png" ? "image.png" : "image.jpg");
+    const upRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/media`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const upData = await upRes.json().catch(() => ({}));
+    if (!upRes.ok || !upData?.id) {
+      console.error("[whatsapp/send-image] upload error:", JSON.stringify(upData?.error || upData));
+      return res.status(502).json({ error: upData?.error?.message || `Media upload failed (${upRes.status})` });
+    }
+    const mediaId = upData.id;
+
+    // 2) Send the image message referencing the uploaded media.
+    const gRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "image",
+        image: { id: mediaId, ...(cap ? { caption: cap } : {}) },
+      }),
+    });
+    const data = await gRes.json().catch(() => ({}));
+    if (!gRes.ok) {
+      console.error("[whatsapp/send-image] Graph error:", JSON.stringify(data?.error || data));
+      return res.status(502).json({ error: data?.error?.message || `Graph API returned ${gRes.status}` });
+    }
+    const messageId = data?.messages?.[0]?.id || null;
+    await recordWhatsAppMessage({
+      waMessageId: messageId,
+      direction: "out",
+      peerNumber: to,
+      body: cap || null,
+      msgType: "image",
+      status: "sent",
+      mediaId,
+    });
+    res.json({ success: true, messageId, to });
+  } catch (err) {
+    console.error("[whatsapp/send-image] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Conversation list — one row per customer number, newest activity first.
 app.get("/api/whatsapp/conversations", async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
