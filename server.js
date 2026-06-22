@@ -6675,6 +6675,57 @@ app.get('/api/promo-offer/uptake', async (req, res) => {
   }
 });
 
+// GET /api/promo-offer/send-log?days=14 — for each proof sent in the window,
+// whether it carried the promo offer (offer enabled) or not (operator ticked
+// "disable promo offer"), plus whether the customer actually bought (uptake).
+// Lets the operator see the reach/hit rate of the up-sell.
+app.get('/api/promo-offer/send-log', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 90);
+    const r = await pool.query(
+      `SELECT s.id, s.order_number, s.customer_name, s.created_at, s.status,
+              s.promo_offer_disabled,
+              EXISTS (SELECT 1 FROM promo_offer_uptake u WHERE u.approval_session_id = s.id) AS converted
+         FROM approval_sessions s
+        WHERE s.created_at > NOW() - ($1 || ' days')::interval
+        ORDER BY s.created_at DESC`,
+      [String(days)]
+    );
+    const rows = r.rows;
+    const total = rows.length;
+    const sent = rows.filter((x) => !x.promo_offer_disabled).length;
+    const converted = rows.filter((x) => x.converted).length;
+    const approved = rows.filter((x) => x.status === 'approved').length;
+    const pct = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : 0);
+    res.json({
+      days,
+      generatedAt: new Date().toISOString(),
+      summary: {
+        total,
+        sent,
+        notSent: total - sent,
+        sentRatePct: pct(sent, total),     // % of proofs that carried the offer
+        approved,
+        converted,                          // sent AND customer bought a promo item
+        convertRateOfSentPct: pct(converted, sent),
+      },
+      jobs: rows.map((x) => ({
+        sessionId: x.id,
+        orderNumber: x.order_number,
+        customerName: x.customer_name,
+        createdAt: x.created_at,
+        status: x.status,
+        sent: !x.promo_offer_disabled,
+        converted: !!x.converted,
+      })),
+    });
+  } catch (err) {
+    console.error('[promo-offer] send-log failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/promo-offer/uptake/:id — remove a single uptake row (e.g. a
 // test submission added during setup). Internal admin tool; no undo.
 app.delete('/api/promo-offer/uptake/:id', async (req, res) => {
