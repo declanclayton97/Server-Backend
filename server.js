@@ -6117,8 +6117,11 @@ app.post('/api/jig/generate', async (req, res) => {
     if (t.vector_required && !uploadIsVector) {
       return res.status(422).json({ error: `'${itemKey}' needs a vector .eps logo` });
     }
+    // The white substrate box (item-sized) belongs on single-item jigs
+    // (notepad/coaster/mug) but NOT the pen bed, whose "page" is the whole jig.
+    const isPenBed = t.grid && t.grid.kind === 'pen';
     const eps = uploadIsVector
-      ? tileVectorEps({ vectorBuffer: fileBuffer, pageWmm, pageHmm, placements, logoAdjust })
+      ? tileVectorEps({ vectorBuffer: fileBuffer, pageWmm, pageHmm, placements, logoAdjust, drawBackground: !isPenBed })
       : await generateJigEps({ logoBuffer: fileBuffer, pageWmm, pageHmm, placements });
     res.setHeader('Content-Type', 'application/postscript');
     res.setHeader('Content-Disposition', `attachment; filename="jig-${itemKey}.eps"`);

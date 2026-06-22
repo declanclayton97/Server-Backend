@@ -124,7 +124,7 @@ const EPS_PROLOGUE = `/BeginEPSF {
  * Tile an uploaded vector EPS logo across the jig placements as true vector EPS.
  * @param {Buffer} vectorBuffer  the operator's vector logo (.eps)
  */
-export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements, logoAdjust }) {
+export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements, logoAdjust, drawBackground = true }) {
   const { text, bbox } = parseEps(vectorBuffer);
   if (!bbox) throw new Error("Uploaded EPS has no BoundingBox — is it a valid vector EPS?");
   const bw = (bbox.urx - bbox.llx) || 1, bh = (bbox.ury - bbox.lly) || 1;
@@ -151,6 +151,15 @@ export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements, logo
     `%%HiResBoundingBox: 0 0 ${pageWpt.toFixed(4)} ${pageHpt.toFixed(4)}\n` +
     `%%LanguageLevel: 2\n%%EndComments\n` +
     EPS_PROLOGUE;
+
+  // White substrate box the size of the page — the item's printable area, so
+  // the operator/printer can see the item size (white = no ink, just the
+  // registration of the item, e.g. A5 notepad, coaster). Matches the raster
+  // path (generateJigEps). Skipped for the pen jig (drawBackground=false): its
+  // page is the whole 710×510 bed, not a single white item.
+  if (drawBackground) {
+    out += `gsave 1 1 1 setrgbcolor 0 0 ${pageWpt.toFixed(3)} ${pageHpt.toFixed(3)} rectfill grestore\n`;
+  }
 
   // Draw the logo by re-embedding its EPS bytes INLINE at each placement, run via
   // SubFileDecode+exec. Two compact alternatives were rejected: wrapping the
