@@ -4102,6 +4102,9 @@ async function initializeCrossSellTables() {
       -- the sales notification is held until then so it's ONE complete email.
       ALTER TABLE crosssell_sends ADD COLUMN IF NOT EXISTS details_text TEXT;
       ALTER TABLE crosssell_sends ADD COLUMN IF NOT EXISTS details_at TIMESTAMPTZ;
+      -- When the sales notification was sent (combined email, or the safety-net
+      -- "said yes, no details yet" email). Stops duplicate / repeated emails.
+      ALTER TABLE crosssell_sends ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
     `);
     console.log('✅ crosssell tables initialized');
   } catch (err) {
@@ -7777,7 +7780,7 @@ async function handleCrossSellReply(peer, text, contactName) {
 
   try {
     await pool.query(
-      `UPDATE crosssell_sends SET details_text = $1, details_at = NOW() WHERE id = $2`,
+      `UPDATE crosssell_sends SET details_text = $1, details_at = NOW(), notified_at = NOW() WHERE id = $2`,
       [text || null, pendingDetails.id]
     );
   } catch (err) { console.error("[crosssell/reply] details update failed:", err.message); }
@@ -7785,9 +7788,44 @@ async function handleCrossSellReply(peer, text, contactName) {
   notifyCrossSellReply(pendingDetails, contactName, text, "yes").catch((e) =>
     console.error("[crosssell/reply] notify failed:", e.message)
   );
+  // Acknowledge the customer so they know it's in hand.
+  if (process.env.CROSSSELL_AUTO_REPLY_DISABLED !== "1") {
+    const ack = process.env.CROSSSELL_ACK_TEXT ||
+      "Thanks! 🙌 We'll get that added to your order and confirm shortly.";
+    await sendWhatsAppText(peer, ack, "crosssell_reply");
+  }
   console.log(`[crosssell/reply] ${peer} → size details captured (order ${pendingDetails.order_number || "?"})`);
   return true;
 }
+
+// Safety net: a customer who said YES but never sent their size/colour/qty.
+// After a grace period (default 2h), email anyway so the lead isn't lost.
+// Runs periodically; each row is emailed at most once (notified_at).
+async function sweepCrossSellAwaitingDetails() {
+  if (!useDatabase) return;
+  const graceMin = Number(process.env.CROSSSELL_DETAILS_GRACE_MIN) || 120;
+  try {
+    const r = await pool.query(
+      `SELECT * FROM crosssell_sends
+        WHERE response = 'yes' AND details_at IS NULL AND notified_at IS NULL
+          AND responded_at < NOW() - ($1 || ' minutes')::interval
+        ORDER BY responded_at ASC LIMIT 20`,
+      [String(graceMin)]
+    );
+    for (const send of r.rows) {
+      try {
+        await pool.query(`UPDATE crosssell_sends SET notified_at = NOW() WHERE id = $1`, [send.id]);
+        await notifyCrossSellReply(send, null, null, "yes_nodetails");
+        console.log(`[crosssell/sweep] chased order ${send.order_number || "?"} (yes, no details after ${graceMin}m)`);
+      } catch (e) {
+        console.error("[crosssell/sweep] row failed:", e.message);
+      }
+    }
+  } catch (err) {
+    console.error("[crosssell/sweep] query failed:", err.message);
+  }
+}
+setInterval(() => { sweepCrossSellAwaitingDetails().catch(() => {}); }, 15 * 60 * 1000);
 
 // Email sales when a customer responds to a cross-sell offer (yes, or an
 // unclear reply). They confirm size/colour/qty with the customer and add it to
@@ -7808,15 +7846,22 @@ async function notifyCrossSellReply(send, contactName, rawText, verdict) {
   });
   const name = contactName || "Customer";
   const isYes = verdict === "yes";
+  const isAwaiting = verdict === "yes_nodetails";
   const item = [send.companion_name, send.companion_sku && `(${send.companion_sku})`].filter(Boolean).join(" ");
   const detailsRow = isYes
     ? `<tr><td style="padding:3px 10px 3px 0;color:#666">Size / colour / qty</td><td><strong>${(rawText || "—").replace(/</g, "&lt;")}</strong></td></tr>`
+    : isAwaiting
+    ? `<tr><td style="padding:3px 10px 3px 0;color:#666">Size / colour / qty</td><td><em>not sent yet — chase the customer</em></td></tr>`
     : `<tr><td style="padding:3px 10px 3px 0;color:#666">Their reply</td><td>${(rawText || "").replace(/</g, "&lt;")}</td></tr>`;
+  const heading = isAwaiting ? "customer said YES — awaiting sizes ⏳" : isYes ? "customer said YES 🙌" : "customer replied — needs a look 👀";
+  const intro = isAwaiting
+    ? `<strong>${name}</strong> said YES but hasn't sent their size/colour/qty. Give them a nudge to confirm, then add it in Brightpearl.`
+    : isYes
+    ? `<strong>${name}</strong> said YES and sent their details below — add it to their Brightpearl order.`
+    : `<strong>${name}</strong> replied to the cross-sell offer but it wasn't a clear yes/no. Take a look and follow up.`;
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
-    <h2 style="margin:0 0 12px">WhatsApp cross-sell — ${isYes ? "customer said YES 🙌" : "customer replied — needs a look 👀"}</h2>
-    <p>${isYes
-      ? `<strong>${name}</strong> said YES and sent their details below — add it to their Brightpearl order.`
-      : `<strong>${name}</strong> replied to the cross-sell offer but it wasn't a clear yes/no. Take a look and follow up.`}</p>
+    <h2 style="margin:0 0 12px">WhatsApp cross-sell — ${heading}</h2>
+    <p>${intro}</p>
     <table style="border-collapse:collapse;font-size:14px">
       <tr><td style="padding:3px 10px 3px 0;color:#666">Order</td><td><strong>#${send.order_number || "—"}</strong></td></tr>
       <tr><td style="padding:3px 10px 3px 0;color:#666">Phone</td><td><a href="https://wa.me/${(send.customer_phone || "").replace(/[^\d]/g, "")}">${send.customer_phone || "—"}</a></td></tr>
@@ -7828,7 +7873,7 @@ async function notifyCrossSellReply(send, contactName, rawText, verdict) {
   await transporter.sendMail({
     from: "Tuff Shop <ordertracking@tuffshop.co.uk>",
     to,
-    subject: `WhatsApp cross-sell: ${name} ${isYes ? "said YES" : "replied"} (order #${send.order_number || "?"})`,
+    subject: `WhatsApp cross-sell: ${name} ${isAwaiting ? "said YES — awaiting sizes" : isYes ? "said YES" : "replied"} (order #${send.order_number || "?"})`,
     html,
   });
   console.log(`[crosssell/reply] sales notified at ${to}`);
