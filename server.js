@@ -7847,36 +7847,37 @@ async function notifyCrossSellReply(send, contactName, rawText, verdict) {
   const name = contactName || "Customer";
   const isYes = verdict === "yes";
   const isAwaiting = verdict === "yes_nodetails";
-  const item = [send.companion_name, send.companion_sku && `(${send.companion_sku})`].filter(Boolean).join(" ");
-  const detailsRow = isYes
-    ? `<tr><td style="padding:3px 10px 3px 0;color:#666">Size / colour / qty</td><td><strong>${(rawText || "—").replace(/</g, "&lt;")}</strong></td></tr>`
-    : isAwaiting
-    ? `<tr><td style="padding:3px 10px 3px 0;color:#666">Size / colour / qty</td><td><em>not sent yet — chase the customer</em></td></tr>`
-    : `<tr><td style="padding:3px 10px 3px 0;color:#666">Their reply</td><td>${(rawText || "").replace(/</g, "&lt;")}</td></tr>`;
-  const heading = isAwaiting ? "customer said YES — awaiting sizes ⏳" : isYes ? "customer said YES 🙌" : "customer replied — needs a look 👀";
-  const intro = isAwaiting
-    ? `<strong>${name}</strong> said YES but hasn't sent their size/colour/qty. Give them a nudge to confirm, then add it in Brightpearl.`
+  const orderNo = send.order_number || "—";
+  const item = [send.companion_name, send.companion_sku && `(${send.companion_sku})`].filter(Boolean).join(" ") || "—";
+  const sizes = isAwaiting
+    ? "<em>not sent yet — chase the customer</em>"
     : isYes
-    ? `<strong>${name}</strong> said YES and sent their details below — add it to their Brightpearl order.`
-    : `<strong>${name}</strong> replied to the cross-sell offer but it wasn't a clear yes/no. Take a look and follow up.`;
+    ? `<strong>${(rawText || "—").replace(/</g, "&lt;")}</strong>`
+    : (rawText || "—").replace(/</g, "&lt;");
+  const intro = isAwaiting
+    ? `<strong>${name}</strong> (order ${orderNo}) would like to add some items to their order but hasn't sent their sizes yet — please give them a nudge.`
+    : isYes
+    ? `<strong>${name}</strong> (order ${orderNo}) would like to add some items to their order, see the information below.`
+    : `<strong>${name}</strong> (order ${orderNo}) replied to an add-on offer but it wasn't a clear yes/no — please take a look.`;
+  const td = 'style="padding:4px 12px 4px 0;color:#666;vertical-align:top"';
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
-    <h2 style="margin:0 0 12px">WhatsApp cross-sell — ${heading}</h2>
     <p>${intro}</p>
-    <table style="border-collapse:collapse;font-size:14px">
-      <tr><td style="padding:3px 10px 3px 0;color:#666">Order</td><td><strong>#${send.order_number || "—"}</strong></td></tr>
-      <tr><td style="padding:3px 10px 3px 0;color:#666">Phone</td><td><a href="https://wa.me/${(send.customer_phone || "").replace(/[^\d]/g, "")}">${send.customer_phone || "—"}</a></td></tr>
-      <tr><td style="padding:3px 10px 3px 0;color:#666">Offered item</td><td>${item || "—"}</td></tr>
-      ${detailsRow}
+    <table style="border-collapse:collapse;font-size:14px;margin-top:8px">
+      <tr><td ${td}>Customer Name</td><td><strong>${name}</strong></td></tr>
+      <tr><td ${td}>Order Number</td><td><strong>${orderNo}</strong></td></tr>
+      <tr><td ${td}>Phone</td><td><a href="https://wa.me/${(send.customer_phone || "").replace(/[^\d]/g, "")}">${send.customer_phone || "—"}</a></td></tr>
+      <tr><td ${td}>Item</td><td>${item}</td></tr>
+      <tr><td ${td}>Size / colour / qty</td><td>${sizes}</td></tr>
     </table>
     ${send.mockup_url ? `<p style="margin-top:12px"><img src="${send.mockup_url}" alt="mockup" style="max-width:280px;border:1px solid #e5e7eb;border-radius:6px"></p>` : ""}
   </div>`;
   await transporter.sendMail({
     from: "Tuff Shop <ordertracking@tuffshop.co.uk>",
     to,
-    subject: `WhatsApp cross-sell: ${name} ${isAwaiting ? "said YES — awaiting sizes" : isYes ? "said YES" : "replied"} (order #${send.order_number || "?"})`,
+    subject: `Customer Order ${orderNo} Add On${isAwaiting ? " — awaiting sizes" : ""}`,
     html,
   });
-  console.log(`[crosssell/reply] sales notified at ${to}`);
+  console.log(`[crosssell/reply] notified ${to} (order ${orderNo})`);
 }
 
 // GET webhook — Meta's one-time verification handshake. Echoes
