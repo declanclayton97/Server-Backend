@@ -7791,7 +7791,7 @@ async function handleCrossSellReply(peer, text, contactName) {
   // Acknowledge the customer so they know it's in hand.
   if (process.env.CROSSSELL_AUTO_REPLY_DISABLED !== "1") {
     const ack = process.env.CROSSSELL_ACK_TEXT ||
-      "Thanks! 🙌 We'll get that added to your order and confirm shortly.";
+      "Thanks! 👍 We'll get that added to your order and confirm shortly.";
     await sendWhatsAppText(peer, ack, "crosssell_reply");
   }
   console.log(`[crosssell/reply] ${peer} → size details captured (order ${pendingDetails.order_number || "?"})`);
