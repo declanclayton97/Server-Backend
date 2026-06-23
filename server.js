@@ -4105,6 +4105,11 @@ async function initializeCrossSellTables() {
       -- When the sales notification was sent (combined email, or the safety-net
       -- "said yes, no details yet" email). Stops duplicate / repeated emails.
       ALTER TABLE crosssell_sends ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
+      -- Mark all pre-existing answered rows as already-notified so the new
+      -- safety-net sweep can't fire for stale rows from before this flow existed.
+      UPDATE crosssell_sends SET notified_at = COALESCE(responded_at, sent_at, NOW())
+        WHERE notified_at IS NULL AND response IS NOT NULL
+          AND responded_at < NOW() - INTERVAL '6 hours';
     `);
     console.log('✅ crosssell tables initialized');
   } catch (err) {
@@ -7809,6 +7814,7 @@ async function sweepCrossSellAwaitingDetails() {
       `SELECT * FROM crosssell_sends
         WHERE response = 'yes' AND details_at IS NULL AND notified_at IS NULL
           AND responded_at < NOW() - ($1 || ' minutes')::interval
+          AND responded_at > NOW() - INTERVAL '24 hours'
         ORDER BY responded_at ASC LIMIT 20`,
       [String(graceMin)]
     );
