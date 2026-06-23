@@ -7751,11 +7751,13 @@ async function handleCrossSellReply(peer, text, contactName) {
 // unclear reply). They confirm size/colour/qty with the customer and add it to
 // Brightpearl manually.
 async function notifyCrossSellReply(send, contactName, rawText, verdict) {
-  // Test sends (logged with order "TEST") must never email sales — they're the
-  // operator trying the flow, not a real customer.
-  if (send?.order_number === "TEST") { console.log("[crosssell/reply] TEST send — sales NOT emailed"); return; }
-  if (!process.env.SMTP_PASS) { console.warn("[crosssell/reply] SMTP_PASS unset — sales not emailed"); return; }
-  const to = process.env.CROSSSELL_NOTIFY_EMAIL || process.env.PROMO_OFFER_NOTIFY_EMAIL || "sales@tuffshop.co.uk";
+  if (!process.env.SMTP_PASS) { console.warn("[crosssell/reply] SMTP_PASS unset — not emailed"); return; }
+  // Test sends (logged with order "TEST") go to the tester so real sales never
+  // see test traffic; real sends go to the configured sales address.
+  const isTest = send?.order_number === "TEST";
+  const to = isTest
+    ? (process.env.CROSSSELL_TEST_NOTIFY_EMAIL || "dec@tuffshop.co.uk")
+    : (process.env.CROSSSELL_NOTIFY_EMAIL || process.env.PROMO_OFFER_NOTIFY_EMAIL || "sales@tuffshop.co.uk");
   const transporter = nodemailer.createTransport({
     host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
     port: parseInt(process.env.SMTP_PORT || "2525", 10),
