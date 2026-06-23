@@ -6009,6 +6009,25 @@ app.get('/api/whatsapp/templates', async (req, res) => {
   }
 });
 
+// Build a circular "from £X each" price badge (brand yellow, black text) to
+// composite onto the cross-sell mockup — mirrors the admin PriceBadge.
+async function buildCrossSellPriceBadge(Jimp, price, diameter) {
+  const D = Math.max(80, Math.round(diameter));
+  const badge = new Jimp(D, D, 0xeab308ff); // brand yellow
+  badge.circle();                            // round mask (transparent corners)
+  const val = Number(price);
+  const display = Number.isInteger(val) ? String(val) : val.toFixed(2);
+  const fontConst = D >= 320 ? Jimp.FONT_SANS_64_BLACK : D >= 160 ? Jimp.FONT_SANS_32_BLACK : Jimp.FONT_SANS_16_BLACK;
+  const font = await Jimp.loadFont(fontConst);
+  const box = Math.round(D * 0.8);
+  badge.print(
+    font, Math.round((D - box) / 2), 0,
+    { text: `from £${display} each`, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER, alignmentY: Jimp.VERTICAL_ALIGN_MIDDLE },
+    box, D
+  );
+  return badge;
+}
+
 // Composite a customer's logo onto a companion product image in the rule's
 // logo zone — the real cross-sell mockup. Served at a PUBLIC url so WhatsApp
 // can fetch it as the template's image header. Generated on demand (not stored).
@@ -6033,10 +6052,11 @@ app.get('/api/crosssell/mockup', async (req, res) => {
     let companionUrl = cand?.companionImageUrl || null;
     let companionUrlFallback = cand?.companionImageUrlDefault || null;
     let zone = cand?.logoZone || null;
+    let price = cand?.priceEach ?? null;
     if (!companionUrl && ruleId) {
-      const rr = await pool.query(`SELECT companion_image_url, logo_zone FROM crosssell_rules WHERE id = $1`, [ruleId]);
+      const rr = await pool.query(`SELECT companion_image_url, logo_zone, price_each FROM crosssell_rules WHERE id = $1`, [ruleId]);
       const rule = rr.rows[0];
-      if (rule?.companion_image_url) { companionUrl = rule.companion_image_url; zone = rule.logo_zone; }
+      if (rule?.companion_image_url) { companionUrl = rule.companion_image_url; zone = rule.logo_zone; price = rule.price_each; }
     }
     if (!companionUrl) return res.status(404).send('No companion image (no candidate and no usable rule)');
 
@@ -6068,6 +6088,16 @@ app.get('/api/crosssell/mockup', async (req, res) => {
     const lx = Math.round(zx + (zw - logo.bitmap.width) / 2);
     const ly = Math.round(zy + (zh - logo.bitmap.height) / 2);
     companion.composite(logo, lx, ly);
+
+    // "from £X each" yellow price badge, top-right — matches the admin preview.
+    if (price != null && price !== '' && !isNaN(Number(price))) {
+      try {
+        const badge = await buildCrossSellPriceBadge(Jimp, price, Math.round(W * 0.30));
+        const m = Math.round(W * 0.02);
+        companion.composite(badge, W - badge.bitmap.width - m, m);
+      } catch (e) { console.warn('[crosssell/mockup] price badge failed:', e.message); }
+    }
+
     const out = await companion.getBufferAsync(Jimp.MIME_PNG);
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'public, max-age=600');
