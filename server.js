@@ -4098,6 +4098,10 @@ async function initializeCrossSellTables() {
       );
       CREATE INDEX IF NOT EXISTS idx_crosssell_sends_phone
         ON crosssell_sends(customer_phone, sent_at);
+      -- After a YES, the customer's size/colour/qty follow-up is captured here;
+      -- the sales notification is held until then so it's ONE complete email.
+      ALTER TABLE crosssell_sends ADD COLUMN IF NOT EXISTS details_text TEXT;
+      ALTER TABLE crosssell_sends ADD COLUMN IF NOT EXISTS details_at TIMESTAMPTZ;
     `);
     console.log('✅ crosssell tables initialized');
   } catch (err) {
@@ -7704,10 +7708,15 @@ const DEFAULT_CROSSSELL_REPLY =
 
 // Handle an inbound message as a reply to a recent cross-sell offer. Returns
 // true if it was a cross-sell reply (so the generic proof-only auto-reply is
-// suppressed). YES → free-typed reply to the customer + notify sales. NO → just
-// logged. Anything else during an open offer → notify sales so a human handles.
+// suppressed). Flow:
+//   1st reply = YES   → ask for size/colour/qty; DON'T email yet (wait).
+//   1st reply = NO    → just logged.
+//   1st reply = other → email (unclear, a human should look).
+//   next message after a YES = the size details → send ONE combined email.
 async function handleCrossSellReply(peer, text, contactName) {
   if (!useDatabase || !peer) return false;
+
+  // 1) Is this the FIRST reply to a pending offer?
   let send;
   try {
     const r = await pool.query(
@@ -7722,28 +7731,61 @@ async function handleCrossSellReply(peer, text, contactName) {
     console.error("[crosssell/reply] lookup failed:", err.message);
     return false;
   }
-  if (!send) return false; // no pending offer → not a cross-sell reply
 
-  const verdict = classifyCrossSellReply(text); // 'yes' | 'no' | 'other'
+  if (send) {
+    const verdict = classifyCrossSellReply(text); // 'yes' | 'no' | 'other'
+    try {
+      await pool.query(
+        `UPDATE crosssell_sends SET response = $1, responded_at = NOW() WHERE id = $2`,
+        [verdict, send.id]
+      );
+    } catch (err) { console.error("[crosssell/reply] update failed:", err.message); }
+
+    if (verdict === "yes" && process.env.CROSSSELL_AUTO_REPLY_DISABLED !== "1") {
+      // Ask for the details; the email waits until they reply with them.
+      const body = process.env.CROSSSELL_REPLY_TEXT || DEFAULT_CROSSSELL_REPLY;
+      await sendWhatsAppText(peer, body, "crosssell_reply");
+    }
+    // Only an UNCLEAR first reply emails now (no size question was asked, so no
+    // follow-up to wait for). A clear yes waits for details; a clear no is logged.
+    if (verdict === "other") {
+      notifyCrossSellReply(send, contactName, text, verdict).catch((e) =>
+        console.error("[crosssell/reply] notify failed:", e.message)
+      );
+    }
+    console.log(`[crosssell/reply] ${peer} → ${verdict} (order ${send.order_number || "?"})`);
+    return true;
+  }
+
+  // 2) Not a first reply — is this the size/colour/qty FOLLOW-UP to a recent
+  // YES that hasn't been emailed yet? If so, send the single combined email.
+  let pendingDetails;
+  try {
+    const r = await pool.query(
+      `SELECT * FROM crosssell_sends
+        WHERE customer_phone = $1 AND response = 'yes' AND details_at IS NULL
+          AND responded_at > NOW() - INTERVAL '24 hours'
+        ORDER BY responded_at DESC LIMIT 1`,
+      [peer]
+    );
+    pendingDetails = r.rows[0];
+  } catch (err) {
+    console.error("[crosssell/reply] details lookup failed:", err.message);
+    return false;
+  }
+  if (!pendingDetails) return false; // not cross-sell related
+
   try {
     await pool.query(
-      `UPDATE crosssell_sends SET response = $1, responded_at = NOW() WHERE id = $2`,
-      [verdict, send.id]
+      `UPDATE crosssell_sends SET details_text = $1, details_at = NOW() WHERE id = $2`,
+      [text || null, pendingDetails.id]
     );
-  } catch (err) { console.error("[crosssell/reply] update failed:", err.message); }
+  } catch (err) { console.error("[crosssell/reply] details update failed:", err.message); }
 
-  if (verdict === "yes" && process.env.CROSSSELL_AUTO_REPLY_DISABLED !== "1") {
-    const body = process.env.CROSSSELL_REPLY_TEXT || DEFAULT_CROSSSELL_REPLY;
-    await sendWhatsAppText(peer, body, "crosssell_reply");
-  }
-  // Notify sales on a yes, or on an unclear first reply so a human follows up.
-  // A clear "no" is just logged.
-  if (verdict === "yes" || verdict === "other") {
-    notifyCrossSellReply(send, contactName, text, verdict).catch((e) =>
-      console.error("[crosssell/reply] notify failed:", e.message)
-    );
-  }
-  console.log(`[crosssell/reply] ${peer} → ${verdict} (order ${send.order_number || "?"})`);
+  notifyCrossSellReply(pendingDetails, contactName, text, "yes").catch((e) =>
+    console.error("[crosssell/reply] notify failed:", e.message)
+  );
+  console.log(`[crosssell/reply] ${peer} → size details captured (order ${pendingDetails.order_number || "?"})`);
   return true;
 }
 
@@ -7767,16 +7809,19 @@ async function notifyCrossSellReply(send, contactName, rawText, verdict) {
   const name = contactName || "Customer";
   const isYes = verdict === "yes";
   const item = [send.companion_name, send.companion_sku && `(${send.companion_sku})`].filter(Boolean).join(" ");
+  const detailsRow = isYes
+    ? `<tr><td style="padding:3px 10px 3px 0;color:#666">Size / colour / qty</td><td><strong>${(rawText || "—").replace(/</g, "&lt;")}</strong></td></tr>`
+    : `<tr><td style="padding:3px 10px 3px 0;color:#666">Their reply</td><td>${(rawText || "").replace(/</g, "&lt;")}</td></tr>`;
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
     <h2 style="margin:0 0 12px">WhatsApp cross-sell — ${isYes ? "customer said YES 🙌" : "customer replied — needs a look 👀"}</h2>
     <p>${isYes
-      ? `<strong>${name}</strong> wants to add the offered item to their order. Confirm size, colour and quantity, then add it in Brightpearl.`
+      ? `<strong>${name}</strong> said YES and sent their details below — add it to their Brightpearl order.`
       : `<strong>${name}</strong> replied to the cross-sell offer but it wasn't a clear yes/no. Take a look and follow up.`}</p>
     <table style="border-collapse:collapse;font-size:14px">
       <tr><td style="padding:3px 10px 3px 0;color:#666">Order</td><td><strong>#${send.order_number || "—"}</strong></td></tr>
       <tr><td style="padding:3px 10px 3px 0;color:#666">Phone</td><td><a href="https://wa.me/${(send.customer_phone || "").replace(/[^\d]/g, "")}">${send.customer_phone || "—"}</a></td></tr>
       <tr><td style="padding:3px 10px 3px 0;color:#666">Offered item</td><td>${item || "—"}</td></tr>
-      <tr><td style="padding:3px 10px 3px 0;color:#666">Their reply</td><td>${(rawText || "").replace(/</g, "&lt;")}</td></tr>
+      ${detailsRow}
     </table>
     ${send.mockup_url ? `<p style="margin-top:12px"><img src="${send.mockup_url}" alt="mockup" style="max-width:280px;border:1px solid #e5e7eb;border-radius:6px"></p>` : ""}
   </div>`;
