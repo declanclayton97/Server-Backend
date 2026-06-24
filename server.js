@@ -6009,8 +6009,50 @@ app.get('/api/whatsapp/templates', async (req, res) => {
   }
 });
 
+// Bundled bold font for the price badge (so server-side text always renders).
+let _badgeFontBuf = null;
+function badgeFontBuffer() {
+  if (_badgeFontBuf === null) {
+    try { _badgeFontBuf = fs.readFileSync(path.join(__dirname, 'assets', 'badge-font.ttf')); }
+    catch (e) { _badgeFontBuf = false; console.warn('[crosssell/badge] font missing:', e.message); }
+  }
+  return _badgeFontBuf || null;
+}
+
+// High-fidelity "from £X each" badge: SVG (yellow circle, slight tilt, size
+// hierarchy) rendered to PNG via resvg — matches the admin PriceBadge much more
+// closely than jimp's bitmap font. Returns a PNG buffer, or null on any failure
+// (caller falls back to the jimp badge).
+async function renderPriceBadgePng(price, diameter) {
+  const fontBuf = badgeFontBuffer();
+  if (!fontBuf) return null;
+  const D = Math.max(120, Math.round(diameter));
+  const val = Number(price);
+  const display = Number.isInteger(val) ? String(val) : val.toFixed(2);
+  const priceStr = `£${display}`;
+  // Shrink the price font for longer amounts so it never overflows the circle.
+  const priceFont = Math.min(D * 0.27, (D * 0.82) / (priceStr.length * 0.56));
+  const c = (D / 2).toFixed(1);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${D}" height="${D}" viewBox="0 0 ${D} ${D}">` +
+    `<g transform="rotate(-8 ${c} ${c})" font-family="DejaVu Sans" font-weight="700" fill="#111827" text-anchor="middle">` +
+    `<circle cx="${c}" cy="${c}" r="${c}" fill="#eab308"/>` +
+    `<text x="${c}" y="${(D * 0.40).toFixed(1)}" font-size="${(D * 0.15).toFixed(1)}">from</text>` +
+    `<text x="${c}" y="${(D * 0.61).toFixed(1)}" font-size="${priceFont.toFixed(1)}">${priceStr}</text>` +
+    `<text x="${c}" y="${(D * 0.77).toFixed(1)}" font-size="${(D * 0.15).toFixed(1)}">each</text>` +
+    `</g></svg>`;
+  try {
+    const { Resvg } = await import('@resvg/resvg-js');
+    const r = new Resvg(svg, { font: { fontBuffers: [fontBuf], defaultFontFamily: 'DejaVu Sans', loadSystemFonts: false } });
+    return r.render().asPng();
+  } catch (e) {
+    console.warn('[crosssell/badge] resvg render failed:', e.message);
+    return null;
+  }
+}
+
 // Build a circular "from £X each" price badge (brand yellow, black text) to
-// composite onto the cross-sell mockup — mirrors the admin PriceBadge.
+// composite onto the cross-sell mockup — jimp fallback for renderPriceBadgePng.
 async function buildCrossSellPriceBadge(Jimp, price, diameter) {
   const D = Math.max(120, Math.round(diameter));
   const badge = new Jimp(D, D, 0xeab308ff); // brand yellow
@@ -6101,7 +6143,9 @@ app.get('/api/crosssell/mockup', async (req, res) => {
     // "from £X each" yellow price badge, top-right — matches the admin preview.
     if (price != null && price !== '' && !isNaN(Number(price))) {
       try {
-        const badge = await buildCrossSellPriceBadge(Jimp, price, Math.round(W * 0.30));
+        const D = Math.round(W * 0.30);
+        const png = await renderPriceBadgePng(price, D);          // crisp SVG version
+        const badge = png ? await Jimp.read(Buffer.from(png)) : await buildCrossSellPriceBadge(Jimp, price, D); // jimp fallback
         const m = Math.round(W * 0.02);
         companion.composite(badge, W - badge.bitmap.width - m, m);
       } catch (e) { console.warn('[crosssell/mockup] price badge failed:', e.message); }
