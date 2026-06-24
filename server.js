@@ -6012,19 +6012,28 @@ app.get('/api/whatsapp/templates', async (req, res) => {
 // Build a circular "from £X each" price badge (brand yellow, black text) to
 // composite onto the cross-sell mockup — mirrors the admin PriceBadge.
 async function buildCrossSellPriceBadge(Jimp, price, diameter) {
-  const D = Math.max(80, Math.round(diameter));
+  const D = Math.max(120, Math.round(diameter));
   const badge = new Jimp(D, D, 0xeab308ff); // brand yellow
   badge.circle();                            // round mask (transparent corners)
   const val = Number(price);
   const display = Number.isInteger(val) ? String(val) : val.toFixed(2);
-  const fontConst = D >= 320 ? Jimp.FONT_SANS_64_BLACK : D >= 160 ? Jimp.FONT_SANS_32_BLACK : Jimp.FONT_SANS_16_BLACK;
-  const font = await Jimp.loadFont(fontConst);
-  const box = Math.round(D * 0.8);
-  badge.print(
-    font, Math.round((D - box) / 2), 0,
-    { text: `from £${display} each`, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER, alignmentY: Jimp.VERTICAL_ALIGN_MIDDLE },
-    box, D
-  );
+  // Size hierarchy like the admin badge: small "from", big price, small "each".
+  const fontBig = await Jimp.loadFont(D >= 240 ? Jimp.FONT_SANS_64_BLACK : Jimp.FONT_SANS_32_BLACK);
+  const fontSm = await Jimp.loadFont(D >= 240 ? Jimp.FONT_SANS_32_BLACK : Jimp.FONT_SANS_16_BLACK);
+  const lines = [
+    { font: fontSm, text: 'from' },
+    { font: fontBig, text: `£${display}` },
+    { font: fontSm, text: 'each' },
+  ];
+  const heights = lines.map((l) => Jimp.measureTextHeight(l.font, l.text, D));
+  const gap = Math.round(D * 0.015);
+  const totalH = heights.reduce((a, b) => a + b, 0) + gap * (lines.length - 1);
+  let y = Math.round((D - totalH) / 2);
+  for (let i = 0; i < lines.length; i++) {
+    const w = Jimp.measureText(lines[i].font, lines[i].text);
+    badge.print(lines[i].font, Math.round((D - w) / 2), y, lines[i].text);
+    y += heights[i] + gap;
+  }
   return badge;
 }
 
