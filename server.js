@@ -6158,7 +6158,7 @@ app.post('/api/crosssell/test-send', async (req, res) => {
     // companion product image from the rule.
     const publicBackend = process.env.PUBLIC_BACKEND_URL || 'https://server-backend-1i47.onrender.com';
     const headerImageUrl = sessionId
-      ? `${publicBackend}/api/crosssell/mockup?sessionId=${encodeURIComponent(sessionId)}${rule ? `&ruleId=${rule.id}` : ''}&variant=${encodeURIComponent(logoVariant || 'primary')}`
+      ? `${publicBackend}/api/crosssell/mockup?sessionId=${encodeURIComponent(sessionId)}${rule ? `&ruleId=${rule.id}` : ''}&variant=${encodeURIComponent(logoVariant || 'primary')}&cb=${Date.now()}`
       : rule.companion_image_url;
     const templateName = (tplOverride || '').trim() || process.env.CROSSSELL_TEMPLATE_NAME || 'proof_approved_crosssell';
     // The cross-sell template was approved in plain English ("en"), NOT en_GB
