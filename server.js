@@ -3985,6 +3985,22 @@ async function initializeFitnessIncColourAdditions() {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS uniq_fitness_inc_colour_addition
         ON fitness_inc_colour_additions(product_id, colour_name);
+
+      -- Whole operator-added products (added via the admin UI, no code change).
+      -- Merged with the hardcoded catalogue at runtime. images is a JSON map
+      -- { "<colour>": { "front": url, "back": url } }.
+      CREATE TABLE IF NOT EXISTS fitness_inc_product_additions (
+        id SERIAL PRIMARY KEY,
+        product_id VARCHAR(60) NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        code VARCHAR(60) NOT NULL,
+        colours JSONB NOT NULL DEFAULT '[]'::jsonb,
+        positions JSONB NOT NULL DEFAULT '[]'::jsonb,
+        one_size BOOLEAN NOT NULL DEFAULT FALSE,
+        images JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_by VARCHAR(100)
+      );
     `);
     console.log('✅ fitness_inc_colour_additions initialized');
   } catch (err) {
@@ -5715,6 +5731,60 @@ app.delete('/api/fitness-inc/colour-additions/:id', async (req, res) => {
       `DELETE FROM fitness_inc_colour_additions WHERE id = $1`,
       [req.params.id]
     );
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Whole operator-added products. The frontend merges these into the catalogue.
+app.get('/api/fitness-inc/products', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(
+      `SELECT id, product_id, name, code, colours, positions, one_size, images, created_at, created_by
+         FROM fitness_inc_product_additions ORDER BY created_at DESC`
+    );
+    res.json({ products: r.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST a new/edited product. Body: { code, name, colours[], positions[],
+// oneSize?, images{colour:{front,back}}, productId?, createdBy? }.
+// Upserts on product_id (defaults to a slug of the code) so re-saving edits.
+app.post('/api/fitness-inc/products', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const { code, name, colours, positions, oneSize, images, productId, createdBy } = req.body || {};
+    if (!code?.trim() || !name?.trim()) return res.status(400).json({ error: 'code and name are required' });
+    const colArr = Array.isArray(colours) ? colours.map((c) => String(c).trim()).filter(Boolean) : [];
+    const posArr = Array.isArray(positions) ? positions.map((p) => String(p).trim()).filter(Boolean) : [];
+    if (colArr.length === 0) return res.status(400).json({ error: 'at least one colour is required' });
+    if (posArr.length === 0) return res.status(400).json({ error: 'at least one position is required' });
+    const pid = (productId || code).toString().toLowerCase().replace(/[^a-z0-9]/g, '') || `p${Date.now()}`;
+    const r = await pool.query(
+      `INSERT INTO fitness_inc_product_additions (product_id, name, code, colours, positions, one_size, images, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (product_id) DO UPDATE SET
+         name=EXCLUDED.name, code=EXCLUDED.code, colours=EXCLUDED.colours,
+         positions=EXCLUDED.positions, one_size=EXCLUDED.one_size, images=EXCLUDED.images
+       RETURNING id, product_id, name, code, colours, positions, one_size, images, created_at, created_by`,
+      [pid, name.trim(), code.trim(), JSON.stringify(colArr), JSON.stringify(posArr),
+       oneSize === true, JSON.stringify(images && typeof images === 'object' ? images : {}), createdBy || null]
+    );
+    res.json({ success: true, product: r.rows[0] });
+  } catch (err) {
+    console.error('[fitness-inc-products] save failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/fitness-inc/products/:id', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'Database not configured' });
+  try {
+    const r = await pool.query(`DELETE FROM fitness_inc_product_additions WHERE id = $1`, [req.params.id]);
     res.json({ success: true, deleted: r.rowCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
