@@ -6967,9 +6967,16 @@ ${bundleDiscountPct > 0 ? `Bundle discount (${Math.round(bundleDiscountPct * 100
     // "Pay Now Online" link — OFF for real customers until PROMO_PAYMENT_ENABLED=true,
     // but always built for preview submits so the team can test the journey.
     // Real submits only offer it if a promo item actually got added to the order.
+    // PROMO_PAYMENT_TEST_ORDERS: comma-separated order numbers that get the live
+    // link even while the global flag is off — for testing one real order at a time.
     let paymentUrl = null;
     const paymentEnabled = String(process.env.PROMO_PAYMENT_ENABLED ?? 'false').toLowerCase() === 'true';
-    if (sess.order_number && (paymentEnabled || previewBypass)) {
+    const testOrders = String(process.env.PROMO_PAYMENT_TEST_ORDERS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const isTestOrder = sess.order_number && testOrders.includes(String(sess.order_number));
+    if (sess.order_number && (paymentEnabled || isTestOrder || previewBypass)) {
       const anyAdded = previewBypass ? true : bpRowResults.some((r) => r.ok);
       if (anyAdded) paymentUrl = await buildOrderPaymentLink(sess.order_number);
     }
