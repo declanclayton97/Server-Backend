@@ -8538,6 +8538,92 @@ app.post("/api/whatsapp/send-image", async (req, res) => {
   }
 });
 
+// Send a PDF document to a customer (within the 24h service window). Mirrors
+// send-image: the operator uploads the bytes, we upload them to WhatsApp media,
+// send a document message (with the original filename + any typed caption), and
+// record it with the returned media id so the chat shows a "📎 Open document"
+// link via the media proxy.
+const WA_SEND_DOC_TYPES = ["application/pdf"];
+app.post("/api/whatsapp/send-document", async (req, res) => {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token || !phoneNumberId) return res.status(503).json({ error: "WhatsApp not configured" });
+
+  const { phone, fileBase64, mimeType, filename, caption, sentBy } = req.body || {};
+  const to = normaliseWhatsAppNumber(phone);
+  if (!to) return res.status(400).json({ error: "A valid phone number is required" });
+  const mime = (mimeType || "").toLowerCase();
+  if (!fileBase64 || !WA_SEND_DOC_TYPES.includes(mime)) {
+    return res.status(400).json({ error: "A PDF document is required" });
+  }
+  const buf = Buffer.from(fileBase64, "base64");
+  if (!buf.length) return res.status(400).json({ error: "Empty document" });
+  if (buf.length > 25 * 1024 * 1024) return res.status(413).json({ error: "Document too large (max 25MB)" });
+
+  const win = await whatsAppWindow(to);
+  if (!win.open) {
+    return res.status(409).json({ error: "The 24-hour reply window has closed for this customer.", windowClosed: true });
+  }
+
+  // Sanitise the display filename; WhatsApp shows it to the customer. Always
+  // end in .pdf so it opens as a document on the recipient's device.
+  let docName = (filename || "document.pdf").toString().trim().replace(/[\r\n"]/g, "").slice(0, 240) || "document.pdf";
+  if (!/\.pdf$/i.test(docName)) docName += ".pdf";
+
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  const cap = (caption || "").toString().trim().slice(0, 1024);
+  try {
+    // 1) Upload the media to get a reusable id.
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("type", mime);
+    form.append("file", new Blob([buf], { type: mime }), docName);
+    const upRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/media`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const upData = await upRes.json().catch(() => ({}));
+    if (!upRes.ok || !upData?.id) {
+      console.error("[whatsapp/send-document] upload error:", JSON.stringify(upData?.error || upData));
+      return res.status(502).json({ error: upData?.error?.message || `Media upload failed (${upRes.status})` });
+    }
+    const mediaId = upData.id;
+
+    // 2) Send the document message referencing the uploaded media.
+    const gRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "document",
+        document: { id: mediaId, filename: docName, ...(cap ? { caption: cap } : {}) },
+      }),
+    });
+    const data = await gRes.json().catch(() => ({}));
+    if (!gRes.ok) {
+      console.error("[whatsapp/send-document] Graph error:", JSON.stringify(data?.error || data));
+      return res.status(502).json({ error: data?.error?.message || `Graph API returned ${gRes.status}` });
+    }
+    const messageId = data?.messages?.[0]?.id || null;
+    await recordWhatsAppMessage({
+      waMessageId: messageId,
+      direction: "out",
+      peerNumber: to,
+      body: cap || docName,
+      msgType: "document",
+      status: "sent",
+      mediaId,
+      sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
+    });
+    res.json({ success: true, messageId, to });
+  } catch (err) {
+    console.error("[whatsapp/send-document] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Conversation list — one row per customer number, newest activity first.
 app.get("/api/whatsapp/conversations", async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
