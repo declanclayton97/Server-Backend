@@ -42,7 +42,18 @@ if (useDatabase) {
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL?.includes('localhost') ? false : {
       rejectUnauthorized: false
-    }
+    },
+    keepAlive: true,               // keep sockets warm so Render doesn't drop idle ones
+    idleTimeoutMillis: 30000,      // close idle clients ourselves before the DB does
+    connectionTimeoutMillis: 10000,
+    max: 10,
+  });
+  // CRITICAL: without an 'error' listener, a pooled connection dying in the
+  // background (Render idle timeout, DB restart, network blip) is emitted as an
+  // uncaught exception and crashes the process. This handler lets the pool quietly
+  // discard the dead client and carry on — the next query gets a fresh connection.
+  pool.on('error', (err) => {
+    console.warn('[pg pool] idle client error (recovered):', err?.message || err);
   });
   console.log('📊 Using PostgreSQL database for DocuSign logs');
 } else {
@@ -60,6 +71,12 @@ const PORT = process.env.PORT || 3000;
 process.on('uncaughtException', (err) => {
   if (err && (err.code === 'EPIPE' || err.code === 'ECONNRESET') && err.syscall === 'write') {
     console.warn(`[uncaught] swallowed ${err.code} on socket write — client disconnected`);
+    return;
+  }
+  // A background Postgres connection dropping is recoverable — the pool discards
+  // the dead client and reconnects on the next query. Don't crash over it.
+  if (err && /Connection terminated unexpectedly|terminating connection|Client has encountered a connection error/i.test(err.message || '')) {
+    console.warn('[uncaught] swallowed DB connection drop — pool will reconnect:', err.message);
     return;
   }
   console.error('[uncaught] FATAL:', err);
