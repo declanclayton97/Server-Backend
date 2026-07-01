@@ -8382,9 +8382,30 @@ ${SIGNATURE_TEXT || ''}`;
       port: parseInt(process.env.SMTP_PORT || '2525'),
       secure: false,
       auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 20000,
     });
 
-    await transporter.sendMail({
+    // Retry transient SMTP failures ("Greeting never received", timeouts, resets)
+    // — smtp2go occasionally doesn't complete the handshake in time. Each attempt
+    // opens a fresh connection (non-pooled transport).
+    const sendWithRetry = async (mail, tries = 3) => {
+      let lastErr;
+      for (let i = 0; i < tries; i++) {
+        try { return await transporter.sendMail(mail); }
+        catch (e) {
+          lastErr = e;
+          const transient = /greeting never received|timeout|ETIMEDOUT|ECONNRESET|ECONNECTION|ESOCKET|EAI_AGAIN|connection closed/i.test(e.message || '');
+          if (!transient || i === tries - 1) throw e;
+          console.warn(`[proof-email] transient send error (retry ${i + 1}/${tries - 1}):`, e.message);
+          await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+        }
+      }
+      throw lastErr;
+    };
+
+    await sendWithRetry({
       from: `"Tuffshop Proofs" <${fromEmail}>`,
       to: recipients.join(', '),
       replyTo: fromEmail,
