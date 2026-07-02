@@ -9469,7 +9469,11 @@ app.get("/api/approval-sessions", async (req, res) => {
       query += ` WHERE ${conditions.join(" AND ")}`;
     }
 
-    query += ` ORDER BY created_at DESC LIMIT 200`;
+    // Active sessions BEFORE archived so the 200-row cap can never crowd out a
+    // live approved/changes_requested/pending session behind a pile of archived
+    // rows (the frontend "Needs attention" filter reads this list and was
+    // under-counting because archived rows filled the window).
+    query += ` ORDER BY (status = 'archived') ASC, created_at DESC LIMIT 200`;
 
     const result = await pool.query(query, params);
 
