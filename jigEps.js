@@ -10,20 +10,47 @@ import Jimp from "jimp";
 
 const MM_TO_PT = 72 / 25.4; // 2.834645669
 
+// A printer/RIP drops PURE white as "no ink", so pure-white elements in a vector
+// logo don't print. Give white a single unit of black (K/grey) so the RIP
+// registers and prints it. Covers the standard PostScript colour operators and
+// Illustrator's fill/stroke operators (`0 0 0 0 k` is the "0000" CMYK white).
+// Word boundaries keep "10 0 0 0 k" (C=10) etc. from matching.
+function nudgeVectorWhite(text) {
+  return String(text)
+    .replace(/\b0 0 0 0 setcmykcolor\b/g, "0 0 0 0.01 setcmykcolor")
+    .replace(/\b0 0 0 0 (k|K)\b/g, "0 0 0 0.01 $1")
+    .replace(/\b1 1 1 setrgbcolor\b/g, "0.996 0.996 0.996 setrgbcolor")
+    .replace(/\b1 1 1 (rg|RG)\b/g, "0.996 0.996 0.996 $1")
+    .replace(/\b1 setgray\b/g, "0.996 setgray");
+}
+
 // Decode an image buffer, flatten transparency onto white, return RGB hex
 // (wrapped so no PostScript line exceeds the DSC 255-char guideline).
 async function loadLogoRgbHex(buffer) {
   const logo = await Jimp.read(buffer);
   const w = logo.bitmap.width, h = logo.bitmap.height;
+  const orig = logo.bitmap.data; // original RGBA (pre-flatten) — for the white nudge
+  // A printer/RIP drops PURE white (0xffffff) as "no ink", so pure-white artwork
+  // doesn't print. Nudging it to 0xfefefe (a single level of grey) makes the RIP
+  // register and print it. We only do this when the logo HAS transparency — then
+  // its opaque white pixels are real artwork, not a flat background we'd wrongly
+  // print. Fully-opaque images (JPEG / flattened PNG) are left as-is, because we
+  // can't tell a white background from white artwork there.
+  let hasAlpha = false;
+  for (let i = 3; i < orig.length; i += 4) { if (orig[i] < 250) { hasAlpha = true; break; } }
   const canvas = new Jimp(w, h, 0xffffffff);
   canvas.composite(logo, 0, 0);
-  const data = canvas.bitmap.data; // RGBA
+  const data = canvas.bitmap.data; // RGBA (flattened onto white)
   const parts = [];
   for (let i = 0; i < data.length; i += 4) {
+    let r = data[i], g = data[i + 1], b = data[i + 2];
+    if (hasAlpha && orig[i + 3] >= 250 && r === 255 && g === 255 && b === 255) {
+      r = 254; g = 254; b = 254; // opaque pure-white artwork → nudge so it prints
+    }
     parts.push(
-      data[i].toString(16).padStart(2, "0") +
-      data[i + 1].toString(16).padStart(2, "0") +
-      data[i + 2].toString(16).padStart(2, "0")
+      r.toString(16).padStart(2, "0") +
+      g.toString(16).padStart(2, "0") +
+      b.toString(16).padStart(2, "0")
     );
   }
   // Wrap at 120 hex pairs (240 chars) per line for RIP friendliness.
@@ -125,7 +152,9 @@ const EPS_PROLOGUE = `/BeginEPSF {
  * @param {Buffer} vectorBuffer  the operator's vector logo (.eps)
  */
 export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements, logoAdjust, drawBackground = true }) {
-  const { text, bbox } = parseEps(vectorBuffer);
+  const parsed = parseEps(vectorBuffer);
+  const bbox = parsed.bbox;
+  const text = nudgeVectorWhite(parsed.text); // pure-white colours → a hair of black so they print
   if (!bbox) throw new Error("Uploaded EPS has no BoundingBox — is it a valid vector EPS?");
   const bw = (bbox.urx - bbox.llx) || 1, bh = (bbox.ury - bbox.lly) || 1;
   const pageWpt = pageWmm * MM_TO_PT, pageHpt = pageHmm * MM_TO_PT;
