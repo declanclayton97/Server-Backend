@@ -19,12 +19,18 @@ function nudgeVectorWhite(text) {
   // Colour values may be integers OR decimals — CorelDRAW/Illustrator write
   // "0.000000 0.000000 0.000000 0.000000 setcmykcolor" for white, so an
   // integer-only match ("0 0 0 0") misses them. Z/O match any zero/one form.
-  const Z = "0(?:\\.0+)?", O = "1(?:\\.0+)?";
+  const Z = "0(?:\\.0+)?", O = "1(?:\\.0+)?", S = "\\s+"; // flexible whitespace — Corel uses double spaces
   const wrap = (body) => new RegExp("(^|[\\s{\\[])" + body + "(?=[\\s}\\]]|$)", "g");
   return String(text)
-    .replace(wrap(`${Z} ${Z} ${Z} ${Z} (setcmykcolor|k|K)`), (m, p, op) => `${p}0 0 0 0.01 ${op}`)
-    .replace(wrap(`${O} ${O} ${O} (setrgbcolor|rg|RG)`), (m, p, op) => `${p}0.996 0.996 0.996 ${op}`)
-    .replace(wrap(`${O} setgray`), (m, p) => `${p}0.996 setgray`);
+    // CorelDRAW EPS: "0.0000 0.0000 0.0000 0.0000  create_cmyk_color set_solid_fill"
+    // (its own colour operators, not setcmykcolor). K 0→0.01 = 1% on the 0-100 UI.
+    .replace(wrap(`${Z}${S}${Z}${S}${Z}${S}${Z}${S}create_cmyk_color`), (m, p) => `${p}0 0 0 0.01 create_cmyk_color`)
+    .replace(wrap(`${O}${S}${O}${S}${O}${S}create_rgb_color`), (m, p) => `${p}0.9961 0.9961 0.9961 create_rgb_color`)
+    .replace(wrap(`${O}${S}create_gray_color`), (m, p) => `${p}0.99 create_gray_color`)
+    // Standard PostScript / Illustrator operators.
+    .replace(wrap(`${Z}${S}${Z}${S}${Z}${S}${Z}${S}(setcmykcolor|k|K)`), (m, p, op) => `${p}0 0 0 0.01 ${op}`)
+    .replace(wrap(`${O}${S}${O}${S}${O}${S}(setrgbcolor|rg|RG)`), (m, p, op) => `${p}0.996 0.996 0.996 ${op}`)
+    .replace(wrap(`${O}${S}setgray`), (m, p) => `${p}0.996 setgray`);
 }
 
 // Decode an image buffer, flatten transparency onto white, return RGB hex
