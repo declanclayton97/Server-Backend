@@ -16,12 +16,15 @@ const MM_TO_PT = 72 / 25.4; // 2.834645669
 // Illustrator's fill/stroke operators (`0 0 0 0 k` is the "0000" CMYK white).
 // Word boundaries keep "10 0 0 0 k" (C=10) etc. from matching.
 function nudgeVectorWhite(text) {
+  // Colour values may be integers OR decimals — CorelDRAW/Illustrator write
+  // "0.000000 0.000000 0.000000 0.000000 setcmykcolor" for white, so an
+  // integer-only match ("0 0 0 0") misses them. Z/O match any zero/one form.
+  const Z = "0(?:\\.0+)?", O = "1(?:\\.0+)?";
+  const wrap = (body) => new RegExp("(^|[\\s{\\[])" + body + "(?=[\\s}\\]]|$)", "g");
   return String(text)
-    .replace(/\b0 0 0 0 setcmykcolor\b/g, "0 0 0 0.01 setcmykcolor")
-    .replace(/\b0 0 0 0 (k|K)\b/g, "0 0 0 0.01 $1")
-    .replace(/\b1 1 1 setrgbcolor\b/g, "0.996 0.996 0.996 setrgbcolor")
-    .replace(/\b1 1 1 (rg|RG)\b/g, "0.996 0.996 0.996 $1")
-    .replace(/\b1 setgray\b/g, "0.996 setgray");
+    .replace(wrap(`${Z} ${Z} ${Z} ${Z} (setcmykcolor|k|K)`), (m, p, op) => `${p}0 0 0 0.01 ${op}`)
+    .replace(wrap(`${O} ${O} ${O} (setrgbcolor|rg|RG)`), (m, p, op) => `${p}0.996 0.996 0.996 ${op}`)
+    .replace(wrap(`${O} setgray`), (m, p) => `${p}0.996 setgray`);
 }
 
 // Decode an image buffer, flatten transparency onto white, return RGB hex
