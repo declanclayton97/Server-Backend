@@ -7628,7 +7628,8 @@ async function sendOutOfStockEmail(supplier, lines) {
 app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
   if (!requirePurchasing(res)) return;
   try {
-    const { supplier, orderIds, dryRun } = req.body || {};
+    const { supplier, orderIds, dryRun, simulateOosSkus } = req.body || {};
+    const simOos = new Set((simulateOosSkus || []).map((x) => String(x))); // test hook: force these SKUs OOS
     const plan = await purchasingAuto.preview(supplier, parseOrderIds(orderIds));
     const lines = [];
     for (const o of plan.orders) for (const l of o.lines) lines.push({ orderId: o.orderId, ref: o.ref, sku: l.sku, name: l.name, qty: l.qty });
@@ -7640,11 +7641,11 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
         try { const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-stock?sku=${encodeURIComponent(l.sku)}`); stockBySku[l.sku] = await r.json(); }
         catch (e) { stockBySku[l.sku] = { found: false, reason: e.message }; }
       }
-      l.stock = stockBySku[l.sku];
+      l.stock = simOos.has(String(l.sku)) ? { found: true, status: 'Out of stock', simulated: true } : stockBySku[l.sku];
     }
-    const isOut = (s) => s && /out of stock/i.test(s.status || '');
-    const inStock = lines.filter((l) => !isOut(l.stock));
-    const outOfStock = lines.filter((l) => isOut(l.stock));
+    const isOut = (l) => l.stock && /out of stock/i.test(l.stock.status || '');
+    const inStock = lines.filter((l) => !isOut(l));
+    const outOfStock = lines.filter((l) => isOut(l));
 
     // aggregate in-stock lines by SKU for the basket import
     const agg = {};
