@@ -19,6 +19,7 @@ import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from 
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch } from './bpWebSession.js';
+import * as purchasingAuto from './purchasingAuto.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -7532,6 +7533,54 @@ app.post('/api/brightpearl/attach-files', async (req, res) => {
 function stripBuffer({ buffer, ...rest }) {
   return rest;
 }
+
+// ============================================================
+// Purchasing automation (Phase A) — build supplier POs from Brightpearl demand.
+// Runs against the TEST account (env BP_TEST_ACCOUNT/APP_REF/TOKEN). See
+// purchasingAuto.js. Sequencing: create-po builds a "Pending PO"; finalize
+// (post supplier-portal placement) strips the tag + flips status.
+// ============================================================
+function requirePurchasing(res) {
+  if (!purchasingAuto.isConfigured()) {
+    res.status(503).json({ error: 'Purchasing automation not configured (set BP_TEST_APP_REF and BP_TEST_TOKEN)' });
+    return false;
+  }
+  return true;
+}
+const parseOrderIds = (v) => (v ? String(v).split(',').map((s) => parseInt(s.trim(), 10)).filter(Boolean) : null);
+
+app.get('/api/purchasing/suppliers', (req, res) => {
+  if (!requirePurchasing(res)) return;
+  res.json({ suppliers: Object.keys(purchasingAuto.SUPPLIERS) });
+});
+
+// Read-only: what would go on this supplier's PO right now.
+app.get('/api/purchasing/preview', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try {
+    res.json(await purchasingAuto.preview(req.query.supplier, parseOrderIds(req.query.orderIds)));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Create the Pending PO (+ source note, + stamp PO number on each order).
+// Pass { dryRun:true } to preview via POST, or { orderIds:[...] } to scope.
+app.post('/api/purchasing/create-po', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try {
+    const { supplier, orderIds, dryRun } = req.body || {};
+    res.json(await purchasingAuto.createPO(supplier, { orderIds, dryRun }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Post-placement: strip the supplier tag, flip status when it was the last
+// supplier, add "ordered via PO N" notes. { supplier, poId, orderIds:[...] }.
+app.post('/api/purchasing/finalize', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try {
+    const { supplier, poId, orderIds } = req.body || {};
+    res.json(await purchasingAuto.finalizePO(supplier, { poId, orderIds }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 
 // ============================================================
 // Proof Approval System
