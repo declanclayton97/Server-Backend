@@ -8377,9 +8377,15 @@ ${approvalUrl}
 
 ${SIGNATURE_TEXT || ''}`;
 
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
-      port: parseInt(process.env.SMTP_PORT || '2525'),
+    const smtpHost = process.env.SMTP_SERVER || 'mail-eu.smtp2go.com';
+    const primaryPort = parseInt(process.env.SMTP_PORT || '2525');
+    // smtp2go accepts submission on several ports (2525/587/8025). If one is
+    // briefly throttled/blocked from Render's IP, a same-port retry just times
+    // out again — so rotate through known-good ports across attempts.
+    const portRotation = [...new Set([primaryPort, 2525, 587, 8025])];
+    const makeTransport = (port) => nodemailer.createTransport({
+      host: smtpHost,
+      port,
       secure: false,
       auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS },
       connectionTimeout: 15000,
@@ -8389,16 +8395,17 @@ ${SIGNATURE_TEXT || ''}`;
 
     // Retry transient SMTP failures ("Greeting never received", timeouts, resets)
     // — smtp2go occasionally doesn't complete the handshake in time. Each attempt
-    // opens a fresh connection (non-pooled transport).
-    const sendWithRetry = async (mail, tries = 3) => {
+    // opens a fresh connection (non-pooled) on the next port in the rotation.
+    const sendWithRetry = async (mail, tries = 4) => {
       let lastErr;
       for (let i = 0; i < tries; i++) {
-        try { return await transporter.sendMail(mail); }
+        const port = portRotation[i % portRotation.length];
+        try { return await makeTransport(port).sendMail(mail); }
         catch (e) {
           lastErr = e;
           const transient = /greeting never received|timeout|ETIMEDOUT|ECONNRESET|ECONNECTION|ESOCKET|EAI_AGAIN|connection closed/i.test(e.message || '');
           if (!transient || i === tries - 1) throw e;
-          console.warn(`[proof-email] transient send error (retry ${i + 1}/${tries - 1}):`, e.message);
+          console.warn(`[proof-email] transient send error on port ${port} (retry ${i + 1}/${tries - 1}):`, e.message);
           await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
         }
       }
