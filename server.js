@@ -7681,7 +7681,10 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     let basket = null, emailed = false, po = null, notesAdded = 0;
     if (!dryRun) {
       if (createPo) po = await purchasingAuto.createPO(supplier, { orderIds: ids });
-      if (importLines.length) {
+      // Basket import is GATED (default off) — we know it works; don't keep
+      // touching the live Snickers basket during testing (avoid accidental order).
+      const basketEnabled = process.env.PURCHASING_BASKET_ENABLED === 'true' || req.body.importBasket === true;
+      if (importLines.length && basketEnabled) {
         const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: importLines }) });
         basket = await r.json();
       }
