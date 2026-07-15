@@ -122,7 +122,11 @@ async function findContributors(sup, orderIds) {
       lines.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty, cost, size: (r.productOptions && r.productOptions.Size) || null });
     }
     const remaining = tagsOf(tag).filter((t) => t.toUpperCase() !== sup.key);
-    out.push({ id, ref: order.reference || '', tag, remaining, complete: remaining.length === 0, lines });
+    out.push({
+      id, ref: order.reference || '', tag, remaining, complete: remaining.length === 0, lines,
+      createdById: order.createdById || null,
+      channelId: (order.assignment && order.assignment.current && order.assignment.current.channelId) || null,
+    });
   }
   return out;
 }
@@ -138,7 +142,7 @@ function summarise(sup, contributors) {
     lineCount: lines.length,
     totalQty: lines.reduce((a, l) => a + l.qty, 0),
     totalNet: Number(total.toFixed(2)),
-    orders: contributors.map((c) => ({ orderId: c.id, ref: c.ref, tag: c.tag, willComplete: c.complete, tagAfter: c.remaining.join(' / '), lines: c.lines })),
+    orders: contributors.map((c) => ({ orderId: c.id, ref: c.ref, createdById: c.createdById, channelId: c.channelId, tag: c.tag, willComplete: c.complete, tagAfter: c.remaining.join(' / '), lines: c.lines })),
   };
 }
 
@@ -223,7 +227,41 @@ export async function finalizePO(supplierKey, { poId, orderIds } = {}) {
 
 // Order note. addedOn is required by BP; caller has no clock dependency here so
 // we send the current time (this runs server-side, not in a workflow script).
-async function addOrderNote(orderId, text, contactId) {
+export async function addOrderNote(orderId, text, contactId) {
   const addedOn = new Date().toISOString().replace('Z', '+00:00');
-  return api('POST', `/order-service/order/${orderId}/note`, { text, addedOn, contactId, isPublic: false });
+  return api('POST', `/order-service/order/${orderId}/note`, { text, addedOn, contactId: contactId || 1, isPublic: false });
+}
+
+// channelId -> { name, provider } (cached). Used to spot Magento (website) orders.
+let _channelMap = null;
+export async function getChannelMap() {
+  if (_channelMap) return _channelMap;
+  const chs = await api('GET', '/product-service/channel');
+  _channelMap = {};
+  for (const c of chs || []) _channelMap[c.id] = { name: c.name, provider: c.integrationDetail && c.integrationDetail.providerCode };
+  return _channelMap;
+}
+
+// staff contactId -> email (cached).
+const _staffEmail = {};
+export async function staffEmailOf(contactId) {
+  if (!contactId) return null;
+  if (contactId in _staffEmail) return _staffEmail[contactId];
+  let email = null;
+  try {
+    const c = await api('GET', `/contact-service/contact/${contactId}`);
+    const emails = c && c[0] && c[0].communication && c[0].communication.emails;
+    if (emails) { const first = Object.values(emails)[0]; email = (first && first.email) || null; }
+  } catch { /* leave null */ }
+  _staffEmail[contactId] = email;
+  return email;
+}
+
+// Who should get the stock email for an order: Magento (website) orders go to
+// the sales email; everything else goes to the staff member who created it.
+export async function orderRecipient(order, salesEmail) {
+  const cm = await getChannelMap();
+  const ch = cm[order.channelId];
+  if (ch && (/magento/i.test(ch.name || '') || /magento/i.test(ch.provider || ''))) return salesEmail;
+  return (await staffEmailOf(order.createdById)) || salesEmail;
 }

@@ -7589,7 +7589,8 @@ app.post('/api/purchasing/finalize', async (req, res) => {
 const ALT_ITEMS_URL = process.env.ALT_ITEMS_URL || 'https://alternate-items.onrender.com';
 const OOS_EMAIL_TO = process.env.PURCHASING_OOS_EMAIL || 'dec@tuffshop.co.uk';
 
-async function sendOutOfStockEmail(supplier, lines) {
+async function sendOutOfStockEmail(supplier, lines, to) {
+  const recipient = to || OOS_EMAIL_TO;
   const rows = lines.map((l) => `<tr>
     <td style="padding:6px;border:1px solid #ddd">${l.orderId}</td>
     <td style="padding:6px;border:1px solid #ddd">${l.ref || ''}</td>
@@ -7622,7 +7623,7 @@ async function sendOutOfStockEmail(supplier, lines) {
   for (const port of ports) {
     try {
       const t = nodemailer.createTransport({ host: smtpHost, port, secure: false, auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS }, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 20000 });
-      await t.sendMail({ from: `"Tuffshop Purchasing" <${OOS_EMAIL_TO}>`, to: OOS_EMAIL_TO, subject: `${supplier} order — ${lines.length} line(s) short`, html });
+      await t.sendMail({ from: `"Tuffshop Purchasing" <${OOS_EMAIL_TO}>`, to: recipient, subject: `${supplier} order — ${lines.length} line(s) short`, html });
       return true;
     } catch (e) { lastErr = e; }
   }
@@ -7656,25 +7657,49 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       l.order = Math.min(l.qty, l.avail);
       l.short = l.qty - l.order;
     }
-    const inStock = lines.filter((l) => l.order > 0);   // has something orderable now
-    const outOfStock = lines.filter((l) => l.short > 0); // has a shortfall to back-order (may overlap inStock)
+    const inStock = lines.filter((l) => l.order > 0);   // has something in stock
+    const outOfStock = lines.filter((l) => l.short > 0); // has a shortfall (flagged on note + email)
 
-    // aggregate the ORDER quantities by SKU for the basket import
+    // Order EVERYTHING regardless of stock (full qty) — the short lines still get
+    // flagged (note on the order + email) so a human decides later (keep on
+    // order / cancel / swap).
     const agg = {};
-    for (const l of inStock) agg[l.sku] = (agg[l.sku] || 0) + l.order;
+    for (const l of lines) agg[l.sku] = (agg[l.sku] || 0) + l.qty;
     const importLines = Object.entries(agg).map(([stockCode, qty]) => ({ stockCode, qty }));
 
-    let basket = null, emailed = false, po = null;
+    // Resolve the email recipient for each short order (Magento -> sales, else
+    // the creator). Computed always so a dry-run shows the routing.
+    const salesEmail = process.env.PURCHASING_SALES_EMAIL || 'sales@tuffshop.co.uk';
+    const shortByOrder = {};
+    for (const l of outOfStock) (shortByOrder[l.orderId] = shortByOrder[l.orderId] || []).push(l);
+    const routing = [];
+    for (const oid of Object.keys(shortByOrder)) {
+      const order = plan.orders.find((o) => String(o.orderId) === String(oid)) || {};
+      routing.push({ orderId: Number(oid), resolvedTo: await purchasingAuto.orderRecipient(order, salesEmail) });
+    }
+
+    let basket = null, emailed = false, po = null, notesAdded = 0;
     if (!dryRun) {
-      // Create the BP Pending PO first (whole demand; stamps PCF_<supplier>PO on
-      // each order). Must run before the basket import re-reads demand isn't an
-      // issue here because we already captured `lines` above.
       if (createPo) po = await purchasingAuto.createPO(supplier, { orderIds: ids });
       if (importLines.length) {
         const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: importLines }) });
         basket = await r.json();
       }
-      if (outOfStock.length) { await sendOutOfStockEmail(supplier, outOfStock); emailed = true; }
+      if (outOfStock.length) {
+        const supContact = (purchasingAuto.SUPPLIERS[String(supplier).toUpperCase()] || {}).contactId;
+        // 1. note on each affected order: item, stock situation, next delivery date
+        for (const oid of Object.keys(shortByOrder)) {
+          const noteText = `${plan.supplier} stock note${po ? ` (PO ${po.poId})` : ''}:\n`
+            + shortByOrder[oid].map((l) => `${l.sku} — ${l.avail} in stock, ${l.short} short${l.stock && l.stock.deldate ? `. Next delivery ${l.stock.deldate}` : ''}`).join('\n');
+          try { await purchasingAuto.addOrderNote(Number(oid), noteText, supContact); notesAdded++; } catch (e) { console.error('[purchasing] note failed', oid, e.message); }
+        }
+        // 2. email, grouped by recipient. `emailTo` overrides the routing (testing).
+        const byRecipient = {};
+        for (const r of routing) { const to = req.body.emailTo || r.resolvedTo; (byRecipient[to] = byRecipient[to] || []).push(...shortByOrder[r.orderId]); }
+        for (const to of Object.keys(byRecipient)) {
+          try { await sendOutOfStockEmail(supplier, byRecipient[to], to); emailed = true; } catch (e) { console.error('[purchasing] oos email failed', to, e.message); }
+        }
+      }
     }
 
     // Optionally finalize the contributing orders (flip status -> Ordered Stock,
@@ -7687,12 +7712,15 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
 
     res.json({
       supplier: plan.supplier, dryRun: !!dryRun,
-      totalLines: lines.length, orderedLines: inStock.length, shortLines: outOfStock.length,
-      unitsOrdered: lines.reduce((a, l) => a + l.order, 0), unitsShort: lines.reduce((a, l) => a + l.short, 0),
+      totalLines: lines.length,
+      basketUnits: lines.reduce((a, l) => a + l.qty, 0),   // all ordered to basket
+      inStockUnits: lines.reduce((a, l) => a + l.order, 0), // of which in stock
+      shortLines: outOfStock.length, shortUnits: lines.reduce((a, l) => a + l.short, 0),
       importedSkus: importLines.length,
       po: po ? { created: po.created, poId: po.poId, net: po.totalNet } : null,
-      basket, emailed, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
-      shortfall: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, need: l.qty, avail: l.avail, ordered: l.order, short: l.short })),
+      basket, emailed, notesAdded, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
+      routing,
+      shortfall: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, need: l.qty, avail: l.avail, short: l.short, deldate: l.stock && l.stock.deldate })),
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
