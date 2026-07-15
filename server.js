@@ -7693,11 +7693,17 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
             + shortByOrder[oid].map((l) => `${l.sku} — ${l.avail} in stock, ${l.short} short${l.stock && l.stock.deldate ? `. Next delivery ${l.stock.deldate}` : ''}`).join('\n');
           try { await purchasingAuto.addOrderNote(Number(oid), noteText, supContact); notesAdded++; } catch (e) { console.error('[purchasing] note failed', oid, e.message); }
         }
-        // 2. email, grouped by recipient. `emailTo` overrides the routing (testing).
-        const byRecipient = {};
-        for (const r of routing) { const to = req.body.emailTo || r.resolvedTo; (byRecipient[to] = byRecipient[to] || []).push(...shortByOrder[r.orderId]); }
-        for (const to of Object.keys(byRecipient)) {
-          try { await sendOutOfStockEmail(supplier, byRecipient[to], to); emailed = true; } catch (e) { console.error('[purchasing] oos email failed', to, e.message); }
+        // 2. email, grouped by recipient. GATED OFF by default so testing never
+        //    sends to real people — only sends when PURCHASING_EMAIL_ENABLED=true
+        //    (production) or the request explicitly sets sendEmail:true. `emailTo`
+        //    overrides the routing (safe testing to one address).
+        const emailEnabled = process.env.PURCHASING_EMAIL_ENABLED === 'true' || req.body.sendEmail === true;
+        if (emailEnabled) {
+          const byRecipient = {};
+          for (const r of routing) { const to = req.body.emailTo || r.resolvedTo; (byRecipient[to] = byRecipient[to] || []).push(...shortByOrder[r.orderId]); }
+          for (const to of Object.keys(byRecipient)) {
+            try { await sendOutOfStockEmail(supplier, byRecipient[to], to); emailed = true; } catch (e) { console.error('[purchasing] oos email failed', to, e.message); }
+          }
         }
       }
     }
