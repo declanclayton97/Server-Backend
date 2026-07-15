@@ -7596,11 +7596,12 @@ async function sendOutOfStockEmail(supplier, lines) {
     <td style="padding:6px;border:1px solid #ddd;font-family:monospace">${l.sku}</td>
     <td style="padding:6px;border:1px solid #ddd">${(l.name || '').slice(0, 60)}</td>
     <td style="padding:6px;border:1px solid #ddd;text-align:right">${l.qty}</td>
-    <td style="padding:6px;border:1px solid #ddd">${(l.stock && l.stock.status) || 'Out of stock'}</td>
+    <td style="padding:6px;border:1px solid #ddd">${(l.stock && l.stock.status) || 'Unknown'}</td>
+    <td style="padding:6px;border:1px solid #ddd">${(l.stock && l.stock.deldate) || ''}</td>
   </tr>`).join('');
   const html = `<div style="font-family:Arial,sans-serif;max-width:900px;color:#333">
-    <h2 style="color:#cc0000">${supplier} — out of stock (${lines.length} line${lines.length === 1 ? '' : 's'})</h2>
-    <p>These lines were <strong>not</strong> added to the ${supplier} basket because they're out of stock at the supplier. They need a back-order or an alternative.</p>
+    <h2 style="color:#cc0000">${supplier} — ${lines.length} line${lines.length === 1 ? '' : 's'} not available to order now</h2>
+    <p>These lines were <strong>not</strong> added to the ${supplier} basket — they're out of stock or low/restocking. They need a back-order or an alternative.</p>
     <table style="border-collapse:collapse;font-size:13px">
       <tr style="background:#f2f2f2">
         <th style="padding:6px;border:1px solid #ddd;text-align:left">Order</th>
@@ -7609,6 +7610,7 @@ async function sendOutOfStockEmail(supplier, lines) {
         <th style="padding:6px;border:1px solid #ddd;text-align:left">Item</th>
         <th style="padding:6px;border:1px solid #ddd;text-align:right">Qty</th>
         <th style="padding:6px;border:1px solid #ddd;text-align:left">Status</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:left">Restock</th>
       </tr>${rows}</table>
     <p style="font-size:11px;color:#888;margin-top:16px">Automated by the purchasing flow • live stock from the supplier portal.</p>
   </div>`;
@@ -7618,7 +7620,7 @@ async function sendOutOfStockEmail(supplier, lines) {
   for (const port of ports) {
     try {
       const t = nodemailer.createTransport({ host: smtpHost, port, secure: false, auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS }, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 20000 });
-      await t.sendMail({ from: `"Tuffshop Purchasing" <${OOS_EMAIL_TO}>`, to: OOS_EMAIL_TO, subject: `${supplier} order — ${lines.length} out-of-stock line(s)`, html });
+      await t.sendMail({ from: `"Tuffshop Purchasing" <${OOS_EMAIL_TO}>`, to: OOS_EMAIL_TO, subject: `${supplier} order — ${lines.length} line(s) not available now`, html });
       return true;
     } catch (e) { lastErr = e; }
   }
@@ -7643,9 +7645,12 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       }
       l.stock = simOos.has(String(l.sku)) ? { found: true, status: 'Out of stock', simulated: true } : stockBySku[l.sku];
     }
-    const isOut = (l) => l.stock && /out of stock/i.test(l.stock.status || '');
-    const inStock = lines.filter((l) => !isOut(l));
-    const outOfStock = lines.filter((l) => isOut(l));
+    // Only cleanly "In stock" lines are orderable. "Low stock" (with a future
+    // restock date) and "Out of stock" read as unavailable on the portal, so
+    // they go to the shortfall (email / back-order) — don't import them.
+    const isAvailable = (l) => l.stock && /^\s*in stock\s*$/i.test(l.stock.status || '');
+    const inStock = lines.filter((l) => isAvailable(l));
+    const outOfStock = lines.filter((l) => !isAvailable(l));
 
     // aggregate in-stock lines by SKU for the basket import
     const agg = {};
