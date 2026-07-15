@@ -7596,20 +7596,22 @@ async function sendOutOfStockEmail(supplier, lines) {
     <td style="padding:6px;border:1px solid #ddd;font-family:monospace">${l.sku}</td>
     <td style="padding:6px;border:1px solid #ddd">${(l.name || '').slice(0, 60)}</td>
     <td style="padding:6px;border:1px solid #ddd;text-align:right">${l.qty}</td>
-    <td style="padding:6px;border:1px solid #ddd">${(l.stock && l.stock.status) || 'Unknown'}</td>
+    <td style="padding:6px;border:1px solid #ddd;text-align:right">${l.avail != null ? l.avail : '?'}</td>
+    <td style="padding:6px;border:1px solid #ddd;text-align:right;font-weight:bold;color:#cc0000">${l.short}</td>
     <td style="padding:6px;border:1px solid #ddd">${(l.stock && l.stock.deldate) || ''}</td>
   </tr>`).join('');
   const html = `<div style="font-family:Arial,sans-serif;max-width:900px;color:#333">
-    <h2 style="color:#cc0000">${supplier} — ${lines.length} line${lines.length === 1 ? '' : 's'} not available to order now</h2>
-    <p>These lines were <strong>not</strong> added to the ${supplier} basket — they're out of stock or low/restocking. They need a back-order or an alternative.</p>
+    <h2 style="color:#cc0000">${supplier} — ${lines.length} line${lines.length === 1 ? '' : 's'} short</h2>
+    <p>These lines couldn't be fully ordered from the ${supplier} basket — the <strong>Short</strong> quantity needs a back-order or an alternative. (Any in-stock quantity was ordered.)</p>
     <table style="border-collapse:collapse;font-size:13px">
       <tr style="background:#f2f2f2">
         <th style="padding:6px;border:1px solid #ddd;text-align:left">Order</th>
         <th style="padding:6px;border:1px solid #ddd;text-align:left">Reference</th>
         <th style="padding:6px;border:1px solid #ddd;text-align:left">SKU</th>
         <th style="padding:6px;border:1px solid #ddd;text-align:left">Item</th>
-        <th style="padding:6px;border:1px solid #ddd;text-align:right">Qty</th>
-        <th style="padding:6px;border:1px solid #ddd;text-align:left">Status</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:right">Need</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:right">Avail</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:right">Short</th>
         <th style="padding:6px;border:1px solid #ddd;text-align:left">Restock</th>
       </tr>${rows}</table>
     <p style="font-size:11px;color:#888;margin-top:16px">Automated by the purchasing flow • live stock from the supplier portal.</p>
@@ -7620,7 +7622,7 @@ async function sendOutOfStockEmail(supplier, lines) {
   for (const port of ports) {
     try {
       const t = nodemailer.createTransport({ host: smtpHost, port, secure: false, auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS }, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 20000 });
-      await t.sendMail({ from: `"Tuffshop Purchasing" <${OOS_EMAIL_TO}>`, to: OOS_EMAIL_TO, subject: `${supplier} order — ${lines.length} line(s) not available now`, html });
+      await t.sendMail({ from: `"Tuffshop Purchasing" <${OOS_EMAIL_TO}>`, to: OOS_EMAIL_TO, subject: `${supplier} order — ${lines.length} line(s) short`, html });
       return true;
     } catch (e) { lastErr = e; }
   }
@@ -7637,25 +7639,29 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     const lines = [];
     for (const o of plan.orders) for (const l of o.lines) lines.push({ orderId: o.orderId, ref: o.ref, sku: l.sku, name: l.name, qty: l.qty });
 
-    // live stock per unique SKU
-    const stockBySku = {};
+    // LIVE portal EXACT stock per line (?live=1), cached by sku+size. Then a
+    // quantity-aware split: order min(need, available) now, back-order the rest.
+    const stockCache = {};
     for (const l of lines) {
-      if (!(l.sku in stockBySku)) {
-        try { const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-stock?sku=${encodeURIComponent(l.sku)}`); stockBySku[l.sku] = await r.json(); }
-        catch (e) { stockBySku[l.sku] = { found: false, reason: e.message }; }
+      if (simOos.has(String(l.sku))) { l.stock = { avail: 0, simulated: true }; }
+      else {
+        const key = `${l.sku}|${l.size || ''}`;
+        if (!(key in stockCache)) {
+          try { const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-stock?live=1&sku=${encodeURIComponent(l.sku)}&sizeLabel=${encodeURIComponent(l.size || '')}`); stockCache[key] = await r.json(); }
+          catch (e) { stockCache[key] = { found: false, reason: e.message }; }
+        }
+        l.stock = stockCache[key];
       }
-      l.stock = simOos.has(String(l.sku)) ? { found: true, status: 'Out of stock', simulated: true } : stockBySku[l.sku];
+      l.avail = (l.stock && typeof l.stock.avail === 'number') ? l.stock.avail : 0; // unresolved → 0 orderable (conservative)
+      l.order = Math.min(l.qty, l.avail);
+      l.short = l.qty - l.order;
     }
-    // Only cleanly "In stock" lines are orderable. "Low stock" (with a future
-    // restock date) and "Out of stock" read as unavailable on the portal, so
-    // they go to the shortfall (email / back-order) — don't import them.
-    const isAvailable = (l) => l.stock && /^\s*in stock\s*$/i.test(l.stock.status || '');
-    const inStock = lines.filter((l) => isAvailable(l));
-    const outOfStock = lines.filter((l) => !isAvailable(l));
+    const inStock = lines.filter((l) => l.order > 0);   // has something orderable now
+    const outOfStock = lines.filter((l) => l.short > 0); // has a shortfall to back-order (may overlap inStock)
 
-    // aggregate in-stock lines by SKU for the basket import
+    // aggregate the ORDER quantities by SKU for the basket import
     const agg = {};
-    for (const l of inStock) agg[l.sku] = (agg[l.sku] || 0) + l.qty;
+    for (const l of inStock) agg[l.sku] = (agg[l.sku] || 0) + l.order;
     const importLines = Object.entries(agg).map(([stockCode, qty]) => ({ stockCode, qty }));
 
     let basket = null, emailed = false, po = null;
@@ -7681,11 +7687,12 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
 
     res.json({
       supplier: plan.supplier, dryRun: !!dryRun,
-      totalLines: lines.length, inStockLines: inStock.length, outOfStockLines: outOfStock.length,
+      totalLines: lines.length, orderedLines: inStock.length, shortLines: outOfStock.length,
+      unitsOrdered: lines.reduce((a, l) => a + l.order, 0), unitsShort: lines.reduce((a, l) => a + l.short, 0),
       importedSkus: importLines.length,
       po: po ? { created: po.created, poId: po.poId, net: po.totalNet } : null,
       basket, emailed, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
-      outOfStock: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, qty: l.qty, status: l.stock && l.stock.status })),
+      shortfall: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, need: l.qty, avail: l.avail, ordered: l.order, short: l.short })),
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
