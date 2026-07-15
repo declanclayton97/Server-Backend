@@ -7671,12 +7671,20 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       if (outOfStock.length) { await sendOutOfStockEmail(supplier, outOfStock); emailed = true; }
     }
 
+    // Optionally finalize the contributing orders (flip status -> Ordered Stock,
+    // strip tag, add "ordered via PO" note). Currently all-or-nothing (not yet
+    // shortfall-aware). Requires the PO to have been created.
+    let finalized = null;
+    if (!dryRun && req.body.finalize && po && po.created) {
+      finalized = await purchasingAuto.finalizePO(supplier, { poId: po.poId, orderIds: plan.orders.map((o) => o.orderId) });
+    }
+
     res.json({
       supplier: plan.supplier, dryRun: !!dryRun,
       totalLines: lines.length, inStockLines: inStock.length, outOfStockLines: outOfStock.length,
       importedSkus: importLines.length,
       po: po ? { created: po.created, poId: po.poId, net: po.totalNet } : null,
-      basket, emailed,
+      basket, emailed, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
       outOfStock: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, qty: l.qty, status: l.stock && l.stock.status })),
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
