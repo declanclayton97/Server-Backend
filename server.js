@@ -7582,6 +7582,93 @@ app.post('/api/purchasing/finalize', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Prepare a supplier order: take the demand, check LIVE supplier stock per line,
+// import the in-stock qty into the supplier basket, and email the out-of-stock
+// shortfall (for back-order / alternative). Leaves the basket for human review;
+// does NOT place the order. Stock + basket run on the Alternate-Items service.
+const ALT_ITEMS_URL = process.env.ALT_ITEMS_URL || 'https://alternate-items.onrender.com';
+const OOS_EMAIL_TO = process.env.PURCHASING_OOS_EMAIL || 'dec@tuffshop.co.uk';
+
+async function sendOutOfStockEmail(supplier, lines) {
+  const rows = lines.map((l) => `<tr>
+    <td style="padding:6px;border:1px solid #ddd">${l.orderId}</td>
+    <td style="padding:6px;border:1px solid #ddd">${l.ref || ''}</td>
+    <td style="padding:6px;border:1px solid #ddd;font-family:monospace">${l.sku}</td>
+    <td style="padding:6px;border:1px solid #ddd">${(l.name || '').slice(0, 60)}</td>
+    <td style="padding:6px;border:1px solid #ddd;text-align:right">${l.qty}</td>
+    <td style="padding:6px;border:1px solid #ddd">${(l.stock && l.stock.status) || 'Out of stock'}</td>
+  </tr>`).join('');
+  const html = `<div style="font-family:Arial,sans-serif;max-width:900px;color:#333">
+    <h2 style="color:#cc0000">${supplier} — out of stock (${lines.length} line${lines.length === 1 ? '' : 's'})</h2>
+    <p>These lines were <strong>not</strong> added to the ${supplier} basket because they're out of stock at the supplier. They need a back-order or an alternative.</p>
+    <table style="border-collapse:collapse;font-size:13px">
+      <tr style="background:#f2f2f2">
+        <th style="padding:6px;border:1px solid #ddd;text-align:left">Order</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:left">Reference</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:left">SKU</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:left">Item</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:right">Qty</th>
+        <th style="padding:6px;border:1px solid #ddd;text-align:left">Status</th>
+      </tr>${rows}</table>
+    <p style="font-size:11px;color:#888;margin-top:16px">Automated by the purchasing flow • live stock from the supplier portal.</p>
+  </div>`;
+  const smtpHost = process.env.SMTP_SERVER || 'mail-eu.smtp2go.com';
+  const ports = [...new Set([parseInt(process.env.SMTP_PORT || '2525', 10), 2525, 587, 8025])];
+  let lastErr;
+  for (const port of ports) {
+    try {
+      const t = nodemailer.createTransport({ host: smtpHost, port, secure: false, auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS }, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 20000 });
+      await t.sendMail({ from: `"Tuffshop Purchasing" <${OOS_EMAIL_TO}>`, to: OOS_EMAIL_TO, subject: `${supplier} order — ${lines.length} out-of-stock line(s)`, html });
+      return true;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
+app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try {
+    const { supplier, orderIds, dryRun } = req.body || {};
+    const plan = await purchasingAuto.preview(supplier, parseOrderIds(orderIds));
+    const lines = [];
+    for (const o of plan.orders) for (const l of o.lines) lines.push({ orderId: o.orderId, ref: o.ref, sku: l.sku, name: l.name, qty: l.qty });
+
+    // live stock per unique SKU
+    const stockBySku = {};
+    for (const l of lines) {
+      if (!(l.sku in stockBySku)) {
+        try { const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-stock?sku=${encodeURIComponent(l.sku)}`); stockBySku[l.sku] = await r.json(); }
+        catch (e) { stockBySku[l.sku] = { found: false, reason: e.message }; }
+      }
+      l.stock = stockBySku[l.sku];
+    }
+    const isOut = (s) => s && /out of stock/i.test(s.status || '');
+    const inStock = lines.filter((l) => !isOut(l.stock));
+    const outOfStock = lines.filter((l) => isOut(l.stock));
+
+    // aggregate in-stock lines by SKU for the basket import
+    const agg = {};
+    for (const l of inStock) agg[l.sku] = (agg[l.sku] || 0) + l.qty;
+    const importLines = Object.entries(agg).map(([stockCode, qty]) => ({ stockCode, qty }));
+
+    let basket = null, emailed = false;
+    if (!dryRun) {
+      if (importLines.length) {
+        const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: importLines }) });
+        basket = await r.json();
+      }
+      if (outOfStock.length) { await sendOutOfStockEmail(supplier, outOfStock); emailed = true; }
+    }
+
+    res.json({
+      supplier: plan.supplier, dryRun: !!dryRun,
+      totalLines: lines.length, inStockLines: inStock.length, outOfStockLines: outOfStock.length,
+      importedSkus: importLines.length, basket, emailed,
+      outOfStock: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, qty: l.qty, status: l.stock && l.stock.status })),
+    });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // ============================================================
 // Proof Approval System
 // ============================================================
