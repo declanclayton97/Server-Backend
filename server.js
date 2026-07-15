@@ -7630,9 +7630,10 @@ async function sendOutOfStockEmail(supplier, lines) {
 app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
   if (!requirePurchasing(res)) return;
   try {
-    const { supplier, orderIds, dryRun, simulateOosSkus } = req.body || {};
+    const { supplier, orderIds, dryRun, simulateOosSkus, createPo } = req.body || {};
     const simOos = new Set((simulateOosSkus || []).map((x) => String(x))); // test hook: force these SKUs OOS
-    const plan = await purchasingAuto.preview(supplier, parseOrderIds(orderIds));
+    const ids = parseOrderIds(orderIds);
+    const plan = await purchasingAuto.preview(supplier, ids);
     const lines = [];
     for (const o of plan.orders) for (const l of o.lines) lines.push({ orderId: o.orderId, ref: o.ref, sku: l.sku, name: l.name, qty: l.qty });
 
@@ -7657,8 +7658,12 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     for (const l of inStock) agg[l.sku] = (agg[l.sku] || 0) + l.qty;
     const importLines = Object.entries(agg).map(([stockCode, qty]) => ({ stockCode, qty }));
 
-    let basket = null, emailed = false;
+    let basket = null, emailed = false, po = null;
     if (!dryRun) {
+      // Create the BP Pending PO first (whole demand; stamps PCF_<supplier>PO on
+      // each order). Must run before the basket import re-reads demand isn't an
+      // issue here because we already captured `lines` above.
+      if (createPo) po = await purchasingAuto.createPO(supplier, { orderIds: ids });
       if (importLines.length) {
         const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: importLines }) });
         basket = await r.json();
@@ -7669,7 +7674,9 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     res.json({
       supplier: plan.supplier, dryRun: !!dryRun,
       totalLines: lines.length, inStockLines: inStock.length, outOfStockLines: outOfStock.length,
-      importedSkus: importLines.length, basket, emailed,
+      importedSkus: importLines.length,
+      po: po ? { created: po.created, poId: po.poId, net: po.totalNet } : null,
+      basket, emailed,
       outOfStock: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, qty: l.qty, status: l.stock && l.stock.status })),
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
