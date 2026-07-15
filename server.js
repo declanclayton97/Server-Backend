@@ -7637,7 +7637,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     const ids = parseOrderIds(orderIds);
     const plan = await purchasingAuto.preview(supplier, ids);
     const lines = [];
-    for (const o of plan.orders) for (const l of o.lines) lines.push({ orderId: o.orderId, ref: o.ref, sku: l.sku, name: l.name, qty: l.qty });
+    for (const o of plan.orders) for (const l of o.lines) lines.push({ orderId: o.orderId, ref: o.ref, sku: l.sku, name: l.name, qty: l.qty, size: l.size });
 
     // LIVE portal EXACT stock per line (?live=1), cached by sku+size. Then a
     // quantity-aware split: order min(need, available) now, back-order the rest.
