@@ -7717,12 +7717,13 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       // It is also SUPPLIER-SPECIFIC: only the Snickers/Hultafors basket is built,
       // so never push another supplier's lines into it.
       const basketEnabled = process.env.PURCHASING_BASKET_ENABLED === 'true' || req.body.importBasket === true;
-      const basketSupplier = String(supplier).toUpperCase() === 'SNICKERS';
+      const BASKET_SUPPLIERS = new Set(['SNICKERS', 'PORTWEST']); // suppliers with a built basket flow
+      const basketSupplier = BASKET_SUPPLIERS.has(String(supplier).toUpperCase());
       if (importLines.length && basketEnabled && basketSupplier) {
-        const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: importLines }) });
+        const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ supplier: String(supplier).toUpperCase(), lines: importLines }) });
         basket = await r.json();
       } else if (importLines.length && basketEnabled && !basketSupplier) {
-        basket = { skipped: true, reason: `basket automation not built for ${plan.supplier} (only Snickers)` };
+        basket = { skipped: true, reason: `basket automation not built for ${plan.supplier}` };
       }
       if (outOfStock.length) {
         const supContact = (purchasingAuto.SUPPLIERS[String(supplier).toUpperCase()] || {}).contactId;
