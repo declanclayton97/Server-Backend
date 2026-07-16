@@ -189,9 +189,9 @@ export async function createPO(supplierKey, { orderIds, dryRun } = {}) {
     }
   }
 
-  // 3. source note on the PO
+  // 3. source note on the PO (SO#nnn renders as a clickable order link in BP)
   const noteText = `Auto-PO for ${sup.key}. Lines sourced from:\n` +
-    contributors.map((c) => `  SO ${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')).join('\n');
+    contributors.map((c) => `  SO#${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')).join('\n');
   await addOrderNote(poId, noteText, sup.contactId);
 
   // 4. stamp the PO number onto each contributing SO (linkage + dedupe)
@@ -200,6 +200,42 @@ export async function createPO(supplierKey, { orderIds, dryRun } = {}) {
   }
 
   return { created: true, poId, ...plan };
+}
+
+export const PO_BACKORDER_STATUS = 45; // "On Back Order"
+
+// Create a PO for a supplier from explicit line items — used to split demand
+// into a main PO (in-stock qty) and a separate back-order PO (shortfall qty).
+// lineItems = [{ productId, qty, cost }]. opts: { reference, status, note }.
+export async function createSupplierPO(supplierKey, lineItems, opts = {}) {
+  const sup = resolveSupplier(supplierKey);
+  if (!lineItems.length) return { created: false, reason: 'no lines' };
+  const poId = await api('POST', '/order-service/order', {
+    orderTypeCode: 'PO',
+    reference: opts.reference || `Auto-PO ${sup.key}`,
+    priceListId: sup.costList != null ? sup.costList : 3,
+    priceModeCode: 'EXC',
+    warehouseId: WAREHOUSE_ID,
+    currency: { orderCurrencyCode: 'GBP' },
+    parties: { supplier: { contactId: sup.contactId } },
+  });
+  for (const l of lineItems) {
+    const net = (l.cost || 0) * l.qty;
+    await api('POST', `/order-service/order/${poId}/row`, {
+      productId: l.productId,
+      quantity: { magnitude: String(l.qty) },
+      rowValue: { taxCode: 'T20', rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * 0.2).toFixed(2) } },
+    });
+  }
+  if (opts.note) await addOrderNote(poId, opts.note, sup.contactId);
+  if (opts.status) await api('PUT', `/order-service/order/${poId}/status`, { orderStatusId: opts.status });
+  return { created: true, poId };
+}
+
+// Stamp a supplier PO number into an order's per-supplier PO custom field.
+export async function stampPoField(supplierKey, orderId, poId) {
+  const sup = resolveSupplier(supplierKey);
+  return api('PATCH', `/order-service/order/${orderId}/custom-field`, [{ op: 'add', path: `/${sup.poField}`, value: String(poId) }]);
 }
 
 // Post-placement: strip the supplier from the tag, flip status when it was the
@@ -219,7 +255,7 @@ export async function finalizePO(supplierKey, { poId, orderIds } = {}) {
       await api('PATCH', `/order-service/order/${id}/custom-field`, [{ op: 'remove', path: '/PCF_SUPPLIER' }]);
       await api('PUT', `/order-service/order/${id}/status`, { orderStatusId: ORDERED_STATUS });
     }
-    await addOrderNote(id, `${sup.key} items ordered via PO ${poId}`, sup.contactId);
+    await addOrderNote(id, `${sup.key} items ordered via PO#${poId}`, sup.contactId);
     results.push({ orderId: id, tagAfter: remaining.join(' / '), completed: remaining.length === 0 });
   }
   return { finalized: true, poId, results };
