@@ -7725,7 +7725,11 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       } else if (importLines.length && basketEnabled && !basketSupplier) {
         basket = { skipped: true, reason: `basket automation not built for ${plan.supplier}` };
       }
-      if (outOfStock.length) {
+      // Shortfall notes/emails only make sense once a back-order PO exists to
+      // reference — otherwise (e.g. a basket-only run) we'd stamp "PO#?" notes and
+      // re-stamp them on every re-run (the order isn't PO-tagged yet, so it keeps
+      // being re-picked). Tie them to the actual split.
+      if (outOfStock.length && backorderPo && backorderPo.poId) {
         const supContact = (purchasingAuto.SUPPLIERS[String(supplier).toUpperCase()] || {}).contactId;
         // 1. note on each affected order: item, stock situation, next delivery date
         for (const oid of Object.keys(shortByOrder)) {
