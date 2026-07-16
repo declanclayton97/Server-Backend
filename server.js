@@ -7650,7 +7650,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       else {
         const key = `${l.sku}|${l.size || ''}`;
         if (!(key in stockCache)) {
-          try { const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-stock?live=1&sku=${encodeURIComponent(l.sku)}&sizeLabel=${encodeURIComponent(l.size || '')}`); stockCache[key] = await r.json(); }
+          try { const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-stock?live=1&supplier=${encodeURIComponent(supplier)}&sku=${encodeURIComponent(l.sku)}&sizeLabel=${encodeURIComponent(l.size || '')}`); stockCache[key] = await r.json(); }
           catch (e) { stockCache[key] = { found: false, reason: e.message }; }
         }
         l.stock = stockCache[key];
@@ -7714,10 +7714,15 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       }
       // Basket import is GATED (default off) — we know it works; don't keep
       // touching the live Snickers basket during testing (avoid accidental order).
+      // It is also SUPPLIER-SPECIFIC: only the Snickers/Hultafors basket is built,
+      // so never push another supplier's lines into it.
       const basketEnabled = process.env.PURCHASING_BASKET_ENABLED === 'true' || req.body.importBasket === true;
-      if (importLines.length && basketEnabled) {
+      const basketSupplier = String(supplier).toUpperCase() === 'SNICKERS';
+      if (importLines.length && basketEnabled && basketSupplier) {
         const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: importLines }) });
         basket = await r.json();
+      } else if (importLines.length && basketEnabled && !basketSupplier) {
+        basket = { skipped: true, reason: `basket automation not built for ${plan.supplier} (only Snickers)` };
       }
       if (outOfStock.length) {
         const supContact = (purchasingAuto.SUPPLIERS[String(supplier).toUpperCase()] || {}).contactId;
