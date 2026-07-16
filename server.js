@@ -7638,7 +7638,9 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     const ids = parseOrderIds(orderIds);
     const plan = await purchasingAuto.preview(supplier, ids);
     const lines = [];
-    for (const o of plan.orders) for (const l of o.lines) lines.push({ orderId: o.orderId, ref: o.ref, sku: l.sku, name: l.name, qty: l.qty, size: l.size, productId: l.productId, cost: l.cost });
+    for (const o of plan.orders) for (const l of o.lines) lines.push({ orderId: o.orderId, ref: o.ref, sku: l.sku, name: l.name, qty: l.qty, size: l.size, colour: l.colour, productId: l.productId, cost: l.cost });
+    // "<name> <colour> <size>" for a line (skips blanks).
+    const itemLabel = (l) => [l.name, l.colour, l.size].filter(Boolean).join(' ');
 
     // LIVE portal EXACT stock per line (?live=1), cached by sku+size. Then a
     // quantity-aware split: order min(need, available) now, back-order the rest.
@@ -7681,16 +7683,32 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     let basket = null, emailed = false, po = null, backorderPo = null, notesAdded = 0;
     if (!dryRun) {
       if (createPo) {
-        // Split the demand: main Pending PO = in-stock qty; a separate
-        // "On Back Order" PO = the shortfall qty. Both link back via SO#/PO#.
+        // Split the demand: main Pending PO = in-stock qty; a separate "On Back
+        // Order" PO (child of the main) = the shortfall qty. Create both first so
+        // the notes can cross-reference each other's PO#.
+        const supContact = (purchasingAuto.SUPPLIERS[String(supplier).toUpperCase()] || {}).contactId;
         const mainItems = lines.filter((l) => l.order > 0).map((l) => ({ productId: l.productId, qty: l.order, cost: l.cost }));
         const boItems = lines.filter((l) => l.short > 0).map((l) => ({ productId: l.productId, qty: l.short, cost: l.cost }));
-        const srcNote = `Auto-PO for ${plan.supplier}. Sourced from:\n` + plan.orders.map((o) => `  SO#${o.orderId} (${o.ref})`).join('\n');
-        po = await purchasingAuto.createSupplierPO(supplier, mainItems, { reference: `Auto-PO ${plan.supplier}`, note: srcNote });
-        if (boItems.length) {
-          const boNote = `Back-order (short stock) for ${plan.supplier}.${po && po.poId ? ` Main order: PO#${po.poId}.` : ''}\nSourced from:\n` + [...new Set(outOfStock.map((l) => l.orderId))].map((oid) => `  SO#${oid}`).join('\n');
-          backorderPo = await purchasingAuto.createSupplierPO(supplier, boItems, { reference: `Auto-PO ${plan.supplier} BACK ORDER`, status: purchasingAuto.PO_BACKORDER_STATUS, note: boNote, parentOrderId: po && po.poId ? po.poId : undefined });
+        const mainSrc = lines.filter((l) => l.order > 0).sort((a, b) => a.orderId - b.orderId);
+        const shortSrc = outOfStock.slice().sort((a, b) => a.orderId - b.orderId);
+
+        po = await purchasingAuto.createSupplierPO(supplier, mainItems, { reference: `Auto-PO ${plan.supplier}` });
+        if (boItems.length) backorderPo = await purchasingAuto.createSupplierPO(supplier, boItems, { reference: `Auto-PO ${plan.supplier} BACK ORDER`, status: purchasingAuto.PO_BACKORDER_STATUS, parentOrderId: po && po.poId ? po.poId : undefined });
+
+        // main PO note — items grouped by order, plus any split-to-back-order lines
+        if (po && po.poId) {
+          let note = 'This purchase order was created using the following sales orders:\n'
+            + mainSrc.map((l) => `${l.order} of ${itemLabel(l)} from order SO#${l.orderId}`).join('\n');
+          if (backorderPo && backorderPo.poId) note += '\n\n' + shortSrc.map((l) => `${itemLabel(l)} split to back order to PO#${backorderPo.poId}`).join('\n');
+          try { await purchasingAuto.addOrderNote(po.poId, note, supContact); } catch (e) { console.error('[purchasing] main note', e.message); }
         }
+        // back-order PO note — split from the main PO, items grouped by order
+        if (backorderPo && backorderPo.poId) {
+          const note = `This back order was split from PO#${po && po.poId ? po.poId : '?'}, using the following sales orders:\n`
+            + shortSrc.map((l) => `${l.short} of ${itemLabel(l)} from order SO#${l.orderId}`).join('\n');
+          try { await purchasingAuto.addOrderNote(backorderPo.poId, note, supContact); } catch (e) { console.error('[purchasing] bo note', e.message); }
+        }
+
         const stampId = (po && po.poId) || (backorderPo && backorderPo.poId);
         if (stampId) for (const o of plan.orders) { try { await purchasingAuto.stampPoField(supplier, o.orderId, stampId); } catch (e) { console.error('[purchasing] stamp failed', o.orderId, e.message); } }
       }
@@ -7705,8 +7723,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
         const supContact = (purchasingAuto.SUPPLIERS[String(supplier).toUpperCase()] || {}).contactId;
         // 1. note on each affected order: item, stock situation, next delivery date
         for (const oid of Object.keys(shortByOrder)) {
-          const noteText = `${plan.supplier} stock shortfall${backorderPo && backorderPo.poId ? ` — back-ordered on PO#${backorderPo.poId}` : ''}:\n`
-            + shortByOrder[oid].map((l) => `${l.sku} — ${l.avail} in stock, ${l.short} short${l.stock && l.stock.deldate ? `. Next delivery ${l.stock.deldate}` : ''}`).join('\n');
+          const noteText = shortByOrder[oid].map((l) => `${l.short} of ${itemLabel(l)} split to back order PO#${backorderPo && backorderPo.poId ? backorderPo.poId : '?'}${l.stock && l.stock.deldate ? `. Next delivery ${l.stock.deldate}` : ''}`).join('\n');
           try { await purchasingAuto.addOrderNote(Number(oid), noteText, supContact); notesAdded++; } catch (e) { console.error('[purchasing] note failed', oid, e.message); }
         }
         // 2. email, grouped by recipient. GATED OFF by default so testing never

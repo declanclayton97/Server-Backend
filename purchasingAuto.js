@@ -119,7 +119,7 @@ async function findContributors(sup, orderIds) {
     for (const r of rows) {
       const qty = parseFloat(r.quantity.magnitude);
       const cost = await costOf(r.productId, sup.costList, r.itemCost ? parseFloat(r.itemCost.value) : 0);
-      lines.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty, cost, size: (r.productOptions && r.productOptions.Size) || null });
+      lines.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty, cost, size: (r.productOptions && r.productOptions.Size) || null, colour: (r.productOptions && r.productOptions.Colour) || null });
     }
     const remaining = tagsOf(tag).filter((t) => t.toUpperCase() !== sup.key);
     out.push({
