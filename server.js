@@ -7746,7 +7746,15 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     // shortfall-aware). Requires the PO to have been created.
     let finalized = null;
     if (!dryRun && req.body.finalize && po && po.created) {
-      finalized = await purchasingAuto.finalizePO(supplier, { poId: po.poId, orderIds: plan.orders.map((o) => o.orderId) });
+      // Per-order "ordered via" note listing the actual items ordered on the PO.
+      const orderedByOrder = {};
+      for (const l of lines) if (l.order > 0) (orderedByOrder[l.orderId] = orderedByOrder[l.orderId] || []).push(l);
+      const finalizeNotes = {};
+      for (const o of plan.orders) {
+        const ol = orderedByOrder[o.orderId];
+        if (ol && ol.length) finalizeNotes[o.orderId] = 'Ordered via PO#' + po.poId + ':\n' + ol.map((l) => `${l.order} of ${itemLabel(l)}`).join('\n');
+      }
+      finalized = await purchasingAuto.finalizePO(supplier, { poId: po.poId, orderIds: plan.orders.map((o) => o.orderId), notes: finalizeNotes });
     }
 
     res.json({

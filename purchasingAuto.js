@@ -242,7 +242,7 @@ export async function stampPoField(supplierKey, orderId, poId) {
 // Post-placement: strip the supplier from the tag, flip status when it was the
 // last supplier, and add an "ordered via PO N" note. Call after the order has
 // actually been placed with the supplier.
-export async function finalizePO(supplierKey, { poId, orderIds } = {}) {
+export async function finalizePO(supplierKey, { poId, orderIds, notes } = {}) {
   const sup = resolveSupplier(supplierKey);
   if (!poId) throw new Error('poId required');
   if (!orderIds || !orderIds.length) throw new Error('orderIds required');
@@ -256,7 +256,7 @@ export async function finalizePO(supplierKey, { poId, orderIds } = {}) {
       await api('PATCH', `/order-service/order/${id}/custom-field`, [{ op: 'remove', path: '/PCF_SUPPLIER' }]);
       await api('PUT', `/order-service/order/${id}/status`, { orderStatusId: ORDERED_STATUS });
     }
-    await addOrderNote(id, `${sup.key} items ordered via PO#${poId}`, sup.contactId);
+    await addOrderNote(id, (notes && notes[id]) || `${sup.key} items ordered via PO#${poId}`, sup.contactId);
     results.push({ orderId: id, tagAfter: remaining.join(' / '), completed: remaining.length === 0 });
   }
   return { finalized: true, poId, results };
