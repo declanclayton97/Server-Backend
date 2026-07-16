@@ -7688,8 +7688,8 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
         const srcNote = `Auto-PO for ${plan.supplier}. Sourced from:\n` + plan.orders.map((o) => `  SO#${o.orderId} (${o.ref})`).join('\n');
         po = await purchasingAuto.createSupplierPO(supplier, mainItems, { reference: `Auto-PO ${plan.supplier}`, note: srcNote });
         if (boItems.length) {
-          const boNote = `Back-order (short stock) for ${plan.supplier}. Sourced from:\n` + [...new Set(outOfStock.map((l) => l.orderId))].map((oid) => `  SO#${oid}`).join('\n');
-          backorderPo = await purchasingAuto.createSupplierPO(supplier, boItems, { reference: `Auto-PO ${plan.supplier} BACK ORDER`, status: purchasingAuto.PO_BACKORDER_STATUS, note: boNote });
+          const boNote = `Back-order (short stock) for ${plan.supplier}.${po && po.poId ? ` Main order: PO#${po.poId}.` : ''}\nSourced from:\n` + [...new Set(outOfStock.map((l) => l.orderId))].map((oid) => `  SO#${oid}`).join('\n');
+          backorderPo = await purchasingAuto.createSupplierPO(supplier, boItems, { reference: `Auto-PO ${plan.supplier} BACK ORDER`, status: purchasingAuto.PO_BACKORDER_STATUS, note: boNote, parentOrderId: po && po.poId ? po.poId : undefined });
         }
         const stampId = (po && po.poId) || (backorderPo && backorderPo.poId);
         if (stampId) for (const o of plan.orders) { try { await purchasingAuto.stampPoField(supplier, o.orderId, stampId); } catch (e) { console.error('[purchasing] stamp failed', o.orderId, e.message); } }

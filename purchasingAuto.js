@@ -213,6 +213,7 @@ export async function createSupplierPO(supplierKey, lineItems, opts = {}) {
   const poId = await api('POST', '/order-service/order', {
     orderTypeCode: 'PO',
     reference: opts.reference || `Auto-PO ${sup.key}`,
+    ...(opts.parentOrderId ? { parentOrderId: opts.parentOrderId } : {}),
     priceListId: sup.costList != null ? sup.costList : 3,
     priceModeCode: 'EXC',
     warehouseId: WAREHOUSE_ID,
