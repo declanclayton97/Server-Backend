@@ -73,6 +73,9 @@ async function api(method, path, body, attempt = 0) {
 
 // ---- helpers ----
 const tagsOf = (v) => String(v || '').split('/').map((x) => x.trim()).filter(Boolean);
+// Pick a product-option value by matching the option KEY (names vary: "Size",
+// "Mascot Trouser Size", "Colour", "Color"…).
+const optValue = (opts, re) => { for (const k of Object.keys(opts || {})) if (re.test(k)) return opts[k]; return null; };
 const isNoteRow = (r) => String(r.productId) === '1000' || !r.productSku;
 const isLeaveNote = (v) => /unable to order|awaiting|leave|do not order|chased|response|on hold/i.test(v || '');
 
@@ -119,7 +122,7 @@ async function findContributors(sup, orderIds) {
     for (const r of rows) {
       const qty = parseFloat(r.quantity.magnitude);
       const cost = await costOf(r.productId, sup.costList, r.itemCost ? parseFloat(r.itemCost.value) : 0);
-      lines.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty, cost, size: (r.productOptions && r.productOptions.Size) || null, colour: (r.productOptions && r.productOptions.Colour) || null });
+      lines.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty, cost, size: optValue(r.productOptions, /size/i), colour: optValue(r.productOptions, /colou?r/i) });
     }
     const remaining = tagsOf(tag).filter((t) => t.toUpperCase() !== sup.key);
     out.push({
