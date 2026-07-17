@@ -46,6 +46,9 @@ export const SUPPLIERS = {
   UNEEK:        { contactId: 322,   costList: 11, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
   'HELLY HANSEN': { contactId: 214, costList: 6,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
   MASCOT:       { contactId: 334,   costList: null, poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
+  // Ralawise = distributor (Stanley Stella exclusive + Gildan/AWDis/etc). Detect by
+  // Stanley Stella name OR a Ralawise-format SKU (2 letters + 3 digits + …).
+  RALAWISE:     { contactId: 205,   costList: null, poField: 'PCF_RALAWPO', detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z0-9]/.test(String(sku || '').replace(/[\s_-]/g, '')) },
 };
 
 // ---- low-level API with throttle back-off ----

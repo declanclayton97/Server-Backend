@@ -7782,7 +7782,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       routing.push({ orderId: Number(oid), resolvedTo: await purchasingAuto.orderRecipient(order, salesEmail) });
     }
 
-    let basket = null, emailed = false, po = null, backorderPo = null, notesAdded = 0, poEmail = null;
+    let basket = null, emailed = false, po = null, backorderPo = null, notesAdded = 0, poEmail = null, ralawiseOrder = null;
     if (!dryRun) {
       if (createPo) {
         // Split the demand: main Pending PO = in-stock qty; a separate "On Back
@@ -7839,6 +7839,23 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
         try { poEmail = await sendPurchaseOrderEmail(plan.supplier, po.poId, emailLines, { to: recipient, send: sendPo }); }
         catch (e) { poEmail = { sent: false, error: e.message }; console.error('[purchasing] po email failed', e.message); }
       }
+      // Ralawise: the "place" step is a direct API order (POST /v1/order). GATED —
+      // it does NOT call Ralawise unless PURCHASING_RALAWISE_ORDER_ENABLED=true (or
+      // req.placeRalawise:true). Even then it uses orderReference=APITEST (not
+      // dispatched) unless req.ralawiseLive:true AND RALAWISE_ORDER_LIVE=true. Our PO
+      // number rides on orderReference; the returned order number feeds refStamped.
+      if (po && po.poId && String(supplier).toUpperCase() === 'RALAWISE') {
+        const placeEnabled = process.env.PURCHASING_RALAWISE_ORDER_ENABLED === 'true' || req.body.placeRalawise === true;
+        if (placeEnabled) {
+          const ralLines = lines.map((l) => ({ sku: l.sku, quantity: l.qty, orderLineRef: `SO${l.orderId}` }));
+          try {
+            const rr = await fetch(`${ALT_ITEMS_URL}/api/ralawise-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: ralLines, reference: String(po.poId), test: req.body.ralawiseLive !== true, notes: `Tuff PO ${po.poId}` }) });
+            ralawiseOrder = await rr.json();
+          } catch (e) { ralawiseOrder = { ok: false, error: e.message }; console.error('[purchasing] ralawise order', e.message); }
+        } else {
+          ralawiseOrder = { skipped: true, reason: 'placement gated off — no API call' };
+        }
+      }
       // Shortfall notes/emails only make sense once a back-order PO exists to
       // reference — otherwise (e.g. a basket-only run) we'd stamp "PO#?" notes and
       // re-stamp them on every re-run (the order isn't PO-tagged yet, so it keeps
@@ -7889,7 +7906,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     // Public API can't set the reference post-create, hence the web session; the
     // client follows the purchasing BP account (sandbox=DEC login; live=uploader).
     let refStamped = null;
-    const supplierOrderRef = req.body.supplierOrderRef || (basket && basket.orderNumber) || null;
+    const supplierOrderRef = req.body.supplierOrderRef || (ralawiseOrder && ralawiseOrder.orderNumber) || (basket && basket.orderNumber) || null;
     if (!dryRun && po && po.poId && supplierOrderRef) {
       const refClient = process.env.BP_TEST_ACCOUNT || 'tuffbsitc';
       try {
@@ -7907,7 +7924,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       importedSkus: importLines.length,
       po: po && po.poId ? { poId: po.poId } : null,
       backorderPo: backorderPo && backorderPo.poId ? { poId: backorderPo.poId, status: 'On Back Order' } : null,
-      basket, emailed, notesAdded, refStamped, poEmail, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
+      basket, emailed, notesAdded, refStamped, poEmail, ralawiseOrder, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
       routing,
       shortfall: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, need: l.qty, avail: l.avail, short: l.short, deldate: l.stock && l.stock.deldate })),
     });
