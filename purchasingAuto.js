@@ -94,11 +94,48 @@ async function costOf(productId, costList, fallback) {
   }
 }
 
-function resolveSupplier(key) {
+// Detect overrides for suppliers whose product NAME isn't the supplier name
+// (e.g. Panther supplies Aboutblu). Otherwise the detector is built from the
+// supplier name. Used for dynamic (email) suppliers not in the hardcoded registry.
+const SUPPLIER_ALIASES = {
+  PANTHER: /aboutblu|panther/i,
+  BUCKBOOTZ: /buckler|buckbootz/i,
+  'BLUE MAX BANNER': /\bbanner\b/i,
+  'SHOES FOR CREWS': /shoes\s*for\s*crews|\bsfc\b/i,
+  DISLEY: /disley/i,
+  OCTOGRIP: /octogrip/i,
+};
+function dynamicDetect(key) {
   const k = String(key || '').toUpperCase();
-  const sup = SUPPLIERS[k];
-  if (!sup) throw new Error(`Unknown supplier "${key}". Known: ${Object.keys(SUPPLIERS).join(', ')}`);
-  return { key: k, ...sup };
+  if (SUPPLIER_ALIASES[k]) { const re = SUPPLIER_ALIASES[k]; return (n) => re.test(n || ''); }
+  const words = String(key).replace(/\bltd\b|\blimited\b|\buk\b|\(.*?\)/gi, ' ').replace(/[^a-z0-9\s]/gi, ' ').trim().split(/\s+/).filter(Boolean);
+  const re = words.length ? new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*'), 'i') : null;
+  return (n) => (re ? re.test(n || '') : false);
+}
+// Resolve a supplier's BP contactId by company name (cached).
+const _supContact = {};
+async function lookupSupplierContactId(name) {
+  const key = String(name).toUpperCase();
+  if (key in _supContact) return _supContact[key];
+  let id = null;
+  try {
+    const s = await api('GET', `/contact-service/contact-search?companyName=${encodeURIComponent(name)}&pageSize=5`);
+    const idx = {}; s.metaData.columns.forEach((c, i) => { idx[c.name] = i; });
+    const rows = s.results || [];
+    if (rows.length) id = rows[0][idx.contactId];
+  } catch { /* leave null */ }
+  _supContact[key] = id;
+  return id;
+}
+// Registry entry first (portal suppliers with specific detect/costList); otherwise
+// a DYNAMIC entry for email/unknown suppliers — contactId looked up from BP by
+// name, costList null (falls back to SO itemCost), name/alias detector.
+async function resolveSupplier(key) {
+  const k = String(key || '').toUpperCase();
+  if (SUPPLIERS[k]) return { key: k, ...SUPPLIERS[k] };
+  const contactId = await lookupSupplierContactId(key);
+  if (!contactId) throw new Error(`Unknown supplier "${key}" — not in registry and no BP contact found by that name`);
+  return { key: k, name: String(key), contactId, costList: null, poField: null, detect: dynamicDetect(key), dynamic: true };
 }
 
 // Find the orders that contribute lines to this supplier's PO.
@@ -117,9 +154,16 @@ async function findContributors(sup, orderIds) {
     const tag = cf.PCF_SUPPLIER;
     if (!tag || isLeaveNote(tag)) continue;                                   // empty / leave-note
     if (!tagsOf(tag).some((t) => t.toUpperCase() === sup.key)) continue;      // not this supplier
-    if (cf[sup.poField]) continue;                                            // already has a PO for this supplier
+    if (sup.poField && cf[sup.poField]) continue;                             // already has a PO for this supplier
     const order = (await api('GET', `/order-service/order/${id}`))[0];
-    const rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && sup.detect(r.productName, r.productSku));
+    let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && sup.detect(r.productName, r.productSku));
+    // Single-supplier order where the name-detector matched nothing (common for
+    // email suppliers whose products aren't named after the supplier): take all
+    // product rows — the whole order was tagged for this one supplier.
+    const allTags = tagsOf(tag);
+    if (!rows.length && allTags.length === 1 && allTags[0].toUpperCase() === sup.key) {
+      rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r));
+    }
     if (!rows.length) continue;
     const lines = [];
     for (const r of rows) {
@@ -154,7 +198,7 @@ function summarise(sup, contributors) {
 
 // Read-only preview.
 export async function preview(supplierKey, orderIds) {
-  const sup = resolveSupplier(supplierKey);
+  const sup = await resolveSupplier(supplierKey);
   const contributors = await findContributors(sup, orderIds);
   return { dryRun: true, ...summarise(sup, contributors) };
 }
@@ -162,7 +206,7 @@ export async function preview(supplierKey, orderIds) {
 // Create the Pending PO (+ source note) and stamp the PO number onto each
 // contributing order (linkage + dedupe). Does NOT strip tags or change status.
 export async function createPO(supplierKey, { orderIds, dryRun } = {}) {
-  const sup = resolveSupplier(supplierKey);
+  const sup = await resolveSupplier(supplierKey);
   const contributors = await findContributors(sup, orderIds);
   const plan = summarise(sup, contributors);
   if (dryRun) return { dryRun: true, ...plan };
@@ -202,7 +246,7 @@ export async function createPO(supplierKey, { orderIds, dryRun } = {}) {
 
   // 4. stamp the PO number onto each contributing SO (linkage + dedupe)
   for (const c of contributors) {
-    await api('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${sup.poField}`, value: String(poId) }]);
+    if (sup.poField) await api('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${sup.poField}`, value: String(poId) }]);
   }
 
   return { created: true, poId, ...plan };
@@ -214,7 +258,7 @@ export const PO_BACKORDER_STATUS = 45; // "On Back Order"
 // into a main PO (in-stock qty) and a separate back-order PO (shortfall qty).
 // lineItems = [{ productId, qty, cost }]. opts: { reference, status, note }.
 export async function createSupplierPO(supplierKey, lineItems, opts = {}) {
-  const sup = resolveSupplier(supplierKey);
+  const sup = await resolveSupplier(supplierKey);
   if (!lineItems.length) return { created: false, reason: 'no lines' };
   const poId = await api('POST', '/order-service/order', {
     orderTypeCode: 'PO',
@@ -241,7 +285,8 @@ export async function createSupplierPO(supplierKey, lineItems, opts = {}) {
 
 // Stamp a supplier PO number into an order's per-supplier PO custom field.
 export async function stampPoField(supplierKey, orderId, poId) {
-  const sup = resolveSupplier(supplierKey);
+  const sup = await resolveSupplier(supplierKey);
+  if (!sup.poField) return { skipped: true, reason: 'no poField for supplier' };
   return api('PATCH', `/order-service/order/${orderId}/custom-field`, [{ op: 'add', path: `/${sup.poField}`, value: String(poId) }]);
 }
 
@@ -249,7 +294,7 @@ export async function stampPoField(supplierKey, orderId, poId) {
 // last supplier, and add an "ordered via PO N" note. Call after the order has
 // actually been placed with the supplier.
 export async function finalizePO(supplierKey, { poId, orderIds, notes } = {}) {
-  const sup = resolveSupplier(supplierKey);
+  const sup = await resolveSupplier(supplierKey);
   if (!poId) throw new Error('poId required');
   if (!orderIds || !orderIds.length) throw new Error('orderIds required');
   const results = [];
@@ -305,7 +350,7 @@ export async function staffEmailOf(contactId) {
 // suppliers. Resolves the registry contactId → contact → communication.emails.
 export async function supplierEmailOf(supplierKey) {
   try {
-    const sup = resolveSupplier(supplierKey);
+    const sup = await resolveSupplier(supplierKey);
     const c = await api('GET', `/contact-service/contact/${sup.contactId}`);
     const emails = c && c[0] && c[0].communication && c[0].communication.emails;
     if (!emails) return null;
