@@ -109,7 +109,7 @@ async function followRedirects(jar, res, originUrl) {
 
 const TEST_CLIENT = process.env.BP_WEB_TEST_CLIENT || 'tuffbsitc';
 
-async function login(client = BP_CLIENT) {
+async function login(client = BP_CLIENT, trace = null) {
   // Sandbox (test) account uses its own login; live uses the uploader account.
   const isTest = client === TEST_CLIENT;
   const email = isTest ? (process.env.DEC_USER || process.env.BP_WEB_TEST_EMAIL || process.env.BP_WEB_EMAIL) : process.env.BP_WEB_EMAIL;
@@ -117,6 +117,7 @@ async function login(client = BP_CLIENT) {
   if (!email || !password) {
     throw new Error(`BP web credentials not configured for client ${client}`);
   }
+  const tstep = (o) => { if (trace) trace.push(o); };
 
   const jar = new CookieJar();
 
@@ -154,6 +155,7 @@ async function login(client = BP_CLIENT) {
     redirect: 'manual',
   });
   await ingestCookies(jar, postRes, `${BP_HOST}/admin_login.php`);
+  tstep({ step: 'postLogin', client, emailUsed: email, status: postRes.status, location: (postRes.headers.get('location') || '').slice(0, 120) });
 
   // Step 3: Follow the redirect chain (/p.php?p=dash → /report.php → ...).
   // Each hop may re-issue pearlAdmin with HttpOnly+Secure flags upgraded.
@@ -166,6 +168,7 @@ async function login(client = BP_CLIENT) {
     .split('; ')
     .map((c) => c.split('=')[0])
     .filter(Boolean);
+  tstep({ step: 'afterRedirects', hops, finalUrl: (finalUrl || '').slice(0, 120), finalStatus: finalRes.status, cookies: cookieNames });
   if (!cookieNames.includes('pearlAdmin')) {
     throw new Error(
       `BP login: pearlAdmin not found in jar after login. ` +

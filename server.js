@@ -7636,6 +7636,13 @@ async function sendOutOfStockEmail(supplier, lines, to) {
 app.get('/api/debug/bp-web', async (req, res) => {
   try {
     if (req.query.env) return res.json({ DEC_USER: !!process.env.DEC_USER, DEC_PASS: !!process.env.DEC_PASS, BP_WEB_TEST_EMAIL: !!process.env.BP_WEB_TEST_EMAIL, BP_WEB_EMAIL: !!process.env.BP_WEB_EMAIL, BP_WEB_TEST_CLIENT: process.env.BP_WEB_TEST_CLIENT || '(default tuffbsitc)' });
+    if (req.query.logintrace) {
+      const client = (req.query.client || 'tuffbsitc').toString();
+      bpWebInvalidate(client);
+      const trace = [];
+      try { await bpWebLogin(client, trace); return res.json({ ok: true, trace }); }
+      catch (e) { return res.json({ ok: false, error: e.message, trace }); }
+    }
     const client = (req.query.client || 'tuffbsitc').toString();
     const path = (req.query.path || '/').toString();
     const url = path.startsWith('http') ? path : `${BP_WEB_HOST}${path}`;
