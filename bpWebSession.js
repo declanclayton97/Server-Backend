@@ -30,7 +30,7 @@ const BROWSER_HEADERS = {
   'Accept-Language': 'en-GB,en;q=0.9',
 };
 
-let cachedSession = null; // { jar: CookieJar, loggedInAt: number }
+const sessions = new Map(); // client (clients_id) -> { jar: CookieJar, loggedInAt: number }
 
 function extractSetCookies(res) {
   if (typeof res.headers.getSetCookie === 'function') {
@@ -107,7 +107,7 @@ async function followRedirects(jar, res, originUrl) {
   return { finalRes: current, finalUrl: lastUrl, hops };
 }
 
-async function login() {
+async function login(client = BP_CLIENT) {
   const email = process.env.BP_WEB_EMAIL;
   const password = process.env.BP_WEB_PASSWORD;
   if (!email || !password) {
@@ -120,7 +120,7 @@ async function login() {
   // __cf_bm + _cfuvid (bot-management cookies) and BP sets the initial
   // pearlAdmin session-init token. Without these, the post-login flow
   // is routed to the new Sage SPA.
-  const loginPageUrl = `${BP_HOST}/admin_login.php?clients_id=${encodeURIComponent(BP_CLIENT)}`;
+  const loginPageUrl = `${BP_HOST}/admin_login.php?clients_id=${encodeURIComponent(client)}`;
   const getRes = await fetch(loginPageUrl, {
     method: 'GET',
     headers: { ...BROWSER_HEADERS },
@@ -134,7 +134,7 @@ async function login() {
     password,
     action: 'login',
     redirect: `//${BP_HOST.replace(/^https?:\/\//, '')}/index.php`,
-    clients_id: BP_CLIENT,
+    clients_id: client,
   });
 
   const postCookies = await getCookieHeader(jar, BP_HOST);
@@ -171,20 +171,20 @@ async function login() {
     );
   }
 
-  console.log(`[bp-web] login OK after ${hops} redirect(s), cookies in jar: ${cookieNames.join(',')}`);
-  cachedSession = { jar, loggedInAt: Date.now() };
-  return cachedSession;
+  console.log(`[bp-web] login OK (${client}) after ${hops} redirect(s), cookies in jar: ${cookieNames.join(',')}`);
+  const session = { jar, loggedInAt: Date.now() };
+  sessions.set(client, session);
+  return session;
 }
 
-async function getSession() {
-  if (cachedSession && Date.now() - cachedSession.loggedInAt < SESSION_TTL_MS) {
-    return cachedSession;
-  }
-  return await login();
+async function getSession(client = BP_CLIENT) {
+  const s = sessions.get(client);
+  if (s && Date.now() - s.loggedInAt < SESSION_TTL_MS) return s;
+  return await login(client);
 }
 
-function invalidateSession() {
-  cachedSession = null;
+function invalidateSession(client = BP_CLIENT) {
+  sessions.delete(client);
 }
 
 async function fetchCsrfToken(jar, orderId) {
@@ -290,22 +290,22 @@ async function attachFileToOrder(orderId, filename, buffer, mimeType = 'applicat
 
 // GET an authenticated Brightpearl web page using the cached session (re-logs
 // in once if expired). Follows redirects. Returns { status, html, finalUrl }.
-async function fetchAuthed(url) {
+async function fetchAuthed(url, { client = BP_CLIENT, method = 'GET', body, headers } = {}) {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const session = await getSession();
+    const session = await getSession(client);
     const cookieHeader = await getCookieHeader(session.jar, url);
-    let res = await fetch(url, { headers: { ...BROWSER_HEADERS, Cookie: cookieHeader }, redirect: 'manual' });
+    let res = await fetch(url, { method, body, headers: { ...BROWSER_HEADERS, Cookie: cookieHeader, ...(headers || {}) }, redirect: 'manual' });
     await ingestCookies(session.jar, res, url);
     let finalUrl = url;
-    if ([301, 302, 303, 307, 308].includes(res.status)) {
+    if (method === 'GET' && [301, 302, 303, 307, 308].includes(res.status)) {
       const r = await followRedirects(session.jar, res, url);
       res = r.finalRes; finalUrl = r.finalUrl;
     }
     const html = await res.text();
-    if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(); continue; }
-    return { status: res.status, html, finalUrl };
+    if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(client); continue; }
+    return { status: res.status, html, finalUrl, location: res.headers.get('location') || null };
   }
   return { status: 0, html: '', finalUrl: url };
 }
 
-export { attachFileToOrder, login, invalidateSession, fetchAuthed };
+export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, BP_HOST };

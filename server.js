@@ -18,7 +18,7 @@ import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
-import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch } from './bpWebSession.js';
+import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
 import * as purchasingAuto from './purchasingAuto.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
@@ -7629,6 +7629,25 @@ async function sendOutOfStockEmail(supplier, lines, to) {
   }
   throw lastErr;
 }
+
+// TEMP debug: fetch a Brightpearl legacy web page as the uploader account, on a
+// chosen client (default sandbox), to discover the order-reference edit endpoint.
+// ?path=/patt-op.php?oID=123 &client=tuffbsitc &find=<regex>
+app.get('/api/debug/bp-web', async (req, res) => {
+  try {
+    const client = (req.query.client || 'tuffbsitc').toString();
+    const path = (req.query.path || '/').toString();
+    const url = path.startsWith('http') ? path : `${BP_WEB_HOST}${path}`;
+    const r = await bpWebFetch(url, { client });
+    const html = r.html || '';
+    if (req.query.find) {
+      const rx = new RegExp(req.query.find.toString(), 'gi'); const hits = []; let m, n = 0;
+      while ((m = rx.exec(html)) && n < 10) { hits.push(html.slice(Math.max(0, m.index - 100), m.index + 260).replace(/\s+/g, ' ')); n++; if (m.index === rx.lastIndex) rx.lastIndex++; }
+      return res.json({ status: r.status, finalUrl: r.finalUrl, hits });
+    }
+    res.json({ status: r.status, finalUrl: r.finalUrl, len: html.length, forms: [...html.matchAll(/<form[^>]*>/gi)].map((x) => x[0].replace(/\s+/g, ' ')).slice(0, 10), refInputs: [...html.matchAll(/<(?:input|textarea)[^>]*(?:ref|reference)[^>]*>/gi)].map((x) => x[0].replace(/\s+/g, ' ')).slice(0, 10) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
   if (!requirePurchasing(res)) return;
