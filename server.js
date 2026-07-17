@@ -7741,9 +7741,13 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
 
     // LIVE portal EXACT stock per line (?live=1), cached by sku+size. Then a
     // quantity-aware split: order min(need, available) now, back-order the rest.
+    // Email-based suppliers have no live-stock feed — don't split; order everything
+    // on one PO and email it (they fulfil / back-order their end).
+    const isEmailSupplier = EMAIL_SUPPLIERS.has(String(supplier).toUpperCase());
     const stockCache = {};
     for (const l of lines) {
-      if (simOos.has(String(l.sku))) { l.stock = { avail: 0, simulated: true }; }
+      if (isEmailSupplier) { l.stock = { avail: l.qty, emailSupplier: true }; }
+      else if (simOos.has(String(l.sku))) { l.stock = { avail: 0, simulated: true }; }
       else {
         const key = `${l.sku}|${l.size || ''}`;
         if (!(key in stockCache)) {
