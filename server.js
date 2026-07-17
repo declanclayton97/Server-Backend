@@ -7666,8 +7666,9 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     // flagged (note on the order + email) so a human decides later (keep on
     // order / cancel / swap).
     const agg = {};
-    for (const l of lines) agg[l.sku] = (agg[l.sku] || 0) + l.qty;
-    const importLines = Object.entries(agg).map(([stockCode, qty]) => ({ stockCode, qty }));
+    for (const l of lines) { if (!agg[l.sku]) agg[l.sku] = { qty: 0, name: l.name }; agg[l.sku].qty += l.qty; }
+    // name carried through for suppliers whose basket resolves by product name (Mascot); ignored by the others.
+    const importLines = Object.entries(agg).map(([stockCode, v]) => ({ stockCode, qty: v.qty, name: v.name }));
 
     // Resolve the email recipient for each short order (Magento -> sales, else
     // the creator). Computed always so a dry-run shows the routing.
@@ -7717,7 +7718,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       // It is also SUPPLIER-SPECIFIC: only the Snickers/Hultafors basket is built,
       // so never push another supplier's lines into it.
       const basketEnabled = process.env.PURCHASING_BASKET_ENABLED === 'true' || req.body.importBasket === true;
-      const BASKET_SUPPLIERS = new Set(['SNICKERS', 'PORTWEST', 'BLAKLADER']); // suppliers with a built basket flow
+      const BASKET_SUPPLIERS = new Set(['SNICKERS', 'PORTWEST', 'BLAKLADER', 'MASCOT']); // suppliers with a built basket flow
       const basketSupplier = BASKET_SUPPLIERS.has(String(supplier).toUpperCase());
       if (importLines.length && basketEnabled && basketSupplier) {
         const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ supplier: String(supplier).toUpperCase(), lines: importLines }) });
