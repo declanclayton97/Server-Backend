@@ -7630,6 +7630,62 @@ async function sendOutOfStockEmail(supplier, lines, to) {
   throw lastErr;
 }
 
+// ── Email-based suppliers: the "place" step is emailing the PO to the supplier's
+// order address (they process it their end). GATED — nothing sends unless
+// PURCHASING_PO_EMAIL_ENABLED=true (or req.sendPoEmail:true); otherwise preview.
+const TUFF_PO_DELIVERY = {
+  company: process.env.PURCHASING_DEL_COMPANY || 'Tuff Workwear Ltd',
+  address: process.env.PURCHASING_DEL_ADDRESS || '144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG',
+  contact: process.env.PURCHASING_CONTACT_NAME || 'Matt',
+  phone: process.env.PURCHASING_CONTACT_PHONE || '0113 288 7713',
+  from: process.env.PURCHASING_FROM_EMAIL || 'purchasing@tuffshop.co.uk',
+};
+// Suppliers ordered by email (from the supplier order-methods list). Their order
+// email is read from env PO_EMAIL_<SUPPLIER> (e.g. PO_EMAIL_UNEEK); populate as
+// the addresses come in. No email = preview only (can't send).
+const EMAIL_SUPPLIERS = new Set(['UNEEK', 'DELTA PLUS', 'BUCKBOOTZ', 'BURLINGTON', 'CENTURION', 'PANTHER', 'ALSICO', 'TRANEMO', 'V12', 'ZECO', 'AS APPAREL', 'BLUE MAX BANNER', 'COFRA', 'DISLEY', 'ELKA', 'FUTURE GARMENTS', 'GAAARD', 'POLYCO', 'ROWLINSON', 'SHOES FOR CREWS', 'GLOBAL SAFETY', 'CLEAN BOOT', 'OCTOGRIP', 'PERFORMANCE BRANDS']);
+const supplierOrderEmail = (supplier) => process.env['PO_EMAIL_' + String(supplier || '').toUpperCase().replace(/[^A-Z0-9]/g, '')] || null;
+
+function poEmailHtml(supplier, poId, lines) {
+  const rows = lines.map((l) => `<tr>
+    <td style="padding:6px;border:1px solid #ddd;font-family:monospace">${l.sku || ''}</td>
+    <td style="padding:6px;border:1px solid #ddd">${(l.name || '').slice(0, 70)}</td>
+    <td style="padding:6px;border:1px solid #ddd">${[l.colour, l.size].filter(Boolean).join(' / ')}</td>
+    <td style="padding:6px;border:1px solid #ddd;text-align:right;font-weight:bold">${l.qty}</td>
+  </tr>`).join('');
+  const units = lines.reduce((a, l) => a + (Number(l.qty) || 0), 0);
+  return `<div style="font-family:Arial,sans-serif;max-width:820px;color:#333">
+    <h2 style="color:#0073e6;border-bottom:2px solid #0073e6;padding-bottom:8px">Purchase Order — PO#${poId}</h2>
+    <p><strong>To:</strong> ${supplier}<br><strong>Our reference:</strong> PO#${poId}</p>
+    <p><strong>Deliver to:</strong><br>${TUFF_PO_DELIVERY.company}<br>${TUFF_PO_DELIVERY.address}</p>
+    <table style="border-collapse:collapse;font-size:13px;margin:10px 0">
+      <tr style="background:#f2f2f2"><th style="padding:6px;border:1px solid #ddd;text-align:left">SKU</th><th style="padding:6px;border:1px solid #ddd;text-align:left">Item</th><th style="padding:6px;border:1px solid #ddd;text-align:left">Colour / Size</th><th style="padding:6px;border:1px solid #ddd;text-align:right">Qty</th></tr>
+      ${rows}
+      <tr style="background:#d9ebd3;font-weight:bold"><td colspan="3" style="padding:6px;border:1px solid #ddd">TOTAL UNITS</td><td style="padding:6px;border:1px solid #ddd;text-align:right">${units}</td></tr>
+    </table>
+    <p>Please confirm receipt and quote <strong>PO#${poId}</strong> on your order acknowledgement.</p>
+    <p style="font-size:12px;color:#555">${TUFF_PO_DELIVERY.contact} &middot; ${TUFF_PO_DELIVERY.phone} &middot; ${TUFF_PO_DELIVERY.from}</p>
+  </div>`;
+}
+
+async function sendPurchaseOrderEmail(supplier, poId, lines, { to, send } = {}) {
+  const recipient = to || supplierOrderEmail(supplier);
+  const subject = `Purchase Order PO#${poId} — ${TUFF_PO_DELIVERY.company}`;
+  const html = poEmailHtml(supplier, poId, lines);
+  if (!send || !recipient) return { sent: false, to: recipient, subject, reason: !recipient ? 'no supplier order email configured (set PO_EMAIL_' + String(supplier).toUpperCase().replace(/[^A-Z0-9]/g, '') + ')' : 'send disabled — preview only', units: lines.reduce((a, l) => a + (Number(l.qty) || 0), 0) };
+  const smtpHost = process.env.SMTP_SERVER || 'mail-eu.smtp2go.com';
+  const ports = [...new Set([parseInt(process.env.SMTP_PORT || '2525', 10), 2525, 587, 8025])];
+  let lastErr;
+  for (const port of ports) {
+    try {
+      const t = nodemailer.createTransport({ host: smtpHost, port, secure: false, auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS }, connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 20000 });
+      await t.sendMail({ from: `"Tuffshop Purchasing" <${TUFF_PO_DELIVERY.from}>`, to: recipient, subject, html });
+      return { sent: true, to: recipient, subject };
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
 // TEMP debug: fetch a Brightpearl legacy web page as the uploader account, on a
 // chosen client (default sandbox), to discover the order-reference edit endpoint.
 // ?path=/patt-op.php?oID=123 &client=tuffbsitc &find=<regex>
@@ -7722,7 +7778,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       routing.push({ orderId: Number(oid), resolvedTo: await purchasingAuto.orderRecipient(order, salesEmail) });
     }
 
-    let basket = null, emailed = false, po = null, backorderPo = null, notesAdded = 0;
+    let basket = null, emailed = false, po = null, backorderPo = null, notesAdded = 0, poEmail = null;
     if (!dryRun) {
       if (createPo) {
         // Split the demand: main Pending PO = in-stock qty; a separate "On Back
@@ -7766,6 +7822,15 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
         basket = await r.json();
       } else if (importLines.length && basketEnabled && !basketSupplier) {
         basket = { skipped: true, reason: `basket automation not built for ${plan.supplier}` };
+      }
+      // Email-based suppliers: the "place" step = email the PO to their order
+      // address. GATED — sends only if PURCHASING_PO_EMAIL_ENABLED=true or
+      // req.sendPoEmail:true; otherwise returns a preview and sends nothing.
+      if (po && po.poId && (req.body.emailPo === true || EMAIL_SUPPLIERS.has(String(supplier).toUpperCase()))) {
+        const sendPo = process.env.PURCHASING_PO_EMAIL_ENABLED === 'true' || req.body.sendPoEmail === true;
+        const emailLines = lines.map((l) => ({ sku: l.sku, name: l.name, qty: l.qty, colour: l.colour, size: l.size }));
+        try { poEmail = await sendPurchaseOrderEmail(plan.supplier, po.poId, emailLines, { to: req.body.emailTo, send: sendPo }); }
+        catch (e) { poEmail = { sent: false, error: e.message }; console.error('[purchasing] po email failed', e.message); }
       }
       // Shortfall notes/emails only make sense once a back-order PO exists to
       // reference — otherwise (e.g. a basket-only run) we'd stamp "PO#?" notes and
@@ -7835,7 +7900,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       importedSkus: importLines.length,
       po: po && po.poId ? { poId: po.poId } : null,
       backorderPo: backorderPo && backorderPo.poId ? { poId: backorderPo.poId, status: 'On Back Order' } : null,
-      basket, emailed, notesAdded, refStamped, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
+      basket, emailed, notesAdded, refStamped, poEmail, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
       routing,
       shortfall: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, need: l.qty, avail: l.avail, short: l.short, deldate: l.stock && l.stock.deldate })),
     });
