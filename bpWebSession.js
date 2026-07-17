@@ -314,7 +314,9 @@ async function fetchAuthed(url, { client = BP_CLIENT, method = 'GET', body, head
 // x-csrf-token header (token = the __fc_csrf_token meta on the order page).
 // Used to write a supplier's order number onto our PO for two-way linkage.
 // NOTE: web session only authenticates on the LIVE account — no sandbox login.
-async function updateOrderReference(orderId, reference, { client = BP_CLIENT } = {}) {
+// Low-level: POST to the legacy order ajax endpoint with CSRF + session.
+// op e.g. "order:validateOrder", data = form fields object.
+async function orderAjaxPost(orderId, op, data, { client = BP_CLIENT } = {}) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const session = await getSession(client);
     const pageUrl = `${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`;
@@ -327,7 +329,7 @@ async function updateOrderReference(orderId, reference, { client = BP_CLIENT } =
       || html.match(/content=["']([^"']+)["'][^>]*name=["']__fc_csrf_token["']/i) || [])[1];
     if (!token) throw new Error(`__fc_csrf_token not found on order page ${orderId} (status ${pageRes.status})`);
 
-    const url = `${BP_HOST}/ajaxData.php?op=order:validateOrder&oID=${encodeURIComponent(orderId)}`;
+    const url = `${BP_HOST}/ajaxData.php?op=${op}&oID=${encodeURIComponent(orderId)}`;
     cookie = await getCookieHeader(session.jar, url);
     const res = await fetch(url, {
       method: 'POST',
@@ -341,15 +343,19 @@ async function updateOrderReference(orderId, reference, { client = BP_CLIENT } =
         Referer: pageUrl,
         Cookie: cookie,
       },
-      body: new URLSearchParams({ orders_customer_ref: reference }).toString(),
+      body: new URLSearchParams(data || {}).toString(),
     });
     await ingestCookies(session.jar, res, url);
     const text = await res.text();
     if (looksLikeLoginPage(text) && attempt === 0) { invalidateSession(client); continue; }
     let json = null; try { json = JSON.parse(text); } catch {}
-    return { ok: res.ok, status: res.status, json, text: json ? undefined : text.slice(0, 300) };
+    return { ok: res.ok, status: res.status, op, json, text: json ? undefined : text.slice(0, 400) };
   }
   return { ok: false, error: 'session expired' };
 }
 
-export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, BP_HOST };
+async function updateOrderReference(orderId, reference, opts = {}) {
+  return orderAjaxPost(orderId, 'order:validateOrder', { orders_customer_ref: reference }, opts);
+}
+
+export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, orderAjaxPost, BP_HOST };

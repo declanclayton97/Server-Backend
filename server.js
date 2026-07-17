@@ -18,7 +18,7 @@ import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
-import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, updateOrderReference as bpUpdateOrderReference, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
+import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, updateOrderReference as bpUpdateOrderReference, orderAjaxPost as bpOrderAjaxPost, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
 import * as purchasingAuto from './purchasingAuto.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
@@ -7653,9 +7653,10 @@ app.get('/api/debug/bp-web', async (req, res) => {
 // POST { orderId, reference, client? }.
 app.post('/api/debug/bp-setref', async (req, res) => {
   try {
-    const { orderId, reference, client } = req.body || {};
-    if (!orderId || reference == null) return res.status(400).json({ error: 'orderId + reference required' });
-    const r = await bpUpdateOrderReference(orderId, String(reference), client ? { client } : {});
+    const { orderId, reference, client, op, data } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: 'orderId required' });
+    const r = op ? await bpOrderAjaxPost(orderId, op, data || {}, client ? { client } : {})
+                 : await bpUpdateOrderReference(orderId, String(reference), client ? { client } : {});
     res.json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
