@@ -7809,6 +7809,23 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       finalized = await purchasingAuto.finalizePO(supplier, { poId: po.poId, orderIds: plan.orders.map((o) => o.orderId), notes: finalizeNotes });
     }
 
+    // Two-way reference linkage (ALL suppliers): write the supplier's order number
+    // into the BP PO's Reference box (searchable) via the legacy web session — the
+    // counterpart to our PO number going onto the supplier's order at placement.
+    // The number comes from the supplier's order placement (Ralawise API today;
+    // basket-supplier checkout when built) or req.body.supplierOrderRef for testing.
+    // Public API can't set the reference post-create, hence the web session; the
+    // client follows the purchasing BP account (sandbox=DEC login; live=uploader).
+    let refStamped = null;
+    const supplierOrderRef = req.body.supplierOrderRef || (basket && basket.orderNumber) || null;
+    if (!dryRun && po && po.poId && supplierOrderRef) {
+      const refClient = process.env.BP_TEST_ACCOUNT || 'tuffbsitc';
+      try {
+        const rr = await bpUpdateOrderReference(po.poId, String(supplierOrderRef), { client: refClient });
+        refStamped = { ok: !!rr.ok, reference: String(supplierOrderRef), poId: po.poId };
+      } catch (e) { refStamped = { ok: false, error: e.message }; console.error('[purchasing] ref stamp failed', e.message); }
+    }
+
     res.json({
       supplier: plan.supplier, dryRun: !!dryRun,
       totalLines: lines.length,
@@ -7818,7 +7835,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       importedSkus: importLines.length,
       po: po && po.poId ? { poId: po.poId } : null,
       backorderPo: backorderPo && backorderPo.poId ? { poId: backorderPo.poId, status: 'On Back Order' } : null,
-      basket, emailed, notesAdded, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
+      basket, emailed, notesAdded, refStamped, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
       routing,
       shortfall: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, need: l.qty, avail: l.avail, short: l.short, deldate: l.stock && l.stock.deldate })),
     });

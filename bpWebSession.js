@@ -111,6 +111,10 @@ const TEST_CLIENT = process.env.BP_WEB_TEST_CLIENT || 'tuffbsitc';
 
 async function login(client = BP_CLIENT, trace = null) {
   // Sandbox (test) account uses its own login; live uses the uploader account.
+  // Sandbox (tuffbsitc) = the user's own login (DEC_USER/DEC_PASS) for safe testing.
+  // >>> GO-LIVE TODO: the LIVE reference-write (tuffworkwear) uses the FILE UPLOADER
+  //     account (BP_WEB_EMAIL/BP_WEB_PASSWORD). Confirm that env is the fileuploader@
+  //     account and verify a reference-write works on live before switching on. <<<
   const isTest = client === TEST_CLIENT;
   const email = isTest ? (process.env.DEC_USER || process.env.BP_WEB_TEST_EMAIL || process.env.BP_WEB_EMAIL) : process.env.BP_WEB_EMAIL;
   const password = isTest ? (process.env.DEC_PASS || process.env.BP_WEB_TEST_PASSWORD || process.env.BP_WEB_PASSWORD) : process.env.BP_WEB_PASSWORD;
