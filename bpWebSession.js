@@ -472,14 +472,20 @@ async function saveOrderForm(orderId, overrides = {}, { client = BP_CLIENT } = {
     if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(client); continue; }
     const fields = parseOrderForm(html);
     if (!fields) throw new Error(`order form not found for ${orderId} (status ${pageRes.status})`);
-    for (const [k, v] of Object.entries(overrides)) {
+    // The __fc_csrf_token form INPUT is empty in the raw HTML — the page JS fills
+    // it from the <meta name="__fc_csrf_token"> at submit time. Do the same.
+    const metaToken = (html.match(/name=["']__fc_csrf_token["'][^>]*content=["']([^"']+)["']/i)
+      || html.match(/content=["']([^"']+)["'][^>]*name=["']__fc_csrf_token["']/i) || [])[1];
+    const applied = { ...overrides };
+    if (metaToken && !('__fc_csrf_token' in applied)) applied.__fc_csrf_token = metaToken;
+    for (const [k, v] of Object.entries(applied)) {
       const f = fields.find((x) => x[0] === k);
       if (f) f[1] = String(v); else fields.push([k, String(v)]);
     }
     const fd = new FormData();
     for (const [k, v] of fields) fd.append(k, v);
     const postCookie = await getCookieHeader(session.jar, pageUrl);
-    const res = await fetch(pageUrl, { method: 'POST', headers: { ...BROWSER_HEADERS, Cookie: postCookie, Origin: BP_HOST, Referer: pageUrl }, body: fd, redirect: 'manual' });
+    const res = await fetch(pageUrl, { method: 'POST', headers: { ...BROWSER_HEADERS, Cookie: postCookie, Origin: BP_HOST, Referer: pageUrl, 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-User': '?1' }, body: fd, redirect: 'manual' });
     await ingestCookies(session.jar, res, pageUrl);
     return { ok: [200, 302].includes(res.status), status: res.status, location: res.headers.get('location'), fieldCount: fields.length };
   }
