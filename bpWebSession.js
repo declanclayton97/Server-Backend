@@ -404,8 +404,13 @@ async function lockedValidateOrder(orderId, fields, { client = BP_CLIENT } = {})
     const saveUrl = `${BP_HOST}/ajaxData.php?op=order:validateOrder&oID=${encodeURIComponent(orderId)}`;
     const lock = await ajaxReq(session, lockUrl, token, 'POST');
     const save = await ajaxReq(session, saveUrl, token, 'POST', new URLSearchParams(fields).toString());
-    await ajaxReq(session, lockUrl, token, 'DELETE');
-    return { ok: save.status === 200, status: save.status, lock: lock.status, save: save.json != null ? save.json : (save.text || '').slice(0, 200) };
+    const unlock = await ajaxReq(session, lockUrl, token, 'DELETE');
+    return {
+      ok: save.status === 200, status: save.status,
+      lock: { status: lock.status, body: (lock.json != null ? lock.json : (lock.text || '').slice(0, 150)) },
+      save: { status: save.status, body: (save.json != null ? save.json : (save.text || '').slice(0, 250)) },
+      unlock: { status: unlock.status, body: (unlock.json != null ? unlock.json : (unlock.text || '').slice(0, 150)) },
+    };
   }
   return { ok: false, error: 'session expired' };
 }
