@@ -297,6 +297,17 @@ export async function staffEmailOf(contactId) {
   return email;
 }
 
+// A supplier's order email, taken from their Brightpearl contact record (the
+// email on the supplier details of the PO). Used to email POs to email-method
+// suppliers. Resolves the registry contactId → contact → communication.emails.
+export async function supplierEmailOf(supplierKey) {
+  try { const sup = resolveSupplier(supplierKey); return await staffEmailOf(sup.contactId); }
+  catch { return null; }
+}
+
+// A specific contact's email by id (e.g. the supplier party on a PO).
+export const contactEmailOf = (contactId) => staffEmailOf(contactId);
+
 // Who should get the stock email for an order: Magento (website) orders go to
 // the sales email; everything else goes to the staff member who created it.
 export async function orderRecipient(order, salesEmail) {
