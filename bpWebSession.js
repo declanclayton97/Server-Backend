@@ -112,8 +112,8 @@ const TEST_CLIENT = process.env.BP_WEB_TEST_CLIENT || 'tuffbsitc';
 async function login(client = BP_CLIENT) {
   // Sandbox (test) account uses its own login; live uses the uploader account.
   const isTest = client === TEST_CLIENT;
-  const email = isTest ? (process.env.BP_WEB_TEST_EMAIL || process.env.BP_WEB_EMAIL) : process.env.BP_WEB_EMAIL;
-  const password = isTest ? (process.env.BP_WEB_TEST_PASSWORD || process.env.BP_WEB_PASSWORD) : process.env.BP_WEB_PASSWORD;
+  const email = isTest ? (process.env.DEC_USER || process.env.BP_WEB_TEST_EMAIL || process.env.BP_WEB_EMAIL) : process.env.BP_WEB_EMAIL;
+  const password = isTest ? (process.env.DEC_PASS || process.env.BP_WEB_TEST_PASSWORD || process.env.BP_WEB_PASSWORD) : process.env.BP_WEB_PASSWORD;
   if (!email || !password) {
     throw new Error(`BP web credentials not configured for client ${client}`);
   }
