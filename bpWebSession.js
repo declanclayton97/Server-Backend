@@ -354,8 +354,54 @@ async function orderAjaxPost(orderId, op, data, { client = BP_CLIENT } = {}) {
   return { ok: false, error: 'session expired' };
 }
 
-async function updateOrderReference(orderId, reference, opts = {}) {
-  return orderAjaxPost(orderId, 'order:validateOrder', { orders_customer_ref: reference }, opts);
+// One authed ajaxData request with CSRF + session cookies.
+async function ajaxReq(session, url, token, method = 'POST', body) {
+  const cookie = await getCookieHeader(session.jar, url);
+  const res = await fetch(url, {
+    method,
+    headers: {
+      ...BROWSER_HEADERS,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Requested-With': 'XMLHttpRequest',
+      'X-CSRF-Token': token,
+      Accept: 'application/json, text/javascript, */*; q=0.01',
+      Origin: BP_HOST,
+      Referer: `${BP_HOST}/patt-op.php?scode=invoice`,
+      Cookie: cookie,
+    },
+    body,
+  });
+  await ingestCookies(session.jar, res, url);
+  const text = await res.text();
+  let json = null; try { json = JSON.parse(text); } catch {}
+  return { status: res.status, json, text };
+}
+
+// Set an order's Reference box (orders_customer_ref). BP's legacy editor requires
+// a page LOCK to be held for the write to commit: pageLock -> order:validateOrder
+// (which persists while locked) -> release pageLock. Live account only.
+async function updateOrderReference(orderId, reference, { client = BP_CLIENT } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const session = await getSession(client);
+    // CSRF token from the order page
+    const pageUrl = `${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`;
+    const pageCookie = await getCookieHeader(session.jar, pageUrl);
+    const pageRes = await fetch(pageUrl, { headers: { ...BROWSER_HEADERS, Cookie: pageCookie }, redirect: 'manual' });
+    await ingestCookies(session.jar, pageRes, pageUrl);
+    const html = await pageRes.text();
+    if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(client); continue; }
+    const token = (html.match(/name=["']__fc_csrf_token["'][^>]*content=["']([^"']+)["']/i)
+      || html.match(/content=["']([^"']+)["'][^>]*name=["']__fc_csrf_token["']/i) || [])[1];
+    if (!token) throw new Error(`__fc_csrf_token not found on order page ${orderId} (status ${pageRes.status})`);
+
+    const lockUrl = `${BP_HOST}/ajaxData.php?op=pageLock&resourceId=${encodeURIComponent(orderId)}&resourceTypeId=2`;
+    const saveUrl = `${BP_HOST}/ajaxData.php?op=order:validateOrder&oID=${encodeURIComponent(orderId)}`;
+    const lock = await ajaxReq(session, lockUrl, token, 'POST');
+    const save = await ajaxReq(session, saveUrl, token, 'POST', new URLSearchParams({ orders_customer_ref: reference }).toString());
+    await ajaxReq(session, lockUrl, token, 'DELETE'); // release the lock regardless
+    return { ok: save.status === 200 && (!save.json || !save.json.length), status: save.status, lock: lock.status, save: save.json != null ? save.json : (save.text || '').slice(0, 200) };
+  }
+  return { ok: false, error: 'session expired' };
 }
 
 export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, orderAjaxPost, BP_HOST };
