@@ -18,7 +18,7 @@ import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
-import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
+import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, updateOrderReference as bpUpdateOrderReference, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
 import * as purchasingAuto from './purchasingAuto.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
@@ -7646,6 +7646,17 @@ app.get('/api/debug/bp-web', async (req, res) => {
       return res.json({ status: r.status, finalUrl: r.finalUrl, hits });
     }
     res.json({ status: r.status, finalUrl: r.finalUrl, len: html.length, forms: [...html.matchAll(/<form[^>]*>/gi)].map((x) => x[0].replace(/\s+/g, ' ')).slice(0, 10), refInputs: [...html.matchAll(/<(?:input|textarea)[^>]*(?:ref|reference)[^>]*>/gi)].map((x) => x[0].replace(/\s+/g, ' ')).slice(0, 10) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// TEMP debug: set an order's Reference box via the legacy web UI (live account).
+// POST { orderId, reference, client? }.
+app.post('/api/debug/bp-setref', async (req, res) => {
+  try {
+    const { orderId, reference, client } = req.body || {};
+    if (!orderId || reference == null) return res.status(400).json({ error: 'orderId + reference required' });
+    const r = await bpUpdateOrderReference(orderId, String(reference), client ? { client } : {});
+    res.json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

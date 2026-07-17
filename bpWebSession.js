@@ -308,4 +308,48 @@ async function fetchAuthed(url, { client = BP_CLIENT, method = 'GET', body, head
   return { status: 0, html: '', finalUrl: url };
 }
 
-export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, BP_HOST };
+// Update a Brightpearl order's Reference box (the "orders_customer_ref" field).
+// The public API can't edit an order's reference post-create; the legacy web UI
+// auto-saves each field via ajaxData.php?op=order:validateOrder with an
+// x-csrf-token header (token = the __fc_csrf_token meta on the order page).
+// Used to write a supplier's order number onto our PO for two-way linkage.
+// NOTE: web session only authenticates on the LIVE account — no sandbox login.
+async function updateOrderReference(orderId, reference, { client = BP_CLIENT } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const session = await getSession(client);
+    const pageUrl = `${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`;
+    let cookie = await getCookieHeader(session.jar, pageUrl);
+    const pageRes = await fetch(pageUrl, { headers: { ...BROWSER_HEADERS, Cookie: cookie }, redirect: 'manual' });
+    await ingestCookies(session.jar, pageRes, pageUrl);
+    const html = await pageRes.text();
+    if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(client); continue; }
+    const token = (html.match(/name=["']__fc_csrf_token["'][^>]*content=["']([^"']+)["']/i)
+      || html.match(/content=["']([^"']+)["'][^>]*name=["']__fc_csrf_token["']/i) || [])[1];
+    if (!token) throw new Error(`__fc_csrf_token not found on order page ${orderId} (status ${pageRes.status})`);
+
+    const url = `${BP_HOST}/ajaxData.php?op=order:validateOrder&oID=${encodeURIComponent(orderId)}`;
+    cookie = await getCookieHeader(session.jar, url);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...BROWSER_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-CSRF-Token': token,
+        Accept: 'application/json, text/javascript, */*; q=0.01',
+        Origin: BP_HOST,
+        Referer: pageUrl,
+        Cookie: cookie,
+      },
+      body: new URLSearchParams({ orders_customer_ref: reference }).toString(),
+    });
+    await ingestCookies(session.jar, res, url);
+    const text = await res.text();
+    if (looksLikeLoginPage(text) && attempt === 0) { invalidateSession(client); continue; }
+    let json = null; try { json = JSON.parse(text); } catch {}
+    return { ok: res.ok, status: res.status, json, text: json ? undefined : text.slice(0, 300) };
+  }
+  return { ok: false, error: 'session expired' };
+}
+
+export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, BP_HOST };
