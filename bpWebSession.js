@@ -377,13 +377,12 @@ async function ajaxReq(session, url, token, method = 'POST', body) {
   return { status: res.status, json, text };
 }
 
-// Set an order's Reference box (orders_customer_ref). BP's legacy editor requires
-// a page LOCK to be held for the write to commit: pageLock -> order:validateOrder
-// (which persists while locked) -> release pageLock. Live account only.
-async function updateOrderReference(orderId, reference, { client = BP_CLIENT } = {}) {
+// Save order-header fields via the legacy editor: pageLock -> order:validateOrder
+// (persists while locked) -> release lock. `fields` = object of form fields.
+// Live account only.
+async function lockedValidateOrder(orderId, fields, { client = BP_CLIENT } = {}) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const session = await getSession(client);
-    // CSRF token from the order page
     const pageUrl = `${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`;
     const pageCookie = await getCookieHeader(session.jar, pageUrl);
     const pageRes = await fetch(pageUrl, { headers: { ...BROWSER_HEADERS, Cookie: pageCookie }, redirect: 'manual' });
@@ -397,11 +396,19 @@ async function updateOrderReference(orderId, reference, { client = BP_CLIENT } =
     const lockUrl = `${BP_HOST}/ajaxData.php?op=pageLock&resourceId=${encodeURIComponent(orderId)}&resourceTypeId=2`;
     const saveUrl = `${BP_HOST}/ajaxData.php?op=order:validateOrder&oID=${encodeURIComponent(orderId)}`;
     const lock = await ajaxReq(session, lockUrl, token, 'POST');
-    const save = await ajaxReq(session, saveUrl, token, 'POST', new URLSearchParams({ orders_customer_ref: reference }).toString());
-    await ajaxReq(session, lockUrl, token, 'DELETE'); // release the lock regardless
-    return { ok: save.status === 200 && (!save.json || !save.json.length), status: save.status, lock: lock.status, save: save.json != null ? save.json : (save.text || '').slice(0, 200) };
+    const save = await ajaxReq(session, saveUrl, token, 'POST', new URLSearchParams(fields).toString());
+    await ajaxReq(session, lockUrl, token, 'DELETE');
+    return { ok: save.status === 200, status: save.status, lock: lock.status, save: save.json != null ? save.json : (save.text || '').slice(0, 200) };
   }
   return { ok: false, error: 'session expired' };
 }
 
-export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, orderAjaxPost, BP_HOST };
+// Convenience: set the Reference box. Sends the reference alongside the other
+// header fields BP validates as a set (date + department), like the real UI.
+async function updateOrderReference(orderId, reference, { client = BP_CLIENT, date, department = '1' } = {}) {
+  const fields = { orders_customer_ref: reference, orders_department: department };
+  if (date) fields.date = date;
+  return lockedValidateOrder(orderId, fields, { client });
+}
+
+export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, lockedValidateOrder, orderAjaxPost, BP_HOST };
