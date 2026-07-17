@@ -301,8 +301,14 @@ export async function staffEmailOf(contactId) {
 // email on the supplier details of the PO). Used to email POs to email-method
 // suppliers. Resolves the registry contactId → contact → communication.emails.
 export async function supplierEmailOf(supplierKey) {
-  try { const sup = resolveSupplier(supplierKey); return await staffEmailOf(sup.contactId); }
-  catch { return null; }
+  try {
+    const sup = resolveSupplier(supplierKey);
+    const c = await api('GET', `/contact-service/contact/${sup.contactId}`);
+    const emails = c && c[0] && c[0].communication && c[0].communication.emails;
+    if (!emails) return null;
+    // Prefer the PRIMARY email (the supplier's order address), else any.
+    return (emails.PRI && emails.PRI.email) || (Object.values(emails)[0] || {}).email || null;
+  } catch { return null; }
 }
 
 // A specific contact's email by id (e.g. the supplier party on a PO).
