@@ -7635,6 +7635,7 @@ async function sendOutOfStockEmail(supplier, lines, to) {
 // ?path=/patt-op.php?oID=123 &client=tuffbsitc &find=<regex>
 app.get('/api/debug/bp-web', async (req, res) => {
   try {
+    if (req.query.env) return res.json({ DEC_USER: !!process.env.DEC_USER, DEC_PASS: !!process.env.DEC_PASS, BP_WEB_TEST_EMAIL: !!process.env.BP_WEB_TEST_EMAIL, BP_WEB_EMAIL: !!process.env.BP_WEB_EMAIL, BP_WEB_TEST_CLIENT: process.env.BP_WEB_TEST_CLIENT || '(default tuffbsitc)' });
     const client = (req.query.client || 'tuffbsitc').toString();
     const path = (req.query.path || '/').toString();
     const url = path.startsWith('http') ? path : `${BP_WEB_HOST}${path}`;
