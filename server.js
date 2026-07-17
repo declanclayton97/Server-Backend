@@ -7650,7 +7650,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       else {
         const key = `${l.sku}|${l.size || ''}`;
         if (!(key in stockCache)) {
-          try { const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-stock?live=1&supplier=${encodeURIComponent(supplier)}&sku=${encodeURIComponent(l.sku)}&sizeLabel=${encodeURIComponent(l.size || '')}`); stockCache[key] = await r.json(); }
+          try { const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-stock?live=1&supplier=${encodeURIComponent(supplier)}&sku=${encodeURIComponent(l.sku)}&sizeLabel=${encodeURIComponent(l.size || '')}&name=${encodeURIComponent(l.name || '')}&colour=${encodeURIComponent(l.colour || '')}`); stockCache[key] = await r.json(); }
           catch (e) { stockCache[key] = { found: false, reason: e.message }; }
         }
         l.stock = stockCache[key];
