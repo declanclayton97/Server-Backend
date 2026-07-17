@@ -415,12 +415,80 @@ async function lockedValidateOrder(orderId, fields, { client = BP_CLIENT } = {})
   return { ok: false, error: 'session expired' };
 }
 
-// Convenience: set the Reference box. Sends the reference alongside the other
-// header fields BP validates as a set (date + department), like the real UI.
-async function updateOrderReference(orderId, reference, { client = BP_CLIENT, date, department = '1' } = {}) {
-  const fields = { orders_customer_ref: reference, orders_department: department };
-  if (date) fields.date = date;
-  return lockedValidateOrder(orderId, fields, { client });
+const decodeHtml = (s) => String(s || '')
+  .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+  .replace(/&#0?39;/g, "'").replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16))).replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)));
+
+// Parse the ENTIRE order edit form (the one holding orders_customer_ref) into an
+// ordered list of [name, value] pairs — inputs (skipping submit/button/file and
+// unchecked checkboxes/radios), textareas, and the selected <option> of selects.
+// Array fields (name[]) are preserved in order. The whole form is re-submitted to
+// save, so this must round-trip faithfully.
+function parseOrderForm(html) {
+  const idx = html.indexOf('name="orders_customer_ref"');
+  if (idx < 0) return null;
+  const start = html.lastIndexOf('<form', idx);
+  const end = html.indexOf('</form>', idx);
+  if (start < 0 || end < 0) return null;
+  const form = html.slice(start, end);
+  const fields = [];
+  const seen = []; // track (start index) to interleave selects/textareas roughly in order is not needed for BP
+  for (const m of form.matchAll(/<input\b[^>]*>/gi)) {
+    const tag = m[0];
+    const name = (tag.match(/\bname\s*=\s*"([^"]*)"/i) || [])[1];
+    if (!name) continue;
+    const type = ((tag.match(/\btype\s*=\s*"([^"]*)"/i) || [])[1] || 'text').toLowerCase();
+    if (['submit', 'button', 'image', 'file', 'reset'].includes(type)) continue;
+    if ((type === 'checkbox' || type === 'radio') && !/\bchecked\b/i.test(tag)) continue;
+    const value = (tag.match(/\bvalue\s*=\s*"([^"]*)"/i) || [, ''])[1];
+    fields.push([name, decodeHtml(value)]);
+  }
+  for (const m of form.matchAll(/<textarea\b[^>]*>([\s\S]*?)<\/textarea>/gi)) {
+    const name = (m[0].match(/\bname\s*=\s*"([^"]*)"/i) || [])[1];
+    if (name) fields.push([name, decodeHtml(m[1])]);
+  }
+  for (const m of form.matchAll(/<select\b[^>]*>([\s\S]*?)<\/select>/gi)) {
+    const name = (m[0].match(/\bname\s*=\s*"([^"]*)"/i) || [])[1];
+    if (!name) continue;
+    const opts = [...m[1].matchAll(/<option\b([^>]*)>/gi)];
+    let sel = opts.find((o) => /\bselected\b/i.test(o[1])) || opts[0];
+    const val = sel ? (sel[1].match(/\bvalue\s*=\s*"([^"]*)"/i) || [, ''])[1] : '';
+    fields.push([name, decodeHtml(val)]);
+  }
+  return fields;
+}
+
+// Save order-header changes by re-submitting the whole legacy edit form.
+// overrides = { orders_customer_ref: '...' } etc. Refreshes the CSRF token from
+// the live page. Live + sandbox (per client).
+async function saveOrderForm(orderId, overrides = {}, { client = BP_CLIENT } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const session = await getSession(client);
+    const pageUrl = `${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`;
+    const cookie = await getCookieHeader(session.jar, pageUrl);
+    const pageRes = await fetch(pageUrl, { headers: { ...BROWSER_HEADERS, Cookie: cookie }, redirect: 'manual' });
+    await ingestCookies(session.jar, pageRes, pageUrl);
+    const html = await pageRes.text();
+    if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(client); continue; }
+    const fields = parseOrderForm(html);
+    if (!fields) throw new Error(`order form not found for ${orderId} (status ${pageRes.status})`);
+    for (const [k, v] of Object.entries(overrides)) {
+      const f = fields.find((x) => x[0] === k);
+      if (f) f[1] = String(v); else fields.push([k, String(v)]);
+    }
+    const fd = new FormData();
+    for (const [k, v] of fields) fd.append(k, v);
+    const postCookie = await getCookieHeader(session.jar, pageUrl);
+    const res = await fetch(pageUrl, { method: 'POST', headers: { ...BROWSER_HEADERS, Cookie: postCookie, Origin: BP_HOST, Referer: pageUrl }, body: fd, redirect: 'manual' });
+    await ingestCookies(session.jar, res, pageUrl);
+    return { ok: [200, 302].includes(res.status), status: res.status, location: res.headers.get('location'), fieldCount: fields.length };
+  }
+  return { ok: false, error: 'session expired' };
+}
+
+// Set the order's Reference box (orders_customer_ref) via a full form re-submit.
+async function updateOrderReference(orderId, reference, opts = {}) {
+  return saveOrderForm(orderId, { orders_customer_ref: reference }, opts);
 }
 
 export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, lockedValidateOrder, orderAjaxPost, BP_HOST };
