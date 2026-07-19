@@ -74,6 +74,10 @@ async function api(method, path, body, attempt = 0) {
   return json ? json.response : null;
 }
 
+// Thin passthrough to the internal BP api (TEST account) — used by gated debug/seed
+// endpoints for validation. Same throttle/error handling.
+export async function bpApi(method, path, body) { return api(method, path, body); }
+
 // ---- helpers ----
 const tagsOf = (v) => String(v || '').split('/').map((x) => x.trim()).filter(Boolean);
 // Pick a product-option value by matching the option KEY (names vary: "Size",

@@ -7582,6 +7582,52 @@ app.post('/api/purchasing/finalize', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// TEMP (sandbox validation only) — read-only BP GET proxy against the TEST account.
+app.get('/api/purchasing/debug-bp', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try { res.json(await purchasingAuto.bpApi('GET', String(req.query.path || ''))); }
+  catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// TEMP (sandbox validation only) — seed a test SO tagged for a supplier so we can
+// run prepare-supplier-order end-to-end. body: { supplier, customerId, reference,
+// rows:[{ productId, productName?, qty, price?, taxCode? }] }. colour/size come from
+// the variant's own productOptions (so pass real variant productIds).
+app.post('/api/purchasing/seed-test-order', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try {
+    const { supplier = 'PRESTIGE', customerId = 128071, rows = [], reference = `AUTOTEST ${supplier}` } = req.body || {};
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'rows[] required' });
+    const soId = await purchasingAuto.bpApi('POST', '/order-service/order', {
+      orderTypeCode: 'SO', reference, priceListId: 1, priceModeCode: 'INC', warehouseId: 2,
+      currency: { orderCurrencyCode: 'GBP' }, parties: { customer: { contactId: customerId } },
+    });
+    for (const r of rows) {
+      const net = (r.price || 0) * (r.qty || 1);
+      await purchasingAuto.bpApi('POST', `/order-service/order/${soId}/row`, {
+        productId: r.productId,
+        ...(r.productName ? { productName: r.productName } : {}),
+        quantity: { magnitude: String(r.qty || 1) },
+        rowValue: { taxCode: r.taxCode || 'T20', rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * 0.2).toFixed(2) } },
+      });
+    }
+    await purchasingAuto.bpApi('PATCH', `/order-service/order/${soId}/custom-field`, [{ op: 'add', path: '/PCF_SUPPLIER', value: supplier }]);
+    await purchasingAuto.bpApi('PUT', `/order-service/order/${soId}/status`, { orderStatusId: 23 });
+    res.json({ ok: true, soId, reference });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// TEMP (sandbox cleanup) — set an order's status (default cancel SO=5, PO=62).
+app.post('/api/purchasing/cancel-order', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try {
+    const { orderId, statusId = 5 } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: 'orderId required' });
+    await purchasingAuto.bpApi('PUT', `/order-service/order/${orderId}/status`, { orderStatusId: statusId });
+    res.json({ ok: true, orderId, statusId });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Prepare a supplier order: take the demand, check LIVE supplier stock per line,
 // import the in-stock qty into the supplier basket, and email the out-of-stock
 // shortfall (for back-order / alternative). Leaves the basket for human review;
