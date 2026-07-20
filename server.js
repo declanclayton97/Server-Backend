@@ -9904,18 +9904,33 @@ app.get("/api/approval-sessions", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "Database not configured" });
 
   try {
-    const { orderNumber, includeArchived } = req.query;
+    const { orderNumber, includeArchived, search } = req.query;
+    const searchTerm = (search || "").trim();
     let query = `SELECT id, order_number, customer_name, recipient_name, status, created_at, completed_at, opened_at, submitter_ip, approver_name, signature_data, created_by, resend_log, (pdf_data IS NOT NULL) AS has_pdf
                  FROM approval_sessions`;
     const conditions = [];
     const params = [];
 
-    if (!includeArchived) {
+    // A targeted lookup (explicit order number, or a search term) must see the
+    // whole table, not just the recent window the list view loads. Archived is
+    // never excluded here: the point of searching an order is to find it even
+    // once it has been archived, which is exactly the case that used to come
+    // back empty.
+    const isLookup = Boolean(orderNumber) || Boolean(searchTerm);
+
+    if (!includeArchived && !isLookup) {
       conditions.push(`status != 'archived'`);
     }
     if (orderNumber) {
       params.push(orderNumber);
       conditions.push(`order_number = $${params.length}`);
+    }
+    if (searchTerm) {
+      params.push(`%${searchTerm}%`);
+      const p = `$${params.length}`;
+      conditions.push(
+        `(order_number ILIKE ${p} OR customer_name ILIKE ${p} OR recipient_name ILIKE ${p})`
+      );
     }
     if (conditions.length) {
       query += ` WHERE ${conditions.join(" AND ")}`;
@@ -9925,16 +9940,38 @@ app.get("/api/approval-sessions", async (req, res) => {
     // live approved/changes_requested/pending session behind a pile of archived
     // rows (the frontend "Needs attention" filter reads this list and was
     // under-counting because archived rows filled the window).
-    query += ` ORDER BY (status = 'archived') ASC, created_at DESC LIMIT 200`;
+    // Lookups rank purely by recency — the archived-last ordering exists to stop
+    // archived rows crowding live ones out of the 200-row list window, which is
+    // irrelevant when the result set is already narrowed to a match.
+    query += isLookup
+      ? ` ORDER BY created_at DESC LIMIT 200`
+      : ` ORDER BY (status = 'archived') ASC, created_at DESC LIMIT 200`;
 
     const result = await pool.query(query, params);
 
+    // Fetch every session's items in one round trip. This was previously a
+    // query per session (200 sessions = 201 queries).
+    const sessionIds = result.rows.map((r) => r.id);
+    const itemsBySession = new Map();
+    if (sessionIds.length) {
+      const itemsResult = await pool.query(
+        `SELECT id, session_id, label, status, rejection_reason FROM approval_items
+         WHERE session_id = ANY($1) ORDER BY position_index`,
+        [sessionIds]
+      );
+      for (const row of itemsResult.rows) {
+        if (!itemsBySession.has(row.session_id)) itemsBySession.set(row.session_id, []);
+        itemsBySession.get(row.session_id).push({
+          id: row.id,
+          label: row.label,
+          status: row.status,
+          rejection_reason: row.rejection_reason,
+        });
+      }
+    }
+
     const sessions = await Promise.all(
       result.rows.map(async (session) => {
-        const itemsResult = await pool.query(
-          `SELECT id, label, status, rejection_reason FROM approval_items WHERE session_id = $1 ORDER BY position_index`,
-          [session.id]
-        );
         return {
           id: session.id,
           orderNumber: session.order_number,
@@ -9950,7 +9987,7 @@ app.get("/api/approval-sessions", async (req, res) => {
           createdBy: session.created_by,
           hasPdf: session.has_pdf,
           resendLog: session.resend_log || [],
-          items: itemsResult.rows,
+          items: itemsBySession.get(session.id) || [],
         };
       })
     );
