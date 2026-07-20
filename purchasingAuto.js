@@ -123,10 +123,14 @@ async function lookupSupplierContactId(name) {
   if (key in _supContact) return _supContact[key];
   let id = null;
   try {
-    const s = await api('GET', `/contact-service/contact-search?companyName=${encodeURIComponent(name)}&pageSize=5`);
+    const s = await api('GET', `/contact-service/contact-search?companyName=${encodeURIComponent(name)}&pageSize=20`);
     const idx = {}; s.metaData.columns.forEach((c, i) => { idx[c.name] = i; });
     const rows = s.results || [];
-    if (rows.length) id = rows[0][idx.contactId];
+    // Prefer a contact actually flagged as a supplier (a name match alone can hit a
+    // customer of the same name, e.g. "Prestige Building Supplies" vs the supplier
+    // "Prestige Leisure UK Ltd"). Fall back to the first match if none are flagged.
+    const pick = (idx.isSupplier != null && rows.find((r) => r[idx.isSupplier] === true)) || rows[0];
+    if (pick) id = pick[idx.contactId];
   } catch { /* leave null */ }
   _supContact[key] = id;
   return id;
