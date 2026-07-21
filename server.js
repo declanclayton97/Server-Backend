@@ -7776,8 +7776,9 @@ app.post('/api/debug/bp-setref', async (req, res) => {
 app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
   if (!requirePurchasing(res)) return;
   try {
-    const { supplier, orderIds, dryRun, simulateOosSkus, createPo } = req.body || {};
+    const { supplier, orderIds, dryRun, simulateOosSkus, simulateStock, createPo } = req.body || {};
     const simOos = new Set((simulateOosSkus || []).map((x) => String(x))); // test hook: force these SKUs OOS
+    const simStock = simulateStock || {}; // test hook (sandbox): force avail for these SKUs {sku: avail}
     const ids = parseOrderIds(orderIds);
     const plan = await purchasingAuto.preview(supplier, ids);
     const lines = [];
@@ -7794,6 +7795,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     for (const l of lines) {
       if (isEmailSupplier) { l.stock = { avail: l.qty, emailSupplier: true }; }
       else if (simOos.has(String(l.sku))) { l.stock = { avail: 0, simulated: true }; }
+      else if (String(l.sku) in simStock) { l.stock = { avail: Number(simStock[String(l.sku)]), simulated: true }; }
       else {
         const key = `${l.sku}|${l.size || ''}`;
         if (!(key in stockCache)) {
