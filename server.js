@@ -7868,7 +7868,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       // It is also SUPPLIER-SPECIFIC: only the Snickers/Hultafors basket is built,
       // so never push another supplier's lines into it.
       const basketEnabled = process.env.PURCHASING_BASKET_ENABLED === 'true' || req.body.importBasket === true;
-      const BASKET_SUPPLIERS = new Set(['SNICKERS', 'PORTWEST', 'BLAKLADER', 'MASCOT', 'PRESTIGE', 'BTC', 'CASTLE', 'FRISTADS', 'LEO', 'BEHRENS', 'STEEL BLUE', 'STEELBLUE', 'CHADWICK', 'CHADWICK TEXTILES', 'ROCK FALL', 'ROCKFALL']); // suppliers with a built basket flow
+      const BASKET_SUPPLIERS = new Set(['SNICKERS', 'PORTWEST', 'BLAKLADER', 'MASCOT', 'PRESTIGE', 'BTC', 'CASTLE', 'FRISTADS', 'LEO', 'BEHRENS', 'STEEL BLUE', 'STEELBLUE', 'CHADWICK', 'CHADWICK TEXTILES', 'ROCK FALL', 'ROCKFALL', 'ENGEL']); // suppliers with a built basket flow
       const basketSupplier = BASKET_SUPPLIERS.has(String(supplier).toUpperCase());
       if (importLines.length && basketEnabled && basketSupplier) {
         const r = await fetch(`${ALT_ITEMS_URL}/api/basket-import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ supplier: String(supplier).toUpperCase(), lines: importLines }) });

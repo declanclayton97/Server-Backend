@@ -132,10 +132,16 @@ async function lookupSupplierContactId(name) {
     const isDead = (r) => idx.companyName != null && /\bOLD ACC(OUNT)?\b|\bCLOSED\b|DO ?NOT ?USE|DEAD ACC/i.test(String(r[idx.companyName] || ''));
     // Prefer a contact actually flagged as a supplier (a name match alone can hit a
     // customer of the same name, e.g. "Prestige Building Supplies" vs the supplier
-    // "Prestige Leisure UK Ltd"), and skip dead records. Fall back progressively so a
-    // match is still returned if every candidate is dead / none is flagged.
+    // "Prestige Leisure UK Ltd"), skip dead records, and — because contact-search is
+    // a prefix/substring match — prefer an EXACT company-name match, then a
+    // starts-with, over a mere substring hit (e.g. "Engel" must resolve to "Engel"
+    // 83093, NOT "engelbert strauss Ltd" 23986). Fall back progressively so a match
+    // is still returned if every candidate is dead / none is flagged.
+    const wanted = String(name).trim().toLowerCase();
+    const cname = (r) => (idx.companyName != null ? String(r[idx.companyName] || '') : '').trim().toLowerCase();
+    const best = (list) => list.find((r) => cname(r) === wanted) || list.find((r) => cname(r).startsWith(wanted)) || list[0];
     const supplierRows = idx.isSupplier != null ? rows.filter((r) => r[idx.isSupplier] === true) : [];
-    const pick = supplierRows.find((r) => !isDead(r)) || rows.find((r) => !isDead(r)) || supplierRows[0] || rows[0];
+    const pick = best(supplierRows.filter((r) => !isDead(r))) || best(rows.filter((r) => !isDead(r))) || supplierRows[0] || rows[0];
     if (pick) id = pick[idx.contactId];
   } catch { /* leave null */ }
   _supContact[key] = id;
