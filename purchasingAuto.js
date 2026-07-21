@@ -126,10 +126,16 @@ async function lookupSupplierContactId(name) {
     const s = await api('GET', `/contact-service/contact-search?companyName=${encodeURIComponent(name)}&pageSize=20`);
     const idx = {}; s.metaData.columns.forEach((c, i) => { idx[c.name] = i; });
     const rows = s.results || [];
+    // Skip dead/duplicate records ("... ++ OLD ACC ++", "OLD ACCOUNT", "CLOSED",
+    // "DO NOT USE") — some suppliers have a stale contact alongside the live one
+    // (e.g. Fristads "Fristads Kansas ++ OLD ACC ++" vs "Fristads Workwear Ltd").
+    const isDead = (r) => idx.companyName != null && /\bOLD ACC(OUNT)?\b|\bCLOSED\b|DO ?NOT ?USE|DEAD ACC/i.test(String(r[idx.companyName] || ''));
     // Prefer a contact actually flagged as a supplier (a name match alone can hit a
     // customer of the same name, e.g. "Prestige Building Supplies" vs the supplier
-    // "Prestige Leisure UK Ltd"). Fall back to the first match if none are flagged.
-    const pick = (idx.isSupplier != null && rows.find((r) => r[idx.isSupplier] === true)) || rows[0];
+    // "Prestige Leisure UK Ltd"), and skip dead records. Fall back progressively so a
+    // match is still returned if every candidate is dead / none is flagged.
+    const supplierRows = idx.isSupplier != null ? rows.filter((r) => r[idx.isSupplier] === true) : [];
+    const pick = supplierRows.find((r) => !isDead(r)) || rows.find((r) => !isDead(r)) || supplierRows[0] || rows[0];
     if (pick) id = pick[idx.contactId];
   } catch { /* leave null */ }
   _supContact[key] = id;
