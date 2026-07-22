@@ -7831,7 +7831,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       routing.push({ orderId: Number(oid), resolvedTo: await purchasingAuto.orderRecipient(order, salesEmail) });
     }
 
-    let basket = null, emailed = false, po = null, backorderPo = null, notesAdded = 0, poEmail = null, ralawiseOrder = null;
+    let basket = null, emailed = false, po = null, backorderPo = null, notesAdded = 0, poEmail = null, ralawiseOrder = null, pencarrieOrder = null;
     if (!dryRun) {
       if (createPo) {
         // Split the demand: main Pending PO = in-stock qty; a separate "On Back
@@ -7905,6 +7905,23 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
           ralawiseOrder = { skipped: true, reason: 'placement gated off — no API call' };
         }
       }
+      // PenCarrie: direct-order API (pcautoorder) — no web basket. GATED. Does NOT
+      // call PenCarrie unless PURCHASING_PENCARRIE_ORDER_ENABLED=true or
+      // req.placePencarrie=true. Even then parkorder=1 (order left PARKED/editable —
+      // NOT sent for picking; the "basket" equivalent) and the SANDBOX gateway
+      // unless req.pencarrieLive=true. assumebo=1 → PenCarrie back-orders shortfalls.
+      if (po && po.poId && String(supplier).toUpperCase() === 'PENCARRIE') {
+        const placeEnabled = process.env.PURCHASING_PENCARRIE_ORDER_ENABLED === 'true' || req.body.placePencarrie === true;
+        if (placeEnabled) {
+          const pcLines = importLines.map((l) => ({ sku: l.stockCode, qty: l.qty, ref: `PO${po.poId}` }));
+          try {
+            const pr = await fetch(`${ALT_ITEMS_URL}/api/pencarrie-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: pcLines, reference: `TW${po.poId}`, parkorder: 1, assumebo: 1, sandbox: req.body.pencarrieLive !== true }) });
+            pencarrieOrder = await pr.json();
+          } catch (e) { pencarrieOrder = { ok: false, error: e.message }; console.error('[purchasing] pencarrie order', e.message); }
+        } else {
+          pencarrieOrder = { skipped: true, reason: 'placement gated off — no API call' };
+        }
+      }
       // Shortfall notes/emails only make sense once a back-order PO exists to
       // reference — otherwise (e.g. a basket-only run) we'd stamp "PO#?" notes and
       // re-stamp them on every re-run (the order isn't PO-tagged yet, so it keeps
@@ -7973,7 +7990,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       importedSkus: importLines.length,
       po: po && po.poId ? { poId: po.poId } : null,
       backorderPo: backorderPo && backorderPo.poId ? { poId: backorderPo.poId, status: 'On Back Order' } : null,
-      basket, emailed, notesAdded, refStamped, poEmail, ralawiseOrder, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
+      basket, emailed, notesAdded, refStamped, poEmail, ralawiseOrder, pencarrieOrder, finalized: finalized ? { finalized: true, orders: finalized.results.length } : null,
       routing,
       shortfall: outOfStock.map((l) => ({ orderId: l.orderId, ref: l.ref, sku: l.sku, name: l.name, need: l.qty, avail: l.avail, short: l.short, deldate: l.stock && l.stock.deldate })),
     });
