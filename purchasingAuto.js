@@ -368,6 +368,16 @@ export async function staffEmailOf(contactId) {
 // A supplier's order email, taken from their Brightpearl contact record (the
 // email on the supplier details of the PO). Used to email POs to email-method
 // suppliers. Resolves the registry contactId → contact → communication.emails.
+// The order email as it sits ON the created PO (the supplier party's snapshot email).
+// This is the authoritative address for the email-PO — it's exactly who the PO is for.
+export async function poSupplierEmail(poId) {
+  try {
+    const o = await api('GET', `/order-service/order/${poId}`);
+    const sup = o && o[0] && o[0].parties && o[0].parties.supplier;
+    return (sup && sup.email) || null;
+  } catch { return null; }
+}
+
 export async function supplierEmailOf(supplierKey) {
   try {
     const sup = await resolveSupplier(supplierKey);

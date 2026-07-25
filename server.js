@@ -7893,9 +7893,9 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
       if (po && po.poId && (req.body.emailPo === true || EMAIL_SUPPLIERS.has(String(supplier).toUpperCase()))) {
         const sendPo = process.env.PURCHASING_PO_EMAIL_ENABLED === 'true' || req.body.sendPoEmail === true;
         const emailLines = lines.map((l) => ({ sku: l.sku, name: l.name, qty: l.qty, colour: l.colour, size: l.size }));
-        // Recipient = the email on the supplier's BP contact (supplier details of
-        // the PO); fall back to req.emailTo / PO_EMAIL_<SUPPLIER> env.
-        let recipient = req.body.emailTo || (await purchasingAuto.supplierEmailOf(supplier)) || supplierOrderEmail(supplier);
+        // Recipient = the order email ON the PO (supplier party snapshot) — the
+        // authoritative address; then req.emailTo / the supplier's BP contact / env.
+        let recipient = req.body.emailTo || (await purchasingAuto.poSupplierEmail(po.poId)) || (await purchasingAuto.supplierEmailOf(supplier)) || supplierOrderEmail(supplier);
         try { poEmail = await sendPurchaseOrderEmail(plan.supplier, po.poId, emailLines, { to: recipient, send: sendPo }); }
         catch (e) { poEmail = { sent: false, error: e.message }; console.error('[purchasing] po email failed', e.message); }
       }
