@@ -7689,8 +7689,19 @@ const TUFF_PO_DELIVERY = {
 // Suppliers ordered by email (from the supplier order-methods list). Their order
 // email is read from env PO_EMAIL_<SUPPLIER> (e.g. PO_EMAIL_UNEEK); populate as
 // the addresses come in. No email = preview only (can't send).
-const EMAIL_SUPPLIERS = new Set(['UNEEK', 'DELTA PLUS', 'BUCKBOOTZ', 'BURLINGTON', 'CENTURION', 'PANTHER', 'ALSICO', 'TRANEMO', 'V12', 'ZECO', 'AS APPAREL', 'BLUE MAX BANNER', 'COFRA', 'DISLEY', 'ELKA', 'FUTURE GARMENTS', 'GAAARD', 'POLYCO', 'ROWLINSON', 'SHOES FOR CREWS', 'GLOBAL SAFETY', 'CLEAN BOOT', 'OCTOGRIP', 'PERFORMANCE BRANDS']);
-const supplierOrderEmail = (supplier) => process.env['PO_EMAIL_' + String(supplier || '').toUpperCase().replace(/[^A-Z0-9]/g, '')] || null;
+const EMAIL_SUPPLIERS = new Set(['UNEEK', 'DELTA PLUS', 'BUCKBOOTZ', 'BURLINGTON', 'CENTURION', 'PANTHER', 'ALSICO', 'TRANEMO', 'V12', 'ZECO', 'AS APPAREL', 'BLUE MAX BANNER', 'COFRA', 'DISLEY', 'ELKA', 'FUTURE GARMENTS', 'GAAARD', 'POLYCO', 'ROWLINSON', 'SHOES FOR CREWS', 'GLOBAL SAFETY', 'CLEAN BOOT', 'OCTOGRIP', 'PERFORMANCE BRANDS', 'PULSAR', 'U-POWER']);
+// Recipient resolution order (see the purchasing flow): req.emailTo → the supplier's
+// PRIMARY email on its Brightpearl contact (supplierEmailOf — covers ~20 of these) →
+// PO_EMAIL_<SUPPLIER> env → this fallback map (order emails we know but that aren't on
+// a BP contact). Keep known addresses here so they work without env vars.
+const PO_EMAIL_FALLBACK = {
+  UPOWER: 'sales.uk@u-power.it',
+  // PULSAR / BLUEMAXBANNER / FUTUREGARMENTS / GLOBALSAFETY — no BP contact + address unknown; add when confirmed.
+};
+const supplierOrderEmail = (supplier) => {
+  const k = String(supplier || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return process.env['PO_EMAIL_' + k] || PO_EMAIL_FALLBACK[k] || null;
+};
 
 function poEmailHtml(supplier, poId, lines) {
   const rows = lines.map((l) => `<tr>
