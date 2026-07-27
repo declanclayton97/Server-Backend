@@ -7589,6 +7589,36 @@ app.get('/api/purchasing/debug-bp', async (req, res) => {
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// TEMP (sandbox validation only) — prove the product-identity read-merge-write is
+// safe: (1) no-op round-trip preserves every identifier, (2) writing `ean` sets it
+// and PRESERVES the sku, (3) whether `barcode` follows `ean`, (4) full restore.
+// Reversible — restores the original identity at the end. ?productId= (default 1019).
+app.get('/api/purchasing/identity-test', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const pid = parseInt(req.query.productId, 10) || 1019;
+  const testEan = String(req.query.ean || '5000000000017');
+  try {
+    const before = await purchasingAuto.getProductIdentity(pid);
+    await purchasingAuto.setProductIdentity(pid, {});                 // no-op round-trip
+    const afterNoop = await purchasingAuto.getProductIdentity(pid);
+    await purchasingAuto.setProductIdentity(pid, { ean: testEan });   // set a test EAN
+    const afterSet = await purchasingAuto.getProductIdentity(pid);
+    await purchasingAuto.setProductIdentity(pid, { ean: before.ean || null }); // restore
+    const restored = await purchasingAuto.getProductIdentity(pid);
+    const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    res.json({
+      productId: pid, before, afterNoop, afterSet, restored,
+      checks: {
+        noopPreservedEverything: eq(before, afterNoop),
+        eanWasSet: afterSet.ean === testEan,
+        skuPreservedOnWrite: afterSet.sku === before.sku,
+        barcodeFollowedEan: afterSet.barcode === testEan,
+        fullyRestored: eq(before, restored),
+      },
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // TEMP (sandbox validation only) — seed a test SO tagged for a supplier so we can
 // run prepare-supplier-order end-to-end. body: { supplier, customerId, reference,
 // rows:[{ productId, productName?, qty, price?, taxCode? }] }. colour/size come from

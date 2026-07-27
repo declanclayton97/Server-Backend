@@ -78,6 +78,35 @@ async function api(method, path, body, attempt = 0) {
 // endpoints for validation. Same throttle/error handling.
 export async function bpApi(method, path, body) { return api(method, path, body); }
 
+// ---- Product identity (SKU/EAN/UPC/MPN/ISBN) read + SAFE merge-write ----
+// PUT /product-service/product/{id}/identity REPLACES the whole identity block:
+// any identifier NOT supplied is CLEARED. So NEVER PUT a partial body directly —
+// always read-merge-write. `barcode` is returned by GET but is NOT one of the
+// PUT-settable keys (BP stores/derives it) — the sandbox identity-test tells us
+// whether writing `ean` also populates `barcode` (which is what our stock lookups
+// read from Alt-Items product_cache).
+const IDENTITY_KEYS = ['sku', 'ean', 'upc', 'mpn', 'isbn'];
+
+export async function getProductIdentity(productId) {
+  const resp = await api('GET', `/product-service/product/${productId}`);
+  const p = Array.isArray(resp) ? resp[0] : resp;
+  return (p && p.identity) || {};
+}
+
+// changes: any of { sku, ean, upc, mpn, isbn }. Pass "" / null to intentionally
+// clear one. Every identifier NOT in `changes` is preserved from the current
+// identity. Returns { productId, before, put } for logging/verification.
+export async function setProductIdentity(productId, changes = {}) {
+  const cur = await getProductIdentity(productId);
+  const put = {};
+  for (const k of IDENTITY_KEYS) {
+    const v = (k in changes) ? changes[k] : cur[k];
+    if (v != null && String(v).trim() !== '') put[k] = String(v).trim();
+  }
+  await api('PUT', `/product-service/product/${productId}/identity`, put);
+  return { productId, before: cur, put };
+}
+
 // ---- helpers ----
 const tagsOf = (v) => String(v || '').split('/').map((x) => x.trim()).filter(Boolean);
 // Pick a product-option value by matching the option KEY (names vary: "Size",
