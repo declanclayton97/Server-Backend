@@ -7603,16 +7603,32 @@ app.get('/api/purchasing/identity-test', async (req, res) => {
     const afterNoop = await purchasingAuto.getProductIdentity(pid);
     await purchasingAuto.setProductIdentity(pid, { ean: testEan });   // set a test EAN
     const afterSet = await purchasingAuto.getProductIdentity(pid);
+    // Does BP's product-search `barcode` column (what Alt-Items syncs into
+    // product_cache.barcode, which the stock lookups read) reflect the EAN we set?
+    // Poll a few times to allow for search-index lag.
+    let searchBarcode = null, searchRow = null;
+    for (let t = 0; t < 5; t++) {
+      try {
+        const srch = await purchasingAuto.bpApi('GET', `/product-service/product-search?productId=${pid}`);
+        const cols = (srch.metaData.columns || []).map((c) => c.name);
+        const row = (srch.results || [])[0] || [];
+        searchRow = {}; cols.forEach((c, i) => { if (/barcode|sku|ean|upc/i.test(c)) searchRow[c] = row[i]; });
+        searchBarcode = row[cols.indexOf('barcode')];
+        if (searchBarcode) break;
+      } catch (e) { searchRow = { error: e.message }; break; }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
     await purchasingAuto.setProductIdentity(pid, { ean: before.ean || null }); // restore
     const restored = await purchasingAuto.getProductIdentity(pid);
     const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     res.json({
-      productId: pid, before, afterNoop, afterSet, restored,
+      productId: pid, before, afterNoop, afterSet, restored, searchRow,
       checks: {
         noopPreservedEverything: eq(before, afterNoop),
         eanWasSet: afterSet.ean === testEan,
         skuPreservedOnWrite: afterSet.sku === before.sku,
-        barcodeFollowedEan: afterSet.barcode === testEan,
+        identityBarcodeFollowedEan: afterSet.barcode === testEan,
+        searchBarcodeFollowedEan: searchBarcode === testEan,
         fullyRestored: eq(before, restored),
       },
     });
