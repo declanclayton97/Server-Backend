@@ -7589,6 +7589,27 @@ app.get('/api/purchasing/debug-bp', async (req, res) => {
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// Apply an identifier to a product via the safe merge-write helper. This is the
+// write primitive for the stock auto-heal (fill a blank EAN so lookups resolve).
+// body: { productId, ean?, sku? }. Preserves all other identifiers; reversible by
+// re-applying. Currently targets the SANDBOX (BP_TEST creds); a live switch is just
+// live product-write credentials. Gated by requirePurchasing.
+app.post('/api/purchasing/product-identity', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const { productId, ean, sku } = req.body || {};
+  if (!productId) return res.status(400).json({ error: 'productId required' });
+  const changes = {};
+  if (ean !== undefined) changes.ean = ean;
+  if (sku !== undefined) changes.sku = sku;
+  if (!Object.keys(changes).length) return res.status(400).json({ error: 'ean or sku required' });
+  try {
+    const before = await purchasingAuto.getProductIdentity(productId);
+    await purchasingAuto.setProductIdentity(productId, changes);
+    const after = await purchasingAuto.getProductIdentity(productId);
+    res.json({ productId, changes, before, after, skuPreserved: after.sku === before.sku });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // TEMP (sandbox validation only) — prove the product-identity read-merge-write is
 // safe: (1) no-op round-trip preserves every identifier, (2) writing `ean` sets it
 // and PRESERVES the sku, (3) whether `barcode` follows `ean`, (4) full restore.
