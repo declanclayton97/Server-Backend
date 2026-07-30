@@ -6627,9 +6627,23 @@ app.post('/api/promo-offer/submit', async (req, res) => {
     // amounts below are computed per-line independently (and BP rounds each
     // row itself), so this doesn't change what's actually charged.
     const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+    // Price at a CLEAN 2dp per-UNIT ex-VAT amount (after the bundle discount), then
+    // derive each line total from it. This is exactly what BP ends up charging: when
+    // a row is posted, BP re-derives a 2dp unit price (rowNet ÷ qty) and recomputes
+    // the row, shedding fractional pennies. Previously the quote applied the discount
+    // to the un-rounded subtotal (£100.58 ex VAT) while BP rounded per unit (£100.46
+    // → £120.56 inc), so the quote and the invoice never reconciled. Computing the
+    // per-unit price here and sending BP `unitNet × qty` (already 2dp) makes them
+    // identical — BP has nothing left to re-round.
+    for (const l of lineItems) {
+      l.unitNetExVat = round2(l.dealPriceExVat * (1 - bundleDiscountPct));
+      l.lineNetExVat = round2(l.unitNetExVat * l.qty);
+    }
     const subtotalExVat = round2(lineItems.reduce((s, l) => s + l.lineTotalExVat, 0));
-    const bundleDiscount = round2(subtotalExVat * bundleDiscountPct);
-    const orderTotalExVat = round2(subtotalExVat - bundleDiscount);
+    const orderTotalExVat = round2(lineItems.reduce((s, l) => s + l.lineNetExVat, 0));
+    // Effective discount = subtotal − discounted total (absorbs the per-unit rounding
+    // so the displayed breakdown still reconciles: subtotal − discount = total).
+    const bundleDiscount = round2(subtotalExVat - orderTotalExVat);
     // Keep `orderTotal` name as an alias so the rest of the handler /
     // PDF code (further down) doesn't need rewriting — but it's now
     // ex-VAT after bundle discount.
@@ -6664,7 +6678,9 @@ app.post('/api/promo-offer/submit', async (req, res) => {
           bpRowResults.push({ name: l.name, sku: l.bpSku, ok: false, reason: 'SKU not found in BP' });
           continue;
         }
-        const lineExVatAfterDiscount = l.lineTotalExVat * (1 - bundleDiscountPct);
+        // Send the CLEAN per-unit-derived line net (unitNet × qty, already 2dp) so
+        // BP charges exactly the quoted total — no per-unit re-rounding by BP.
+        const lineExVatAfterDiscount = l.lineNetExVat;
         const addRes = await bpAddOrderRow(sess.order_number, productId, l.qty, lineExVatAfterDiscount, `${l.name} + PRINTED LOGO`);
         bpRowResults.push({
           name: l.name, sku: l.bpSku, productId, ok: addRes.ok,
