@@ -7626,6 +7626,27 @@ app.post('/api/purchasing/product-identity', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// READ-ONLY (sandbox): inspect a product's price lists + cost so we can see which
+// priceListId is retail vs cost and the exact value shape before writing. ?productId=
+app.get('/api/purchasing/price-inspect', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const pid = parseInt(req.query.productId, 10) || 1019;
+  try {
+    const priceResp = await purchasingAuto.bpApi('GET', `/product-service/product-price/${pid}`);
+    const prodResp = await purchasingAuto.bpApi('GET', `/product-service/product/${pid}`);
+    const p = Array.isArray(prodResp) ? prodResp[0] : prodResp;
+    const priceLists = (priceResp[0] && priceResp[0].priceLists) || priceResp;
+    res.json({
+      productId: pid,
+      name: p && p.stock ? undefined : undefined,
+      sku: p && p.identity && p.identity.sku,
+      priceLists: (priceLists || []).map((pl) => ({ priceListId: pl.priceListId, currencyCode: pl.currencyCode, quantityPrice: pl.quantityPrice })),
+      financialDetails: p && p.financialDetails,
+      salesChannelsCount: p && p.salesChannels ? p.salesChannels.length : undefined,
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // TEMP (sandbox validation only) — prove the product-identity read-merge-write is
 // safe: (1) no-op round-trip preserves every identifier, (2) writing `ean` sets it
 // and PRESERVES the sku, (3) whether `barcode` follows `ean`, (4) full restore.
