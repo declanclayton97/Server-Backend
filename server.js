@@ -7771,10 +7771,13 @@ app.get('/api/purchasing/price-test', async (req, res) => {
     catch (e) { putErr = e.message; }
 
     const afterWrite = await readAll();
-    // restore every populated list to its original value
+    // restore every populated list to its original value (unless ?norestore=1, which
+    // leaves the written value in place — used to set a specific value cleanly)
     let restoreErr = null;
-    try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}/price-list`, { priceLists: bodyFrom(before, -1, null) }); }
-    catch (e) { restoreErr = e.message; }
+    if (!req.query.norestore) {
+      try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}/price-list`, { priceLists: bodyFrom(before, -1, null) }); }
+      catch (e) { restoreErr = e.message; }
+    }
     const restored = await readAll();
 
     const populated = (l) => l.filter((pl) => pl.quantityPrice && pl.quantityPrice['1'] != null).map((pl) => ({ id: pl.priceListId, v: pl.quantityPrice['1'] }));
