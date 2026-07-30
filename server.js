@@ -7626,6 +7626,59 @@ app.post('/api/purchasing/product-identity', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// RRP from cost — tiered multiplier → ex-VAT RRP → +VAT → nearest .49/.99 inc price →
+// ex-VAT figure to store (BP price mode is EXC, so storing ex makes the inc land on .x9).
+function rrpFromCost(cost) {
+  const c = Number(cost);
+  if (!(c > 0)) return null;
+  const round2 = (n) => Math.round((n + 1e-9) * 100) / 100;
+  const m = c < 0.80 ? 4 : c < 1.49 ? 3 : c < 2.99 ? 2.5 : c < 3.99 ? 2.3 : c < 4.99 ? 2.1
+    : c < 14.99 ? 2 : c < 29.99 ? 1.8 : c < 59.99 ? 1.7 : c < 199.99 ? 1.6 : 1.5;
+  const rrpExVat = round2(c * m);
+  const rrpIncVat = round2(Math.round((rrpExVat * 1.2 - 0.49) / 0.5) * 0.5 + 0.49);
+  return { cost: c, mult: m, rrpExVat, rrpIncVat, rrpExStore: round2(rrpIncVat / 1.2) };
+}
+
+// TEMP (sandbox): the FULL flow, reversibly. Given a cost, compute RRP, then write
+// cost → list 20 (Cost Launch) and RRP → list 13, verify, and RESTORE (clearing any
+// list that was empty before). ?productId=&cost=3.05
+const COST_LIST = 20, RRP_LIST = 13;
+app.get('/api/purchasing/product-price-test', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const pid = parseInt(req.query.productId, 10) || 1019;
+  const cost = parseFloat(req.query.cost || '3.05');
+  const rrp = rrpFromCost(cost);
+  try {
+    const readAll = async () => { const r = await purchasingAuto.bpApi('GET', `/product-service/product-price/${pid}`); return (r[0] && r[0].priceLists) || []; };
+    const valOf = (lists, id) => { const pl = lists.find((x) => x.priceListId === id); return pl && pl.quantityPrice ? (pl.quantityPrice['1'] ?? null) : null; };
+    const populated = (lists) => lists.filter((pl) => pl.quantityPrice && pl.quantityPrice['1'] != null);
+    const before = await readAll();
+    const overrides = { [COST_LIST]: String(cost), [RRP_LIST]: String(rrp.rrpExStore) };
+    const seen = new Set();
+    const body = populated(before).map((pl) => { seen.add(pl.priceListId); return { priceListId: pl.priceListId, quantityPrice: { '1': String(overrides[pl.priceListId] ?? pl.quantityPrice['1']) } }; });
+    for (const id of [COST_LIST, RRP_LIST]) if (!seen.has(id)) body.push({ priceListId: id, quantityPrice: { '1': String(overrides[id]) } });
+    let putErr = null;
+    try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}/price-list`, { priceLists: body }); } catch (e) { putErr = e.message; }
+    const after = await readAll();
+    // Restore: original populated values; clear (empty quantityPrice) any list we added.
+    const restoreBody = populated(before).map((pl) => ({ priceListId: pl.priceListId, quantityPrice: { '1': String(pl.quantityPrice['1']) } }));
+    for (const id of [COST_LIST, RRP_LIST]) if (valOf(before, id) == null) restoreBody.push({ priceListId: id, quantityPrice: {} });
+    let restoreErr = null;
+    try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}/price-list`, { priceLists: restoreBody }); } catch (e) { restoreErr = e.message; }
+    const restored = await readAll();
+    res.json({
+      pid, cost, rrp, costList: COST_LIST, rrpList: RRP_LIST,
+      before: { cost: valOf(before, COST_LIST), rrp: valOf(before, RRP_LIST) },
+      after: { cost: valOf(after, COST_LIST), rrp: valOf(after, RRP_LIST) },
+      restored: { cost: valOf(restored, COST_LIST), rrp: valOf(restored, RRP_LIST) },
+      wroteCost: String(valOf(after, COST_LIST)) === String(cost),
+      wroteRrp: String(valOf(after, RRP_LIST)) === String(rrp.rrpExStore),
+      restoredClean: valOf(restored, COST_LIST) == valOf(before, COST_LIST) && String(valOf(restored, RRP_LIST)) === String(valOf(before, RRP_LIST)),
+      putErr, restoreErr,
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // READ-ONLY (sandbox): all price-list definitions (id + name) so we can find e.g. the
 // "Launch" list the business prices on.
 app.get('/api/purchasing/price-lists', async (req, res) => {
