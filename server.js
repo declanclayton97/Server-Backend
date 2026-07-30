@@ -7680,6 +7680,65 @@ app.get('/api/purchasing/product-price-test', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// READ-ONLY dry-run: build the cost/RRP change plan for a style. Matches each BP
+// variant (by colour+size) to its Pencarrie SKU, computes cost + RRP, and returns
+// current-vs-new for cost (list 20) and RRP (list 13). NO writes. ?style=GD01[&full=1][&limit=]
+app.get('/api/purchasing/gildan-plan', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const style = (req.query.style || 'GD01').toString().toUpperCase();
+  const limit = parseInt(req.query.limit, 10) || 0;
+  const ALT = process.env.ALT_ITEMS_URL || 'https://alternate-items.onrender.com';
+  const norm = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const chunk = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
+  try {
+    const pc = await (await fetch(`${ALT}/api/debug/pencarrie-products?style=${encodeURIComponent(style)}&full=1`)).json();
+    if (!pc.rows) return res.status(502).json({ error: 'no pencarrie rows', pc });
+    const pcByCode = new Map(), pcByName = new Map();
+    for (const r of pc.rows) { pcByCode.set(`${norm(r.colCode)}|${norm(r.size)}`, r); pcByName.set(`${norm(r.colName)}|${norm(r.size)}`, r); }
+
+    const search = await purchasingAuto.bpApi('GET', `/product-service/product-search?productName=${encodeURIComponent(style + '*')}&pageSize=500`);
+    const cols = (search.metaData.columns || []).map((c) => c.name);
+    const iId = cols.indexOf('productId'), iName = cols.indexOf('productName'), iStatus = cols.indexOf('productStatus');
+    let ids = (search.results || []).filter((r) => new RegExp('^' + style + '\\b|^' + style + '\\*', 'i').test(String(r[iName] || '')) && (iStatus < 0 || r[iStatus] === 'LIVE')).map((r) => r[iId]);
+    ids = [...new Set(ids)].sort((a, b) => a - b);
+    if (limit) ids = ids.slice(0, limit);
+
+    const prodById = new Map(), priceById = new Map();
+    for (const grp of chunk(ids, 100)) {
+      const idset = grp.join(',');
+      const prods = await purchasingAuto.bpApi('GET', `/product-service/product/${idset}`);
+      for (const p of (prods || [])) prodById.set(p.id, p);
+      const prices = await purchasingAuto.bpApi('GET', `/product-service/product-price/${idset}`);
+      for (const pr of (prices || [])) priceById.set(pr.productId, pr.priceLists || []);
+    }
+    const varVal = (p, re) => { for (const v of (p.variations || [])) if (re.test(v.optionName || '')) return v.optionValue; return null; };
+    const priceOf = (lists, id) => { const pl = (lists || []).find((x) => x.priceListId === id); return pl && pl.quantityPrice ? (pl.quantityPrice['1'] ?? null) : null; };
+
+    const plan = [], unmatched = [];
+    for (const id of ids) {
+      const p = prodById.get(id);
+      if (!p) { unmatched.push({ productId: id, why: 'no product record' }); continue; }
+      const colour = varVal(p, /colou?r/i), size = varVal(p, /size/i);
+      const pcRow = pcByName.get(`${norm(colour)}|${norm(size)}`) || pcByCode.get(`${norm(colour)}|${norm(size)}`);
+      if (!pcRow) { unmatched.push({ productId: id, colour, size, why: 'no pencarrie match' }); continue; }
+      const cost = parseFloat(pcRow.single);
+      const rrp = rrpFromCost(cost);
+      const lists = priceById.get(id);
+      plan.push({
+        productId: id, colour, size, pencarrieSku: pcRow.sku, discontinued: pcRow.discontinued,
+        curCost: priceOf(lists, COST_LIST), newCost: cost.toFixed(4),
+        curRrp: priceOf(lists, RRP_LIST), newRrp: rrp.rrpExStore.toFixed(4), rrpIncVat: rrp.rrpIncVat,
+      });
+    }
+    res.json({
+      style, bpVariants: ids.length, pencarrieRows: pc.rows.length, matched: plan.length, unmatched: unmatched.length,
+      firstProductVariationsRaw: ids[0] && prodById.get(ids[0]) ? prodById.get(ids[0]).variations : null,
+      unmatchedSample: unmatched.slice(0, 10),
+      plan: req.query.full ? plan : plan.slice(0, 15),
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // READ-ONLY (sandbox): does the test account have GD01 / Gildan products to run the
 // full flow against? ?q=GD01
 app.get('/api/purchasing/product-find', async (req, res) => {
