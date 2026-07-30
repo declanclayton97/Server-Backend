@@ -7660,9 +7660,10 @@ app.get('/api/purchasing/product-price-test', async (req, res) => {
     let putErr = null;
     try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}/price-list`, { priceLists: body }); } catch (e) { putErr = e.message; }
     const after = await readAll();
-    // Restore: original populated values; clear (empty quantityPrice) any list we added.
+    // Restore the originally-populated lists. NOTE: BP won't clear a list back to
+    // empty (PRDC-031 "Price Break required"), so a list that was empty before and we
+    // added stays set — harmless on the sandbox, and in production it's the goal.
     const restoreBody = populated(before).map((pl) => ({ priceListId: pl.priceListId, quantityPrice: { '1': String(pl.quantityPrice['1']) } }));
-    for (const id of [COST_LIST, RRP_LIST]) if (valOf(before, id) == null) restoreBody.push({ priceListId: id, quantityPrice: {} });
     let restoreErr = null;
     try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}/price-list`, { priceLists: restoreBody }); } catch (e) { restoreErr = e.message; }
     const restored = await readAll();
