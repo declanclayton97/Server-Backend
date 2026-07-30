@@ -7697,14 +7697,16 @@ app.get('/api/purchasing/price-test', async (req, res) => {
     const beforeVal = valOf(before, listId);
     const testVal = req.query.value != null ? String(req.query.value) : (beforeVal != null ? (parseFloat(beforeVal) + 1).toFixed(2) : '9.99');
 
+    // Correct endpoint (per BP docs): PUT /product-service/product-price/{id}/price-list
+    // with body { priceLists: [...] }. Net prices.
     let putResult, putErr = null;
-    try { putResult = await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}`, bodyFrom(before, listId, testVal)); }
+    try { putResult = await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}/price-list`, { priceLists: bodyFrom(before, listId, testVal) }); }
     catch (e) { putErr = e.message; }
 
     const afterWrite = await readAll();
     // restore every populated list to its original value
     let restoreErr = null;
-    try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}`, bodyFrom(before, -1, null)); }
+    try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}/price-list`, { priceLists: bodyFrom(before, -1, null) }); }
     catch (e) { restoreErr = e.message; }
     const restored = await readAll();
 
