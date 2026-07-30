@@ -7632,7 +7632,10 @@ app.get('/api/purchasing/price-lists', async (req, res) => {
   if (!requirePurchasing(res)) return;
   try {
     const lists = await purchasingAuto.bpApi('GET', '/product-service/price-list');
-    res.json({ lists: (lists || []).map((l) => ({ id: l.priceListId, name: l.name, currency: l.currencyCode, mode: l.priceModeCode })) });
+    const norm = (l) => ({ id: l.id ?? l.priceListId, name: (l.name && l.name.text) || l.name, currency: l.currencyCode });
+    const all = (lists || []).map(norm);
+    const q = (req.query.find || '').toString().toLowerCase();
+    res.json({ count: all.length, lists: q ? all.filter((l) => String(l.name).toLowerCase().includes(q)) : all });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
