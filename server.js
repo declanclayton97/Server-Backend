@@ -7680,6 +7680,20 @@ app.get('/api/purchasing/product-price-test', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// READ-ONLY (sandbox): does the test account have GD01 / Gildan products to run the
+// full flow against? ?q=GD01
+app.get('/api/purchasing/product-find', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const q = (req.query.q || 'GD01').toString();
+  try {
+    const byName = await purchasingAuto.bpApi('GET', `/product-service/product-search?productName=${encodeURIComponent(q + '*')}&pageSize=30`);
+    const cols = (byName.metaData.columns || []).map((c) => c.name);
+    const iId = cols.indexOf('productId'), iSku = cols.indexOf('SKU'), iName = cols.indexOf('productName');
+    const rows = (byName.results || []).map((r) => ({ productId: r[iId], sku: r[iSku], name: r[iName] }));
+    res.json({ q, count: rows.length, rows: rows.slice(0, 30) });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // READ-ONLY (sandbox): all price-list definitions (id + name) so we can find e.g. the
 // "Launch" list the business prices on.
 app.get('/api/purchasing/price-lists', async (req, res) => {
