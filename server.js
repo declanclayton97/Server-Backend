@@ -7626,6 +7626,16 @@ app.post('/api/purchasing/product-identity', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// READ-ONLY (sandbox): all price-list definitions (id + name) so we can find e.g. the
+// "Launch" list the business prices on.
+app.get('/api/purchasing/price-lists', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try {
+    const lists = await purchasingAuto.bpApi('GET', '/product-service/price-list');
+    res.json({ lists: (lists || []).map((l) => ({ id: l.priceListId, name: l.name, currency: l.currencyCode, mode: l.priceModeCode })) });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // READ-ONLY (sandbox): inspect a product's price lists + cost so we can see which
 // priceListId is retail vs cost and the exact value shape before writing. ?productId=
 app.get('/api/purchasing/price-inspect', async (req, res) => {
