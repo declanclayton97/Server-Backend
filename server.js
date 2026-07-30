@@ -7647,6 +7647,53 @@ app.get('/api/purchasing/price-inspect', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// TEMP (sandbox): prove the price WRITE works + is safe. Reads ALL populated price
+// lists, writes a test value to one list (default 3 = retail), verifies, then RESTORES
+// — and re-sends the full populated set each time so no other list can be wiped if
+// BP's PUT replaces the block. ?productId=&listId=3[&value=]
+app.get('/api/purchasing/price-test', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const pid = parseInt(req.query.productId, 10) || 1019;
+  const listId = parseInt(req.query.listId, 10) || 3;
+  try {
+    const readAll = async () => {
+      const r = await purchasingAuto.bpApi('GET', `/product-service/product-price/${pid}`);
+      return (r[0] && r[0].priceLists) || [];
+    };
+    const valOf = (lists, id) => { const pl = lists.find((x) => x.priceListId === id); return pl && pl.quantityPrice ? (pl.quantityPrice['1'] ?? null) : null; };
+    // Only the lists that already carry a price — modify one, keep the rest as-is.
+    const bodyFrom = (lists, overrideId, overrideVal) => lists
+      .filter((pl) => pl.quantityPrice && pl.quantityPrice['1'] != null)
+      .map((pl) => ({ priceListId: pl.priceListId, quantityPrice: { '1': String(pl.priceListId === overrideId ? overrideVal : pl.quantityPrice['1']) } }));
+
+    const before = await readAll();
+    const beforeVal = valOf(before, listId);
+    const testVal = req.query.value != null ? String(req.query.value) : (beforeVal != null ? (parseFloat(beforeVal) + 1).toFixed(2) : '9.99');
+
+    let putResult, putErr = null;
+    try { putResult = await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}`, bodyFrom(before, listId, testVal)); }
+    catch (e) { putErr = e.message; }
+
+    const afterWrite = await readAll();
+    // restore every populated list to its original value
+    let restoreErr = null;
+    try { await purchasingAuto.bpApi('PUT', `/product-service/product-price/${pid}`, bodyFrom(before, -1, null)); }
+    catch (e) { restoreErr = e.message; }
+    const restored = await readAll();
+
+    const populated = (l) => l.filter((pl) => pl.quantityPrice && pl.quantityPrice['1'] != null).map((pl) => ({ id: pl.priceListId, v: pl.quantityPrice['1'] }));
+    res.json({
+      pid, listId, beforeVal, testVal,
+      afterVal: valOf(afterWrite, listId), restoredVal: valOf(restored, listId),
+      wroteOk: String(valOf(afterWrite, listId)) === String(testVal),
+      restoredOk: String(valOf(restored, listId)) === String(beforeVal),
+      othersUntouched: JSON.stringify(populated(before).filter((x) => x.id !== listId)) === JSON.stringify(populated(restored).filter((x) => x.id !== listId)),
+      putErr, restoreErr,
+      populatedBefore: populated(before), populatedRestored: populated(restored),
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // TEMP (sandbox validation only) — prove the product-identity read-merge-write is
 // safe: (1) no-op round-trip preserves every identifier, (2) writing `ean` sets it
 // and PRESERVES the sku, (3) whether `barcode` follows `ean`, (4) full restore.
