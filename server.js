@@ -7647,6 +7647,33 @@ app.get('/api/purchasing/price-inspect', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// TEMP (sandbox): find the correct BP price-WRITE endpoint. Tries several method/path
+// shapes, each writing the CURRENT value back (a NO-OP → safe), and reports each status.
+app.get('/api/purchasing/price-probe', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const pid = parseInt(req.query.productId, 10) || 1019;
+  const listId = parseInt(req.query.listId, 10) || 3;
+  try {
+    const r = await purchasingAuto.bpApi('GET', `/product-service/product-price/${pid}`);
+    const pl = ((r[0] && r[0].priceLists) || []).find((x) => x.priceListId === listId);
+    const cur = pl && pl.quantityPrice ? pl.quantityPrice['1'] : null;
+    const candidates = [
+      ['PUT', `/product-service/product-price/${pid}/${listId}`, { quantityPrice: { '1': String(cur) } }],
+      ['PATCH', `/product-service/product-price/${pid}`, [{ priceListId: listId, quantityPrice: { '1': String(cur) } }]],
+      ['POST', `/product-service/product-price/${pid}`, [{ priceListId: listId, quantityPrice: { '1': String(cur) } }]],
+      ['PUT', `/product-service/price-list/${listId}/product-price/${pid}`, { quantityPrice: { '1': String(cur) } }],
+      ['POST', `/product-service/price-list/${listId}/product-price/${pid}`, { quantityPrice: { '1': String(cur) } }],
+      ['PUT', `/product-service/product/${pid}/price`, [{ priceListId: listId, quantityPrice: { '1': String(cur) } }]],
+    ];
+    const out = [];
+    for (const [method, path, body] of candidates) {
+      try { await purchasingAuto.bpApi(method, path, body); out.push({ method, path, ok: true }); }
+      catch (e) { out.push({ method, path, err: (e.message || '').slice(0, 120) }); }
+    }
+    res.json({ pid, listId, cur, results: out });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // TEMP (sandbox): prove the price WRITE works + is safe. Reads ALL populated price
 // lists, writes a test value to one list (default 3 = retail), verifies, then RESTORES
 // — and re-sends the full populated set each time so no other list can be wiped if
