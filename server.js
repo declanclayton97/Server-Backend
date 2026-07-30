@@ -7693,8 +7693,29 @@ app.get('/api/purchasing/gildan-plan', async (req, res) => {
   try {
     const pc = await (await fetch(`${ALT}/api/debug/pencarrie-products?style=${encodeURIComponent(style)}&full=1`)).json();
     if (!pc.rows) return res.status(502).json({ error: 'no pencarrie rows', pc });
-    const pcByCode = new Map(), pcByName = new Map();
-    for (const r of pc.rows) { pcByCode.set(`${norm(r.colCode)}|${norm(r.size)}`, r); pcByName.set(`${norm(r.colName)}|${norm(r.size)}`, r); }
+    // Index Pencarrie rows by normalised SIZE (sizes match cleanly); colour is matched
+    // fuzzily within a size because BP abbreviates ("Ant. cherry red" ↔ "Antique Cherry
+    // Red"). Also keep exact colourName/colourCode maps for a fast exact hit first.
+    const bySize = new Map(), pcByName = new Map(), pcByCode = new Map();
+    for (const r of pc.rows) {
+      const sz = norm(r.size);
+      if (!bySize.has(sz)) bySize.set(sz, []);
+      bySize.get(sz).push(r);
+      pcByName.set(`${norm(r.colName)}|${sz}`, r);
+      pcByCode.set(`${norm(r.colCode)}|${sz}`, r);
+    }
+    const toks = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+    const colourScore = (a, b) => { if (!a.length || !b.length) return 0; let m = 0; for (const t of a) if (b.some((u) => u === t || u.startsWith(t) || t.startsWith(u))) m++; return m / Math.max(a.length, b.length); };
+    const matchPc = (colour, size) => {
+      const sz = norm(size);
+      const exact = pcByName.get(`${norm(colour)}|${sz}`) || pcByCode.get(`${norm(colour)}|${sz}`);
+      if (exact) return { row: exact, how: 'exact' };
+      const cands = bySize.get(sz) || [];
+      const bt = toks(colour);
+      let best = null, bestS = 0;
+      for (const r of cands) { const s = colourScore(bt, toks(r.colName)); if (s > bestS) { bestS = s; best = r; } }
+      return bestS >= 0.75 ? { row: best, how: `fuzzy ${bestS.toFixed(2)}` } : null;
+    };
 
     const search = await purchasingAuto.bpApi('GET', `/product-service/product-search?productName=${encodeURIComponent(style + '*')}&pageSize=500`);
     const cols = (search.metaData.columns || []).map((c) => c.name);
@@ -7719,13 +7740,14 @@ app.get('/api/purchasing/gildan-plan', async (req, res) => {
       const p = prodById.get(id);
       if (!p) { unmatched.push({ productId: id, why: 'no product record' }); continue; }
       const colour = varVal(p, /colou?r/i), size = varVal(p, /size/i);
-      const pcRow = pcByName.get(`${norm(colour)}|${norm(size)}`) || pcByCode.get(`${norm(colour)}|${norm(size)}`);
-      if (!pcRow) { unmatched.push({ productId: id, colour, size, why: 'no pencarrie match' }); continue; }
+      const mm = matchPc(colour, size);
+      if (!mm) { unmatched.push({ productId: id, colour, size, why: 'no pencarrie match' }); continue; }
+      const pcRow = mm.row;
       const cost = parseFloat(pcRow.single);
       const rrp = rrpFromCost(cost);
       const lists = priceById.get(id);
       plan.push({
-        productId: id, colour, size, pencarrieSku: pcRow.sku, discontinued: pcRow.discontinued,
+        productId: id, colour, size, match: mm.how, pencarrieSku: pcRow.sku, discontinued: pcRow.discontinued,
         curCost: priceOf(lists, COST_LIST), newCost: cost.toFixed(4),
         curRrp: priceOf(lists, RRP_LIST), newRrp: rrp.rrpExStore.toFixed(4), rrpIncVat: rrp.rrpIncVat,
       });
