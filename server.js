@@ -7673,12 +7673,13 @@ async function liveSetIdentity(productId, changes) {
 app.post('/api/purchasing/product-identity-live', async (req, res) => {
   if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
-  const { productId, ean, sku } = req.body || {};
+  const { productId, ean, sku, mpn } = req.body || {};
   if (!productId) return res.status(400).json({ error: 'productId required' });
   const changes = {};
   if (ean !== undefined) changes.ean = ean;
   if (sku !== undefined) changes.sku = sku;
-  if (!Object.keys(changes).length) return res.status(400).json({ error: 'ean or sku required' });
+  if (mpn !== undefined) changes.mpn = mpn;
+  if (!Object.keys(changes).length) return res.status(400).json({ error: 'ean, sku or mpn required' });
   try {
     const before = await liveGetIdentity(productId);
     await liveSetIdentity(productId, changes);
