@@ -7626,6 +7626,67 @@ app.post('/api/purchasing/product-identity', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// ── LIVE product-identity write (stock barcode auto-heal) ────────────────────
+// UNLIKE /api/purchasing/product-identity (SANDBOX via BP_TEST creds), this writes
+// to the LIVE account (BRIGHTPEARL_* creds, euw1). Read-merge-write so no other
+// identifier is cleared. GATED behind HEAL_LIVE_ENABLED=true so a live product write
+// can never happen by accident — set it on the Render backend only while healing,
+// then switch it off. body: { productId, ean?, sku? }. Reversible (re-apply old ean).
+const IDENTITY_KEYS_LIVE = ['sku', 'ean', 'upc', 'mpn', 'isbn'];
+const bpLiveBase = () => `${BRIGHTPEARL_DATACENTER === 'euw1' ? 'https://euw1.brightpearlconnect.com' : 'https://use1.brightpearlconnect.com'}/public-api/${BRIGHTPEARL_ACCOUNT_ID}`;
+const bpLiveHeaders = () => ({
+  'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+  'brightpearl-account-token': BRIGHTPEARL_API_TOKEN,
+  'Content-Type': 'application/json',
+});
+async function bpLive(method, path, body) {
+  for (let attempt = 0; ; attempt++) {
+    const opts = { method, headers: bpLiveHeaders() };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const r = await fetch(`${bpLiveBase()}${path}`, opts);
+    if ((r.status === 429 || r.status === 503) && attempt < 5) {
+      const wait = parseInt(r.headers.get('brightpearl-next-throttle-period') || '2000', 10);
+      await new Promise((res) => setTimeout(res, Math.min(isNaN(wait) ? 2000 : wait, 60000) + 300));
+      continue;
+    }
+    const text = await r.text();
+    let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+    if (!r.ok) { const e = new Error(`BP ${method} ${path} -> ${r.status}: ${(json && json.errors) ? JSON.stringify(json.errors) : text.slice(0, 200)}`); e.status = r.status; throw e; }
+    return json ? json.response : null;
+  }
+}
+async function liveGetIdentity(productId) {
+  const resp = await bpLive('GET', `/product-service/product/${productId}`);
+  const p = Array.isArray(resp) ? resp[0] : resp;
+  return (p && p.identity) || {};
+}
+async function liveSetIdentity(productId, changes) {
+  const cur = await liveGetIdentity(productId);
+  const put = {};
+  for (const k of IDENTITY_KEYS_LIVE) {
+    const v = (k in changes) ? changes[k] : cur[k];
+    if (v != null && String(v).trim() !== '') put[k] = String(v).trim();
+  }
+  await bpLive('PUT', `/product-service/product/${productId}/identity`, put);
+  return { before: cur, put };
+}
+app.post('/api/purchasing/product-identity-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
+  const { productId, ean, sku } = req.body || {};
+  if (!productId) return res.status(400).json({ error: 'productId required' });
+  const changes = {};
+  if (ean !== undefined) changes.ean = ean;
+  if (sku !== undefined) changes.sku = sku;
+  if (!Object.keys(changes).length) return res.status(400).json({ error: 'ean or sku required' });
+  try {
+    const before = await liveGetIdentity(productId);
+    await liveSetIdentity(productId, changes);
+    const after = await liveGetIdentity(productId);
+    res.json({ productId, changes, before, after, skuPreserved: after.sku === before.sku, eanSet: after.ean || null });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // RRP from cost — tiered multiplier → ex-VAT RRP → +VAT → nearest .49/.99 inc price →
 // ex-VAT figure to store (BP price mode is EXC, so storing ex makes the inc land on .x9).
 function rrpFromCost(cost) {
