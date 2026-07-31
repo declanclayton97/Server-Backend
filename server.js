@@ -7687,6 +7687,31 @@ app.post('/api/purchasing/product-identity-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// SANDBOX weight-write method test — BP has no field-level PATCH for native weight,
+// so validate the full-product read-modify-PUT here (tuffbsitc) before any live write.
+// Reports whether weight updated AND whether key fields survived, then restores.
+app.get('/api/purchasing/weight-put-test', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const pid = parseInt(req.query.productId, 10) || 1019;
+  const w = Number(req.query.weight || 0.15);
+  const snap = (p) => ({ weight: p && p.stock && p.stock.weight, sku: p && p.identity && p.identity.sku, name: p && p.salesChannels && p.salesChannels[0] && p.salesChannels[0].productName, brandId: p && p.brandId, taxCode: p && p.financialDetails && p.financialDetails.taxCode });
+  try {
+    const got = await purchasingAuto.bpApi('GET', `/product-service/product/${pid}`);
+    const p = Array.isArray(got) ? got[0] : got;
+    const before = snap(p);
+    const origWeight = (p.stock && p.stock.weight && p.stock.weight.magnitude) || 0;
+    const payload = JSON.parse(JSON.stringify(p));
+    payload.stock.weight.magnitude = w;
+    let putError = null;
+    try { await purchasingAuto.bpApi('PUT', `/product-service/product/${pid}`, payload); }
+    catch (e) { putError = e.message; }
+    const after = snap((Array.isArray(await purchasingAuto.bpApi('GET', `/product-service/product/${pid}`)) ? (await purchasingAuto.bpApi('GET', `/product-service/product/${pid}`))[0] : null) || {});
+    // restore original weight if the PUT went through
+    if (!putError) { try { const g2 = await purchasingAuto.bpApi('GET', `/product-service/product/${pid}`); const p2 = Array.isArray(g2) ? g2[0] : g2; p2.stock.weight.magnitude = origWeight; await purchasingAuto.bpApi('PUT', `/product-service/product/${pid}`, p2); } catch {} }
+    res.json({ pid, requestedWeight: w, putError, before, after, restored: !putError });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // READ-ONLY live BP GET proxy, restricted to product-service paths — for inspecting
 // product custom fields / metadata on the live account (sandbox has none defined).
 app.get('/api/purchasing/bp-live-get', async (req, res) => {
