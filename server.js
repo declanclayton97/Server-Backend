@@ -7721,13 +7721,15 @@ app.post('/api/purchasing/product-fields-live', async (req, res) => {
       }
       if (patch.length) await bpLive('PATCH', `/product-service/product/${productId}/custom-field`, patch);
     }
-    let wroteWeight = null;
+    let wroteWeight = null, weightError = null;
     if (weight != null && Number(weight) > 0) {
-      await bpLive('PATCH', `/product-service/product/${productId}`, [{ op: 'replace', path: '/stock/weight/magnitude', value: Number(weight) }]);
-      wroteWeight = Number(weight);
+      try {
+        await bpLive('PATCH', `/product-service/product/${productId}`, [{ op: 'replace', path: '/stock/weight/magnitude', value: Number(weight) }]);
+        wroteWeight = Number(weight);
+      } catch (e) { weightError = e.message; } // native weight PATCH unsupported — non-fatal
     }
     const after = await liveGetCustomFields(productId);
-    res.json({ productId, wroteFields, wroteWeight, before, after });
+    res.json({ productId, wroteFields, wroteWeight, weightError, before, after });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
