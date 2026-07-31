@@ -7755,7 +7755,7 @@ app.get('/api/purchasing/gildan-plan', async (req, res) => {
     res.json({
       style, bpVariants: ids.length, pencarrieRows: pc.rows.length, matched: plan.length, unmatched: unmatched.length,
       firstProductVariationsRaw: ids[0] && prodById.get(ids[0]) ? prodById.get(ids[0]).variations : null,
-      unmatchedSample: unmatched.slice(0, 10),
+      ...(req.query.full ? { unmatchedRows: unmatched } : { unmatchedSample: unmatched.slice(0, 10) }),
       plan: req.query.full ? plan : plan.slice(0, 15),
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
