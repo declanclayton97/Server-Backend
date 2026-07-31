@@ -7687,6 +7687,15 @@ app.post('/api/purchasing/product-identity-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// READ-ONLY live BP GET proxy, restricted to product-service paths — for inspecting
+// product custom fields / metadata on the live account (sandbox has none defined).
+app.get('/api/purchasing/bp-live-get', async (req, res) => {
+  const path = String(req.query.path || '');
+  if (!/^\/product-service\//.test(path)) return res.status(400).json({ error: 'path must start with /product-service/' });
+  try { res.json(await bpLive('GET', path)); }
+  catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // RRP from cost — tiered multiplier → ex-VAT RRP → +VAT → nearest .49/.99 inc price →
 // ex-VAT figure to store (BP price mode is EXC, so storing ex makes the inc land on .x9).
 function rrpFromCost(cost) {
