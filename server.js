@@ -7773,8 +7773,11 @@ function rrpFromCost(cost) {
   const c = Number(cost);
   if (!(c > 0)) return null;
   const round2 = (n) => Math.round((n + 1e-9) * 100) / 100;
-  const m = c < 0.80 ? 4 : c < 1.49 ? 3 : c < 2.99 ? 2.5 : c < 3.99 ? 2.3 : c < 4.99 ? 2.1
-    : c < 14.99 ? 2 : c < 29.99 ? 1.8 : c < 59.99 ? 1.7 : c < 199.99 ? 1.6 : 1.5;
+  // Tiered multiplier on cost (ex-VAT). Updated bands 2026-07-31.
+  const m = c <= 0.50 ? 4.00 : c <= 1.00 ? 3.70 : c <= 2.00 ? 3.34 : c <= 3.00 ? 3.00
+    : c <= 5.00 ? 2.83 : c <= 7.50 ? 2.67 : c <= 10.00 ? 2.53 : c <= 15.00 ? 2.40
+    : c <= 20.00 ? 2.29 : c <= 30.00 ? 2.19 : c <= 40.00 ? 2.09 : c <= 50.00 ? 2.00
+    : c <= 75.00 ? 1.91 : c <= 100.00 ? 1.82 : 1.72;
   const rrpExVat = round2(c * m);
   const rrpIncVat = round2(Math.round((rrpExVat * 1.2 - 0.49) / 0.5) * 0.5 + 0.49);
   return { cost: c, mult: m, rrpExVat, rrpIncVat, rrpExStore: round2(rrpIncVat / 1.2) };
