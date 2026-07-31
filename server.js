@@ -7696,6 +7696,41 @@ app.get('/api/purchasing/bp-live-get', async (req, res) => {
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// LIVE product custom-field + weight write (data enrichment from supplier files).
+// Same HEAL_LIVE_ENABLED gate as the identity write. Custom fields via JSON-Patch
+// op:add (upsert/overwrite) on the /custom-field sub-resource — the exact method
+// purchasingAuto uses for order custom fields. Weight (native stock.weight.magnitude)
+// via JSON-Patch on the product resource. body: { productId, fields?:{PCF_X:val,...}, weight? }.
+async function liveGetCustomFields(productId) {
+  return (await bpLive('GET', `/product-service/product/${productId}/custom-field`)) || {};
+}
+app.post('/api/purchasing/product-fields-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
+  const { productId, fields, weight } = req.body || {};
+  if (!productId) return res.status(400).json({ error: 'productId required' });
+  try {
+    const before = await liveGetCustomFields(productId);
+    const wroteFields = {};
+    if (fields && typeof fields === 'object') {
+      const patch = [];
+      for (const [code, value] of Object.entries(fields)) {
+        if (value == null || String(value).trim() === '') continue;
+        patch.push({ op: 'add', path: `/${code}`, value: String(value).trim() });
+        wroteFields[code] = String(value).trim();
+      }
+      if (patch.length) await bpLive('PATCH', `/product-service/product/${productId}/custom-field`, patch);
+    }
+    let wroteWeight = null;
+    if (weight != null && Number(weight) > 0) {
+      await bpLive('PATCH', `/product-service/product/${productId}`, [{ op: 'replace', path: '/stock/weight/magnitude', value: Number(weight) }]);
+      wroteWeight = Number(weight);
+    }
+    const after = await liveGetCustomFields(productId);
+    res.json({ productId, wroteFields, wroteWeight, before, after });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // RRP from cost — tiered multiplier → ex-VAT RRP → +VAT → nearest .49/.99 inc price →
 // ex-VAT figure to store (BP price mode is EXC, so storing ex makes the inc land on .x9).
 function rrpFromCost(cost) {
