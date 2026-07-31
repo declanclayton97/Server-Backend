@@ -7746,19 +7746,20 @@ app.post('/api/purchasing/product-fields-live', async (req, res) => {
       }
       if (patch.length) await bpLive('PATCH', `/product-service/product/${productId}/custom-field`, patch);
     }
+    // NOTE: weight belongs in a CUSTOM FIELD (pass it in `fields`), not native stock
+    // weight. `nativeWeight` is kept only to reset a stray native weight back to 0.
     let wroteWeight = null, weightError = null;
-    if (weight != null && Number(weight) > 0) {
+    const nw = req.body && req.body.nativeWeight;
+    if (nw != null && nw !== '' && Number(nw) >= 0) {
       try {
-        // BP has no field-level PATCH for native weight — read-modify-PUT the whole
-        // product (validated on sandbox to preserve sku/name/brand/tax/variations).
         const got = await bpLive('GET', `/product-service/product/${productId}`);
         const prod = Array.isArray(got) ? got[0] : got;
         if (prod && prod.stock && prod.stock.weight) {
-          prod.stock.weight.magnitude = Number(weight);
+          prod.stock.weight.magnitude = Number(nw);
           await bpLive('PUT', `/product-service/product/${productId}`, prod);
-          wroteWeight = Number(weight);
+          wroteWeight = Number(nw);
         } else weightError = 'no stock.weight on product';
-      } catch (e) { weightError = e.message; } // non-fatal
+      } catch (e) { weightError = e.message; }
     }
     const after = await liveGetCustomFields(productId);
     res.json({ productId, wroteFields, wroteWeight, weightError, before, after });
