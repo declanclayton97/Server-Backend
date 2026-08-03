@@ -7696,16 +7696,28 @@ app.post('/api/purchasing/product-identity-live', async (req, res) => {
 app.post('/api/purchasing/product-name-append-live', async (req, res) => {
   if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
-  const { productId, append } = req.body || {};
+  const { productId, append, newName, expectOld } = req.body || {};
   const token = String(append || '').trim();
-  if (!productId || !token) return res.status(400).json({ error: 'productId and append required' });
+  const setName = String(newName || '').trim();
+  if (!productId || (!token && !setName)) return res.status(400).json({ error: 'productId and (append or newName) required' });
   try {
     const g = await bpLive('GET', `/product-service/product/${productId}`);
     const p = Array.isArray(g) ? g[0] : g;
     if (!p || !Array.isArray(p.salesChannels) || !p.salesChannels.length) return res.status(404).json({ error: 'product has no salesChannels' });
+    const before = p.salesChannels[0].productName || '';
+    if (setName) {
+      // SET mode: replace the name outright. Guarded by expectOld so we never clobber
+      // a variant whose current name isn't the one we planned for.
+      if (expectOld != null && before.trim() !== String(expectOld).trim()) return res.json({ productId, changed: false, reason: 'name mismatch', name: before });
+      if (before.trim() === setName) return res.json({ productId, changed: false, reason: 'already set', name: before });
+      for (const sc of p.salesChannels) sc.productName = setName;
+      await bpLive('PUT', `/product-service/product/${productId}`, p);
+      const a = await bpLive('GET', `/product-service/product/${productId}`); const ap = Array.isArray(a) ? a[0] : a;
+      return res.json({ productId, changed: true, before, name: (ap.salesChannels[0] && ap.salesChannels[0].productName) || null });
+    }
+    // APPEND mode: add the token if not already a word in the name.
     const esc = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const rx = new RegExp('(^|[^A-Za-z0-9])' + esc + '([^A-Za-z0-9]|$)', 'i');
-    const before = p.salesChannels[0].productName || '';
     if (rx.test(before)) return res.json({ productId, changed: false, reason: 'already present', name: before });
     for (const sc of p.salesChannels) { const nm = sc.productName || ''; if (!rx.test(nm)) sc.productName = `${nm} ${token}`.trim(); }
     await bpLive('PUT', `/product-service/product/${productId}`, p);
