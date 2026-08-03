@@ -7688,6 +7688,33 @@ app.post('/api/purchasing/product-identity-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// LIVE product-name append: add a token (e.g. the Ralawise style code) to every
+// salesChannels[].productName when it isn't already present. BP has no name PATCH,
+// so read-modify-PUT the whole product (same method as the native-weight write).
+// Idempotent (skips if the token is already a word in the name) and HEAL-gated.
+// body: { productId, append }.
+app.post('/api/purchasing/product-name-append-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
+  const { productId, append } = req.body || {};
+  const token = String(append || '').trim();
+  if (!productId || !token) return res.status(400).json({ error: 'productId and append required' });
+  try {
+    const g = await bpLive('GET', `/product-service/product/${productId}`);
+    const p = Array.isArray(g) ? g[0] : g;
+    if (!p || !Array.isArray(p.salesChannels) || !p.salesChannels.length) return res.status(404).json({ error: 'product has no salesChannels' });
+    const esc = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rx = new RegExp('(^|[^A-Za-z0-9])' + esc + '([^A-Za-z0-9]|$)', 'i');
+    const before = p.salesChannels[0].productName || '';
+    if (rx.test(before)) return res.json({ productId, changed: false, reason: 'already present', name: before });
+    for (const sc of p.salesChannels) { const nm = sc.productName || ''; if (!rx.test(nm)) sc.productName = `${nm} ${token}`.trim(); }
+    await bpLive('PUT', `/product-service/product/${productId}`, p);
+    const g2 = await bpLive('GET', `/product-service/product/${productId}`);
+    const p2 = Array.isArray(g2) ? g2[0] : g2;
+    res.json({ productId, changed: true, before, name: (p2.salesChannels[0] && p2.salesChannels[0].productName) || null });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // SANDBOX weight-write method test — BP has no field-level PATCH for native weight,
 // so validate the full-product read-modify-PUT here (tuffbsitc) before any live write.
 // Reports whether weight updated AND whether key fields survived, then restores.
