@@ -7824,6 +7824,39 @@ app.get('/api/purchasing/product-price-test', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// LIVE price write — cost (list 20 "Cost (Launch)") + retail (list 3 "Retail").
+// Read-merge-write: re-send every currently-populated list so none are cleared, then
+// override/add cost & retail. Net (ex-VAT) values (BP price mode EXC). Gated by
+// HEAL_LIVE_ENABLED. body: { productId, cost?, retail? }.
+const RETAIL_LIST = 3;
+app.post('/api/purchasing/product-price-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
+  const { productId, cost, retail } = req.body || {};
+  if (!productId) return res.status(400).json({ error: 'productId required' });
+  const overrides = {};
+  if (cost != null && cost !== '') overrides[COST_LIST] = String(cost);
+  if (retail != null && retail !== '') overrides[RETAIL_LIST] = String(retail);
+  if (!Object.keys(overrides).length) return res.status(400).json({ error: 'cost or retail required' });
+  try {
+    const readAll = async () => { const r = await bpLive('GET', `/product-service/product-price/${productId}`); return (r[0] && r[0].priceLists) || []; };
+    const valOf = (lists, id) => { const pl = lists.find((x) => x.priceListId === id); return pl && pl.quantityPrice ? (pl.quantityPrice['1'] ?? null) : null; };
+    const populated = (lists) => lists.filter((pl) => pl.quantityPrice && pl.quantityPrice['1'] != null);
+    const before = await readAll();
+    const seen = new Set();
+    const body = populated(before).map((pl) => { seen.add(pl.priceListId); return { priceListId: pl.priceListId, quantityPrice: { '1': String(overrides[pl.priceListId] ?? pl.quantityPrice['1']) } }; });
+    for (const id of Object.keys(overrides).map(Number)) if (!seen.has(id)) body.push({ priceListId: id, quantityPrice: { '1': String(overrides[id]) } });
+    await bpLive('PUT', `/product-service/product-price/${productId}/price-list`, { priceLists: body });
+    const after = await readAll();
+    res.json({
+      productId,
+      wroteCost: cost != null && cost !== '' ? String(valOf(after, COST_LIST)) === String(cost) : null,
+      wroteRetail: retail != null && retail !== '' ? String(valOf(after, RETAIL_LIST)) === String(retail) : null,
+      cost: valOf(after, COST_LIST), retail: valOf(after, RETAIL_LIST),
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // READ-ONLY dry-run: build the cost/RRP change plan for a style. Matches each BP
 // variant (by colour+size) to its Pencarrie SKU, computes cost + RRP, and returns
 // current-vs-new for cost (list 20) and RRP (list 13). NO writes. ?style=GD01[&full=1][&limit=]
