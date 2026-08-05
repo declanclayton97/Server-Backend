@@ -8361,6 +8361,18 @@ app.post('/api/purchasing/fristads-scheduled-run', express.json(), async (req, r
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Generic scheduled-run trigger for any registered supplier (?supplier=CASTLE). Dry-run
+// by default; execute=true places for real. Castle has no auto-poller yet — this is the
+// manual trigger used to validate the first real Castle order before enabling a poller.
+app.post('/api/purchasing/supplier-scheduled-run', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  if (!pool) return res.status(503).json({ error: 'DB not available (schedule state)' });
+  try {
+    const b = { ...req.query, ...(req.body || {}) };
+    res.json(await purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: b.supplier || 'FRISTADS', dryRun: b.dryRun === '1' || b.dryRun === true, force: b.force === '1' || b.force === true }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // View recent purchasing errors (also emailed when they happen).
 app.get('/api/purchasing/error-log', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
