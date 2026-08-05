@@ -252,6 +252,152 @@ export async function preview(supplierKey, orderIds) {
   return { dryRun: true, ...summarise(sup, contributors) };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LIVE read-only demand preview — verification tool for go-live. Runs the SAME
+// demand-detection filter as findContributors, but against the LIVE Brightpearl
+// account using the main app's creds, and it is **GET-ONLY** (liveGet takes no
+// method → it physically cannot create/patch/put anything). Nothing is written.
+// It also paginates the status search + reports a full include/exclude accounting
+// so we can confirm every tagged order is picked up before enabling any writes.
+// ─────────────────────────────────────────────────────────────────────────────
+const LIVE_BASE = () => {
+  const dc = process.env.BRIGHTPEARL_DATACENTER === 'euw1' ? 'euw1' : (process.env.BRIGHTPEARL_DATACENTER || 'euw1');
+  return `https://${dc}.brightpearlconnect.com/public-api/${process.env.BRIGHTPEARL_ACCOUNT_ID}`;
+};
+const LIVE_HEADERS = () => ({
+  'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
+  'brightpearl-account-token': process.env.BRIGHTPEARL_API_TOKEN,
+  'Content-Type': 'application/json',
+});
+export const isLiveConfigured = () => !!(process.env.BRIGHTPEARL_APP_REF && process.env.BRIGHTPEARL_API_TOKEN && process.env.BRIGHTPEARL_ACCOUNT_ID);
+
+// GET-only, throttle-aware. No `method` parameter by design — this client cannot write.
+async function liveGet(path, attempt = 0) {
+  const res = await fetch(`${LIVE_BASE()}${path}`, { headers: LIVE_HEADERS() });
+  if ((res.status === 429 || res.status === 503) && attempt < 6) {
+    const wait = parseInt(res.headers.get('brightpearl-next-throttle-period') || '2000', 10);
+    await new Promise((r) => setTimeout(r, Math.min(isNaN(wait) ? 2000 : wait, 60000) + 500));
+    return liveGet(path, attempt + 1);
+  }
+  const text = await res.text();
+  let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+  if (!res.ok) { const e = new Error(`BP GET ${path} -> ${res.status}: ${text.slice(0, 200)}`); e.status = res.status; throw e; }
+  return json ? json.response : null;
+}
+const chunk = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export async function previewLive(supplierKey, orderIds) {
+  const k = String(supplierKey || '').toUpperCase();
+  // Use the hardcoded registry detector/poField (same as production). contactId/
+  // costList are irrelevant to a read-only pickup check, so no dynamic lookup.
+  const sup = SUPPLIERS[k]
+    ? { key: k, ...SUPPLIERS[k] }
+    : { key: k, detect: dynamicDetect(k), poField: null, costList: null };
+
+  // 1. Confirm the status id actually IS "Stock needs ordering" on the live account
+  //    (status ids are account-config; verify 23 rather than trust it blindly).
+  let statusName = null, nameMatchedStatusId = null;
+  try {
+    const statuses = await liveGet('/order-service/order-status');
+    const list = Array.isArray(statuses) ? statuses : Object.values(statuses || {});
+    for (const s of list) {
+      const id = s.orderStatusId ?? s.id, nm = s.name || s.orderStatusName || '';
+      if (String(id) === String(DEMAND_STATUS)) statusName = nm;
+      if (/stock\s*needs\s*ordering/i.test(nm)) nameMatchedStatusId = id;
+    }
+  } catch { /* non-fatal */ }
+
+  // 2. All SO ids in the demand status — PAGINATED (production findContributors
+  //    caps at pageSize 500 with no paging, so surface if live exceeds that).
+  let ids = orderIds, resultsAvailable = null;
+  if (!ids || !ids.length) {
+    ids = [];
+    let firstResult = 1;
+    for (let guard = 0; guard < 40; guard++) {
+      const s = await liveGet(`/order-service/sales-order-search?orderStatusId=${DEMAND_STATUS}&pageSize=500&firstResult=${firstResult}`);
+      const idx = {}; s.metaData.columns.forEach((c, i) => { idx[c.name] = i; });
+      const page = s.results.map((r) => r[idx.salesOrderId]);
+      ids.push(...page);
+      resultsAvailable = s.metaData.resultsAvailable;
+      if (!s.metaData.morePagesAvailable || !page.length) break;
+      firstResult += 500;
+      await pause(250);
+    }
+  }
+
+  // 3. Custom fields for every candidate (id-set batches → gentle on the shared
+  //    rate limit) → apply the EXACT findContributors tag filter.
+  const skipped = { noTag: 0, leaveNote: 0, otherSupplier: 0, alreadyHasPo: 0, noMatchingRows: 0 };
+  const cfById = {};
+  for (const c of chunk(ids, 100)) {
+    const resp = await liveGet(`/order-service/order/${c.join(',')}/custom-field`) || {};
+    // id-set → keyed by orderId; single id → the fields object directly.
+    if (c.length === 1 && !resp[String(c[0])]) cfById[String(c[0])] = resp;
+    else Object.assign(cfById, resp);
+    await pause(200);
+  }
+  const candidates = [];
+  for (const id of ids) {
+    const cf = cfById[String(id)] || {};
+    const tag = cf.PCF_SUPPLIER;
+    if (!tag) { skipped.noTag++; continue; }
+    if (isLeaveNote(tag)) { skipped.leaveNote++; continue; }
+    if (!tagsOf(tag).some((t) => t.toUpperCase() === sup.key)) { skipped.otherSupplier++; continue; }
+    if (sup.poField && cf[sup.poField]) { skipped.alreadyHasPo++; continue; }
+    candidates.push({ id, tag });
+  }
+
+  // 4. Full order for each candidate (id-set batches) → the supplier's rows.
+  const orderById = {};
+  for (const c of chunk(candidates.map((x) => x.id), 60)) {
+    const arr = await liveGet(`/order-service/order/${c.join(',')}`) || [];
+    for (const o of (Array.isArray(arr) ? arr : [arr])) orderById[String(o.id)] = o;
+    await pause(200);
+  }
+  const orders = [];
+  for (const cand of candidates) {
+    const order = orderById[String(cand.id)];
+    if (!order) { skipped.noMatchingRows++; continue; }
+    let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && sup.detect(r.productName, r.productSku));
+    const allTags = tagsOf(cand.tag);
+    if (!rows.length && allTags.length === 1 && allTags[0].toUpperCase() === sup.key) {
+      rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r));
+    }
+    if (!rows.length) { skipped.noMatchingRows++; continue; }
+    orders.push({
+      orderId: cand.id,
+      ref: order.reference || '',
+      tag: cand.tag,
+      otherSuppliersOnOrder: tagsOf(cand.tag).filter((t) => t.toUpperCase() !== sup.key),
+      lineCount: rows.length,
+      totalQty: rows.reduce((a, r) => a + parseFloat(r.quantity.magnitude), 0),
+      lines: rows.map((r) => ({
+        productId: r.productId, sku: r.productSku, name: r.productName,
+        qty: parseFloat(r.quantity.magnitude),
+        size: optValue(r.productOptions, /size/i), colour: optValue(r.productOptions, /colou?r/i),
+      })),
+    });
+  }
+
+  return {
+    live: true, readOnly: true, wrote: false,
+    account: process.env.BRIGHTPEARL_ACCOUNT_ID,
+    supplier: sup.key,
+    demandStatusId: DEMAND_STATUS,
+    demandStatusNameOnLive: statusName,                       // must read "Stock needs ordering"
+    statusIdNamed_StockNeedsOrdering: nameMatchedStatusId,    // sanity: should equal demandStatusId
+    ordersInDemandStatus: ids.length,
+    resultsAvailable,
+    productionCapWouldMiss: resultsAvailable != null ? Math.max(0, resultsAvailable - 500) : null,
+    matchedOrderCount: orders.length,
+    totalQty: orders.reduce((a, o) => a + o.totalQty, 0),
+    totalLines: orders.reduce((a, o) => a + o.lineCount, 0),
+    excludedFromStatusPool: skipped,
+    orders,
+  };
+}
+
 // Create the Pending PO (+ source note) and stamp the PO number onto each
 // contributing order (linkage + dedupe). Does NOT strip tags or change status.
 export async function createPO(supplierKey, { orderIds, dryRun } = {}) {

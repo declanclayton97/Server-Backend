@@ -7578,6 +7578,19 @@ app.get('/api/purchasing/preview', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Read-only demand preview against the LIVE account (go-live verification).
+// GET-only path — creates/changes NOTHING. Proves which orders the demand filter
+// picks up for a supplier before any live writes are enabled.
+app.get('/api/purchasing/preview-live', async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) {
+    return res.status(503).json({ error: 'Live Brightpearl creds not configured (BRIGHTPEARL_APP_REF / BRIGHTPEARL_API_TOKEN / BRIGHTPEARL_ACCOUNT_ID)' });
+  }
+  if (!req.query.supplier) return res.status(400).json({ error: 'supplier query param required' });
+  try {
+    res.json(await purchasingAuto.previewLive(req.query.supplier, parseOrderIds(req.query.orderIds)));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Create the Pending PO (+ source note, + stamp PO number on each order).
 // Pass { dryRun:true } to preview via POST, or { orderIds:[...] } to scope.
 app.post('/api/purchasing/create-po', async (req, res) => {
