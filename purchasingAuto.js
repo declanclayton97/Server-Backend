@@ -287,6 +287,39 @@ async function liveGet(path, attempt = 0) {
 const chunk = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Diagnostic: scan every order in a status and report which custom-field CODES
+// carry values (+ which contain `find`). Read-only. Finds the real code behind a
+// human field label like "SUPPLIERS NEEDED" when it isn't PCF_SUPPLIER.
+export async function debugLiveCustomFields(statusId, find) {
+  const sid = statusId || DEMAND_STATUS;
+  let ids = [], firstResult = 1;
+  for (let guard = 0; guard < 40; guard++) {
+    const s = await liveGet(`/order-service/sales-order-search?orderStatusId=${sid}&pageSize=500&firstResult=${firstResult}`);
+    const idx = {}; s.metaData.columns.forEach((c, i) => { idx[c.name] = i; });
+    ids.push(...s.results.map((r) => r[idx.salesOrderId]));
+    if (!s.metaData.morePagesAvailable || !s.results.length) break;
+    firstResult += 500; await pause(250);
+  }
+  const re = find ? new RegExp(find, 'i') : null;
+  const fieldCodesSeen = {};   // code -> { count, sampleValues[] }
+  const hits = [];
+  for (const id of ids) {
+    const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
+    await pause(120);
+    for (const [k, v] of Object.entries(cf)) {
+      if (v == null || String(v).trim() === '') continue;
+      if (!fieldCodesSeen[k]) fieldCodesSeen[k] = { count: 0, sampleValues: [] };
+      fieldCodesSeen[k].count++;
+      if (fieldCodesSeen[k].sampleValues.length < 4 && !fieldCodesSeen[k].sampleValues.includes(String(v))) fieldCodesSeen[k].sampleValues.push(String(v));
+    }
+    if (re) {
+      const matched = Object.entries(cf).filter(([, v]) => re.test(String(v || '')));
+      if (matched.length) hits.push({ orderId: id, fields: matched.map(([code, value]) => ({ code, value })) });
+    }
+  }
+  return { statusId: sid, ordersScanned: ids.length, find: find || null, matchCount: hits.length, fieldCodesSeen, hits };
+}
+
 export async function previewLive(supplierKey, orderIds) {
   const k = String(supplierKey || '').toUpperCase();
   // Use the hardcoded registry detector/poField (same as production). contactId/

@@ -7591,6 +7591,15 @@ app.get('/api/purchasing/preview-live', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Read-only diagnostic: which custom-field CODE holds a value (e.g. find the code
+// behind the "SUPPLIERS NEEDED" label, or where "SNICKERS" actually lives).
+app.get('/api/purchasing/debug-fields', async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    res.json(await purchasingAuto.debugLiveCustomFields(parseInt(req.query.status, 10) || undefined, req.query.find));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Create the Pending PO (+ source note, + stamp PO number on each order).
 // Pass { dryRun:true } to preview via POST, or { orderIds:[...] } to scope.
 app.post('/api/purchasing/create-po', async (req, res) => {
