@@ -7694,7 +7694,7 @@ app.get('/api/purchasing/debug-order-page', async (req, res) => {
   try {
     const { fetchAuthed, BP_HOST } = await import('./bpWebSession.js');
     const r = await fetchAuthed(`${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(req.query.orderId)}`, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
-    const body = r.body || '';
+    const body = r.html || r.body || '';
     const win = (re, before, after, n) => { const out = []; let m, i = 0; const rx = new RegExp(re, 'gi'); while ((m = rx.exec(body)) && i < (n || 6)) { out.push(body.slice(Math.max(0, m.index - before), m.index + after).replace(/\s+/g, ' ')); i++; if (m.index === rx.lastIndex) rx.lastIndex++; } return out; };
     res.json({
       status: r.status, isLogin: /loginform|admin_login/i.test(body), len: body.length,
