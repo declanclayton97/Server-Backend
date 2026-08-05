@@ -98,7 +98,7 @@ async function jfetch(step, url, opts) {
   return j;
 }
 
-async function placeFristadsOrder(altItemsUrl) {
+async function placeFristadsOrder(pool, altItemsUrl) {
   const steps = {};
   // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs)
   let po;
@@ -136,6 +136,22 @@ async function placeFristadsOrder(altItemsUrl) {
   }
   if (!order || !order.found || !order.orderNo) throw stepErr('order-pull', `order not found in Fristads history for PO ${poId} after placeorder — it may not have placed (checkout status ${co.status})`);
   steps.order = { orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum };
+
+  // price sanity check (NON-FATAL): the Fristads order total (what they'll invoice,
+  // ex-VAT) vs our PO net. A gap means a BP cost price is stale → alert so it can be
+  // adjusted; the order still stands (Fristads charges their price regardless).
+  const poNet = [...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (l.cost || 0) * l.qty, 0);
+  const fristadsTotal = parseFloat(String(order.sum || '').replace(/[^\d.]/g, '')) || 0;
+  const priceGap = fristadsTotal ? +(fristadsTotal - poNet).toFixed(2) : 0;
+  steps.priceCheck = { fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap };
+  if (fristadsTotal && Math.abs(priceGap) > 0.50) {
+    const breakdown = [...(po.soLines || []), ...(po.lowLines || [])].map((l) => `${l.qty} × ${l.sku} — our £${(l.cost || 0).toFixed(2)}/ea (${l.name})`);
+    await logPurchasingError(pool, {
+      supplier: 'FRISTADS', step: 'price-check',
+      message: `Prices don't match: Fristads order total £${fristadsTotal} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}). A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${order.orderNo} still placed.`,
+      context: { poId, orderNo: order.orderNo, fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap, poLines: breakdown },
+    }).catch(() => {});
+  }
 
   // 5. write their order# onto our PO reference + restore tax + status 7
   try {
@@ -186,7 +202,7 @@ export async function runFristadsScheduled({ pool, altItemsUrl, dryRun = false, 
     let placement = null;
     if (willPlace) {
       if (dryRun) { decision = `WOULD place (${reason})`; }
-      else { placement = await placeFristadsOrder(altItemsUrl); decision = `placed — ${reason}`; newWaitDays = 0; }
+      else { placement = await placeFristadsOrder(pool, altItemsUrl); decision = `placed — ${reason}`; newWaitDays = 0; }
     }
 
     const report = { ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold: THRESHOLD_NET, decision, reason, workingDaysWaited: newWaitDays, placement };
