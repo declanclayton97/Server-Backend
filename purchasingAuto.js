@@ -287,6 +287,19 @@ async function liveGet(path, attempt = 0) {
 const chunk = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// SO status ids on the live account, minus `exclude`. Used to scope the Low
+// Inventory report's "Open SO" to real demand (exclude Draft/Quote, Quote sent,
+// Order Confirmation Sent). Read-only.
+export async function liveSalesOrderStatusIds(exclude = []) {
+  const ex = new Set(exclude.map(String));
+  const statuses = await liveGet('/order-service/order-status');
+  const list = Array.isArray(statuses) ? statuses : Object.values(statuses || {});
+  return list
+    .filter((s) => String(s.orderTypeCode || '') === 'SO')
+    .map((s) => s.statusId ?? s.orderStatusId ?? s.id)
+    .filter((id) => id != null && !ex.has(String(id)));
+}
+
 // Diagnostic (read-only): dump warehouse availability + the product record for a
 // set of product ids, so we can locate the reorder/min-stock level + on-hand /
 // on-order / allocated fields that drive the "Low Inventory" replenishment calc.

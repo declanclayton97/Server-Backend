@@ -7591,6 +7591,34 @@ app.get('/api/purchasing/preview-live', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Read-only: BP Low Inventory report (reorder replenishment) for a supplier/brand.
+// Scrapes the legacy web report via the authenticated session; Open SO scoped to
+// real statuses (all SO statuses except Draft/Quote(1), Quote sent(18), Order
+// Confirmation Sent(60)). Nothing is written.
+app.get('/api/purchasing/debug-lowstock', async (req, res) => {
+  try {
+    const { fetchLowInventory } = await import('./lowInventory.js');
+    let statusIds = [];
+    try { statusIds = await purchasingAuto.liveSalesOrderStatusIds([1, 18, 60]); } catch (e) { /* fall back to report default */ }
+    const r = await fetchLowInventory({
+      supplierId: req.query.supplierId != null ? req.query.supplierId : 37419,
+      manufacturerId: req.query.manufacturerId,
+      statusIds,
+      numResults: req.query.n ? parseInt(req.query.n, 10) : 10000,
+    });
+    const toOrder = r.rows.filter((x) => x.orderQty > 0);
+    res.json({
+      status: r.status, isLogin: r.isLogin, htmlLen: r.htmlLen, url: r.url,
+      statusIdsCount: statusIds.length,
+      rowCount: r.rows.length,
+      toOrderCount: toOrder.length,
+      toOrderUnits: toOrder.reduce((a, x) => a + x.orderQty, 0),
+      sample: (req.query.all ? toOrder : toOrder.slice(0, 30)),
+      rawSnippet: req.query.raw ? (r.html || '').slice(0, 2000) : undefined,
+    });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Read-only diagnostic: warehouse availability + product record for productIds.
 app.get('/api/purchasing/debug-stock', async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
