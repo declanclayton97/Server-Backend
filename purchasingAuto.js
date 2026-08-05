@@ -55,6 +55,12 @@ export const SUPPLIERS = {
   UNEEK:        { contactId: 322,   costList: 11, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
   'HELLY HANSEN': { contactId: 214, costList: 6,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
   MASCOT:       { contactId: 334,   costList: null, poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
+  // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
+  FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
+  // Castle Clothing distributes TuffStuff / Makita / Fort (+ Fort Footwear). Their
+  // products are NOT named "castle" — detect by brand. No dedicated PO custom field
+  // yet, so re-pickup is prevented by clearing the CASTLE tag on finalize.
+  CASTLE:       { contactId: 332,   costList: 20, poField: null, lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|\bfort\b/i.test(n || '') },
   // Ralawise = distributor (Stanley Stella exclusive + Gildan/AWDis/etc). Detect by
   // Stanley Stella name OR a Ralawise-format SKU (2 letters + 3 digits + …).
   RALAWISE:     { contactId: 205,   costList: null, poField: 'PCF_RALAWPO', detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z0-9]/.test(String(sku || '').replace(/[\s_-]/g, '')) },
@@ -569,11 +575,12 @@ async function gatherLiveDemand({ supplierKey, detect, poField }) {
 
 export async function createComboPOLive(opts = {}) {
   const supplierKey = String(opts.supplierKey || 'FRISTADS').toUpperCase();
-  const detect = opts.detect || ((n) => /fristads/i.test(n || ''));
-  const contactId = opts.contactId || 37419;         // Fristads Workwear Ltd
-  const priceListId = opts.priceListId || 20;         // Launch (cost) price list — the one the pricing updates write to
-  const poField = opts.poField || 'PCF_FRISTPO';
-  const lowInvSupplierId = opts.lowInvSupplierId || 37419;
+  const reg = SUPPLIERS[supplierKey] || {};                        // registry = single source of truth
+  const detect = opts.detect || reg.detect || dynamicDetect(supplierKey);
+  const contactId = opts.contactId || reg.contactId || 37419;      // supplier BP contact id
+  const priceListId = opts.priceListId || reg.costList || 20;      // Launch (cost) price list — where pricing updates write
+  const poField = opts.poField !== undefined ? opts.poField : (reg.poField || null);
+  const lowInvSupplierId = opts.lowInvSupplierId || reg.lowInvSupplierId || contactId;
   const excludeStatusIds = opts.excludeStatusIds || NON_DEMAND_SO_STATUS_IDS;
   const reference = opts.reference || `Auto-PO ${supplierKey}`;
   const execute = opts.execute === true;
@@ -638,8 +645,10 @@ export async function createComboPOLive(opts = {}) {
   const addedOn = new Date().toISOString().replace('Z', '+00:00');
   await liveWrite('POST', `/order-service/order/${poId}/note`, { text: nl.join('\n'), addedOn, contactId, isPublic: false });
 
-  // stamp the PO number onto each contributing SO (linkage + dedupe)
-  for (const c of contributors) await liveWrite('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${poField}`, value: String(poId) }]);
+  // stamp the PO number onto each contributing SO (linkage + dedupe) — only if this
+  // supplier has a dedicated PO custom field. Otherwise the tag-clear on finalize is
+  // the sole re-pickup guard.
+  if (poField) for (const c of contributors) await liveWrite('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${poField}`, value: String(poId) }]);
 
   return { created: true, poId, ...plan };
 }
