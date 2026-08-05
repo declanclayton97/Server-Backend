@@ -122,7 +122,8 @@ async function placeFristadsOrder(pool, altItemsUrl) {
 
   // 3. checkout / placeorder (Mark of goods=WORKWEAR, order ref = our PO#)
   const co = await jfetch('checkout', `${altItemsUrl}/api/fristads-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goodsMark: 'WORKWEAR', orderRef: String(poId), execute: true }) });
-  steps.checkout = { allOk: co.allOk, status: co.status };
+  const reservationNo = co.reservationNo; // Fristads "Reservation No" (= basket id) → goes on our PO ref
+  steps.checkout = { allOk: co.allOk, status: co.status, reservationNo };
   if (!co.allOk) throw stepErr('checkout', `checkout fields didn't set/verify on the portal: ${JSON.stringify(co.verify || co)}`);
   // placeorder redirects to the credit-account payment step (order gets placed there);
   // we confirm via the order-history pull, so a null orderNo from checkout is expected.
@@ -153,18 +154,19 @@ async function placeFristadsOrder(pool, altItemsUrl) {
     }).catch(() => {});
   }
 
-  // 5. write their order# onto our PO reference + restore tax + status 7
+  // 5. write the Fristads RESERVATION No onto our PO reference + restore tax + status 7
+  const poRef = reservationNo || order.orderNo; // reservation no is the reference; order no is a fallback
   try {
-    await updateOrderReference(poId, String(order.orderNo), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+    await updateOrderReference(poId, String(poRef), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
     await bp.repriceComboPOLive({ poId, keepNet: true, execute: true }); // legacy reference-write zeroes row tax → restore
     await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
-  } catch (e) { throw stepErr('link', `order ${order.orderNo} WAS placed, but linking it to PO ${poId} failed: ${e.message}`); }
-  steps.link = { reference: order.orderNo, status: 7 };
+  } catch (e) { throw stepErr('link', `Fristads order ${order.orderNo} (reservation ${poRef}) WAS placed, but linking to PO ${poId} failed: ${e.message}`); }
+  steps.link = { reference: poRef, reservationNo, orderNo: order.orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
 
-  return { poId, orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum, steps };
+  return { poId, reservationNo: poRef, orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum, steps };
 }
 
 // ── one scheduled run ────────────────────────────────────────────────────────
@@ -235,7 +237,7 @@ async function sendReportEmail(report) {
        <ul>
          <li>Demand value: <strong>£${report.netValue}</strong> ex-VAT (${report.units} units), threshold £${report.threshold}</li>
          <li>Decision: <strong>${report.decision}</strong></li>
-         ${p ? `<li>PO <strong>${p.poId}</strong> → Fristads order <strong>${p.orderNo}</strong> (${p.orderStatus}, ${p.sum} GBP)</li>` : ''}
+         ${p ? `<li>PO <strong>${p.poId}</strong> → Fristads reservation <strong>${p.reservationNo}</strong> (order ${p.orderNo}, ${p.orderStatus}, ${p.sum} GBP)</li>` : ''}
          ${!p && report.workingDaysWaited ? `<li>Working days waited: ${report.workingDaysWaited} of ${MAX_WAIT_WORKING_DAYS}</li>` : ''}
        </ul>`;
   await t.sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO, subject, html, text: subject + '\n\n' + JSON.stringify(report, null, 2) });
