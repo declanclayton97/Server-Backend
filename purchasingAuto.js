@@ -630,7 +630,7 @@ export async function createComboPOLive(opts = {}) {
 // SOs so they aren't picked up again. If the supplier was the only tag, the field
 // is cleared; optionally flip status to "Ordered Stock Awaiting Delivery" (22).
 // Dry-run unless { execute: true }.
-export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', setOrderedStatus = false, execute = false } = {}) {
+export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', poId = null, noteContactId = null, setOrderedStatus = false, execute = false } = {}) {
   const key = String(supplierKey).toUpperCase();
   const plan = [];
   for (const id of orderIds) {
@@ -640,21 +640,26 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     plan.push({ id, before, after: remaining.join(' / '), willClear: remaining.length === 0 });
     await pause(120);
   }
-  if (!execute) return { dryRun: true, supplierKey: key, setOrderedStatus, plan };
+  if (!execute) return { dryRun: true, supplierKey: key, poId, setOrderedStatus, plan };
   const results = [];
   for (const p of plan) {
-    if (p.after) {
-      await liveWrite('PATCH', `/order-service/order/${p.id}/custom-field`, [{ op: 'add', path: '/PCF_SUPPLIER', value: p.after }]);
-      results.push({ id: p.id, tag: p.after, statusChanged: false });
-    } else {
-      await liveWrite('PATCH', `/order-service/order/${p.id}/custom-field`, [{ op: 'remove', path: '/PCF_SUPPLIER' }]);
-      let statusChanged = false;
-      if (setOrderedStatus) { await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: ORDERED_STATUS }); statusChanged = true; }
-      results.push({ id: p.id, tag: '(cleared)', statusChanged });
+    // tag: only PATCH if there was something to change (avoid op:remove on an empty field)
+    if (p.before && p.after) await liveWrite('PATCH', `/order-service/order/${p.id}/custom-field`, [{ op: 'add', path: '/PCF_SUPPLIER', value: p.after }]);
+    else if (p.before && !p.after) await liveWrite('PATCH', `/order-service/order/${p.id}/custom-field`, [{ op: 'remove', path: '/PCF_SUPPLIER' }]);
+    // status: → Ordered Stock Awaiting Delivery ONLY when no supplier remains (else stays on SNO)
+    let statusChanged = false;
+    if (setOrderedStatus && p.willClear) { await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: ORDERED_STATUS }); statusChanged = true; }
+    // note on the SO (the "ordered via PO#" note previously discussed)
+    let noted = false;
+    if (poId) {
+      const addedOn = new Date().toISOString().replace('Z', '+00:00');
+      await liveWrite('POST', `/order-service/order/${p.id}/note`, { text: `${key} items ordered via PO#${poId}`, addedOn, contactId: noteContactId || 1, isPublic: false });
+      noted = true;
     }
+    results.push({ id: p.id, tag: p.after || '(cleared)', keptOnSNO: !p.willClear, statusChanged, noted });
     await pause(150);
   }
-  return { done: true, supplierKey: key, setOrderedStatus, results };
+  return { done: true, supplierKey: key, poId, setOrderedStatus, results };
 }
 
 // Create the Pending PO (+ source note) and stamp the PO number onto each

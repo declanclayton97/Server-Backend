@@ -7645,6 +7645,8 @@ app.post('/api/purchasing/finalize-tags-live', express.json(), async (req, res) 
     res.json(await purchasingAuto.finalizeSupplierTagsLive({
       orderIds: Array.isArray(b.orderIds) ? b.orderIds : parseOrderIds(b.orderIds),
       supplierKey: b.supplier || 'FRISTADS',
+      poId: b.poId || null,
+      noteContactId: b.noteContactId || null,
       setOrderedStatus: b.setOrderedStatus === true,
       execute: b.execute === true,
     }));
