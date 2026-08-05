@@ -20,6 +20,7 @@ import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, updateOrderReference as bpUpdateOrderReference, lockedValidateOrder as bpLockedValidateOrder, orderAjaxPost as bpOrderAjaxPost, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
 import * as purchasingAuto from './purchasingAuto.js';
+import * as purchasingSchedule from './purchasingSchedule.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -8321,6 +8322,34 @@ app.post('/api/purchasing/cancel-order', async (req, res) => {
 // does NOT place the order. Stock + basket run on the Alternate-Items service.
 const ALT_ITEMS_URL = process.env.ALT_ITEMS_URL || 'https://alternate-items.onrender.com';
 const OOS_EMAIL_TO = process.env.PURCHASING_OOS_EMAIL || 'dec@tuffshop.co.uk';
+
+// Scheduled Fristads auto-purchase — manual trigger. ?dryRun=1 values the demand +
+// shows the decision without placing; ?force=1 bypasses the once-per-day guard.
+app.post('/api/purchasing/fristads-scheduled-run', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  if (!pool) return res.status(503).json({ error: 'DB not available (schedule state)' });
+  try {
+    const b = { ...req.query, ...(req.body || {}) };
+    res.json(await purchasingSchedule.runFristadsScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, dryRun: b.dryRun === '1' || b.dryRun === true, force: b.force === '1' || b.force === true }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Poller: every 5 min check UK local time; run the Fristads purchase once at ~10:30
+// on weekdays. The once-per-day guard (last_run_date) keeps it to a single run.
+if (process.env.FRISTADS_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 10 && uk.minute >= 30)) return; // fire in the 10:30–10:59 window
+      purchasingSchedule.runFristadsScheduled({ pool, altItemsUrl: ALT_ITEMS_URL })
+        .then((r) => { if (!r.skipped) console.log('[fristads-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[fristads-schedule] error:', e.message));
+    } catch (e) { console.error('[fristads-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Fristads auto-purchase poller scheduled (weekdays 10:30 UK)');
+}
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;

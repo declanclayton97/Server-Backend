@@ -743,6 +743,18 @@ export async function createPO(supplierKey, { orderIds, dryRun } = {}) {
 export const PO_BACKORDER_STATUS = 45; // "On Back Order"
 export const PLACED_WITH_SUPPLIER_STATUS = 7;
 
+// Cart lines for a PO's product rows (skip the =====LOW INV==== separator) — {sku,
+// size, qty}. Size comes from the row's productOptions (needed by the portal cart).
+export async function getOrderCartLines(orderId) {
+  const order = (await liveGet(`/order-service/order/${orderId}`))[0];
+  const lines = [];
+  for (const r of Object.values(order.orderRows || {})) {
+    if (String(r.productId) === '1000') continue;
+    lines.push({ sku: r.productSku, size: optValue(r.productOptions, /size/i), qty: parseFloat(r.quantity.magnitude) });
+  }
+  return lines;
+}
+
 // LIVE: set a PO's status (e.g. → 7 "Placed with supplier" after the supplier order
 // is placed). Uses the live write client. Single call.
 export async function setOrderStatusLive(orderId, statusId) {
