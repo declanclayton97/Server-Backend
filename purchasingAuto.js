@@ -57,10 +57,11 @@ export const SUPPLIERS = {
   MASCOT:       { contactId: 334,   costList: null, poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
-  // Castle Clothing distributes TuffStuff / Makita / Fort (+ Fort Footwear). Their
-  // products are NOT named "castle" — detect by brand. No dedicated PO custom field
-  // yet, so re-pickup is prevented by clearing the CASTLE tag on finalize.
-  CASTLE:       { contactId: 332,   costList: 20, poField: null, lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|\bfort\b/i.test(n || '') },
+  // Castle Clothing distributes TuffStuff / Makita / Fort (+ Fort Footwear) and the
+  // licensed DeWalt workwear range. Their products are NOT named "castle" — detect by
+  // brand. No dedicated PO custom field yet, so re-pickup is prevented by clearing the
+  // CASTLE tag on finalize.
+  CASTLE:       { contactId: 332,   costList: 20, poField: null, lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|dewalt|\bfort\b/i.test(n || '') },
   // Ralawise = distributor (Stanley Stella exclusive + Gildan/AWDis/etc). Detect by
   // Stanley Stella name OR a Ralawise-format SKU (2 letters + 3 digits + …).
   RALAWISE:     { contactId: 205,   costList: null, poField: 'PCF_RALAWPO', detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z0-9]/.test(String(sku || '').replace(/[\s_-]/g, '')) },
@@ -131,6 +132,9 @@ const tagsOf = (v) => String(v || '').split('/').map((x) => x.trim()).filter(Boo
 // "Mascot Trouser Size", "Colour", "Color"…).
 const optValue = (opts, re) => { for (const k of Object.keys(opts || {})) if (re.test(k)) return opts[k]; return null; };
 const isNoteRow = (r) => String(r.productId) === '1000' || !r.productSku;
+// Not orderable from a supplier: BP note/message rows (pid 1000), the misc/free-text
+// product (pid 1001, e.g. "MISC1" shipping/delivery lines), or any MISC-coded sku.
+const isNonOrderableRow = (r) => isNoteRow(r) || String(r.productId) === '1001' || /^MISC/i.test(r.productSku || '');
 const isLeaveNote = (v) => /unable to order|awaiting|leave|do not order|chased|response|on hold/i.test(v || '');
 
 async function costOf(productId, costList, fallback) {
@@ -548,10 +552,14 @@ async function gatherLiveDemand({ supplierKey, detect, poField }) {
     if (poField && cf[poField]) continue;
     const order = (await liveGet(`/order-service/order/${id}`))[0];
     await pause(120);
-    // rows for this supplier (keep the rowId — needed to look up allocation)
-    let entries = Object.entries(order.orderRows).filter(([, r]) => !isNoteRow(r) && detect(r.productName, r.productSku));
+    // Rows for this supplier (keep the rowId — needed to look up allocation).
+    // Single-supplier order (tag is just us) → the WHOLE order is ours, take every
+    // orderable row (brand regexes miss un-branded/licensed lines). Multi-supplier
+    // order → only the rows whose brand we detect, so we don't order another
+    // supplier's items. Shipping/misc lines are excluded either way.
     const allTags = tagsOf(tag);
-    if (!entries.length && allTags.length === 1 && allTags[0].toUpperCase() === supplierKey) entries = Object.entries(order.orderRows).filter(([, r]) => !isNoteRow(r));
+    const singleSupplier = allTags.length === 1 && allTags[0].toUpperCase() === supplierKey;
+    const entries = Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r) && (singleSupplier || detect(r.productName, r.productSku)));
     if (!entries.length) continue;
     // Only order the UNALLOCATED qty: ordered − allocated − fulfilled − onOrder.
     // Allocation isn't in the order API — read it from the legacy order page.

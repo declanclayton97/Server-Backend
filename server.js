@@ -7692,8 +7692,17 @@ app.post('/api/purchasing/mark-po-placed-live', express.json(), async (req, res)
 app.get('/api/purchasing/debug-order-page', async (req, res) => {
   if (!req.query.orderId) return res.status(400).json({ error: 'orderId required' });
   try {
-    const { getOrderAllocations } = await import('./bpWebSession.js');
-    res.json({ orderId: req.query.orderId, allocations: await getOrderAllocations(req.query.orderId.toString(), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' }) });
+    const bp = await import('./bpWebSession.js');
+    const client = process.env.BP_WEB_CLIENT_ID || 'tuffworkwear';
+    if (req.query.raw === '1') {
+      const r = await bp.fetchAuthed(`${bp.BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(req.query.orderId)}`, { client });
+      const html = r.html || '';
+      const hits = [];
+      const rx = /reserved\[(\d+)\]/gi; let m;
+      while ((m = rx.exec(html)) && hits.length < 6) hits.push(html.slice(Math.max(0, m.index - 40), m.index + 320).replace(/\s+/g, ' '));
+      return res.json({ orderId: req.query.orderId, len: html.length, reservedCount: (html.match(/reserved\[/gi) || []).length, hits });
+    }
+    res.json({ orderId: req.query.orderId, allocations: await bp.getOrderAllocations(req.query.orderId.toString(), { client }) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
