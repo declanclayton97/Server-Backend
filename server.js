@@ -7620,6 +7620,22 @@ app.get('/api/purchasing/debug-lowstock', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// LIVE combined PO (SO demand + =====LOW INV==== separator + reorder replenishment).
+// DRY-RUN by default — returns the full plan and writes NOTHING. Writes only when
+// the body has { execute: true }.
+app.post('/api/purchasing/create-combo-po-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    res.json(await purchasingAuto.createComboPOLive({
+      supplierKey: b.supplier || 'FRISTADS',
+      contactId: b.contactId, priceListId: b.priceListId, poField: b.poField,
+      lowInvSupplierId: b.lowInvSupplierId, reference: b.reference,
+      execute: b.execute === true,
+    }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Read-only diagnostic: warehouse availability + product record for productIds.
 app.get('/api/purchasing/debug-stock', async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });

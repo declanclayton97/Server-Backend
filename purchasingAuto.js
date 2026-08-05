@@ -473,6 +473,159 @@ export async function previewLive(supplierKey, orderIds) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LIVE combined PO: SO-driven demand + a "=====LOW INV====" separator + reorder
+// replenishment (BP Low Inventory report), on the LIVE account. Writes only when
+// { execute: true } — otherwise returns the full plan (dry run). One PO, no split.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Live WRITE client (POST/PATCH/PUT). Only reachable through createComboPOLive,
+// which is itself gated behind an explicit execute flag on the route.
+async function liveWrite(method, path, body, attempt = 0) {
+  const opts = { method, headers: LIVE_HEADERS() };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(`${LIVE_BASE()}${path}`, opts);
+  if ((res.status === 429 || res.status === 503) && attempt < 5) {
+    const wait = parseInt(res.headers.get('brightpearl-next-throttle-period') || '2000', 10);
+    await new Promise((r) => setTimeout(r, Math.min(isNaN(wait) ? 2000 : wait, 60000) + 500));
+    return liveWrite(method, path, body, attempt + 1);
+  }
+  const text = await res.text();
+  let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
+  if (!res.ok) { const e = new Error(`BP ${method} ${path} -> ${res.status}: ${text.slice(0, 200)}`); e.status = res.status; throw e; }
+  return json ? json.response : null;
+}
+
+async function costOfLive(productId, priceListId, fallback = 0) {
+  try {
+    const resp = await liveGet(`/product-service/product-price/${productId}`);
+    const pl = (resp[0].priceLists || []).find((x) => x.priceListId === priceListId);
+    const v = pl && pl.quantityPrice && pl.quantityPrice['1'];
+    return v ? parseFloat(v) : fallback;
+  } catch { return fallback; }
+}
+
+async function skuToProductId(sku) {
+  try {
+    const r = await liveGet(`/product-service/product-search?SKU=${encodeURIComponent(sku)}&pageSize=10`);
+    const idx = {}; r.metaData.columns.forEach((c, i) => { idx[c.name] = i; });
+    const rows = r.results || [];
+    const exact = rows.find((row) => String(row[idx.SKU]).toUpperCase() === String(sku).toUpperCase());
+    const pick = exact || rows[0];
+    return pick ? pick[idx.productId] : null;
+  } catch { return null; }
+}
+
+// SO demand on live (status 23, tag contains supplierKey, not a leave-note, not
+// already carrying this supplier's PO). Mirrors findContributors, GET-only reads.
+async function gatherLiveDemand({ supplierKey, detect, poField }) {
+  let ids = [], firstResult = 1;
+  for (let g = 0; g < 40; g++) {
+    const s = await liveGet(`/order-service/sales-order-search?orderStatusId=${DEMAND_STATUS}&pageSize=500&firstResult=${firstResult}`);
+    const idx = {}; s.metaData.columns.forEach((c, i) => { idx[c.name] = i; });
+    ids.push(...s.results.map((r) => r[idx.salesOrderId]));
+    if (!s.metaData.morePagesAvailable || !s.results.length) break;
+    firstResult += 500; await pause(250);
+  }
+  const contributors = [];
+  for (const id of ids) {
+    const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
+    await pause(120);
+    const tag = cf.PCF_SUPPLIER;
+    if (!tag || isLeaveNote(tag)) continue;
+    if (!tagsOf(tag).some((t) => t.toUpperCase() === supplierKey)) continue;
+    if (poField && cf[poField]) continue;
+    const order = (await liveGet(`/order-service/order/${id}`))[0];
+    await pause(120);
+    let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && detect(r.productName, r.productSku));
+    const allTags = tagsOf(tag);
+    if (!rows.length && allTags.length === 1 && allTags[0].toUpperCase() === supplierKey) rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r));
+    if (!rows.length) continue;
+    contributors.push({
+      id, ref: order.reference || '', tag,
+      lines: rows.map((r) => ({ productId: r.productId, sku: r.productSku, name: r.productName, qty: parseFloat(r.quantity.magnitude), itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0 })),
+    });
+  }
+  return contributors;
+}
+
+export async function createComboPOLive(opts = {}) {
+  const supplierKey = String(opts.supplierKey || 'FRISTADS').toUpperCase();
+  const detect = opts.detect || ((n) => /fristads/i.test(n || ''));
+  const contactId = opts.contactId || 37419;         // Fristads Workwear Ltd
+  const priceListId = opts.priceListId || 19;         // Fristads purchase price list
+  const poField = opts.poField || 'PCF_FRISTPO';
+  const lowInvSupplierId = opts.lowInvSupplierId || 37419;
+  const excludeStatusIds = opts.excludeStatusIds || NON_DEMAND_SO_STATUS_IDS;
+  const reference = opts.reference || `Auto-PO ${supplierKey}`;
+  const execute = opts.execute === true;
+
+  // 1. SO-driven demand + per-SKU qty (for dedupe)
+  const contributors = await gatherLiveDemand({ supplierKey, detect, poField });
+  const soLines = []; const soQtyBySku = {};
+  for (const c of contributors) for (const l of c.lines) {
+    const cost = await costOfLive(l.productId, priceListId, l.itemCost);
+    soLines.push({ productId: l.productId, sku: l.sku, name: l.name, qty: l.qty, cost, order: c.id });
+    const k = String(l.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + l.qty;
+  }
+
+  // 2. low-inventory replenishment (deduped against SO qty for the same SKU)
+  const { fetchLowInventory } = await import('./lowInventory.js');
+  let statusIds = []; try { statusIds = await liveSalesOrderStatusIds(excludeStatusIds); } catch { /* report default */ }
+  const li = await fetchLowInventory({ supplierId: lowInvSupplierId, statusIds, numResults: 10000 });
+  const lowLines = [];
+  for (const d of li.rows) {
+    if (d.orderQty <= 0) continue;
+    const soQ = soQtyBySku[String(d.sku).toUpperCase()] || 0;
+    const qty = Math.max(0, d.orderQty - soQ);          // dedupe: SO units already ordered above the line
+    if (qty <= 0) continue;
+    const productId = await skuToProductId(d.sku);
+    const cost = productId ? await costOfLive(productId, priceListId, 0) : 0;
+    lowLines.push({ productId, sku: d.sku, name: d.name, qty, cost, unresolved: !productId });
+  }
+
+  const plan = {
+    supplierKey, contactId, priceListId, reference, warehouseId: WAREHOUSE_ID,
+    soLines, separator: '=====LOW INV====', lowLines,
+    soUnits: soLines.reduce((a, l) => a + l.qty, 0),
+    lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
+    unresolvedSkus: lowLines.filter((l) => l.unresolved).map((l) => l.sku),
+  };
+
+  if (!execute) return { dryRun: true, ...plan };
+  if (plan.unresolvedSkus.length) return { created: false, reason: `unresolved low-inv SKUs (aborted, nothing written): ${plan.unresolvedSkus.join(', ')}`, ...plan };
+  if (!soLines.length && !lowLines.length) return { created: false, reason: 'nothing to order', ...plan };
+
+  // 3. WRITE — PO header (Pending PO), rows (SO, then separator, then low-inv), note, SO stamps.
+  const poId = await liveWrite('POST', '/order-service/order', {
+    orderTypeCode: 'PO', reference, priceListId, priceModeCode: 'EXC',
+    warehouseId: WAREHOUSE_ID, currency: { orderCurrencyCode: 'GBP' },
+    parties: { supplier: { contactId } },
+  });
+  const addRow = async (productId, qty, cost, nameOverride) => {
+    const net = cost * qty;
+    const body = { productId, quantity: { magnitude: String(qty) }, rowValue: { taxCode: 'T20', rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * 0.2).toFixed(2) } } };
+    if (nameOverride) body.productName = nameOverride;
+    await liveWrite('POST', `/order-service/order/${poId}/row`, body);
+    await pause(150);
+  };
+  for (const l of soLines) await addRow(l.productId, l.qty, l.cost);
+  await addRow(1000, 1, 0, '=====LOW INV====');           // separator note row
+  for (const l of lowLines) await addRow(l.productId, l.qty, l.cost);
+
+  // note (SO#nnn render as clickable links)
+  const nl = [`Auto-PO for ${supplierKey}.`];
+  if (soLines.length) { nl.push('Order demand from:'); for (const c of contributors) nl.push(`  SO#${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')); }
+  if (lowLines.length) { nl.push('Low-inventory replenishment:'); for (const l of lowLines) nl.push(`  ${l.sku} x${l.qty}`); }
+  const addedOn = new Date().toISOString().replace('Z', '+00:00');
+  await liveWrite('POST', `/order-service/order/${poId}/note`, { text: nl.join('\n'), addedOn, contactId, isPublic: false });
+
+  // stamp the PO number onto each contributing SO (linkage + dedupe)
+  for (const c of contributors) await liveWrite('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${poField}`, value: String(poId) }]);
+
+  return { created: true, poId, ...plan };
+}
+
 // Create the Pending PO (+ source note) and stamp the PO number onto each
 // contributing order (linkage + dedupe). Does NOT strip tags or change status.
 export async function createPO(supplierKey, { orderIds, dryRun } = {}) {
