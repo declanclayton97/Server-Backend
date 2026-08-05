@@ -7687,6 +7687,23 @@ app.post('/api/purchasing/mark-po-placed-live', express.json(), async (req, res)
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Read-only diagnostic: the legacy order page's per-line stock/order breakdown
+// (in stock / on hand / on order) — the allocation data the API doesn't expose.
+app.get('/api/purchasing/debug-order-page', async (req, res) => {
+  if (!req.query.orderId) return res.status(400).json({ error: 'orderId required' });
+  try {
+    const { fetchAuthed, BP_HOST } = await import('./bpWebSession.js');
+    const r = await fetchAuthed(`${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(req.query.orderId)}`, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+    const body = r.body || '';
+    // one entry per line: the item code + the "colOptions" line (fulfilled/in stock/on hand/on order)
+    const lines = [];
+    for (const m of body.matchAll(/product_info&(?:amp;)?pID=(\d+)'[^>]*>([^<]+)<[\s\S]{0,600}?colOptions[\s\S]*?<div class="right">([\s\S]*?)<\/div>/gi)) {
+      lines.push({ pid: m[1], code: m[2].trim(), stockText: m[3].replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim() });
+    }
+    res.json({ status: r.status, isLogin: /loginform|admin_login/i.test(body), lineCount: lines.length, lines });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Read-only diagnostic: raw live BP GET (allocation/warehouse endpoint probing).
 app.get('/api/purchasing/debug-live-get', async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
