@@ -19,6 +19,8 @@
 // use JSON-Patch op:"add" to set/upsert and op:"remove" to clear (op:"replace"
 // fails on an empty field).
 
+import { getOrderAllocations } from './bpWebSession.js';
+
 const DC = process.env.BP_TEST_DATACENTER || 'euw1';
 const ACCOUNT = process.env.BP_TEST_ACCOUNT || 'tuffbsitc';
 const BASE = () => `https://${DC}.brightpearlconnect.com/public-api/${ACCOUNT}`;
@@ -540,13 +542,26 @@ async function gatherLiveDemand({ supplierKey, detect, poField }) {
     if (poField && cf[poField]) continue;
     const order = (await liveGet(`/order-service/order/${id}`))[0];
     await pause(120);
-    let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && detect(r.productName, r.productSku));
+    // rows for this supplier (keep the rowId — needed to look up allocation)
+    let entries = Object.entries(order.orderRows).filter(([, r]) => !isNoteRow(r) && detect(r.productName, r.productSku));
     const allTags = tagsOf(tag);
-    if (!rows.length && allTags.length === 1 && allTags[0].toUpperCase() === supplierKey) rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r));
+    if (!entries.length && allTags.length === 1 && allTags[0].toUpperCase() === supplierKey) entries = Object.entries(order.orderRows).filter(([, r]) => !isNoteRow(r));
+    if (!entries.length) continue;
+    // Only order the UNALLOCATED qty: ordered − allocated − fulfilled − onOrder.
+    // Allocation isn't in the order API — read it from the legacy order page.
+    const alloc = await getOrderAllocations(id, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+    const rows = [];
+    for (const [rowId, r] of entries) {
+      const ordered = parseFloat(r.quantity.magnitude);
+      const a = alloc[rowId] || { allocated: 0, fulfilled: 0, onOrder: 0 };
+      const toOrder = ordered - a.allocated - a.fulfilled - a.onOrder;
+      if (toOrder <= 0) continue; // fully allocated / already ordered — skip
+      rows.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty: toOrder, orderedQty: ordered, allocation: a, itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0 });
+    }
     if (!rows.length) continue;
     contributors.push({
       id, ref: order.reference || '', tag,
-      lines: rows.map((r) => ({ productId: r.productId, sku: r.productSku, name: r.productName, qty: parseFloat(r.quantity.magnitude), itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0 })),
+      lines: rows.map((r) => ({ productId: r.productId, sku: r.sku, name: r.name, qty: r.qty, orderedQty: r.orderedQty, allocation: r.allocation, itemCost: r.itemCost })),
     });
   }
   return contributors;

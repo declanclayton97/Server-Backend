@@ -501,4 +501,22 @@ async function updateOrderReference(orderId, reference, opts = {}) {
   return saveOrderForm(orderId, { orders_customer_ref: reference }, opts);
 }
 
-export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, lockedValidateOrder, orderAjaxPost, BP_HOST };
+// Per-line allocation from the legacy order page (the API doesn't expose it).
+// Each line has <input class="reserved" name="reserved[<orderRowId>]" value="N"> =
+// the allocated (reserved-from-stock) qty, then "N fulfilled … N on order" text.
+// Returns { <orderRowId>: { allocated, fulfilled, onOrder } } — keyed to match the
+// order-service orderRows keys. So qty-to-order = ordered − allocated − fulfilled − onOrder.
+async function getOrderAllocations(orderId, { client = BP_CLIENT } = {}) {
+  const r = await fetchAuthed(`${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`, { client });
+  const html = r.html || '';
+  if (looksLikeLoginPage(html)) throw new Error(`order page not authenticated for ${orderId}`);
+  const alloc = {};
+  for (const m of html.matchAll(/name="reserved\[(\d+)\]"[^>]*value="(\d+)"([\s\S]{0,260}?)(?=name="reserved\[|<\/tr>)/gi)) {
+    const bd = m[3].replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ');
+    const n = (re) => { const x = bd.match(re); return x ? parseInt(x[1], 10) : 0; };
+    alloc[m[1]] = { allocated: parseInt(m[2], 10) || 0, fulfilled: n(/(\d+)\s+fulfilled/i), onOrder: n(/(\d+)\s+on order/i) };
+  }
+  return alloc;
+}
+
+export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, getOrderAllocations, lockedValidateOrder, orderAjaxPost, BP_HOST };

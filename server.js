@@ -7692,11 +7692,8 @@ app.post('/api/purchasing/mark-po-placed-live', express.json(), async (req, res)
 app.get('/api/purchasing/debug-order-page', async (req, res) => {
   if (!req.query.orderId) return res.status(400).json({ error: 'orderId required' });
   try {
-    const { fetchAuthed, BP_HOST } = await import('./bpWebSession.js');
-    const r = await fetchAuthed(`${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(req.query.orderId)}`, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
-    const body = r.html || r.body || '';
-    const win = (re, before, after, n) => { const out = []; let m, i = 0; const rx = new RegExp(re, 'gi'); while ((m = rx.exec(body)) && i < (n || 4)) { out.push(body.slice(Math.max(0, m.index - before), m.index + after)); i++; if (m.index === rx.lastIndex) rx.lastIndex++; } return out; };
-    res.json({ status: r.status, orderId: req.query.orderId, len: body.length, rawAllocated: win('allocated,', 260, 140) });
+    const { getOrderAllocations } = await import('./bpWebSession.js');
+    res.json({ orderId: req.query.orderId, allocations: await getOrderAllocations(req.query.orderId.toString(), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' }) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
