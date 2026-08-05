@@ -665,7 +665,10 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
 // Re-price an existing PO's rows from a price list (BP has no row-value update, so
 // each row is deleted + re-added at the correct cost, preserving order + separator).
 // Dry-run unless { execute: true }. Used to correct a PO built on the wrong list.
-export async function repriceComboPOLive({ poId, priceListId = 20, execute = false } = {}) {
+export async function repriceComboPOLive({ poId, priceListId = 20, keepNet = false, execute = false } = {}) {
+  // keepNet=true: keep each row's CURRENT net (don't recompute from the price list)
+  // and just re-add — used to RESTORE row tax after the legacy reference-write zeroes
+  // it (the API stores explicit rowTax; only the legacy form drops it).
   const order = (await liveGet(`/order-service/order/${poId}`))[0];
   const entries = Object.entries(order.orderRows || {}).sort((a, b) => Number(a[0]) - Number(b[0])); // ascending rowId = creation order
   const plan = [];
@@ -673,7 +676,7 @@ export async function repriceComboPOLive({ poId, priceListId = 20, execute = fal
     const isSep = String(r.productId) === '1000';
     const qty = parseFloat(r.quantity.magnitude);
     const oldNet = parseFloat((r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value) || 0);
-    const cost = isSep ? 0 : await costOfLive(r.productId, priceListId, qty ? oldNet / qty : 0);
+    const cost = isSep ? 0 : (keepNet ? (qty ? oldNet / qty : 0) : await costOfLive(r.productId, priceListId, qty ? oldNet / qty : 0));
     plan.push({ rowId, productId: r.productId, qty, name: r.productName, isSep, oldNet: oldNet.toFixed(2), newNet: (cost * qty).toFixed(2), cost });
   }
   if (!execute) return { dryRun: true, poId, priceListId, plan };

@@ -7677,6 +7677,9 @@ app.post('/api/purchasing/mark-po-placed-live', express.json(), async (req, res)
     if (b.supplierOrderRef) {
       const { updateOrderReference } = await import('./bpWebSession.js');
       out.reference = await updateOrderReference(poId, String(b.supplierOrderRef), { client: b.client || process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+      // The legacy order-form re-submit (the only way to write a PO reference) zeroes
+      // the row tax — restore it via the API (keep the current nets, re-add rows).
+      if (b.restoreTax !== false) out.taxRestored = await purchasingAuto.repriceComboPOLive({ poId, keepNet: true, execute: true });
     }
     out.status = await purchasingAuto.setOrderStatusLive(poId, purchasingAuto.PLACED_WITH_SUPPLIER_STATUS);
     res.json({ done: true, ...out });
