@@ -7687,6 +7687,14 @@ app.post('/api/purchasing/mark-po-placed-live', express.json(), async (req, res)
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Read-only diagnostic: raw live BP GET (allocation/warehouse endpoint probing).
+app.get('/api/purchasing/debug-live-get', async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  if (!req.query.path) return res.status(400).json({ error: 'path required' });
+  try { res.json({ path: req.query.path, response: await purchasingAuto.bpLiveGet(req.query.path.toString()) }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Read-only diagnostic: warehouse availability + product record for productIds.
 app.get('/api/purchasing/debug-stock', async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });

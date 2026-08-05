@@ -85,6 +85,9 @@ async function api(method, path, body, attempt = 0) {
 // endpoints for validation. Same throttle/error handling.
 export async function bpApi(method, path, body) { return api(method, path, body); }
 
+// Read-only LIVE GET passthrough (for debugging allocation/warehouse endpoints).
+export async function bpLiveGet(path) { return liveGet(path); }
+
 // ---- Product identity (SKU/EAN/UPC/MPN/ISBN) read + SAFE merge-write ----
 // PUT /product-service/product/{id}/identity REPLACES the whole identity block:
 // any identifier NOT supplied is CLEARED. So NEVER PUT a partial body directly —
