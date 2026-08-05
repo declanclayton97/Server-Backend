@@ -7653,6 +7653,16 @@ app.post('/api/purchasing/finalize-tags-live', express.json(), async (req, res) 
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Re-price a PO's rows from a price list (dry-run unless body { execute: true }).
+app.post('/api/purchasing/reprice-po-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    if (!b.poId) return res.status(400).json({ error: 'poId required' });
+    res.json(await purchasingAuto.repriceComboPOLive({ poId: b.poId, priceListId: b.priceListId || 20, execute: b.execute === true }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Read-only diagnostic: warehouse availability + product record for productIds.
 app.get('/api/purchasing/debug-stock', async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });

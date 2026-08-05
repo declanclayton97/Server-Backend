@@ -553,7 +553,7 @@ export async function createComboPOLive(opts = {}) {
   const supplierKey = String(opts.supplierKey || 'FRISTADS').toUpperCase();
   const detect = opts.detect || ((n) => /fristads/i.test(n || ''));
   const contactId = opts.contactId || 37419;         // Fristads Workwear Ltd
-  const priceListId = opts.priceListId || 19;         // Fristads purchase price list
+  const priceListId = opts.priceListId || 20;         // Launch (cost) price list — the one the pricing updates write to
   const poField = opts.poField || 'PCF_FRISTPO';
   const lowInvSupplierId = opts.lowInvSupplierId || 37419;
   const excludeStatusIds = opts.excludeStatusIds || NON_DEMAND_SO_STATUS_IDS;
@@ -660,6 +660,32 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     await pause(150);
   }
   return { done: true, supplierKey: key, poId, setOrderedStatus, results };
+}
+
+// Re-price an existing PO's rows from a price list (BP has no row-value update, so
+// each row is deleted + re-added at the correct cost, preserving order + separator).
+// Dry-run unless { execute: true }. Used to correct a PO built on the wrong list.
+export async function repriceComboPOLive({ poId, priceListId = 20, execute = false } = {}) {
+  const order = (await liveGet(`/order-service/order/${poId}`))[0];
+  const entries = Object.entries(order.orderRows || {}).sort((a, b) => Number(a[0]) - Number(b[0])); // ascending rowId = creation order
+  const plan = [];
+  for (const [rowId, r] of entries) {
+    const isSep = String(r.productId) === '1000';
+    const qty = parseFloat(r.quantity.magnitude);
+    const oldNet = parseFloat((r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value) || 0);
+    const cost = isSep ? 0 : await costOfLive(r.productId, priceListId, qty ? oldNet / qty : 0);
+    plan.push({ rowId, productId: r.productId, qty, name: r.productName, isSep, oldNet: oldNet.toFixed(2), newNet: (cost * qty).toFixed(2), cost });
+  }
+  if (!execute) return { dryRun: true, poId, priceListId, plan };
+  for (const p of plan) { await liveWrite('DELETE', `/order-service/order/${poId}/row/${p.rowId}`); await pause(150); }
+  for (const p of plan) {
+    const net = p.cost * p.qty;
+    const body = { productId: p.productId, quantity: { magnitude: String(p.qty) }, rowValue: { taxCode: 'T20', rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * 0.2).toFixed(2) } } };
+    if (p.isSep) body.productName = '=====LOW INV====';
+    await liveWrite('POST', `/order-service/order/${poId}/row`, body);
+    await pause(150);
+  }
+  return { done: true, poId, priceListId, rows: plan.length };
 }
 
 // Create the Pending PO (+ source note) and stamp the PO number onto each
