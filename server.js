@@ -7695,13 +7695,8 @@ app.get('/api/purchasing/debug-order-page', async (req, res) => {
     const { fetchAuthed, BP_HOST } = await import('./bpWebSession.js');
     const r = await fetchAuthed(`${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(req.query.orderId)}`, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
     const body = r.html || r.body || '';
-    const lines = [];
-    for (const m of body.matchAll(/product_info&(?:amp;)?pID=(\d+)'\);?">\s*([^<]+?)\s*<\/a>[\s\S]{0,1400}?((?:\d+)\s+allocated[\s\S]{0,220}?on order)/gi)) {
-      const bd = m[3].replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
-      const num = (re) => { const x = bd.match(re); return x ? parseInt(x[1], 10) : null; };
-      lines.push({ pid: m[1], code: m[2].trim(), breakdown: bd, allocated: num(/(\d+)\s+allocated/), fulfilled: num(/(\d+)\s+fulfilled/), inStock: num(/(\d+)\s+in stock/), onHand: num(/(\d+)\s+on hand/), onOrder: num(/(\d+)\s+on order/) });
-    }
-    res.json({ status: r.status, orderId: req.query.orderId, len: body.length, lineCount: lines.length, lines });
+    const win = (re, before, after, n) => { const out = []; let m, i = 0; const rx = new RegExp(re, 'gi'); while ((m = rx.exec(body)) && i < (n || 4)) { out.push(body.slice(Math.max(0, m.index - before), m.index + after)); i++; if (m.index === rx.lastIndex) rx.lastIndex++; } return out; };
+    res.json({ status: r.status, orderId: req.query.orderId, len: body.length, rawAllocated: win('allocated,', 260, 140) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
