@@ -297,16 +297,17 @@ export async function previewLive(supplierKey, orderIds) {
 
   // 1. Confirm the status id actually IS "Stock needs ordering" on the live account
   //    (status ids are account-config; verify 23 rather than trust it blindly).
-  let statusName = null, nameMatchedStatusId = null;
+  let statusName = null, nameMatchedStatusId = null, statusDebug = null;
   try {
     const statuses = await liveGet('/order-service/order-status');
     const list = Array.isArray(statuses) ? statuses : Object.values(statuses || {});
     for (const s of list) {
-      const id = s.orderStatusId ?? s.id, nm = s.name || s.orderStatusName || '';
+      const id = s.orderStatusId ?? s.id ?? s.statusId, nm = s.name || s.orderStatusName || s.statusName || '';
       if (String(id) === String(DEMAND_STATUS)) statusName = nm;
       if (/stock\s*needs\s*ordering/i.test(nm)) nameMatchedStatusId = id;
     }
-  } catch { /* non-fatal */ }
+    statusDebug = { count: list.length, sample: list.slice(0, 3), matches: list.filter((s) => /stock|order/i.test(s.name || s.statusName || '')).map((s) => ({ id: s.orderStatusId ?? s.id, name: s.name || s.statusName })) };
+  } catch (e) { statusDebug = { error: e.message }; }
 
   // 2. All SO ids in the demand status — PAGINATED (production findContributors
   //    caps at pageSize 500 with no paging, so surface if live exceeds that).
@@ -330,11 +331,13 @@ export async function previewLive(supplierKey, orderIds) {
   //    an id-set 404s), paced to stay gentle on the shared live rate limit → apply
   //    the EXACT findContributors tag filter.
   const skipped = { noTag: 0, leaveNote: 0, otherSupplier: 0, alreadyHasPo: 0, noMatchingRows: 0 };
+  const tagCounts = {};   // every distinct PCF_SUPPLIER tag value seen in the pool → count
   const candidates = [];
   for (const id of ids) {
     const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
     await pause(120);
     const tag = cf.PCF_SUPPLIER;
+    if (tag) tagCounts[tag] = (tagCounts[tag] || 0) + 1;
     if (!tag) { skipped.noTag++; continue; }
     if (isLeaveNote(tag)) { skipped.leaveNote++; continue; }
     if (!tagsOf(tag).some((t) => t.toUpperCase() === sup.key)) { skipped.otherSupplier++; continue; }
@@ -385,6 +388,8 @@ export async function previewLive(supplierKey, orderIds) {
     demandStatusId: DEMAND_STATUS,
     demandStatusNameOnLive: statusName,                       // must read "Stock needs ordering"
     statusIdNamed_StockNeedsOrdering: nameMatchedStatusId,    // sanity: should equal demandStatusId
+    statusDebug,
+    tagDistribution: Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).map(([tag, n]) => ({ tag, n })),
     ordersInDemandStatus: ids.length,
     resultsAvailable,
     productionCapWouldMiss: resultsAvailable != null ? Math.max(0, resultsAvailable - 500) : null,
