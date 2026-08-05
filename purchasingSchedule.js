@@ -107,6 +107,9 @@ async function placeFristadsOrder(altItemsUrl) {
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  // item names ordered per SO — for the SO note
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
 
   // 2. push the PO lines to the Fristads cart (unresolved = size/item not on the portal)
@@ -143,7 +146,7 @@ async function placeFristadsOrder(altItemsUrl) {
   steps.link = { reference: order.orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
-  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
 
   return { poId, orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum, steps };
 }

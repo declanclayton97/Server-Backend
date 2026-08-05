@@ -630,7 +630,9 @@ export async function createComboPOLive(opts = {}) {
 // SOs so they aren't picked up again. If the supplier was the only tag, the field
 // is cleared; optionally flip status to "Ordered Stock Awaiting Delivery" (22).
 // Dry-run unless { execute: true }.
-export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', poId = null, noteContactId = null, setOrderedStatus = false, execute = false } = {}) {
+export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', poId = null, noteContactId = null, setOrderedStatus = false, linesByOrder = null, execute = false } = {}) {
+  // linesByOrder: { <soId>: ["<item name>", ...] } — when given, the SO note lists the
+  // ordered item names (one per line) then "Ordered on PO:<poId>".
   const key = String(supplierKey).toUpperCase();
   const plan = [];
   for (const id of orderIds) {
@@ -649,11 +651,15 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     // status: → Ordered Stock Awaiting Delivery ONLY when no supplier remains (else stays on SNO)
     let statusChanged = false;
     if (setOrderedStatus && p.willClear) { await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: ORDERED_STATUS }); statusChanged = true; }
-    // note on the SO (the "ordered via PO#" note previously discussed)
+    // note on the SO: the item names ordered for this SO, then "Ordered on PO:<poId>"
     let noted = false;
     if (poId) {
+      const names = (linesByOrder && (linesByOrder[p.id] || linesByOrder[String(p.id)])) || null;
+      const text = (names && names.length)
+        ? `${names.join('\n')}\nOrdered on PO:${poId}`
+        : `${key} items ordered via PO#${poId}`;
       const addedOn = new Date().toISOString().replace('Z', '+00:00');
-      await liveWrite('POST', `/order-service/order/${p.id}/note`, { text: `${key} items ordered via PO#${poId}`, addedOn, contactId: noteContactId || 1, isPublic: false });
+      await liveWrite('POST', `/order-service/order/${p.id}/note`, { text, addedOn, contactId: noteContactId || 1, isPublic: false });
       noted = true;
     }
     results.push({ id: p.id, tag: p.after || '(cleared)', keptOnSNO: !p.willClear, statusChanged, noted });
