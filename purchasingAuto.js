@@ -626,6 +626,37 @@ export async function createComboPOLive(opts = {}) {
   return { created: true, poId, ...plan };
 }
 
+// LIVE: strip a supplier from the SUPPLIERS-NEEDED tag (PCF_SUPPLIER) on ordered
+// SOs so they aren't picked up again. If the supplier was the only tag, the field
+// is cleared; optionally flip status to "Ordered Stock Awaiting Delivery" (22).
+// Dry-run unless { execute: true }.
+export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', setOrderedStatus = false, execute = false } = {}) {
+  const key = String(supplierKey).toUpperCase();
+  const plan = [];
+  for (const id of orderIds) {
+    const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
+    const before = cf.PCF_SUPPLIER || '';
+    const remaining = tagsOf(before).filter((t) => t.toUpperCase() !== key);
+    plan.push({ id, before, after: remaining.join(' / '), willClear: remaining.length === 0 });
+    await pause(120);
+  }
+  if (!execute) return { dryRun: true, supplierKey: key, setOrderedStatus, plan };
+  const results = [];
+  for (const p of plan) {
+    if (p.after) {
+      await liveWrite('PATCH', `/order-service/order/${p.id}/custom-field`, [{ op: 'add', path: '/PCF_SUPPLIER', value: p.after }]);
+      results.push({ id: p.id, tag: p.after, statusChanged: false });
+    } else {
+      await liveWrite('PATCH', `/order-service/order/${p.id}/custom-field`, [{ op: 'remove', path: '/PCF_SUPPLIER' }]);
+      let statusChanged = false;
+      if (setOrderedStatus) { await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: ORDERED_STATUS }); statusChanged = true; }
+      results.push({ id: p.id, tag: '(cleared)', statusChanged });
+    }
+    await pause(150);
+  }
+  return { done: true, supplierKey: key, setOrderedStatus, results };
+}
+
 // Create the Pending PO (+ source note) and stamp the PO number onto each
 // contributing order (linkage + dedupe). Does NOT strip tags or change status.
 export async function createPO(supplierKey, { orderIds, dryRun } = {}) {

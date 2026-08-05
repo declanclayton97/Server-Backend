@@ -7636,6 +7636,21 @@ app.post('/api/purchasing/create-combo-po-live', express.json(), async (req, res
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// LIVE: clear a supplier from the SUPPLIERS-NEEDED tag on ordered SOs. Dry-run
+// unless body { execute: true }. Optional setOrderedStatus flips status to 22.
+app.post('/api/purchasing/finalize-tags-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    res.json(await purchasingAuto.finalizeSupplierTagsLive({
+      orderIds: Array.isArray(b.orderIds) ? b.orderIds : parseOrderIds(b.orderIds),
+      supplierKey: b.supplier || 'FRISTADS',
+      setOrderedStatus: b.setOrderedStatus === true,
+      execute: b.execute === true,
+    }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Read-only diagnostic: warehouse availability + product record for productIds.
 app.get('/api/purchasing/debug-stock', async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
