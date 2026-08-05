@@ -326,20 +326,14 @@ export async function previewLive(supplierKey, orderIds) {
     }
   }
 
-  // 3. Custom fields for every candidate (id-set batches → gentle on the shared
-  //    rate limit) → apply the EXACT findContributors tag filter.
+  // 3. Custom fields per order (the /custom-field sub-resource is single-id only —
+  //    an id-set 404s), paced to stay gentle on the shared live rate limit → apply
+  //    the EXACT findContributors tag filter.
   const skipped = { noTag: 0, leaveNote: 0, otherSupplier: 0, alreadyHasPo: 0, noMatchingRows: 0 };
-  const cfById = {};
-  for (const c of chunk(ids, 100)) {
-    const resp = await liveGet(`/order-service/order/${c.join(',')}/custom-field`) || {};
-    // id-set → keyed by orderId; single id → the fields object directly.
-    if (c.length === 1 && !resp[String(c[0])]) cfById[String(c[0])] = resp;
-    else Object.assign(cfById, resp);
-    await pause(200);
-  }
   const candidates = [];
   for (const id of ids) {
-    const cf = cfById[String(id)] || {};
+    const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
+    await pause(120);
     const tag = cf.PCF_SUPPLIER;
     if (!tag) { skipped.noTag++; continue; }
     if (isLeaveNote(tag)) { skipped.leaveNote++; continue; }
@@ -348,11 +342,15 @@ export async function previewLive(supplierKey, orderIds) {
     candidates.push({ id, tag });
   }
 
-  // 4. Full order for each candidate (id-set batches) → the supplier's rows.
+  // 4. Full order for each candidate (id-set batches, per-order fallback) → rows.
   const orderById = {};
   for (const c of chunk(candidates.map((x) => x.id), 60)) {
-    const arr = await liveGet(`/order-service/order/${c.join(',')}`) || [];
-    for (const o of (Array.isArray(arr) ? arr : [arr])) orderById[String(o.id)] = o;
+    try {
+      const arr = await liveGet(`/order-service/order/${c.join(',')}`) || [];
+      for (const o of (Array.isArray(arr) ? arr : [arr])) orderById[String(o.id)] = o;
+    } catch {
+      for (const id of c) { try { const a = await liveGet(`/order-service/order/${id}`); const o = Array.isArray(a) ? a[0] : a; if (o) orderById[String(o.id)] = o; await pause(120); } catch { /* skip */ } }
+    }
     await pause(200);
   }
   const orders = [];
