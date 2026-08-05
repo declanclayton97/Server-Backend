@@ -7591,6 +7591,15 @@ app.get('/api/purchasing/preview-live', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Read-only diagnostic: warehouse availability + product record for productIds.
+app.get('/api/purchasing/debug-stock', async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const ids = parseOrderIds(req.query.ids) || [];
+    res.json(await purchasingAuto.debugLiveStock(ids));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Read-only diagnostic: which custom-field CODE holds a value (e.g. find the code
 // behind the "SUPPLIERS NEEDED" label, or where "SNICKERS" actually lives).
 app.get('/api/purchasing/debug-fields', async (req, res) => {

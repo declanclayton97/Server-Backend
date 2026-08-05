@@ -287,6 +287,25 @@ async function liveGet(path, attempt = 0) {
 const chunk = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Diagnostic (read-only): dump warehouse availability + the product record for a
+// set of product ids, so we can locate the reorder/min-stock level + on-hand /
+// on-order / allocated fields that drive the "Low Inventory" replenishment calc.
+export async function debugLiveStock(productIds) {
+  const idSet = productIds.join(',');
+  const out = { productIds };
+  try { out.availability = await liveGet(`/warehouse-service/product-availability/${idSet}`); } catch (e) { out.availabilityError = e.message; }
+  try {
+    const prods = await liveGet(`/product-service/product/${idSet}`);
+    // Trim to the stock-relevant bits so the payload is readable.
+    out.products = (Array.isArray(prods) ? prods : [prods]).map((p) => ({
+      id: p.id, name: p.productName || (p.identity && p.identity.sku),
+      stock: p.stock, reorder: p.reorderLevel, inventory: p.inventory,
+      keys: Object.keys(p),
+    }));
+  } catch (e) { out.productsError = e.message; }
+  return out;
+}
+
 // Diagnostic: scan every order in a status and report which custom-field CODES
 // carry values (+ which contain `find`). Read-only. Finds the real code behind a
 // human field label like "SUPPLIERS NEEDED" when it isn't PCF_SUPPLIER.
