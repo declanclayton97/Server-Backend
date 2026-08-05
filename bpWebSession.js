@@ -511,10 +511,17 @@ async function getOrderAllocations(orderId, { client = BP_CLIENT } = {}) {
   const html = r.html || '';
   if (looksLikeLoginPage(html)) throw new Error(`order page not authenticated for ${orderId}`);
   const alloc = {};
-  for (const m of html.matchAll(/name="reserved\[(\d+)\]"[^>]*value="(\d+)"([\s\S]{0,260}?)(?=name="reserved\[|<\/tr>)/gi)) {
-    const bd = m[3].replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ');
+  // The reserved input's value = allocated qty; the trailing text reads
+  // "<n> allocated, <n> fulfilled, <n> in stock[, <n> on order]". Match each input,
+  // then parse the labels from the text window up to the NEXT reserved input.
+  const rx = /name="reserved\[(\d+)\]"[^>]*?value="(\d+)"/gi;
+  let m;
+  while ((m = rx.exec(html)) !== null) {
+    const rest = html.slice(rx.lastIndex, rx.lastIndex + 400);
+    const cut = rest.search(/name="reserved\[/i);
+    const bd = (cut >= 0 ? rest.slice(0, cut) : rest).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ');
     const n = (re) => { const x = bd.match(re); return x ? parseInt(x[1], 10) : 0; };
-    alloc[m[1]] = { allocated: parseInt(m[2], 10) || 0, fulfilled: n(/(\d+)\s+fulfilled/i), onOrder: n(/(\d+)\s+on order/i) };
+    alloc[m[1]] = { allocated: parseInt(m[2], 10) || 0, fulfilled: n(/(\d+)\s+fulfilled/i), onOrder: n(/(\d+)\s+on order/i), inStock: n(/(\d+)\s+in stock/i) };
   }
   return alloc;
 }
