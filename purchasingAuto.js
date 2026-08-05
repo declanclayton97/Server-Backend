@@ -738,6 +738,14 @@ export async function createPO(supplierKey, { orderIds, dryRun } = {}) {
 }
 
 export const PO_BACKORDER_STATUS = 45; // "On Back Order"
+export const PLACED_WITH_SUPPLIER_STATUS = 7;
+
+// LIVE: set a PO's status (e.g. → 7 "Placed with supplier" after the supplier order
+// is placed). Uses the live write client. Single call.
+export async function setOrderStatusLive(orderId, statusId) {
+  await liveWrite('PUT', `/order-service/order/${orderId}/status`, { orderStatusId: statusId });
+  return { orderId, statusId };
+}
 
 // Create a PO for a supplier from explicit line items — used to split demand
 // into a main PO (in-stock qty) and a separate back-order PO (shortfall qty).

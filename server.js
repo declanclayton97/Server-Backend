@@ -7663,6 +7663,26 @@ app.post('/api/purchasing/reprice-po-live', express.json(), async (req, res) => 
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// LIVE: after the supplier order is placed — write their order number into the PO's
+// reference (two-way linkage, via the web session) + set status → Placed with
+// supplier (7). Dry-run unless body { execute:true }.
+app.post('/api/purchasing/mark-po-placed-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    const poId = b.poId;
+    if (!poId) return res.status(400).json({ error: 'poId required' });
+    if (b.execute !== true) return res.json({ dryRun: true, poId, supplierOrderRef: b.supplierOrderRef || null, willSetStatus: purchasingAuto.PLACED_WITH_SUPPLIER_STATUS });
+    const out = { poId };
+    if (b.supplierOrderRef) {
+      const { updateOrderReference } = await import('./bpWebSession.js');
+      out.reference = await updateOrderReference(poId, String(b.supplierOrderRef), { client: b.client || process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+    }
+    out.status = await purchasingAuto.setOrderStatusLive(poId, purchasingAuto.PLACED_WITH_SUPPLIER_STATUS);
+    res.json({ done: true, ...out });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Read-only diagnostic: warehouse availability + product record for productIds.
 app.get('/api/purchasing/debug-stock', async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
