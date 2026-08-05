@@ -46,48 +46,104 @@ async function saveState(pool, { workingDaysWaited, lastRunDate, result }) {
   );
 }
 
+// ── error log + alerts ───────────────────────────────────────────────────────
+// Tag an error with the step that raised it so the log/alert is specific.
+const stepErr = (step, message) => Object.assign(new Error(message), { step });
+
+async function ensureErrorTable(pool) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_error_log (
+    id serial PRIMARY KEY,
+    created_at timestamptz DEFAULT now(),
+    supplier text,
+    step text,
+    message text,
+    context jsonb
+  )`);
+}
+
+// Persist an error AND email an alert. Used for every failure in the flow.
+export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null } = {}) {
+  try { if (pool) { await ensureErrorTable(pool); await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context) VALUES ($1,$2,$3,$4)`, [supplier, step, message, context ? JSON.stringify(context) : null]); } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
+  try { await sendAlertEmail({ supplier, step, message, context }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); }
+}
+
+function transporter() {
+  return nodemailer.createTransport({ host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com', port: parseInt(process.env.SMTP_PORT || '2525'), secure: false, auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS } });
+}
+
+async function sendAlertEmail({ supplier, step, message, context }) {
+  if (!process.env.SMTP_PASS) return;
+  const when = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
+  const html = `<p style="color:#c62828"><strong>⚠ ${supplier} auto-purchase failed</strong> — ${when}</p>
+    <ul>
+      <li><strong>Step:</strong> ${step}</li>
+      <li><strong>Problem:</strong> ${escapeHtml(message)}</li>
+    </ul>
+    ${context ? `<pre style="background:#f5f5f5;padding:8px;border-radius:4px;white-space:pre-wrap">${escapeHtml(JSON.stringify(context, null, 2))}</pre>` : ''}
+    <p>Nothing further was placed on this run. Check Brightpearl + the Fristads portal, then it will retry on the next scheduled run.</p>`;
+  await transporter().sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO, subject: `⚠ ${supplier} auto-purchase error — ${step}`, html, text: `${supplier} auto-purchase error at step "${step}": ${message}\n\n${context ? JSON.stringify(context, null, 2) : ''}` });
+}
+const escapeHtml = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
 // ── the full placement chain ─────────────────────────────────────────────────
+// fetch that turns network failures ("website down") + non-2xx into step-tagged errors.
+async function jfetch(step, url, opts) {
+  let res;
+  try { res = await fetch(url, opts); }
+  catch (e) { throw stepErr(step, `can't reach ${url} (website/network down?): ${e.message}`); }
+  const text = await res.text();
+  let j = null; try { j = text ? JSON.parse(text) : null; } catch { /* non-json */ }
+  if (!res.ok) throw stepErr(step, `HTTP ${res.status} from ${url}: ${(j ? JSON.stringify(j) : text).slice(0, 250)}`);
+  if (j && j.error) throw stepErr(step, `${url} returned error: ${j.error}`);
+  return j;
+}
+
 async function placeFristadsOrder(altItemsUrl) {
   const steps = {};
   // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs)
-  const po = await bp.createComboPOLive({ supplierKey: 'FRISTADS', execute: true });
-  if (!po.created) throw new Error(`createComboPOLive did not create a PO: ${po.reason || 'unknown'}`);
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'FRISTADS', execute: true }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
 
-  // 2. push the PO lines to the Fristads cart
-  const cartLines = await bp.getOrderCartLines(poId);
+  // 2. push the PO lines to the Fristads cart (unresolved = size/item not on the portal)
+  const cartLines = await bp.getOrderCartLines(poId).catch((e) => { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); });
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
-  const cart = await (await fetch(`${altItemsUrl}/api/fristads-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: cartLines }) })).json();
+  const cart = await jfetch('cart', `${altItemsUrl}/api/fristads-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: cartLines }) });
   steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved };
-  if ((cart.unresolved || []).length || cart.cartCount !== expectUnits) throw new Error(`cart mismatch: got ${cart.cartCount}, expected ${expectUnits}, unresolved ${JSON.stringify(cart.unresolved || [])}`);
+  if ((cart.unresolved || []).length) throw stepErr('cart', `size/item not found on the Fristads portal (codes don't match): ${JSON.stringify(cart.unresolved)}`);
+  if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`);
 
   // 3. checkout / placeorder (Mark of goods=WORKWEAR, order ref = our PO#)
-  const co = await (await fetch(`${altItemsUrl}/api/fristads-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goodsMark: 'WORKWEAR', orderRef: String(poId), execute: true }) })).json();
+  const co = await jfetch('checkout', `${altItemsUrl}/api/fristads-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goodsMark: 'WORKWEAR', orderRef: String(poId), execute: true }) });
   steps.checkout = { allOk: co.allOk, status: co.status };
-  if (!co.allOk) throw new Error(`checkout fields did not verify: ${JSON.stringify(co.verify || co)}`);
+  if (!co.allOk) throw stepErr('checkout', `checkout fields didn't set/verify on the portal: ${JSON.stringify(co.verify || co)}`);
   // placeorder redirects to the credit-account payment step (order gets placed there);
   // we confirm via the order-history pull, so a null orderNo from checkout is expected.
 
   // 4. pull the Fristads order number (by our PO ref); retry — it may take a moment
   let order = null;
   for (let i = 0; i < 6; i++) {
-    order = await (await fetch(`${altItemsUrl}/api/fristads-order?ref=${encodeURIComponent(poId)}`)).json();
+    order = await jfetch('order-pull', `${altItemsUrl}/api/fristads-order?ref=${encodeURIComponent(poId)}`);
     if (order && order.found && order.orderNo) break;
     await new Promise((r) => setTimeout(r, 5000));
   }
-  if (!order || !order.found || !order.orderNo) throw new Error(`order not found in history for PO ${poId} after placeorder (checkout status ${co.status})`);
+  if (!order || !order.found || !order.orderNo) throw stepErr('order-pull', `order not found in Fristads history for PO ${poId} after placeorder — it may not have placed (checkout status ${co.status})`);
   steps.order = { orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum };
 
   // 5. write their order# onto our PO reference + restore tax + status 7
-  await updateOrderReference(poId, String(order.orderNo), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
-  await bp.repriceComboPOLive({ poId, keepNet: true, execute: true }); // legacy reference-write zeroes row tax → restore
-  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  try {
+    await updateOrderReference(poId, String(order.orderNo), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+    await bp.repriceComboPOLive({ poId, keepNet: true, execute: true }); // legacy reference-write zeroes row tax → restore
+    await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  } catch (e) { throw stepErr('link', `order ${order.orderNo} WAS placed, but linking it to PO ${poId} failed: ${e.message}`); }
   steps.link = { reference: order.orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
-  if (soIds.length) steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, execute: true });
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
 
   return { poId, orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum, steps };
 }
@@ -105,7 +161,10 @@ export async function runFristadsScheduled({ pool, altItemsUrl, dryRun = false, 
     }
 
     // dry-run the combined PO to value the demand (net, ex-VAT)
-    const plan = await bp.createComboPOLive({ supplierKey: 'FRISTADS', execute: false });
+    let plan;
+    try { plan = await bp.createComboPOLive({ supplierKey: 'FRISTADS', execute: false }); }
+    catch (e) { throw stepErr('value-check', `couldn't value the demand (Brightpearl down or demand read failed): ${e.message}`); }
+    if (plan.unresolvedSkus && plan.unresolvedSkus.length) throw stepErr('value-check', `low-inventory item codes don't match any Brightpearl product: ${plan.unresolvedSkus.join(', ')}`);
     const lines = [...(plan.soLines || []), ...(plan.lowLines || [])];
     const netValue = Number(lines.reduce((a, l) => a + (l.cost || 0) * l.qty, 0).toFixed(2));
     const units = (plan.soUnits || 0) + (plan.lowUnits || 0);
@@ -132,9 +191,11 @@ export async function runFristadsScheduled({ pool, altItemsUrl, dryRun = false, 
     await sendReportEmail(report).catch(() => {});
     return report;
   } catch (e) {
-    const report = { ran: uk.date, dryRun, error: e.message };
+    const step = e.step || 'unknown';
+    const report = { ran: uk.date, dryRun, step, error: e.message };
+    // persist to the error log + email a specific alert (what step, what went wrong)
+    await logPurchasingError(pool, { supplier: 'FRISTADS', step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}` } }).catch(() => {});
     if (!dryRun) { try { await saveState(pool, { workingDaysWaited: (await getState(pool)).working_days_waited, lastRunDate: uk.date, result: report }); } catch {} }
-    await sendReportEmail(report).catch(() => {});
     return report;
   } finally { running = false; }
 }

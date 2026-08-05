@@ -8334,6 +8334,17 @@ app.post('/api/purchasing/fristads-scheduled-run', express.json(), async (req, r
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// View recent purchasing errors (also emailed when they happen).
+app.get('/api/purchasing/error-log', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 30, 200);
+    await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_error_log (id serial PRIMARY KEY, created_at timestamptz DEFAULT now(), supplier text, step text, message text, context jsonb)`);
+    const r = await pool.query(`SELECT id, created_at, supplier, step, message, context FROM purchasing_error_log ORDER BY id DESC LIMIT $1`, [limit]);
+    res.json({ count: r.rows.length, errors: r.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Poller: every 5 min check UK local time; run the Fristads purchase once at ~10:30
 // on weekdays. The once-per-day guard (last_run_date) keeps it to a single run.
 if (process.env.FRISTADS_SCHEDULE_ENABLED !== 'false') {
