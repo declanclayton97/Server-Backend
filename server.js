@@ -7598,8 +7598,9 @@ app.get('/api/purchasing/preview-live', async (req, res) => {
 app.get('/api/purchasing/debug-lowstock', async (req, res) => {
   try {
     const { fetchLowInventory } = await import('./lowInventory.js');
+    const exclude = req.query.exclude ? parseOrderIds(req.query.exclude) : purchasingAuto.NON_DEMAND_SO_STATUS_IDS;
     let statusIds = [];
-    try { statusIds = await purchasingAuto.liveSalesOrderStatusIds([1, 18, 60]); } catch (e) { /* fall back to report default */ }
+    try { statusIds = await purchasingAuto.liveSalesOrderStatusIds(exclude); } catch (e) { /* fall back to report default */ }
     const r = await fetchLowInventory({
       supplierId: req.query.supplierId != null ? req.query.supplierId : 37419,
       manufacturerId: req.query.manufacturerId,
