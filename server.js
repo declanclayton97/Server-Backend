@@ -7695,12 +7695,13 @@ app.get('/api/purchasing/debug-order-page', async (req, res) => {
     const bp = await import('./bpWebSession.js');
     const client = process.env.BP_WEB_CLIENT_ID || 'tuffworkwear';
     if (req.query.raw === '1') {
-      const r = await bp.fetchAuthed(`${bp.BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(req.query.orderId)}`, { client });
+      const scode = (req.query.scode || 'invoice').toString();
+      const r = await bp.fetchAuthed(`${bp.BP_HOST}/patt-op.php?scode=${encodeURIComponent(scode)}&oID=${encodeURIComponent(req.query.orderId)}`, { client });
       const html = r.html || '';
-      const hits = [];
-      const rx = /reserved\[(\d+)\]/gi; let m;
-      while ((m = rx.exec(html)) && hits.length < 6) hits.push(html.slice(Math.max(0, m.index - 40), m.index + 320).replace(/\s+/g, ' '));
-      return res.json({ orderId: req.query.orderId, len: html.length, reservedCount: (html.match(/reserved\[/gi) || []).length, hits });
+      const term = (req.query.q || 'reserved\\[').toString();
+      const rx = new RegExp(term, 'gi'); const hits = []; let m;
+      while ((m = rx.exec(html)) && hits.length < 6) { hits.push(html.slice(Math.max(0, m.index - 60), m.index + 260).replace(/\s+/g, ' ')); if (m.index === rx.lastIndex) rx.lastIndex++; }
+      return res.json({ orderId: req.query.orderId, scode, status: r.status, len: html.length, isLogin: /name="password"|log ?in/i.test(html.slice(0, 3000)), hasCustomerRef: /orders_customer_ref/i.test(html), formCount: (html.match(/<form/gi) || []).length, termCount: (html.match(new RegExp(term, 'gi')) || []).length, hits });
     }
     res.json({ orderId: req.query.orderId, allocations: await bp.getOrderAllocations(req.query.orderId.toString(), { client }) });
   } catch (e) { res.status(500).json({ error: e.message }); }
