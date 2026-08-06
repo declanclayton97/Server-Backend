@@ -705,6 +705,24 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
   return { done: true, supplierKey: key, poId, setOrderedStatus, results };
 }
 
+// Stamp a supplier's PO custom field (e.g. PCF_CASTLEPO) with the PO id on each SO.
+// Used to back-fill orders whose PO was created before the field was known, and as a
+// belt-and-braces re-stamp. poField resolves from the SUPPLIERS registry if not given.
+// Dry-run unless { execute: true }.
+export async function stampPoFieldLive({ orderIds = [], supplierKey, poField, poId, execute = false } = {}) {
+  const field = poField || (SUPPLIERS[String(supplierKey || '').toUpperCase()] || {}).poField;
+  if (!field) return { error: `no PO custom field known for supplier ${supplierKey}` };
+  if (!poId) return { error: 'poId required' };
+  if (!execute) return { dryRun: true, field, poId, orderIds };
+  const results = [];
+  for (const id of orderIds) {
+    await liveWrite('PATCH', `/order-service/order/${id}/custom-field`, [{ op: 'add', path: `/${field}`, value: String(poId) }]);
+    results.push({ id, stamped: field, value: String(poId) });
+    await pause(150);
+  }
+  return { done: true, field, poId, results };
+}
+
 // Re-price an existing PO's rows from a price list (BP has no row-value update, so
 // each row is deleted + re-added at the correct cost, preserving order + separator).
 // Dry-run unless { execute: true }. Used to correct a PO built on the wrong list.

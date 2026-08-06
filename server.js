@@ -8383,6 +8383,19 @@ app.post('/api/purchasing/fristads-scheduled-run', express.json(), async (req, r
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Stamp a supplier PO custom field (e.g. PCF_CASTLEPO) with the PO id on given SOs.
+// Dry-run unless body { execute: true }.
+app.post('/api/purchasing/stamp-po-field-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    res.json(await purchasingAuto.stampPoFieldLive({
+      orderIds: Array.isArray(b.orderIds) ? b.orderIds : parseOrderIds(b.orderIds),
+      supplierKey: b.supplier, poField: b.poField, poId: b.poId, execute: b.execute === true,
+    }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Generic scheduled-run trigger for any registered supplier (?supplier=CASTLE). Dry-run
 // by default; execute=true places for real. Castle has no auto-poller yet — this is the
 // manual trigger used to validate the first real Castle order before enabling a poller.
@@ -8421,6 +8434,22 @@ if (process.env.FRISTADS_SCHEDULE_ENABLED !== 'false') {
     } catch (e) { console.error('[fristads-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
   console.log('✅ Fristads auto-purchase poller scheduled (weekdays 10:30 UK)');
+}
+
+// Castle auto-purchase poller — midday EVERY day (user: "mid day everyday").
+// Free-carriage threshold £150 ex-VAT (CASTLE_FREESHIP_THRESHOLD). State row id 2.
+if (process.env.CASTLE_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!(uk.hour === 12 && uk.minute < 30)) return; // fire in the 12:00–12:29 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'CASTLE' })
+        .then((r) => { if (!r.skipped) console.log('[castle-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[castle-schedule] error:', e.message));
+    } catch (e) { console.error('[castle-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Castle auto-purchase poller scheduled (daily 12:00 UK, £150 ex-VAT)');
 }
 
 async function sendOutOfStockEmail(supplier, lines, to) {
