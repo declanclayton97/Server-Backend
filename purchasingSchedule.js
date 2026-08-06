@@ -252,6 +252,27 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
 }
 
 // Supplier registry for the scheduled runner (per-supplier state row id + place fn).
+// Drive the portal worker asynchronously: start a job, then poll until done/error.
+// A full order takes many minutes (WebForms postbacks per line), so we can't hold one
+// HTTP request open — the worker returns a jobId and we poll GET /job/:id.
+async function workerPlaceOrder({ ref, lines, execute }) {
+  const headers = { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET };
+  const start = await jfetch('checkout', `${STERLING_WORKER_URL}/place-order`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ supplier: 'STERLING', ref: String(ref), lines, execute, async: true }),
+  });
+  const jobId = start && start.jobId;
+  if (!jobId) throw stepErr('checkout', `worker didn't start a job: ${JSON.stringify(start)}`);
+  const deadline = Date.now() + 25 * 60 * 1000;      // orders can be long; generous ceiling
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 12000));
+    const j = await jfetch('checkout', `${STERLING_WORKER_URL}/job/${jobId}`, { headers });
+    if (j.status === 'done') return j;               // carries ok/placed/orderNo/results/…
+    if (j.status === 'error') throw stepErr('checkout', `worker job errored: ${j.error}`);
+  }
+  throw stepErr('checkout', `worker job ${jobId} timed out (still running after 25 min)`);
+}
+
 // ── Sterling placement chain ─────────────────────────────────────────────────
 // Sterling's shop (sterling.famlive.net) is a WebForms site with no HTTP order API, so
 // the order is placed by the headless portal-order WORKER. Each PO line's EAN resolves
@@ -282,11 +303,8 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   if (!lines.length) throw stepErr('resolve', 'no resolvable Sterling lines to order');
   steps.resolve = { lines: lines.length, skipped };
 
-  // drive the headless worker to place the order on the shop
-  const wr = await jfetch('checkout', `${STERLING_WORKER_URL}/place-order`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET },
-    body: JSON.stringify({ supplier: 'STERLING', ref: String(poId), lines, execute: true }),
-  });
+  // drive the headless worker (async job + poll) to place the order on the shop
+  const wr = await workerPlaceOrder({ ref: poId, lines, execute: true });
   if (!wr || !wr.placed) throw stepErr('checkout', `Sterling worker did not confirm placement: ${JSON.stringify((wr && (wr.results || wr.error)) || wr)}`);
   const orderNo = wr.orderNo || null;
   steps.checkout = { placed: true, orderNo, cartCount: wr.cartCount, added: wr.added };
