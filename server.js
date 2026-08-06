@@ -7609,6 +7609,11 @@ app.get('/api/purchasing/debug-lowstock', async (req, res) => {
       numResults: req.query.n ? parseInt(req.query.n, 10) : 10000,
     });
     const toOrder = r.rows.filter((x) => x.orderQty > 0);
+    if (req.query.sku) {
+      const want = req.query.sku.toString().toUpperCase();
+      const match = r.rows.filter((x) => String(x.sku || '').toUpperCase().includes(want));
+      return res.json({ status: r.status, statusIdsCount: statusIds.length, rowCount: r.rows.length, matches: match });
+    }
     res.json({
       status: r.status, isLogin: r.isLogin, htmlLen: r.htmlLen, url: r.url,
       statusIdsCount: statusIds.length,
