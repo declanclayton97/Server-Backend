@@ -192,8 +192,13 @@ async function placeCastleOrder(pool, altItemsUrl) {
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
 
-  // 2. push PO lines to the Castle basket (SKU-direct; size ignored by Castle)
-  const cartLines = await bp.getOrderCartLines(poId).catch((e) => { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); });
+  // 2. push PO lines to the Castle basket (SKU-direct; size ignored by Castle).
+  // Build from the PO-creation result (soLines/lowLines) — NOT getOrderCartLines:
+  // the created BP PO row can degrade a variant SKU to the product's base SKU (e.g.
+  // "177-GRY-L" → "177"), but the creation result keeps the SO row's real SKU.
+  const cartLines = [...(po.soLines || []), ...(po.lowLines || [])]
+    .filter((l) => String(l.productId) !== '1000' && l.sku)
+    .map((l) => ({ sku: String(l.sku), qty: l.qty }));
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   const cart = await jfetch('cart', `${altItemsUrl}/api/castle-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: cartLines }) });
   steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved };
