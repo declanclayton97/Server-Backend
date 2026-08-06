@@ -245,14 +245,15 @@ async function placeCastleOrder(pool, altItemsUrl) {
 
 // Supplier registry for the scheduled runner (per-supplier state row id + place fn).
 const SCHEDULED_SUPPLIERS = {
-  FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder },
-  CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder },
+  FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder, threshold: Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300) },
+  CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder, threshold: Number(process.env.CASTLE_FREESHIP_THRESHOLD || 150) }, // Castle free carriage @ £150 ex-VAT
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
 export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false } = {}) {
   const cfg = SCHEDULED_SUPPLIERS[String(supplier).toUpperCase()];
   if (!cfg) return { error: `unknown scheduled supplier ${supplier}` };
+  const threshold = cfg.threshold || THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier
   if (running) return { skipped: 'a run is already in progress' };
   running = true;
   const uk = ukNow();
@@ -276,11 +277,11 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     if (netValue <= 0) {
       decision = 'no demand'; newWaitDays = 0;
     } else {
-      const over = netValue >= THRESHOLD_NET;
+      const over = netValue >= threshold;
       const wouldBeDay = state.working_days_waited + 1;
       if (over) { willPlace = true; reason = 'over-threshold'; }
-      else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS) { willPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${THRESHOLD_NET} — carriage applies)`; }
-      else { decision = `waiting — day ${wouldBeDay} of ${MAX_WAIT_WORKING_DAYS} (£${netValue} < £${THRESHOLD_NET})`; newWaitDays = wouldBeDay; }
+      else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS) { willPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — carriage applies)`; }
+      else { decision = `waiting — day ${wouldBeDay} of ${MAX_WAIT_WORKING_DAYS} (£${netValue} < £${threshold})`; newWaitDays = wouldBeDay; }
     }
 
     let placement = null;
@@ -289,7 +290,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       else { placement = await cfg.placeFn(pool, altItemsUrl); decision = `placed — ${reason}`; newWaitDays = 0; }
     }
 
-    const report = { supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold: THRESHOLD_NET, decision, reason, workingDaysWaited: newWaitDays, placement };
+    const report = { supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold, decision, reason, workingDaysWaited: newWaitDays, placement };
     if (!dryRun) await saveState(pool, { id: cfg.stateId, workingDaysWaited: newWaitDays, lastRunDate: uk.date, result: report });
     await sendReportEmail(report).catch(() => {});
     return report;
