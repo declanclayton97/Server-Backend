@@ -7612,7 +7612,18 @@ app.get('/api/purchasing/debug-lowstock', async (req, res) => {
     if (req.query.sku) {
       const want = req.query.sku.toString().toUpperCase();
       const match = r.rows.filter((x) => String(x.sku || '').toUpperCase().includes(want));
-      return res.json({ status: r.status, statusIdsCount: statusIds.length, rowCount: r.rows.length, matches: match });
+      let headerCells = null, rowCells = null;
+      if (req.query.raw) {
+        const ct = (h) => String(h || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
+        const trs = (r.html || '').match(/<tr[\s\S]*?<\/tr>/gi) || [];
+        for (const tr of trs) {
+          const cells = (tr.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || []).map(ct);
+          if (!headerCells && cells.some((c) => /Minimum Stock/i.test(c)) && cells.some((c) => /Open SO/i.test(c))) headerCells = cells;
+          if (!rowCells && cells.some((c) => c.toUpperCase() === want)) rowCells = cells;
+          if (headerCells && rowCells) break;
+        }
+      }
+      return res.json({ status: r.status, statusIdsCount: statusIds.length, rowCount: r.rows.length, matches: match, headerCells, rowCells });
     }
     res.json({
       status: r.status, isLogin: r.isLogin, htmlLen: r.htmlLen, url: r.url,
