@@ -105,11 +105,11 @@ async function jfetch(step, url, opts) {
   return j;
 }
 
-async function placeFristadsOrder(pool, altItemsUrl) {
+async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   const steps = {};
   // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs)
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'FRISTADS', execute: true }); }
+  try { po = await bp.createComboPOLive({ supplierKey: 'FRISTADS', execute: true, padToThreshold }); }
   catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -179,11 +179,11 @@ async function placeFristadsOrder(pool, altItemsUrl) {
 // ── Castle placement chain ───────────────────────────────────────────────────
 // Same skeleton as Fristads, but Castle's checkout POST *places directly* (no
 // separate placeorder step) and the reference we write is Castle's order number.
-async function placeCastleOrder(pool, altItemsUrl) {
+async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   const steps = {};
   // 1. combined PO (allocation-aware demand + low-inv + separator)
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'CASTLE', execute: true }); }
+  try { po = await bp.createComboPOLive({ supplierKey: 'CASTLE', execute: true, padToThreshold }); }
   catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -278,21 +278,24 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     const netValue = Number(lines.reduce((a, l) => a + (l.cost || 0) * l.qty, 0).toFixed(2));
     const units = (plan.soUnits || 0) + (plan.lowUnits || 0);
 
-    let decision, willPlace = false, reason = null, newWaitDays = state.working_days_waited;
+    let decision, willPlace = false, reason = null, newWaitDays = state.working_days_waited, padOnPlace = false;
     if (netValue <= 0) {
       decision = 'no demand'; newWaitDays = 0;
     } else {
       const over = netValue >= threshold;
       const wouldBeDay = state.working_days_waited + 1;
       if (over) { willPlace = true; reason = 'over-threshold'; }
-      else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS) { willPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — carriage applies)`; }
+      else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS) { willPlace = true; padOnPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — top up low-inv to reach free delivery, else carriage)`; }
       else { decision = `waiting — day ${wouldBeDay} of ${MAX_WAIT_WORKING_DAYS} (£${netValue} < £${threshold})`; newWaitDays = wouldBeDay; }
     }
 
     let placement = null;
     if (willPlace) {
+      // On the final wait day (under threshold) pass the threshold so createComboPOLive
+      // pads low-inv up to +40% above min to reach free delivery — else normal + carriage.
+      const padTo = padOnPlace ? threshold : 0;
       if (dryRun) { decision = `WOULD place (${reason})`; }
-      else { placement = await cfg.placeFn(pool, altItemsUrl); decision = `placed — ${reason}`; newWaitDays = 0; }
+      else { placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo }); decision = `placed — ${reason}`; newWaitDays = 0; }
     }
 
     const report = { supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold, decision, reason, workingDaysWaited: newWaitDays, placement };

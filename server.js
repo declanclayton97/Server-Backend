@@ -7648,6 +7648,7 @@ app.post('/api/purchasing/create-combo-po-live', express.json(), async (req, res
       supplierKey: b.supplier || 'FRISTADS',
       contactId: b.contactId, priceListId: b.priceListId, poField: b.poField,
       lowInvSupplierId: b.lowInvSupplierId, reference: b.reference,
+      padToThreshold: b.padToThreshold, padMaxPct: b.padMaxPct,
       execute: b.execute === true,
     }));
   } catch (e) { res.status(400).json({ error: e.message }); }

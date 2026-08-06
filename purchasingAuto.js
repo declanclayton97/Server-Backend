@@ -592,6 +592,12 @@ export async function createComboPOLive(opts = {}) {
   const excludeStatusIds = opts.excludeStatusIds || NON_DEMAND_SO_STATUS_IDS;
   const reference = opts.reference || `Auto-PO ${supplierKey}`;
   const execute = opts.execute === true;
+  // Day-3 top-up: if the normal order is under this free-delivery threshold, pad the
+  // low-inv lines by up to padMaxPct ABOVE each item's minimum stock level (spread
+  // evenly) to reach it — but ONLY if the pad can actually cross the threshold; if not,
+  // leave the normal quantities (carriage applies, no pointless over-order).
+  const padToThreshold = Number(opts.padToThreshold) || 0;
+  const padMaxPct = opts.padMaxPct != null ? Number(opts.padMaxPct) : 0.40;
 
   // 1. SO-driven demand + per-SKU qty (for dedupe)
   const contributors = await gatherLiveDemand({ supplierKey, detect, poField });
@@ -617,9 +623,62 @@ export async function createComboPOLive(opts = {}) {
     lowLines.push({ productId, sku: d.sku, name: d.name, qty, cost, unresolved: !productId });
   }
 
+  // 2b. DAY-3 TOP-UP — pad low-inv up to padMaxPct above each item's min stock to reach
+  // the free-delivery threshold (spread evenly), but only if it can actually reach it.
+  let padInfo = null;
+  const lineNet = (arr) => arr.reduce((a, l) => a + (l.cost || 0) * l.qty, 0);
+  if (padToThreshold > 0) {
+    const netNormal = lineNet(soLines) + lineNet(lowLines);
+    if (netNormal < padToThreshold) {
+      // Build pad candidates from the low-inv report rows (incl. at-min items ordering 0).
+      const bySku = {}; for (const l of lowLines) bySku[String(l.sku).toUpperCase()] = l;
+      const candidates = [];
+      for (const d of li.rows) {
+        const min = Number(d.minStock) || 0;
+        if (min <= 0) continue;
+        const padCeiling = Math.ceil(min * (1 + padMaxPct));                 // e.g. ceil(7*1.4)=10
+        const existing = bySku[String(d.sku).toUpperCase()];
+        const alreadyOrdering = existing ? existing.qty : 0;
+        const projected = (Number(d.onHand) || 0) + (Number(d.onPO) || 0) - (Number(d.openSO) || 0) + alreadyOrdering;
+        const cap = Math.max(0, padCeiling - Math.max(min, projected));      // extra units allowed above the normal plan
+        if (cap <= 0) continue;
+        let productId = existing ? existing.productId : await skuToProductId(d.sku);
+        if (!productId) continue;                                             // can't pad an unresolvable SKU
+        const cost = existing ? existing.cost : await costOfLive(productId, priceListId, 0);
+        if (!(cost > 0)) continue;
+        candidates.push({ sku: d.sku, name: d.name, productId, cost, cap, existing });
+      }
+      const maxExtraValue = candidates.reduce((a, c) => a + c.cap * c.cost, 0);
+      if (netNormal + maxExtraValue >= padToThreshold && candidates.length) {
+        // Reachable — distribute extra units round-robin (even spread) until we cross it.
+        const added = new Map(); let running = netNormal, guard = 0;
+        while (running < padToThreshold && guard++ < 100000) {
+          let any = false;
+          for (const c of candidates) {
+            const used = added.get(c) || 0;
+            if (used >= c.cap) continue;
+            added.set(c, used + 1); running += c.cost; any = true;
+            if (running >= padToThreshold) break;
+          }
+          if (!any) break;
+        }
+        let extraUnits = 0;
+        for (const [c, n] of added) {
+          if (n <= 0) continue; extraUnits += n;
+          if (c.existing) c.existing.qty += n;
+          else lowLines.push({ productId: c.productId, sku: c.sku, name: c.name, qty: n, cost: c.cost, padded: true });
+        }
+        padInfo = { padded: true, threshold: padToThreshold, netBefore: +netNormal.toFixed(2), netAfter: +running.toFixed(2), extraUnits, maxPct: padMaxPct };
+      } else {
+        // Even the full +40% can't reach the threshold — order normal qty + carriage.
+        padInfo = { padded: false, reason: 'max +' + Math.round(padMaxPct * 100) + '% still under threshold — carriage applies', threshold: padToThreshold, netNormal: +netNormal.toFixed(2), maxReachable: +(netNormal + maxExtraValue).toFixed(2) };
+      }
+    }
+  }
+
   const plan = {
     supplierKey, contactId, priceListId, reference, warehouseId: WAREHOUSE_ID,
-    soLines, separator: '=====LOW INV====', lowLines,
+    soLines, separator: '=====LOW INV====', lowLines, padInfo,
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
     unresolvedSkus: lowLines.filter((l) => l.unresolved).map((l) => l.sku),
