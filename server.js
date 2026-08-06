@@ -7649,6 +7649,7 @@ app.post('/api/purchasing/finalize-tags-live', express.json(), async (req, res) 
       poId: b.poId || null,
       noteContactId: b.noteContactId || null,
       setOrderedStatus: b.setOrderedStatus === true,
+      linesByOrder: b.linesByOrder || null, // { soId: [itemName, ...] } for the SO note
       execute: b.execute === true,
     }));
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -7701,7 +7702,11 @@ app.get('/api/purchasing/debug-order-page', async (req, res) => {
       const term = (req.query.q || 'reserved\\[').toString();
       const rx = new RegExp(term, 'gi'); const hits = []; let m;
       while ((m = rx.exec(html)) && hits.length < 6) { hits.push(html.slice(Math.max(0, m.index - 60), m.index + 260).replace(/\s+/g, ' ')); if (m.index === rx.lastIndex) rx.lastIndex++; }
-      return res.json({ orderId: req.query.orderId, scode, status: r.status, len: html.length, isLogin: /name="password"|log ?in/i.test(html.slice(0, 3000)), hasCustomerRef: /orders_customer_ref/i.test(html), formCount: (html.match(/<form/gi) || []).length, termCount: (html.match(new RegExp(term, 'gi')) || []).length, hits });
+      const refIdx = html.indexOf('name="orders_customer_ref"');
+      const formStartBefore = refIdx >= 0 ? html.lastIndexOf('<form', refIdx) : -1;
+      const formEndAfter = refIdx >= 0 ? html.indexOf('</form>', refIdx) : -1;
+      const formTag = formStartBefore >= 0 ? html.slice(formStartBefore, formStartBefore + 200).replace(/\s+/g, ' ') : null;
+      return res.json({ orderId: req.query.orderId, scode, status: r.status, len: html.length, isLogin: /name="password"|log ?in/i.test(html.slice(0, 3000)), hasCustomerRef: refIdx >= 0, formCount: (html.match(/<form/gi) || []).length, closeFormCount: (html.match(/<\/form>/gi) || []).length, refIdx, formStartBefore, formEndAfter, wouldParse: refIdx >= 0 && formStartBefore >= 0 && formEndAfter >= 0, formTag, termCount: (html.match(new RegExp(term, 'gi')) || []).length, hits });
     }
     res.json({ orderId: req.query.orderId, allocations: await bp.getOrderAllocations(req.query.orderId.toString(), { client }) });
   } catch (e) { res.status(500).json({ error: e.message }); }
