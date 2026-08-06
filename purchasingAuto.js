@@ -686,12 +686,14 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     // status: → Ordered Stock Awaiting Delivery ONLY when no supplier remains (else stays on SNO)
     let statusChanged = false;
     if (setOrderedStatus && p.willClear) { await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: ORDERED_STATUS }); statusChanged = true; }
-    // note on the SO: the item names ordered for this SO, then "Ordered on PO:<poId>"
+    // note on the SO: the item names ordered for this SO, then "Ordered on PO#<poId>".
+    // The '#' before the id is REQUIRED — BP only renders a clickable order link for
+    // the "#<orderId>" pattern (was "PO:<id>", which stayed plain text).
     let noted = false;
     if (poId) {
       const names = (linesByOrder && (linesByOrder[p.id] || linesByOrder[String(p.id)])) || null;
       const text = (names && names.length)
-        ? `${names.join('\n')}\nOrdered on PO:${poId}`
+        ? `${names.join('\n')}\nOrdered on PO#${poId}`
         : `${key} items ordered via PO#${poId}`;
       const addedOn = new Date().toISOString().replace('Z', '+00:00');
       await liveWrite('POST', `/order-service/order/${p.id}/note`, { text, addedOn, contactId: noteContactId || 1, isPublic: false });
