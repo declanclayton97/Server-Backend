@@ -87,7 +87,7 @@ async function sendAlertEmail({ supplier, step, message, context }) {
       <li><strong>Problem:</strong> ${escapeHtml(message)}</li>
     </ul>
     ${context ? `<pre style="background:#f5f5f5;padding:8px;border-radius:4px;white-space:pre-wrap">${escapeHtml(JSON.stringify(context, null, 2))}</pre>` : ''}
-    <p>Nothing further was placed on this run. Check Brightpearl + the Fristads portal, then it will retry on the next scheduled run.</p>`;
+    <p>Nothing further was placed on this run. Check Brightpearl + the ${supplier} portal, then it will retry on the next scheduled run.</p>`;
   await transporter().sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO, subject: `⚠ ${supplier} auto-purchase error — ${step}`, html, text: `${supplier} auto-purchase error at step "${step}": ${message}\n\n${context ? JSON.stringify(context, null, 2) : ''}` });
 }
 const escapeHtml = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
