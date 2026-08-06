@@ -17,6 +17,9 @@ const MAX_WAIT_WORKING_DAYS = 3;
 const NOTIFY_TO = process.env.PURCHASING_SCHEDULE_EMAIL || 'dec@tuffshop.co.uk';
 const FRISTADS_SUPPLIER_CONTACT = 37419;
 const CASTLE_SUPPLIER_CONTACT = 332;
+const STERLING_SUPPLIER_CONTACT = 341;
+const STERLING_WORKER_URL = process.env.STERLING_WORKER_URL || 'https://portal-order-worker.onrender.com';
+const STERLING_WORKER_SECRET = process.env.STERLING_WORKER_SECRET || '';
 
 let running = false; // in-process guard against overlapping runs
 
@@ -249,9 +252,62 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
 }
 
 // Supplier registry for the scheduled runner (per-supplier state row id + place fn).
+// ── Sterling placement chain ─────────────────────────────────────────────────
+// Sterling's shop (sterling.famlive.net) is a WebForms site with no HTTP order API, so
+// the order is placed by the headless portal-order WORKER. Each PO line's EAN resolves
+// (sterlingProducts.json) to { search, colour, size } the worker uses to drive the shop.
+async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
+  const steps = {};
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'STERLING', execute: true, padToThreshold }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
+
+  // resolve each PO line (EAN -> search/colour/size); skip service lines; abort on genuinely-unresolved
+  const { resolveSterlingLine, isNonSterlingOrderable } = await import('./sterlingResolve.js');
+  const poLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000');
+  const lines = [], unresolved = [], skipped = [];
+  for (const l of poLines) {
+    if (isNonSterlingOrderable(l.sku)) { skipped.push(l.sku); continue; }
+    const r = await resolveSterlingLine({ sku: l.sku, productId: l.productId });
+    if (!r.resolved) { unresolved.push(l.sku); continue; }
+    lines.push({ search: r.search, colour: r.colour, size: r.size, qty: Math.round(l.qty) });
+  }
+  if (unresolved.length) throw stepErr('resolve', `Sterling lines not in the product-data file (order NOT placed): ${unresolved.join(', ')}. Update the Sterling product-data file / ingest.`);
+  if (!lines.length) throw stepErr('resolve', 'no resolvable Sterling lines to order');
+  steps.resolve = { lines: lines.length, skipped };
+
+  // drive the headless worker to place the order on the shop
+  const wr = await jfetch('checkout', `${STERLING_WORKER_URL}/place-order`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET },
+    body: JSON.stringify({ supplier: 'STERLING', ref: String(poId), lines, execute: true }),
+  });
+  if (!wr || !wr.placed) throw stepErr('checkout', `Sterling worker did not confirm placement: ${JSON.stringify((wr && (wr.results || wr.error)) || wr)}`);
+  const orderNo = wr.orderNo || null;
+  steps.checkout = { placed: true, orderNo, cartCount: wr.cartCount, added: wr.added };
+
+  // link + finalise (order# onto PO ref if known, else a marker) + restore tax + status 7
+  const ref = orderNo || `Placed-${poId}`;
+  try {
+    await updateOrderReference(poId, String(ref), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+    await bp.repriceComboPOLive({ poId, keepNet: true, execute: true });
+    await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  } catch (e) { throw stepErr('link', `Sterling order ${ref} placed on the shop, but linking to PO ${poId} failed: ${e.message}`); }
+  steps.link = { reference: ref, orderNo, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'STERLING', poId, noteContactId: STERLING_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 const SCHEDULED_SUPPLIERS = {
   FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder, threshold: Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300) },
   CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder, threshold: Number(process.env.CASTLE_FREESHIP_THRESHOLD || 150) }, // Castle free carriage @ £150 ex-VAT
+  STERLING: { supplierKey: 'STERLING', stateId: 4, placeFn: placeSterlingOrder, threshold: Number(process.env.STERLING_FREESHIP_THRESHOLD || 150) },
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────

@@ -8397,6 +8397,26 @@ app.post('/api/purchasing/stamp-po-field-live', express.json(), async (req, res)
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// READ-ONLY: dry-run the Sterling combo PO, resolve each line to the worker payload
+// (EAN -> search/colour/size via sterlingProducts.json). NO PO, NO placement — just
+// shows what would be sent to the portal worker.
+app.get('/api/purchasing/sterling-resolve-test', async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const plan = await purchasingAuto.createComboPOLive({ supplierKey: 'STERLING', execute: false });
+    const { resolveSterlingLine, isNonSterlingOrderable } = await import('./sterlingResolve.js');
+    const poLines = [...(plan.soLines || []), ...(plan.lowLines || [])].filter((l) => String(l.productId) !== '1000');
+    const lines = [], unresolved = [], skipped = [];
+    for (const l of poLines) {
+      if (isNonSterlingOrderable(l.sku)) { skipped.push(l.sku); continue; }
+      const r = await resolveSterlingLine({ sku: l.sku, productId: l.productId });
+      if (!r.resolved) { unresolved.push({ sku: l.sku, ean: r.ean }); continue; }
+      lines.push({ sku: l.sku, search: r.search, colour: r.colour, size: r.size, qty: Math.round(l.qty) });
+    }
+    res.json({ poLines: poLines.length, resolved: lines.length, unresolved, skipped, lines });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Generic scheduled-run trigger for any registered supplier (?supplier=CASTLE). Dry-run
 // by default; execute=true places for real. Castle has no auto-poller yet — this is the
 // manual trigger used to validate the first real Castle order before enabling a poller.
