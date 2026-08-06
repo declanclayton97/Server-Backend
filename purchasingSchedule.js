@@ -316,14 +316,21 @@ async function sendReportEmail(report) {
   if (!process.env.SMTP_PASS) return;
   const t = nodemailer.createTransport({ host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com', port: parseInt(process.env.SMTP_PORT || '2525'), secure: false, auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS } });
   const p = report.placement;
-  const subject = report.error ? `Fristads auto-purchase: ERROR` : `Fristads auto-purchase: ${report.decision}`;
+  const S = report.supplier || 'FRISTADS';
+  const label = S.charAt(0) + S.slice(1).toLowerCase(); // "Fristads" / "Castle"
+  const dr = report.dryRun ? '[DRY RUN] ' : '';
+  const subject = report.error ? `${dr}${label} auto-purchase: ERROR` : `${dr}${label} auto-purchase: ${report.decision}`;
+  // Placement line — supplier-agnostic; extra fields (reservation/status/sum) only if present.
+  const placedLine = p
+    ? `<li>PO <strong>${p.poId}</strong> → ${label} order <strong>${p.orderNo}</strong>${p.reservationNo && p.reservationNo !== p.orderNo ? ` (reservation ${p.reservationNo})` : ''}${p.orderStatus ? `, ${p.orderStatus}` : ''}${p.sum ? `, ${p.sum} GBP` : ''}</li>`
+    : '';
   const html = report.error
-    ? `<p><strong>Error during the scheduled Fristads run (${report.ran}).</strong></p><pre>${report.error}</pre><p>Nothing may have been placed — check BP + the Fristads portal before the next run.</p>`
-    : `<p>Fristads auto-purchase — ${report.ukTime}${report.dryRun ? ' (DRY RUN)' : ''}</p>
+    ? `<p><strong>Error during the scheduled ${label} run (${report.ran}).</strong></p><pre>${report.error}</pre><p>Nothing may have been placed — check BP + the ${label} portal before the next run.</p>`
+    : `<p>${label} auto-purchase — ${report.ukTime}${report.dryRun ? ' (DRY RUN)' : ''}</p>
        <ul>
          <li>Demand value: <strong>£${report.netValue}</strong> ex-VAT (${report.units} units), threshold £${report.threshold}</li>
          <li>Decision: <strong>${report.decision}</strong></li>
-         ${p ? `<li>PO <strong>${p.poId}</strong> → Fristads reservation <strong>${p.reservationNo}</strong> (order ${p.orderNo}, ${p.orderStatus}, ${p.sum} GBP)</li>` : ''}
+         ${placedLine}
          ${!p && report.workingDaysWaited ? `<li>Working days waited: ${report.workingDaysWaited} of ${MAX_WAIT_WORKING_DAYS}</li>` : ''}
        </ul>`;
   await t.sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO, subject, html, text: subject + '\n\n' + JSON.stringify(report, null, 2) });
