@@ -61,7 +61,7 @@ export const SUPPLIERS = {
   // licensed DeWalt workwear range. Their products are NOT named "castle" — detect by
   // brand. No dedicated PO custom field yet, so re-pickup is prevented by clearing the
   // CASTLE tag on finalize.
-  CASTLE:       { contactId: 332,   costList: 20, poField: 'PCF_CASTLEPO', lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|dewalt|\bfort\b/i.test(n || '') },
+  CASTLE:       { contactId: 332,   costList: 20, poField: 'PCF_CASTLEPO', lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|\bfort\b/i.test(n || '') }, // DeWalt moved to Sterling (Castle no longer sells it)
   // Sterling Safetywear — brands Apache / City Knights / DeWalt. ⚠ DeWalt ALSO comes
   // via Castle, so on a multi-supplier order a DeWalt row is ambiguous — the
   // PCF_SUPPLIER tag decides which supplier the order is for; single-supplier orders
@@ -141,6 +141,18 @@ const isNoteRow = (r) => String(r.productId) === '1000' || !r.productSku;
 // Not orderable from a supplier: BP note/message rows (pid 1000), the misc/free-text
 // product (pid 1001, e.g. "MISC1" shipping/delivery lines), or any MISC-coded sku.
 const isNonOrderableRow = (r) => isNoteRow(r) || String(r.productId) === '1001' || /^MISC/i.test(r.productSku || '');
+
+// VAT: a BP tax code encodes its rate (T20=20%, T5=5%, T0=0%). Parse the rate so a
+// PO row carries the product's ACTUAL VAT — never a blanket T20 (which wrongly charges
+// 20% on zero-rated items like kids' clothing). BP does NOT silently fix a wrong code.
+const taxRate = (code) => { const m = String(code || '').match(/T(\d+(?:\.\d+)?)/i); return m ? Number(m[1]) / 100 : 0.20; };
+const _productTaxCache = {};
+async function productTaxCodeLive(productId) {
+  if (productId in _productTaxCache) return _productTaxCache[productId];
+  let code = 'T20';
+  try { const p = (await liveGet(`/product-service/product/${productId}`))[0]; code = (p && p.financialDetails && p.financialDetails.taxCode && p.financialDetails.taxCode.code) || 'T20'; } catch { /* default */ }
+  _productTaxCache[productId] = code; return code;
+}
 const isLeaveNote = (v) => /unable to order|awaiting|leave|do not order|chased|response|on hold/i.test(v || '');
 
 async function costOf(productId, costList, fallback) {
@@ -576,12 +588,12 @@ async function gatherLiveDemand({ supplierKey, detect, poField }) {
       const a = alloc[rowId] || { allocated: 0, fulfilled: 0, onOrder: 0 };
       const toOrder = ordered - a.allocated - a.fulfilled - a.onOrder;
       if (toOrder <= 0) continue; // fully allocated / already ordered — skip
-      rows.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty: toOrder, orderedQty: ordered, allocation: a, itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0 });
+      rows.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty: toOrder, orderedQty: ordered, allocation: a, itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0, taxCode: (r.rowValue && r.rowValue.taxCode) || null });
     }
     if (!rows.length) continue;
     contributors.push({
       id, ref: order.reference || '', tag,
-      lines: rows.map((r) => ({ productId: r.productId, sku: r.sku, name: r.name, qty: r.qty, orderedQty: r.orderedQty, allocation: r.allocation, itemCost: r.itemCost })),
+      lines: rows.map((r) => ({ productId: r.productId, sku: r.sku, name: r.name, qty: r.qty, orderedQty: r.orderedQty, allocation: r.allocation, itemCost: r.itemCost, taxCode: r.taxCode })),
     });
   }
   return contributors;
@@ -610,7 +622,7 @@ export async function createComboPOLive(opts = {}) {
   const soLines = []; const soQtyBySku = {};
   for (const c of contributors) for (const l of c.lines) {
     const cost = await costOfLive(l.productId, priceListId, l.itemCost);
-    soLines.push({ productId: l.productId, sku: l.sku, name: l.name, qty: l.qty, cost, order: c.id });
+    soLines.push({ productId: l.productId, sku: l.sku, name: l.name, qty: l.qty, cost, order: c.id, taxCode: l.taxCode });
     const k = String(l.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + l.qty;
   }
 
@@ -700,16 +712,20 @@ export async function createComboPOLive(opts = {}) {
     warehouseId: WAREHOUSE_ID, currency: { orderCurrencyCode: 'GBP' },
     parties: { supplier: { contactId } },
   });
-  const addRow = async (productId, qty, cost, nameOverride) => {
+  // Per-row VAT: use the row's tax code (SO line carries it; else the product's default);
+  // rowTax = net × the code's rate. Never blanket T20 (would over-tax zero-rated items).
+  const addRow = async (productId, qty, cost, nameOverride, taxCode) => {
     const net = cost * qty;
-    const body = { productId, quantity: { magnitude: String(qty) }, rowValue: { taxCode: 'T20', rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * 0.2).toFixed(2) } } };
+    const code = taxCode || (String(productId) === '1000' ? 'T20' : await productTaxCodeLive(productId));
+    const rate = taxRate(code);
+    const body = { productId, quantity: { magnitude: String(qty) }, rowValue: { taxCode: code, rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * rate).toFixed(2) } } };
     if (nameOverride) body.productName = nameOverride;
     await liveWrite('POST', `/order-service/order/${poId}/row`, body);
     await pause(150);
   };
-  for (const l of soLines) await addRow(l.productId, l.qty, l.cost);
-  await addRow(1000, 1, 0, '=====LOW INV====');           // separator note row
-  for (const l of lowLines) await addRow(l.productId, l.qty, l.cost);
+  for (const l of soLines) await addRow(l.productId, l.qty, l.cost, undefined, l.taxCode);
+  await addRow(1000, 1, 0, '=====LOW INV====');           // separator note row (net 0 → no tax)
+  for (const l of lowLines) await addRow(l.productId, l.qty, l.cost); // low-inv: tax from product default
 
   // note (SO#nnn render as clickable links)
   const nl = [`Auto-PO for ${supplierKey}.`];
@@ -809,7 +825,11 @@ export async function repriceComboPOLive({ poId, priceListId = 20, keepNet = fal
   for (const p of plan) { await liveWrite('DELETE', `/order-service/order/${poId}/row/${p.rowId}`); await pause(150); }
   for (const p of plan) {
     const net = p.cost * p.qty;
-    const body = { productId: p.productId, quantity: { magnitude: String(p.qty) }, rowValue: { taxCode: 'T20', rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * 0.2).toFixed(2) } } };
+    // Restore each row's REAL VAT from the product's tax code (the reference-write can
+    // reset it) — not a blanket T20, which was over-taxing zero-rated items.
+    const code = p.isSep ? 'T20' : await productTaxCodeLive(p.productId);
+    const rate = taxRate(code);
+    const body = { productId: p.productId, quantity: { magnitude: String(p.qty) }, rowValue: { taxCode: code, rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * rate).toFixed(2) } } };
     if (p.isSep) body.productName = '=====LOW INV====';
     await liveWrite('POST', `/order-service/order/${poId}/row`, body);
     await pause(150);
