@@ -62,6 +62,12 @@ export const SUPPLIERS = {
   // brand. No dedicated PO custom field yet, so re-pickup is prevented by clearing the
   // CASTLE tag on finalize.
   CASTLE:       { contactId: 332,   costList: 20, poField: 'PCF_CASTLEPO', lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|dewalt|\bfort\b/i.test(n || '') },
+  // Sterling Safetywear — brands Apache / City Knights / DeWalt. ⚠ DeWalt ALSO comes
+  // via Castle, so on a multi-supplier order a DeWalt row is ambiguous — the
+  // PCF_SUPPLIER tag decides which supplier the order is for; single-supplier orders
+  // use the all-rows fallback. Portal ordering is client-side (localStorage/JS) → needs
+  // a headless browser (built separately); the BP side is fully generic.
+  STERLING:     { contactId: 341,   costList: 20, poField: 'PCF_STERLPO', lowInvSupplierId: 341, detect: (n) => /apache|city\s*knights|dewalt/i.test(n || '') },
   // Ralawise = distributor (Stanley Stella exclusive + Gildan/AWDis/etc). Detect by
   // Stanley Stella name OR a Ralawise-format SKU (2 letters + 3 digits + …).
   RALAWISE:     { contactId: 205,   costList: null, poField: 'PCF_RALAPO', detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z0-9]/.test(String(sku || '').replace(/[\s_-]/g, '')) },
