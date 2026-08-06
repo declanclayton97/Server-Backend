@@ -16,7 +16,7 @@ async function barcodeFor(productId) {
 
 // Service/non-product lines that legitimately appear on an SO but are NOT Sterling
 // orderables (personalisation, misc/shipping) — skip, don't treat as unresolved.
-export const isNonSterlingOrderable = (sku) => /^(OPPR|MISC)/i.test(String(sku || ''));
+export const isNonSterlingOrderable = (sku) => /^(OPPR|MISC|SHIP|CARR|DELIV)/i.test(String(sku || ''));
 
 export async function resolveSterlingLine({ sku, productId }) {
   let ean = /^\d{8,}$/.test(String(sku || '')) ? String(sku) : null;
