@@ -740,11 +740,23 @@ export async function createComboPOLive(opts = {}) {
   if (!soLines.length && !lowLines.length) return { created: false, reason: 'nothing to order', ...plan };
 
   // 3. WRITE — PO header (Pending PO), rows (SO, then separator, then low-inv), note, SO stamps.
-  const poId = await liveWrite('POST', '/order-service/order', {
-    orderTypeCode: 'PO', reference, priceListId, priceModeCode: 'EXC',
-    warehouseId: WAREHOUSE_ID, currency: { orderCurrencyCode: 'GBP' },
-    parties: { supplier: { contactId } },
-  });
+  // fillExistingPoId: reuse an existing EMPTY PO shell (e.g. one left behind by a prior failed
+  // run) so its number/links stay stable, instead of minting a new PO. Guarded to empty POs so
+  // it can never double-fill.
+  let poId;
+  if (opts.fillExistingPoId) {
+    poId = Number(opts.fillExistingPoId);
+    const ex = (await liveGet(`/order-service/order/${poId}`) || [])[0];
+    if (!ex) return { created: false, reason: `fillExistingPoId ${poId} not found`, ...plan };
+    const existingRows = Object.keys(ex.rows || {}).length;
+    if (existingRows) return { created: false, reason: `PO ${poId} already has ${existingRows} row(s) — refusing to double-fill`, ...plan };
+  } else {
+    poId = await liveWrite('POST', '/order-service/order', {
+      orderTypeCode: 'PO', reference, priceListId, priceModeCode: 'EXC',
+      warehouseId: WAREHOUSE_ID, currency: { orderCurrencyCode: 'GBP' },
+      parties: { supplier: { contactId } },
+    });
+  }
   // Per-row VAT: use the row's tax code (SO line carries it; else the product's default);
   // rowTax = net × the code's rate. Never blanket T20 (would over-tax zero-rated items).
   const addRow = async (productId, qty, cost, nameOverride, taxCode) => {
