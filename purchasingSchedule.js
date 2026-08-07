@@ -304,7 +304,7 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     if (!r.resolved) { unresolved.push(l.sku); continue; }
     const key = [r.search, r.colour || '', r.size].map((s) => String(s).trim().toLowerCase()).join('|');
     if (byVariant.has(key)) byVariant.get(key).qty += Math.round(l.qty);
-    else byVariant.set(key, { search: r.search, colour: r.colour, size: r.size, qty: Math.round(l.qty) });
+    else byVariant.set(key, { search: r.search, colour: r.colour, size: r.size, qty: Math.round(l.qty), leg: r.leg, waist: r.waist, legIndex: r.legIndex, legCount: r.legCount });
   }
   const lines = [...byVariant.values()];
   if (unresolved.length) throw stepErr('resolve', `Sterling lines not in the product-data file (order NOT placed): ${unresolved.join(', ')}. Update the Sterling product-data file / ingest.`);

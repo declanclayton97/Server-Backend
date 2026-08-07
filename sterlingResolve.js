@@ -6,6 +6,30 @@ import { bpLiveGet } from './purchasingAuto.js';
 
 const PRODUCTS = JSON.parse(fs.readFileSync(new URL('./sterlingProducts.json', import.meta.url), 'utf8'));
 
+// Leg×waist trousers (e.g. Bancroft) render as a grid: one ROW per leg length, one COLUMN
+// per waist. The shop labels the waist columns but NOT the leg rows — rows are just in
+// ascending leg order. So to target the right cell we pass the leg's ordinal position among
+// the style's distinct legs. Build, per style+colour, the sorted list of distinct leg values.
+const legWaist = (size) => {
+  const s = String(size || '');
+  const l = s.match(/L\s*(\d{2})/i); const w = s.match(/W\s*(\d{2})/i);
+  return { leg: l ? Number(l[1]) : null, waist: w ? Number(w[1]) : null };
+};
+const styleKey = (search, colour) => `${String(search || '').trim().toLowerCase()}|${String(colour || '').trim().toLowerCase()}`;
+const LEGS_BY_STYLE = (() => {
+  const m = new Map();
+  for (const e of Object.values(PRODUCTS)) {
+    const { leg } = legWaist(e.size);
+    if (leg == null) continue;
+    const k = styleKey(e.search, e.colour);
+    if (!m.has(k)) m.set(k, new Set());
+    m.get(k).add(leg);
+  }
+  const out = new Map();
+  for (const [k, set] of m) out.set(k, [...set].sort((a, b) => a - b));
+  return out;
+})();
+
 const _barcode = {};
 async function barcodeFor(productId) {
   if (productId in _barcode) return _barcode[productId];
@@ -24,5 +48,14 @@ export async function resolveSterlingLine({ sku, productId }) {
   ean = ean ? String(ean).replace(/\D/g, '') : null;
   const e = ean ? PRODUCTS[ean] : null;
   if (!e) return { resolved: false, sku, ean, reason: 'not in Sterling product data' };
-  return { resolved: true, ean, search: e.search, colour: e.colour, size: e.size, brand: e.brand };
+  const out = { resolved: true, ean, search: e.search, colour: e.colour, size: e.size, brand: e.brand };
+  // For leg×waist trousers, attach the leg's ordinal (row) among the style's legs + total
+  // legs, so the worker can target the exact (leg-row, waist-column) cell and verify the
+  // grid's row count matches — refusing to guess if the catalogue/grid drift.
+  const { leg, waist } = legWaist(e.size);
+  if (leg != null) {
+    const legs = LEGS_BY_STYLE.get(styleKey(e.search, e.colour)) || [leg];
+    out.leg = leg; out.waist = waist; out.legIndex = legs.indexOf(leg); out.legCount = legs.length; out.legs = legs;
+  }
+  return out;
 }
