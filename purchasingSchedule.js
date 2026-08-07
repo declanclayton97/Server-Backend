@@ -292,13 +292,21 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // resolve each PO line (EAN -> search/colour/size); skip service lines; abort on genuinely-unresolved
   const { resolveSterlingLine, isNonSterlingOrderable } = await import('./sterlingResolve.js');
   const poLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000');
-  const lines = [], unresolved = [], skipped = [];
+  const unresolved = [], skipped = [];
+  // Merge lines that resolve to the SAME shop variant (search|colour|size) into ONE add,
+  // summing qty. The PO can carry two rows for the same variant (e.g. two SOs both needing
+  // Mercury Black 11); the shop's basket merges duplicate adds and keeps the LAST qty, not
+  // the sum — so adding them separately silently drops units. One deduped add avoids that.
+  const byVariant = new Map();
   for (const l of poLines) {
     if (isNonSterlingOrderable(l.sku)) { skipped.push(l.sku); continue; }
     const r = await resolveSterlingLine({ sku: l.sku, productId: l.productId });
     if (!r.resolved) { unresolved.push(l.sku); continue; }
-    lines.push({ search: r.search, colour: r.colour, size: r.size, qty: Math.round(l.qty) });
+    const key = [r.search, r.colour || '', r.size].map((s) => String(s).trim().toLowerCase()).join('|');
+    if (byVariant.has(key)) byVariant.get(key).qty += Math.round(l.qty);
+    else byVariant.set(key, { search: r.search, colour: r.colour, size: r.size, qty: Math.round(l.qty) });
   }
+  const lines = [...byVariant.values()];
   if (unresolved.length) throw stepErr('resolve', `Sterling lines not in the product-data file (order NOT placed): ${unresolved.join(', ')}. Update the Sterling product-data file / ingest.`);
   if (!lines.length) throw stepErr('resolve', 'no resolvable Sterling lines to order');
   steps.resolve = { lines: lines.length, skipped };

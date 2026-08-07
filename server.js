@@ -8417,6 +8417,31 @@ app.get('/api/purchasing/sterling-resolve-test', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Fire a Sterling worker DRY-RUN (execute:false) with an explicit deduped lines[] payload,
+// using the server-side worker URL/secret. Returns the async jobId; poll with the job route
+// below. Used to verify per-line qty staging before a real placement. Never places.
+app.post('/api/purchasing/sterling-worker-dry', express.json({ limit: '2mb' }), async (req, res) => {
+  try {
+    const url = process.env.STERLING_WORKER_URL || 'https://portal-order-worker.onrender.com';
+    const secret = process.env.STERLING_WORKER_SECRET || '';
+    const lines = req.body && Array.isArray(req.body.lines) ? req.body.lines : null;
+    if (!lines || !lines.length) return res.status(400).json({ error: 'lines[] required' });
+    const r = await fetch(`${url}/place-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-worker-secret': secret },
+      body: JSON.stringify({ supplier: 'STERLING', ref: String(req.body.ref || 'dry'), lines, execute: false, async: true }),
+    });
+    res.status(r.status).json(await r.json());
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.get('/api/purchasing/sterling-worker-job/:id', async (req, res) => {
+  try {
+    const url = process.env.STERLING_WORKER_URL || 'https://portal-order-worker.onrender.com';
+    const secret = process.env.STERLING_WORKER_SECRET || '';
+    const r = await fetch(`${url}/job/${req.params.id}`, { headers: { 'x-worker-secret': secret } });
+    res.status(r.status).json(await r.json());
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Generic scheduled-run trigger for any registered supplier (?supplier=CASTLE). Dry-run
 // by default; execute=true places for real. Castle has no auto-poller yet — this is the
 // manual trigger used to validate the first real Castle order before enabling a poller.
