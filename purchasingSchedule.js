@@ -168,15 +168,11 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // the API). Record the order number as a PO NOTE (reliable). The legacy web-form "reference"
   // write only renders its editable form when the PO is open in a real browser, so headlessly
   // it fails for POs — make it best-effort/non-fatal so it never blocks the finalize.
-  const poRef = order.orderNo || reservationNo;
+  const poRef = order.orderNo;                           // the Fristads order number goes on the PO reference
   await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
-  await bp.addOrderNoteLive(poId, `Placed with Fristads — order ${order.orderNo} (reservation ${reservationNo})${order.sum ? `, ${order.sum}` : ''}.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
   let refWritten = false;
-  try {
-    await updateOrderReference(poId, String(poRef), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
-    await bp.repriceComboPOLive({ poId, keepNet: true, execute: true }); // legacy reference-write zeroes row tax → restore
-    refWritten = true;
-  } catch (e) { steps.linkWarn = `PO reference not written (non-fatal, recorded as a note): ${e.message}`; }
+  try { await bp.setOrderReferenceLive(poId, poRef); refWritten = true; }   // API PATCH — tax-safe, no reprice
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Fristads — order ${order.orderNo} (reservation ${reservationNo}). Reference-set failed: ${e.message}`, FRISTADS_SUPPLIER_CONTACT).catch(() => {}); }
   steps.link = { reference: poRef, refWritten, reservationNo, orderNo: order.orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
@@ -245,13 +241,9 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
 
   // 5. write the Castle order number onto our PO reference + restore tax + status 7
   await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
-  await bp.addOrderNoteLive(poId, `Placed with Castle — order ${order.orderNo}.`, CASTLE_SUPPLIER_CONTACT).catch(() => {});
   let castleRefWritten = false;
-  try {
-    await updateOrderReference(poId, String(order.orderNo), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
-    await bp.repriceComboPOLive({ poId, keepNet: true, execute: true }); // legacy reference-write zeroes row tax → restore
-    castleRefWritten = true;
-  } catch (e) { steps.linkWarn = `PO reference not written (non-fatal, recorded as a note): ${e.message}`; }
+  try { await bp.setOrderReferenceLive(poId, order.orderNo); castleRefWritten = true; }   // API PATCH — tax-safe
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Castle — order ${order.orderNo}. Reference-set failed: ${e.message}`, CASTLE_SUPPLIER_CONTACT).catch(() => {}); }
   steps.link = { reference: order.orderNo, refWritten: castleRefWritten, orderNo: order.orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear CASTLE tag, status 22 when fully ordered, note)
@@ -329,13 +321,9 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // link + finalise (order# onto PO ref if known, else a marker) + restore tax + status 7
   const ref = orderNo || `Placed-${poId}`;
   await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
-  await bp.addOrderNoteLive(poId, `Placed with Sterling — order ${ref}.`, STERLING_SUPPLIER_CONTACT).catch(() => {});
   let sterlRefWritten = false;
-  try {
-    await updateOrderReference(poId, String(ref), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
-    await bp.repriceComboPOLive({ poId, keepNet: true, execute: true });
-    sterlRefWritten = true;
-  } catch (e) { steps.linkWarn = `PO reference not written (non-fatal, recorded as a note): ${e.message}`; }
+  try { await bp.setOrderReferenceLive(poId, ref); sterlRefWritten = true; }   // API PATCH — tax-safe
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Sterling — order ${ref}. Reference-set failed: ${e.message}`, STERLING_SUPPLIER_CONTACT).catch(() => {}); }
   steps.link = { reference: ref, refWritten: sterlRefWritten, orderNo, status: 7 };
 
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'STERLING', poId, noteContactId: STERLING_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }

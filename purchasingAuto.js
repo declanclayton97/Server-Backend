@@ -402,6 +402,14 @@ export async function addOrderNoteLive(orderId, text, contactId) {
   return liveWrite('POST', `/order-service/order/${orderId}/note`, { text: String(text), addedOn, contactId: contactId || 1, isPublic: false });
 }
 
+// Set an order's Reference field via the API (JSON-Patch replace). SURGICAL — it touches ONLY
+// /reference, so unlike the legacy web-form re-submit (which zeroes row tax → needed a fragile
+// reprice) it can't disturb rows/tax. PUT is unsupported (405); PATCH replace works. Verified
+// tax-unchanged on sandbox POs (empty + tax-bearing) 2026-08-07.
+export async function setOrderReferenceLive(orderId, reference) {
+  return liveWrite('PATCH', `/order-service/order/${orderId}`, [{ op: 'replace', path: '/reference', value: String(reference) }]);
+}
+
 export async function previewLive(supplierKey, orderIds) {
   const k = String(supplierKey || '').toUpperCase();
   // Use the hardcoded registry detector/poField (same as production). contactId/

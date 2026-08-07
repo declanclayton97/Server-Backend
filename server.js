@@ -7699,17 +7699,10 @@ app.post('/api/purchasing/mark-po-placed-live', express.json(), async (req, res)
     // finalising Sterling PO 480691 — reference-write failed at status 6, worked at 7.)
     out.status = await purchasingAuto.setOrderStatusLive(poId, purchasingAuto.PLACED_WITH_SUPPLIER_STATUS);
     if (b.supplierOrderRef) {
-      // Reliable linkage = a PO note (always). The reference web-form write is best-effort:
-      // its editable form only renders when the PO is open in a real browser, so headlessly
-      // it fails for POs — non-fatal, and the note carries the order number regardless.
-      await purchasingAuto.addOrderNoteLive(poId, `Placed with supplier — order ${b.supplierOrderRef}.`, b.noteContactId || 1).catch(() => {});
-      try {
-        const { updateOrderReference } = await import('./bpWebSession.js');
-        out.reference = await updateOrderReference(poId, String(b.supplierOrderRef), { client: b.client || process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
-        // The legacy order-form re-submit zeroes the row tax — restore it via the API.
-        if (b.restoreTax !== false) out.taxRestored = await purchasingAuto.repriceComboPOLive({ poId, keepNet: true, execute: true });
-        out.refWritten = true;
-      } catch (e) { out.refWritten = false; out.refWarn = `reference not written (recorded as a note instead): ${e.message}`; }
+      // Set the Reference via the API (JSON-Patch) — surgical + tax-safe. (The old web-form
+      // write zeroed row tax and only rendered its form when the PO was open in a browser.)
+      try { await purchasingAuto.setOrderReferenceLive(poId, b.supplierOrderRef); out.reference = String(b.supplierOrderRef); out.refWritten = true; }
+      catch (e) { out.refWritten = false; out.refWarn = `reference-set failed: ${e.message}`; await purchasingAuto.addOrderNoteLive(poId, `Placed with supplier — order ${b.supplierOrderRef}. Reference-set failed: ${e.message}`, b.noteContactId || 1).catch(() => {}); }
     }
     res.json({ done: true, ...out });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -8528,34 +8521,6 @@ if (process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Sterling auto-purchase poller scheduled (daily 13:00 UK, £150 ex-VAT)');
 }
 
-// TEMP (SANDBOX only — uses bpApi = tuffbsitc): prove the Brightpearl API can set an order's
-// reference WITHOUT touching rows/tax (the reliable replacement for the flaky web-form write
-// that zeroes tax). Reads the order, tries the update, re-reads, then restores the original ref.
-app.get('/api/purchasing/debug-ref-put', async (req, res) => {
-  try {
-    const id = req.query.orderId; if (!id) return res.status(400).json({ error: 'orderId required (SANDBOX order)' });
-    const ref = String(req.query.ref || 'REF-TEST-123');
-    const rd = async () => { const g = await purchasingAuto.bpApi('GET', `/order-service/order/${id}`); const o = Array.isArray(g) ? g[0] : g; return { reference: o.reference, tax: o.totalValue && o.totalValue.taxAmount, net: o.totalValue && o.totalValue.net, total: o.totalValue && o.totalValue.total, rows: Object.keys(o.rows || {}).length }; };
-    const before = await rd();
-    const candidates = [
-      ['PUT', `/order-service/order/${id}`, { reference: ref }],
-      ['PATCH', `/order-service/order/${id}`, [{ op: 'replace', path: '/reference', value: ref }]],
-    ];
-    const results = [];
-    let done = false;
-    for (const [m, p, b] of candidates) {
-      if (done) break;
-      try { const r = await purchasingAuto.bpApi(m, p, b); results.push({ m, resp: JSON.stringify(r).slice(0, 80) }); const chk = await rd(); if (String(chk.reference) === ref) { done = true; results[results.length - 1].worked = true; } }
-      catch (e) { results.push({ m, err: (e.message || '').slice(0, 160) }); }
-    }
-    const after = await rd();
-    let restored = null;
-    if (String(after.reference) !== String(before.reference)) {
-      try { await purchasingAuto.bpApi('PUT', `/order-service/order/${id}`, { reference: String(before.reference || '') }); restored = String((await rd()).reference) === String(before.reference || ''); } catch (e) { restored = e.message; }
-    }
-    res.json({ orderId: id, before, results, after, refChanged: String(after.reference) !== String(before.reference), taxUnchanged: String(after.tax) === String(before.tax) && after.rows === before.rows, restored });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;
