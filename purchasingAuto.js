@@ -576,7 +576,7 @@ async function skuToProductId(sku) {
 
 // SO demand on live (status 23, tag contains supplierKey, not a leave-note, not
 // already carrying this supplier's PO). Mirrors findContributors, GET-only reads.
-async function gatherLiveDemand({ supplierKey, detect, poField }) {
+async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect = false }) {
   let ids = [], firstResult = 1;
   for (let g = 0; g < 40; g++) {
     const s = await liveGet(`/order-service/sales-order-search?orderStatusId=${DEMAND_STATUS}&pageSize=500&firstResult=${firstResult}`);
@@ -595,14 +595,20 @@ async function gatherLiveDemand({ supplierKey, detect, poField }) {
     if (poField && cf[poField]) continue;
     const order = (await liveGet(`/order-service/order/${id}`))[0];
     await pause(120);
-    // Rows for this supplier (keep the rowId — needed to look up allocation).
-    // Single-supplier order (tag is just us) → the WHOLE order is ours, take every
-    // orderable row (brand regexes miss un-branded/licensed lines). Multi-supplier
-    // order → only the rows whose brand we detect, so we don't order another
-    // supplier's items. Shipping/misc lines are excluded either way.
+    // Which rows to order (keep the rowId — needed to look up allocation).
+    // The PCF_SUPPLIER tag lists the suppliers STILL TO BE ORDERED on this order (each tag
+    // is removed as that supplier is placed), so a lone remaining tag means "only THIS
+    // supplier's items are left" — NOT "the whole order is this supplier". So for a
+    // brand-detect supplier we ALWAYS filter by its brand regex (even when it's the sole
+    // tag), or we'd drag other suppliers' lines onto the PO (e.g. a Uneek tee + Apache boot
+    // pulled onto a Castle PO). Email/dynamic suppliers have only a weak name-derived
+    // detector and their orders ARE single-supplier, so for them a sole tag = take every
+    // orderable row. Shipping/misc/decoration lines are excluded either way.
     const allTags = tagsOf(tag);
     const singleSupplier = allTags.length === 1 && allTags[0].toUpperCase() === supplierKey;
-    const entries = Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r) && (singleSupplier || detect(r.productName, r.productSku)));
+    const entries = (singleSupplier && !hasBrandDetect)
+      ? Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r))
+      : Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r) && detect(r.productName, r.productSku));
     if (!entries.length) continue;
     // Only order the UNALLOCATED qty: ordered − allocated − fulfilled − onOrder.
     // Allocation isn't in the order API — read it from the legacy order page.
@@ -642,8 +648,10 @@ export async function createComboPOLive(opts = {}) {
   const padToThreshold = Number(opts.padToThreshold) || 0;
   const padMaxPct = opts.padMaxPct != null ? Number(opts.padMaxPct) : 0.40;
 
-  // 1. SO-driven demand + per-SKU qty (for dedupe)
-  const contributors = await gatherLiveDemand({ supplierKey, detect, poField });
+  // 1. SO-driven demand + per-SKU qty (for dedupe). hasBrandDetect = this is a hardcoded
+  // brand-regex supplier (vs a dynamic/email supplier with a weak name-derived detector).
+  const hasBrandDetect = !!(opts.detect || reg.detect);
+  const contributors = await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect });
   const soLines = []; const soQtyBySku = {};
   for (const c of contributors) for (const l of c.lines) {
     const cost = await costOfLive(l.productId, priceListId, l.itemCost);
