@@ -8426,9 +8426,11 @@ app.post('/api/purchasing/sterling-worker-dry', express.json({ limit: '2mb' }), 
     const secret = process.env.STERLING_WORKER_SECRET || '';
     const lines = req.body && Array.isArray(req.body.lines) ? req.body.lines : null;
     if (!lines || !lines.length) return res.status(400).json({ error: 'lines[] required' });
+    const payload = { supplier: 'STERLING', ref: String(req.body.ref || 'dry'), lines, execute: false, async: true };
+    if (req.body.inspect) payload.opts = { inspect: true };
     const r = await fetch(`${url}/place-order`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-worker-secret': secret },
-      body: JSON.stringify({ supplier: 'STERLING', ref: String(req.body.ref || 'dry'), lines, execute: false, async: true }),
+      body: JSON.stringify(payload),
     });
     res.status(r.status).json(await r.json());
   } catch (e) { res.status(400).json({ error: e.message }); }
