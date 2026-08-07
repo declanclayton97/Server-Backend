@@ -586,6 +586,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     firstResult += 500; await pause(250);
   }
   const contributors = [];
+  const demandAudit = [];                                          // per-line decision breakdown (for the audit log)
   for (const id of ids) {
     const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
     await pause(120);
@@ -616,8 +617,11 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     const rows = [];
     for (const [rowId, r] of entries) {
       const ordered = parseFloat(r.quantity.magnitude);
-      const a = alloc[rowId] || { allocated: 0, fulfilled: 0, onOrder: 0 };
+      const a = alloc[rowId] || { allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0 };
       const toOrder = ordered - a.allocated - a.fulfilled - a.onOrder;
+      // Audit EVERY considered line (incl. ones we decide NOT to order) so a later
+      // "why did it order N?" is answerable from the exact decision-time figures.
+      demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: a.allocated || 0, fulfilled: a.fulfilled || 0, onOrder: a.onOrder || 0, inStock: a.inStock || 0, toOrder });
       if (toOrder <= 0) continue; // fully allocated / already ordered — skip
       rows.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty: toOrder, orderedQty: ordered, allocation: a, itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0, taxCode: (r.rowValue && r.rowValue.taxCode) || null });
     }
@@ -627,7 +631,31 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       lines: rows.map((r) => ({ productId: r.productId, sku: r.sku, name: r.name, qty: r.qty, orderedQty: r.orderedQty, allocation: r.allocation, itemCost: r.itemCost, taxCode: r.taxCode })),
     });
   }
-  return contributors;
+  return { contributors, demandAudit };
+}
+
+// Persist the per-line demand decision to the demand_log table (best-effort). Lets a later
+// "why did PO#N order only M of X?" be answered from the exact ordered/allocated/fulfilled/
+// on-order figures at the moment the PO ran, rather than inferring from current state.
+let _demandLogReady = false;
+async function writeDemandLog(pool, poId, supplierKey, demandAudit) {
+  if (!pool || !demandAudit || !demandAudit.length) return;
+  if (!_demandLogReady) {
+    await pool.query(`CREATE TABLE IF NOT EXISTS demand_log (
+      id BIGSERIAL PRIMARY KEY, po_id INTEGER, supplier TEXT, so_id INTEGER,
+      product_id INTEGER, sku TEXT, name TEXT,
+      ordered NUMERIC, allocated NUMERIC, fulfilled NUMERIC, on_order NUMERIC,
+      in_stock NUMERIC, to_order NUMERIC, logged_at TIMESTAMPTZ DEFAULT now())`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS demand_log_po_idx ON demand_log(po_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS demand_log_sku_idx ON demand_log(sku)`);
+    _demandLogReady = true;
+  }
+  for (const d of demandAudit) {
+    await pool.query(
+      `INSERT INTO demand_log (po_id, supplier, so_id, product_id, sku, name, ordered, allocated, fulfilled, on_order, in_stock, to_order)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [poId, supplierKey, d.soId, d.productId, d.sku, d.name, d.ordered, d.allocated, d.fulfilled, d.onOrder, d.inStock, d.toOrder]);
+  }
 }
 
 export async function createComboPOLive(opts = {}) {
@@ -651,7 +679,7 @@ export async function createComboPOLive(opts = {}) {
   // 1. SO-driven demand + per-SKU qty (for dedupe). hasBrandDetect = this is a hardcoded
   // brand-regex supplier (vs a dynamic/email supplier with a weak name-derived detector).
   const hasBrandDetect = !!(opts.detect || reg.detect);
-  const contributors = await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect });
+  const { contributors, demandAudit } = await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect });
   const soLines = []; const soQtyBySku = {};
   for (const c of contributors) for (const l of c.lines) {
     const cost = await costOfLive(l.productId, priceListId, l.itemCost);
@@ -794,7 +822,10 @@ export async function createComboPOLive(opts = {}) {
   // the sole re-pickup guard.
   if (poField) for (const c of contributors) await liveWrite('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${poField}`, value: String(poId) }]);
 
-  return { created: true, poId, skippedBundles, ...plan };
+  // audit trail: persist the per-line demand decision for this PO (best-effort, non-fatal)
+  if (opts.logPool) { try { await writeDemandLog(opts.logPool, poId, supplierKey, demandAudit); } catch (e) { /* logging must never break a PO */ } }
+
+  return { created: true, poId, skippedBundles, demandAudit, ...plan };
 }
 
 // LIVE: strip a supplier from the SUPPLIERS-NEEDED tag (PCF_SUPPLIER) on ordered

@@ -7650,9 +7650,33 @@ app.post('/api/purchasing/create-combo-po-live', express.json(), async (req, res
       lowInvSupplierId: b.lowInvSupplierId, reference: b.reference,
       padToThreshold: b.padToThreshold, padMaxPct: b.padMaxPct,
       fillExistingPoId: b.fillExistingPoId,
+      logPool: pool,
       execute: b.execute === true,
     }));
   } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Demand audit log — why a PO ordered the quantities it did. Every SO-demand line the flow
+// considered is recorded at PO-creation time with its ordered/allocated/fulfilled/on-order/
+// in-stock → to-order figures. Query by PO (?po=), SKU (?sku=), or recent days (?days=).
+//   to-order = ordered − allocated − fulfilled − on-order  (in-stock is NOT subtracted)
+app.get('/api/purchasing/demand-log', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try {
+    const where = []; const params = [];
+    if (req.query.po) { params.push(parseInt(req.query.po, 10)); where.push(`po_id = $${params.length}`); }
+    if (req.query.sku) { params.push(String(req.query.sku).toUpperCase()); where.push(`upper(sku) = $${params.length}`); }
+    if (req.query.so) { params.push(parseInt(req.query.so, 10)); where.push(`so_id = $${params.length}`); }
+    if (req.query.days) { params.push(parseInt(req.query.days, 10)); where.push(`logged_at > now() - ($${params.length} || ' days')::interval`); }
+    const sql = `SELECT po_id, supplier, so_id, sku, name, ordered, allocated, fulfilled, on_order, in_stock, to_order, logged_at
+                 FROM demand_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+                 ORDER BY logged_at DESC, po_id DESC LIMIT ${Math.min(parseInt(req.query.limit, 10) || 500, 2000)}`;
+    const r = await pool.query(sql, params);
+    res.json({ count: r.rows.length, rows: r.rows });
+  } catch (e) {
+    if (/relation "demand_log" does not exist/i.test(e.message)) return res.json({ count: 0, rows: [], note: 'no demand logged yet (table is created on the first PO run after this deploy)' });
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // LIVE: clear a supplier from the SUPPLIERS-NEEDED tag on ordered SOs. Dry-run
