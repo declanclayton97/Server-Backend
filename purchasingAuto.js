@@ -139,8 +139,10 @@ const tagsOf = (v) => String(v || '').split('/').map((x) => x.trim()).filter(Boo
 const optValue = (opts, re) => { for (const k of Object.keys(opts || {})) if (re.test(k)) return opts[k]; return null; };
 const isNoteRow = (r) => String(r.productId) === '1000' || !r.productSku;
 // Not orderable from a supplier: BP note/message rows (pid 1000), the misc/free-text
-// product (pid 1001, e.g. "MISC1" shipping/delivery lines), or any MISC-coded sku.
-const isNonOrderableRow = (r) => isNoteRow(r) || String(r.productId) === '1001' || /^MISC/i.test(r.productSku || '');
+// product (pid 1001), or a service/personalisation/shipping sku (MISC1, OPPR = "Print
+// …"/embroidery, SHIP/CARR/DELIV = carriage). These are decoration/charges on the SO,
+// never something the supplier ships us — keep them off the PO.
+const isNonOrderableRow = (r) => isNoteRow(r) || String(r.productId) === '1001' || /^(MISC|OPPR|SHIP|CARR|DELIV)/i.test(r.productSku || '');
 
 // VAT: a BP tax code encodes its rate (T20=20%, T5=5%, T0=0%). Parse the rate so a
 // PO row carries the product's ACTUAL VAT — never a blanket T20 (which wrongly charges
