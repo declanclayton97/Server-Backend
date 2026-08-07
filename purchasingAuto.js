@@ -741,14 +741,23 @@ export async function createComboPOLive(opts = {}) {
     await liveWrite('POST', `/order-service/order/${poId}/row`, body);
     await pause(150);
   };
-  for (const l of soLines) await addRow(l.productId, l.qty, l.cost, undefined, l.taxCode);
+  // Bundle products can't be added to a PO (BP ORDC-023) — you order their components, not
+  // the kit. Skip any such row so ONE bundle doesn't abort the whole PO; report them so the
+  // components can be handled manually. Genuine (non-bundle) row errors still throw.
+  const skippedBundles = [];
+  const tryRow = async (l, from) => {
+    try { await addRow(l.productId, l.qty, l.cost, undefined, l.taxCode); }
+    catch (e) { if (/ORDC-023|bundle/i.test(e.message || '')) skippedBundles.push({ sku: l.sku, name: l.name, productId: l.productId, qty: l.qty, from }); else throw e; }
+  };
+  for (const l of soLines) await tryRow(l, 'SO');
   await addRow(1000, 1, 0, '=====LOW INV====');           // separator note row (net 0 → no tax)
-  for (const l of lowLines) await addRow(l.productId, l.qty, l.cost); // low-inv: tax from product default
+  for (const l of lowLines) await tryRow(l, 'low-inv');
 
   // note (SO#nnn render as clickable links)
   const nl = [`Auto-PO for ${supplierKey}.`];
   if (soLines.length) { nl.push('Order demand from:'); for (const c of contributors) nl.push(`  SO#${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')); }
   if (lowLines.length) { nl.push('Low-inventory replenishment:'); for (const l of lowLines) nl.push(`  ${l.sku} x${l.qty}`); }
+  if (skippedBundles.length) { nl.push('⚠ SKIPPED — bundles (cannot add to a PO; order the components manually):'); for (const b of skippedBundles) nl.push(`  ${b.sku || b.productId} x${b.qty} (${b.name || ''})`); }
   const addedOn = new Date().toISOString().replace('Z', '+00:00');
   await liveWrite('POST', `/order-service/order/${poId}/note`, { text: nl.join('\n'), addedOn, contactId, isPublic: false });
 
@@ -757,7 +766,7 @@ export async function createComboPOLive(opts = {}) {
   // the sole re-pickup guard.
   if (poField) for (const c of contributors) await liveWrite('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${poField}`, value: String(poId) }]);
 
-  return { created: true, poId, ...plan };
+  return { created: true, poId, skippedBundles, ...plan };
 }
 
 // LIVE: strip a supplier from the SUPPLIERS-NEEDED tag (PCF_SUPPLIER) on ordered

@@ -120,7 +120,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // item names ordered per SO — for the SO note
   const linesByOrder = {};
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. push the PO lines to the Fristads cart (unresolved = size/item not on the portal)
   const cartLines = await bp.getOrderCartLines(poId).catch((e) => { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); });
@@ -195,7 +195,7 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. push PO lines to the Castle basket (SKU-direct; size ignored by Castle).
   // Build from the PO-creation result (soLines/lowLines) — NOT getOrderCartLines:
@@ -288,7 +288,7 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // resolve each PO line (EAN -> search/colour/size); skip service lines; abort on genuinely-unresolved
   const { resolveSterlingLine, isNonSterlingOrderable } = await import('./sterlingResolve.js');
