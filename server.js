@@ -8489,20 +8489,21 @@ if (process.env.FRISTADS_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Fristads auto-purchase poller scheduled (weekdays 10:30 UK)');
 }
 
-// Castle auto-purchase poller — midday EVERY day (user: "mid day everyday").
+// Castle auto-purchase poller — weekdays 12:00 UK (weekends off, per user 2026-08-07).
 // Free-carriage threshold £150 ex-VAT (CASTLE_FREESHIP_THRESHOLD). State row id 2.
 if (process.env.CASTLE_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return; // weekdays only (no weekend orders)
       if (!(uk.hour === 12 && uk.minute < 30)) return; // fire in the 12:00–12:29 window
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'CASTLE' })
         .then((r) => { if (!r.skipped) console.log('[castle-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[castle-schedule] error:', e.message));
     } catch (e) { console.error('[castle-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
-  console.log('✅ Castle auto-purchase poller scheduled (daily 12:00 UK, £150 ex-VAT)');
+  console.log('✅ Castle auto-purchase poller scheduled (weekdays 12:00 UK, £150 ex-VAT)');
 }
 
 // Sterling auto-purchase poller — daily 13:00 UK (user: "like the others, for 1pm").
