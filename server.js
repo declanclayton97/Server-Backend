@@ -8512,6 +8512,51 @@ if (process.env.CASTLE_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Castle auto-purchase poller scheduled (daily 12:00 UK, £150 ex-VAT)');
 }
 
+// Sterling auto-purchase poller — daily 13:00 UK (user: "like the others, for 1pm").
+// Places via the headless portal-order worker. Threshold £150 ex-VAT, state row id 4.
+if (process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!(uk.hour === 13 && uk.minute < 30)) return; // fire in the 13:00–13:29 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'STERLING' })
+        .then((r) => { if (!r.skipped) console.log('[sterling-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[sterling-schedule] error:', e.message));
+    } catch (e) { console.error('[sterling-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Sterling auto-purchase poller scheduled (daily 13:00 UK, £150 ex-VAT)');
+}
+
+// TEMP (SANDBOX only — uses bpApi = tuffbsitc): prove the Brightpearl API can set an order's
+// reference WITHOUT touching rows/tax (the reliable replacement for the flaky web-form write
+// that zeroes tax). Reads the order, tries the update, re-reads, then restores the original ref.
+app.get('/api/purchasing/debug-ref-put', async (req, res) => {
+  try {
+    const id = req.query.orderId; if (!id) return res.status(400).json({ error: 'orderId required (SANDBOX order)' });
+    const ref = String(req.query.ref || 'REF-TEST-123');
+    const rd = async () => { const g = await purchasingAuto.bpApi('GET', `/order-service/order/${id}`); const o = Array.isArray(g) ? g[0] : g; return { reference: o.reference, tax: o.totalValue && o.totalValue.taxAmount, net: o.totalValue && o.totalValue.net, total: o.totalValue && o.totalValue.total, rows: Object.keys(o.rows || {}).length }; };
+    const before = await rd();
+    const candidates = [
+      ['PUT', `/order-service/order/${id}`, { reference: ref }],
+      ['PATCH', `/order-service/order/${id}`, [{ op: 'replace', path: '/reference', value: ref }]],
+    ];
+    const results = [];
+    let done = false;
+    for (const [m, p, b] of candidates) {
+      if (done) break;
+      try { const r = await purchasingAuto.bpApi(m, p, b); results.push({ m, resp: JSON.stringify(r).slice(0, 80) }); const chk = await rd(); if (String(chk.reference) === ref) { done = true; results[results.length - 1].worked = true; } }
+      catch (e) { results.push({ m, err: (e.message || '').slice(0, 160) }); }
+    }
+    const after = await rd();
+    let restored = null;
+    if (String(after.reference) !== String(before.reference)) {
+      try { await purchasingAuto.bpApi('PUT', `/order-service/order/${id}`, { reference: String(before.reference || '') }); restored = String((await rd()).reference) === String(before.reference || ''); } catch (e) { restored = e.message; }
+    }
+    res.json({ orderId: id, before, results, after, refChanged: String(after.reference) !== String(before.reference), taxUnchanged: String(after.tax) === String(before.tax) && after.rows === before.rows, restored });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;
   const rows = lines.map((l) => `<tr>
