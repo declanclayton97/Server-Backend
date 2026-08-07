@@ -140,10 +140,10 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
 
   // 4. pull the Fristads order number (by our PO ref); retry — it may take a moment
   let order = null;
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 20; i++) {                         // the order can take a few minutes to appear in history
     order = await jfetch('order-pull', `${altItemsUrl}/api/fristads-order?ref=${encodeURIComponent(poId)}`);
     if (order && order.found && order.orderNo) break;
-    await new Promise((r) => setTimeout(r, 5000));
+    await new Promise((r) => setTimeout(r, 15000));
   }
   if (!order || !order.found || !order.orderNo) throw stepErr('order-pull', `order not found in Fristads history for PO ${poId} after placeorder — it may not have placed (checkout status ${co.status})`);
   steps.order = { orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum };
@@ -164,14 +164,20 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     }).catch(() => {});
   }
 
-  // 5. write the Fristads RESERVATION No onto our PO reference + restore tax + status 7
-  const poRef = reservationNo || order.orderNo; // reservation no is the reference; order no is a fallback
+  // 5. mark the PO placed + link the Fristads order. Status → Placed FIRST (guaranteed via
+  // the API). Record the order number as a PO NOTE (reliable). The legacy web-form "reference"
+  // write only renders its editable form when the PO is open in a real browser, so headlessly
+  // it fails for POs — make it best-effort/non-fatal so it never blocks the finalize.
+  const poRef = order.orderNo || reservationNo;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  await bp.addOrderNoteLive(poId, `Placed with Fristads — order ${order.orderNo} (reservation ${reservationNo})${order.sum ? `, ${order.sum}` : ''}.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
+  let refWritten = false;
   try {
     await updateOrderReference(poId, String(poRef), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
     await bp.repriceComboPOLive({ poId, keepNet: true, execute: true }); // legacy reference-write zeroes row tax → restore
-    await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
-  } catch (e) { throw stepErr('link', `Fristads order ${order.orderNo} (reservation ${poRef}) WAS placed, but linking to PO ${poId} failed: ${e.message}`); }
-  steps.link = { reference: poRef, reservationNo, orderNo: order.orderNo, status: 7 };
+    refWritten = true;
+  } catch (e) { steps.linkWarn = `PO reference not written (non-fatal, recorded as a note): ${e.message}`; }
+  steps.link = { reference: poRef, refWritten, reservationNo, orderNo: order.orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
@@ -238,12 +244,15 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   }
 
   // 5. write the Castle order number onto our PO reference + restore tax + status 7
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  await bp.addOrderNoteLive(poId, `Placed with Castle — order ${order.orderNo}.`, CASTLE_SUPPLIER_CONTACT).catch(() => {});
+  let castleRefWritten = false;
   try {
     await updateOrderReference(poId, String(order.orderNo), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
     await bp.repriceComboPOLive({ poId, keepNet: true, execute: true }); // legacy reference-write zeroes row tax → restore
-    await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
-  } catch (e) { throw stepErr('link', `Castle order ${order.orderNo} WAS placed, but linking to PO ${poId} failed: ${e.message}`); }
-  steps.link = { reference: order.orderNo, orderNo: order.orderNo, status: 7 };
+    castleRefWritten = true;
+  } catch (e) { steps.linkWarn = `PO reference not written (non-fatal, recorded as a note): ${e.message}`; }
+  steps.link = { reference: order.orderNo, refWritten: castleRefWritten, orderNo: order.orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear CASTLE tag, status 22 when fully ordered, note)
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'CASTLE', poId, noteContactId: CASTLE_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
@@ -319,12 +328,15 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
 
   // link + finalise (order# onto PO ref if known, else a marker) + restore tax + status 7
   const ref = orderNo || `Placed-${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  await bp.addOrderNoteLive(poId, `Placed with Sterling — order ${ref}.`, STERLING_SUPPLIER_CONTACT).catch(() => {});
+  let sterlRefWritten = false;
   try {
     await updateOrderReference(poId, String(ref), { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
     await bp.repriceComboPOLive({ poId, keepNet: true, execute: true });
-    await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
-  } catch (e) { throw stepErr('link', `Sterling order ${ref} placed on the shop, but linking to PO ${poId} failed: ${e.message}`); }
-  steps.link = { reference: ref, orderNo, status: 7 };
+    sterlRefWritten = true;
+  } catch (e) { steps.linkWarn = `PO reference not written (non-fatal, recorded as a note): ${e.message}`; }
+  steps.link = { reference: ref, refWritten: sterlRefWritten, orderNo, status: 7 };
 
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'STERLING', poId, noteContactId: STERLING_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
   return { poId, orderNo, steps };

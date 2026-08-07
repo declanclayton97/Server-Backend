@@ -394,6 +394,14 @@ export async function debugLiveCustomFields(statusId, find) {
   return { statusId: sid, ordersScanned: ids.length, find: find || null, matchCount: hits.length, fieldCodesSeen, hits };
 }
 
+// Add a private note to any order (PO or SO) via the API — the reliable way to record the
+// supplier's order number against a PO (the legacy web-form "reference" write only renders
+// its editable form when the PO is open in a real browser, so it fails from a headless run).
+export async function addOrderNoteLive(orderId, text, contactId) {
+  const addedOn = new Date().toISOString().replace('Z', '+00:00');
+  return liveWrite('POST', `/order-service/order/${orderId}/note`, { text: String(text), addedOn, contactId: contactId || 1, isPublic: false });
+}
+
 export async function previewLive(supplierKey, orderIds) {
   const k = String(supplierKey || '').toUpperCase();
   // Use the hardcoded registry detector/poField (same as production). contactId/

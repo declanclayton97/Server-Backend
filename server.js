@@ -7693,14 +7693,24 @@ app.post('/api/purchasing/mark-po-placed-live', express.json(), async (req, res)
     if (!poId) return res.status(400).json({ error: 'poId required' });
     if (b.execute !== true) return res.json({ dryRun: true, poId, supplierOrderRef: b.supplierOrderRef || null, willSetStatus: purchasingAuto.PLACED_WITH_SUPPLIER_STATUS });
     const out = { poId };
-    if (b.supplierOrderRef) {
-      const { updateOrderReference } = await import('./bpWebSession.js');
-      out.reference = await updateOrderReference(poId, String(b.supplierOrderRef), { client: b.client || process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
-      // The legacy order-form re-submit (the only way to write a PO reference) zeroes
-      // the row tax — restore it via the API (keep the current nets, re-add rows).
-      if (b.restoreTax !== false) out.taxRestored = await purchasingAuto.repriceComboPOLive({ poId, keepNet: true, execute: true });
-    }
+    // Set status → Placed(7) FIRST. A Pending(6) PO does NOT render the editable legacy
+    // order form on patt-op.php?scode=invoice (no <form> wrapping orders_customer_ref), so
+    // the reference write can't find the form; once Placed it renders. (Found 2026-08-07
+    // finalising Sterling PO 480691 — reference-write failed at status 6, worked at 7.)
     out.status = await purchasingAuto.setOrderStatusLive(poId, purchasingAuto.PLACED_WITH_SUPPLIER_STATUS);
+    if (b.supplierOrderRef) {
+      // Reliable linkage = a PO note (always). The reference web-form write is best-effort:
+      // its editable form only renders when the PO is open in a real browser, so headlessly
+      // it fails for POs — non-fatal, and the note carries the order number regardless.
+      await purchasingAuto.addOrderNoteLive(poId, `Placed with supplier — order ${b.supplierOrderRef}.`, b.noteContactId || 1).catch(() => {});
+      try {
+        const { updateOrderReference } = await import('./bpWebSession.js');
+        out.reference = await updateOrderReference(poId, String(b.supplierOrderRef), { client: b.client || process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+        // The legacy order-form re-submit zeroes the row tax — restore it via the API.
+        if (b.restoreTax !== false) out.taxRestored = await purchasingAuto.repriceComboPOLive({ poId, keepNet: true, execute: true });
+        out.refWritten = true;
+      } catch (e) { out.refWritten = false; out.refWarn = `reference not written (recorded as a note instead): ${e.message}`; }
+    }
     res.json({ done: true, ...out });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
