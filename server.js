@@ -8512,13 +8512,14 @@ if (process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
     try {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return; // weekdays only (no weekend orders)
       if (!(uk.hour === 13 && uk.minute < 30)) return; // fire in the 13:00–13:29 window
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'STERLING' })
         .then((r) => { if (!r.skipped) console.log('[sterling-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[sterling-schedule] error:', e.message));
     } catch (e) { console.error('[sterling-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
-  console.log('✅ Sterling auto-purchase poller scheduled (daily 13:00 UK, £150 ex-VAT)');
+  console.log('✅ Sterling auto-purchase poller scheduled (weekdays 13:00 UK, £150 ex-VAT)');
 }
 
 
