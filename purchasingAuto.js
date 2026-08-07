@@ -729,6 +729,7 @@ export async function createComboPOLive(opts = {}) {
 
   const plan = {
     supplierKey, contactId, priceListId, reference, warehouseId: WAREHOUSE_ID,
+    fillExistingPoId: opts.fillExistingPoId || null,               // echoed so callers can confirm the option is wired
     soLines, separator: '=====LOW INV====', lowLines, padInfo,
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
