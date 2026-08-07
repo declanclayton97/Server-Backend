@@ -274,6 +274,38 @@ async function workerPlaceOrder({ ref, lines, execute }) {
   throw stepErr('checkout', `worker job ${jobId} timed out (still running after 25 min)`);
 }
 
+// Fallback order-number pull: if place() didn't return the Sterling OrderID, read the
+// account's Order Status (worker ordersList mode) and find the row carrying OUR ref (PO#).
+// Retries a few times — a just-placed order can take a moment to list.
+async function pullSterlingOrderNo(poId) {
+  const headers = { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const start = await jfetch('order-pull', `${STERLING_WORKER_URL}/place-order`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ supplier: 'STERLING', ref: String(poId), lines: [{ search: 'x', colour: 'x', size: 'x', qty: 1 }], execute: false, async: true, opts: { ordersList: true } }),
+      });
+      const jobId = start && start.jobId;
+      if (jobId) {
+        const deadline = Date.now() + 3 * 60 * 1000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 8000));
+          const j = await jfetch('order-pull', `${STERLING_WORKER_URL}/job/${jobId}`, { headers });
+          if (j.status === 'done') {
+            const hit = (j.rows || []).find((r) => new RegExp(`\\b${poId}\\b`).test(String(r)));
+            const m = hit && String(hit).match(/Select\s+(\d{5,})/);
+            if (m) return m[1];
+            break;
+          }
+          if (j.status === 'error') break;
+        }
+      }
+    } catch { /* try again */ }
+    await new Promise((r) => setTimeout(r, 20000));   // let the order settle into the list
+  }
+  return null;
+}
+
 // ── Sterling placement chain ─────────────────────────────────────────────────
 // Sterling's shop (sterling.famlive.net) is a WebForms site with no HTTP order API, so
 // the order is placed by the headless portal-order WORKER. Each PO line's EAN resolves
@@ -315,8 +347,9 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // drive the headless worker (async job + poll) to place the order on the shop
   const wr = await workerPlaceOrder({ ref: poId, lines, execute: true });
   if (!wr || !wr.placed) throw stepErr('checkout', `Sterling worker did not confirm placement: ${JSON.stringify((wr && (wr.results || wr.error)) || wr)}`);
-  const orderNo = wr.orderNo || null;
-  steps.checkout = { placed: true, orderNo, cartCount: wr.cartCount, added: wr.added };
+  let orderNo = wr.orderNo || null;
+  if (!orderNo) { try { orderNo = await pullSterlingOrderNo(poId); } catch { /* leave null → Placed-<poId> marker */ } }
+  steps.checkout = { placed: true, orderNo, orderNoSource: wr.orderNo ? 'place' : (orderNo ? 'order-status' : 'none'), cartCount: wr.cartCount, added: wr.added };
 
   // link + finalise (order# onto PO ref if known, else a marker) + restore tax + status 7
   const ref = orderNo || `Placed-${poId}`;
