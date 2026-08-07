@@ -142,7 +142,14 @@ const isNoteRow = (r) => String(r.productId) === '1000' || !r.productSku;
 // product (pid 1001), or a service/personalisation/shipping sku (MISC1, OPPR = "Print
 // …"/embroidery, SHIP/CARR/DELIV = carriage). These are decoration/charges on the SO,
 // never something the supplier ships us — keep them off the PO.
-const isNonOrderableRow = (r) => isNoteRow(r) || String(r.productId) === '1001' || /^(MISC|OPPR|SHIP|CARR|DELIV)/i.test(r.productSku || '');
+// Rows that are never supplier-orderable: notes, the 1001 marker, service/shipping SKUs,
+// in-house DECORATION lines (OPEM = embroider, OPPR = personalisation), the decorated bundle
+// variants (SKU carries a "#…" decoration suffix, e.g. 26706#EW — BP rejects bundles on a PO
+// anyway with ORDC-023), and the standalone "Embroidery (Our Garments)" service product.
+const isNonOrderableRow = (r) => isNoteRow(r) || String(r.productId) === '1001'
+  || /^(MISC|OPPR|OPEM|SHIP|CARR|DELIV)/i.test(r.productSku || '')
+  || /#/.test(r.productSku || '')
+  || /^embroider/i.test(r.productName || '');
 
 // VAT: a BP tax code encodes its rate (T20=20%, T5=5%, T0=0%). Parse the rate so a
 // PO row carries the product's ACTUAL VAT — never a blanket T20 (which wrongly charges
