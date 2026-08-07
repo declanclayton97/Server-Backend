@@ -8428,6 +8428,7 @@ app.post('/api/purchasing/sterling-worker-dry', express.json({ limit: '2mb' }), 
     if (!lines || !lines.length) return res.status(400).json({ error: 'lines[] required' });
     const payload = { supplier: 'STERLING', ref: String(req.body.ref || 'dry'), lines, execute: false, async: true };
     if (req.body.inspect) payload.opts = { inspect: true };
+    if (req.body.checkoutProbe) payload.opts = { checkoutProbe: true };
     const r = await fetch(`${url}/place-order`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-worker-secret': secret },
       body: JSON.stringify(payload),
