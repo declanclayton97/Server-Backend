@@ -184,7 +184,11 @@ app.get("/image", async (req, res) => {
     
     const streamOrBuffer = await sftp.get(filePath);
     res.setHeader("Content-Type", "image/jpeg");
-    
+    // Product images are keyed by product code and effectively static — let the browser/CDN
+    // cache them so the same image isn't re-fetched from SFTP + re-served on every render.
+    // This is the single biggest bandwidth saver (was: no cache header → re-transferred always).
+    res.setHeader("Cache-Control", "public, max-age=604800");   // 7 days
+
     if (streamOrBuffer.pipe) {
       streamOrBuffer.pipe(res);
       streamOrBuffer.on("end", async () => {
