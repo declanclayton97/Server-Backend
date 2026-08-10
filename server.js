@@ -7660,6 +7660,25 @@ app.post('/api/purchasing/create-combo-po-live', express.json(), async (req, res
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Preview the email a supplier PO would send — re-gathers the live combo demand (SO + low-inv,
+// dry, NO PO created) and emails the exact PO email to `to`. Used to review before a real send.
+// body: { supplier, to, send?, poId? }. send:true actually emails `to`; else returns a preview.
+app.post('/api/purchasing/email-po-preview', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    const supplier = String(b.supplier || 'UNEEK');
+    const plan = await purchasingAuto.createComboPOLive({ supplierKey: supplier.toUpperCase(), execute: false });
+    const lines = [...(plan.soLines || []), ...(plan.lowLines || [])]
+      .filter((l) => String(l.productId) !== '1000' && l.sku)
+      .map((l) => ({ sku: String(l.sku), name: l.name, qty: l.qty }));
+    if (!lines.length) return res.json({ supplier, reason: 'no demand to order', lineCount: 0 });
+    const poId = b.poId || 'PREVIEW';
+    const email = await sendPurchaseOrderEmail(supplier, poId, lines, { to: b.to, send: b.send === true });
+    res.json({ supplier, poId, soLines: (plan.soLines || []).length, lowLines: (plan.lowLines || []).length, lineCount: lines.length, units: lines.reduce((a, l) => a + l.qty, 0), email });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Demand audit log — why a PO ordered the quantities it did. Every SO-demand line the flow
 // considered is recorded at PO-creation time with its ordered/allocated/fulfilled/on-order/
 // in-stock → to-order figures. Query by PO (?po=), SKU (?sku=), or recent days (?days=).
