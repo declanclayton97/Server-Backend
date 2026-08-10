@@ -7702,6 +7702,18 @@ app.get('/api/purchasing/demand-log', async (req, res) => {
   }
 });
 
+// LIVE read-only: a PO's consolidated cart lines (sku/size/qty, productId 1000 dropped,
+// duplicate SKU rows summed). Used to (re)load a supplier basket when completing a PO whose
+// scheduled run failed mid-flow. GET ?poId=<id>.
+app.get('/api/purchasing/po-cart-lines', async (req, res) => {
+  const poId = parseInt(req.query.poId, 10);
+  if (!poId) return res.status(400).json({ error: 'poId required' });
+  try {
+    const lines = await purchasingAuto.getOrderCartLines(poId);
+    res.json({ poId, lineCount: lines.length, units: lines.reduce((a, l) => a + (l.qty || 0), 0), lines });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // LIVE: clear a supplier from the SUPPLIERS-NEEDED tag on ordered SOs. Dry-run
 // unless body { execute: true }. Optional setOrderedStatus flips status to 22.
 app.post('/api/purchasing/finalize-tags-live', express.json(), async (req, res) => {
