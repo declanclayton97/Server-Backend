@@ -8014,7 +8014,11 @@ app.get('/api/purchasing/weight-put-test', async (req, res) => {
 // product custom fields / metadata on the live account (sandbox has none defined).
 app.get('/api/purchasing/bp-live-get', async (req, res) => {
   const path = String(req.query.path || '');
-  if (!/^\/product-service\//.test(path)) return res.status(400).json({ error: 'path must start with /product-service/' });
+  // Read-only GET. order-service is allowed too so order rows can be inspected (e.g. why
+  // a row shows no item code); this endpoint cannot write, whatever path it is given.
+  if (!/^\/(product-service|order-service|warehouse-service)\//.test(path)) {
+    return res.status(400).json({ error: 'path must start with /product-service/, /order-service/ or /warehouse-service/' });
+  }
   try { res.json(await bpLive('GET', path)); }
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
