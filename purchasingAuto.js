@@ -598,7 +598,14 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     const tag = cf.PCF_SUPPLIER;
     if (!tag || isLeaveNote(tag)) continue;
     if (!tagsOf(tag).some((t) => t.toUpperCase() === supplierKey)) continue;
-    if (poField && cf[poField]) continue;
+    // Do NOT skip SOs already stamped with this supplier's poField. Still being TAGGED for the
+    // supplier (checked just above; the finalize removes the tag once fully ordered) means it
+    // still needs ordering — a stamp only records a prior PO. Skipping stamped SOs permanently
+    // buried RESIDUAL demand from partial/re-allocated orders (e.g. 480109 stamped
+    // PCF_CASTLEPO=480396 but still needed 1× 710-GRY-32L). The toOrder calc below
+    // (ordered − allocated − fulfilled − onOrder) already prevents any double-order: an SO whose
+    // prior PO is still open shows that qty as onOrder → toOrder 0. Runs are sequential (lock),
+    // so there's no stamp-then-regather race within a run.
     const order = (await liveGet(`/order-service/order/${id}`))[0];
     await pause(120);
     // Which rows to order (keep the rowId — needed to look up allocation).
