@@ -7850,8 +7850,13 @@ app.get('/api/purchasing/ebay-ship-probe', async (req, res) => {
   };
   try {
     const order = (await purchasingAuto.bpApi('GET', `/order-service/order/${orderId}`))[0];
-    const shipRow = Object.entries(order.orderRows || {})
-      .find(([, r]) => String(r.productId) === '1000' && /^shipping costs:/i.test(String(r.productName || '')));
+    // ?rowId= targets a specific row — needed to put a row BACK after a test, since by
+    // then it no longer matches the "product 1000 + Shipping Costs:" signature.
+    const wantRow = req.query.rowId ? String(req.query.rowId) : null;
+    const shipRow = wantRow
+      ? Object.entries(order.orderRows || {}).find(([id]) => id === wantRow)
+      : Object.entries(order.orderRows || {})
+        .find(([, r]) => String(r.productId) === '1000' && /^shipping costs:/i.test(String(r.productName || '')));
     let out;
     if (action === 'addrow') {
       // Can we ADD a product row to a paid order (leaving the original in place)?
