@@ -7833,6 +7833,60 @@ app.get('/api/purchasing/debug-bp', async (req, res) => {
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// SANDBOX-ONLY probes for the eBay shipping mapper. Deleting a row from an eBay order is
+// refused (ORDC-053 "Order has payments" — eBay orders arrive PAID), so these establish
+// what Brightpearl WILL allow on a paid order instead. Read the reply, don't trust a 200:
+// each probe reports the raw BP error so we can see exactly which door is shut.
+//   /api/purchasing/ebay-ship-probe?orderId=436676&action=addrow|shipmethod|rowput&value=104
+app.get('/api/purchasing/ebay-ship-probe', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const orderId = parseInt(req.query.orderId, 10);
+  const action = String(req.query.action || '');
+  const value = req.query.value;
+  if (!orderId || !action) return res.status(400).json({ error: 'orderId and action required' });
+  const attempt = async (label, fn) => {
+    try { return { probe: label, ok: true, result: await fn() }; }
+    catch (e) { return { probe: label, ok: false, error: String(e.message || e).slice(0, 400) }; }
+  };
+  try {
+    const order = (await purchasingAuto.bpApi('GET', `/order-service/order/${orderId}`))[0];
+    const shipRow = Object.entries(order.orderRows || {})
+      .find(([, r]) => String(r.productId) === '1000' && /^shipping costs:/i.test(String(r.productName || '')));
+    let out;
+    if (action === 'addrow') {
+      // Can we ADD a product row to a paid order (leaving the original in place)?
+      out = await attempt('POST row on a paid order', () => purchasingAuto.bpApi('POST', `/order-service/order/${orderId}/row`, {
+        productId: parseInt(value, 10) || 27570,
+        productName: 'PROBE shipping row',
+        quantity: { magnitude: '1' },
+        rowValue: { taxCode: 'T20', rowNet: { currency: 'GBP', value: '0.00' }, rowTax: { currency: 'GBP', value: '0.00' } },
+      }));
+    } else if (action === 'shipmethod') {
+      // Can we set the ORDER-level shipping method? This touches no money, so it may be
+      // allowed where a row edit is not — and it's what drives picking and labels.
+      out = await attempt('PATCH order delivery.shippingMethodId', () => purchasingAuto.bpApi(
+        'PATCH', `/order-service/order/${orderId}`,
+        [{ op: 'replace', path: '/delivery/shippingMethodId', value: parseInt(value, 10) || 104 }]));
+    } else if (action === 'rowput') {
+      // Does a row-update endpoint exist at all? (Not in the docs; worth one probe.)
+      if (!shipRow) return res.status(400).json({ error: 'no shipping row on this order' });
+      out = await attempt('PUT row', () => purchasingAuto.bpApi('PUT', `/order-service/order/${orderId}/row/${shipRow[0]}`, {
+        productId: parseInt(value, 10) || 27570,
+      }));
+    } else {
+      return res.status(400).json({ error: 'action must be addrow | shipmethod | rowput' });
+    }
+    const after = (await purchasingAuto.bpApi('GET', `/order-service/order/${orderId}`))[0];
+    res.json({
+      orderId, action, paymentStatus: order.orderPaymentStatus,
+      ...out,
+      deliveryBefore: order.delivery, deliveryAfter: after.delivery,
+      totalBefore: order.totalValue, totalAfter: after.totalValue,
+      rowsAfter: Object.entries(after.orderRows || {}).map(([id, r]) => ({ id, productId: r.productId, name: r.productName, net: r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value })),
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // SANDBOX-ONLY proving ground for the eBay shipping mapper (the Apps Script job that
 // repoints Brightpearl's generic "Shipping Costs: UK_x" row at a real product).
 // Brightpearl has no row-update endpoint, so the swap is delete-then-add — and that has
