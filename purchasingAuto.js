@@ -38,7 +38,11 @@ const DEMAND_STATUS = 23;   // Stock needs ordering
 //   1 Draft / Quote · 2 New order · 18 Quote sent · 36 Ignore – awaiting deletion ·
 //   53 Sample orders · 60 Order Confirmation Sent · 87 Pending Magento Orders ·
 //   89 Belgrade Pending Orders · 114 Cancellation Pending
-export const NON_DEMAND_SO_STATUS_IDS = [1, 2, 18, 36, 53, 60, 87, 89, 114];
+// Added 2026-08-10 (not committed demand): 34 Proof Required · 35 Proof Sent ·
+//   44 Awaiting payment before despatch · 49 Pending Room–Awaiting Instruction ·
+//   51 Await payment before Ordering in · 55 ON STOP DO NOT PROCESS ·
+//   78 Awaiting Payment before Workshop · 117 Await Payment – Link Sent
+export const NON_DEMAND_SO_STATUS_IDS = [1, 2, 18, 34, 35, 36, 44, 49, 51, 53, 55, 60, 78, 87, 89, 114, 117];
 const ORDERED_STATUS = 22;  // Ordered Stock Awaiting Delivery
 const PENDING_PO_STATUS = 6; // (informational — POs default to this on create)
 const WAREHOUSE_ID = 2;
