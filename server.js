@@ -7836,6 +7836,49 @@ app.get('/api/purchasing/debug-fields', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// SANDBOX-ONLY. PUT on a free-text order row sets productId but leaves productSku empty,
+// so Brightpearl's Item code column stays blank on the rewritten eBay shipping line. This
+// probes whether sending productSku (and/or productPrice) in the body populates it.
+// BP_TEST creds — cannot reach live.  ?orderId=&rowId=&to=&sku=&label=&execute=1
+app.get('/api/purchasing/ebay-row-sku-probe', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const orderId = parseInt(req.query.orderId, 10);
+  const rowId = String(req.query.rowId || '');
+  const to = parseInt(req.query.to, 10) || 0;
+  if (!orderId || !rowId || !to) return res.status(400).json({ error: 'orderId, rowId and to required' });
+  const shape = (o) => Object.entries(o.orderRows || {}).map(([id, r]) => ({
+    id, productId: r.productId, productSku: r.productSku, productName: r.productName,
+    net: r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value,
+  }));
+  try {
+    const get = async () => (await purchasingAuto.bpApi('GET', `/order-service/order/${orderId}`))[0];
+    const before = await get();
+    const src = (before.orderRows || {})[rowId];
+    if (!src) return res.status(400).json({ error: `row ${rowId} not on order ${orderId}` });
+    const rv = src.rowValue || {};
+    const body = {
+      productId: to,
+      productName: String(req.query.label || src.productName),
+      quantity: { magnitude: String(src.quantity.magnitude) },
+      rowValue: {
+        taxCode: rv.taxCode,
+        rowNet: { currency: (rv.rowNet && rv.rowNet.currencyCode) || 'GBP', value: String(rv.rowNet.value) },
+        rowTax: { currency: (rv.rowTax && rv.rowTax.currencyCode) || 'GBP', value: String(rv.rowTax.value) },
+      },
+    };
+    if (req.query.sku) body.productSku = String(req.query.sku);   // the thing under test
+    if (src.nominalCode) body.nominalCode = src.nominalCode;
+    if (req.query.execute !== '1') return res.json({ dryRun: true, orderId, rowId, body, rowsBefore: shape(before) });
+    let err = null;
+    try { await purchasingAuto.bpApi('PUT', `/order-service/order/${orderId}/row/${rowId}`, body); }
+    catch (e) { err = String(e.message || e).slice(0, 300); }
+    const after = await get();
+    res.json({ orderId, rowId, sentSku: body.productSku || null, error: err,
+      totalsUnchanged: JSON.stringify(before.totalValue) === JSON.stringify(after.totalValue),
+      rowsBefore: shape(before), rowsAfter: shape(after) });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Create the Pending PO (+ source note, + stamp PO number on each order).
 // Pass { dryRun:true } to preview via POST, or { orderIds:[...] } to scope.
 app.post('/api/purchasing/create-po', async (req, res) => {
