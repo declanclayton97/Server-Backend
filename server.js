@@ -7879,6 +7879,56 @@ app.get('/api/purchasing/ebay-row-sku-probe', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// SANDBOX-ONLY. The fallback for getting a real SKU onto an eBay shipping line when the
+// row cannot be deleted: zero the free-text row, then ADD a proper product row carrying
+// the money (only a created row gets a productSku). Leaves two lines — the point of this
+// probe is to confirm the order TOTAL is unchanged and the new row really has a SKU.
+// PUT-first on purpose: if the POST then fails the order is briefly under-valued but the
+// original row is still free-text and can be PUT back, whereas POST-first would leave it
+// over-valued with no easy undo.   ?orderId=&rowId=&to=&label=&execute=1
+app.get('/api/purchasing/ebay-row-split', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const orderId = parseInt(req.query.orderId, 10);
+  const rowId = String(req.query.rowId || '');
+  const to = parseInt(req.query.to, 10) || 0;
+  if (!orderId || !rowId || !to) return res.status(400).json({ error: 'orderId, rowId and to required' });
+  const shape = (o) => ({ total: o.totalValue, rows: Object.entries(o.orderRows || {}).map(([id, r]) => ({
+    id, productId: r.productId, productSku: r.productSku === undefined ? '<absent>' : r.productSku,
+    net: r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value, name: r.productName })) });
+  try {
+    const get = async () => (await purchasingAuto.bpApi('GET', `/order-service/order/${orderId}`))[0];
+    const beforeRaw = await get();
+    const src = (beforeRaw.orderRows || {})[rowId];
+    if (!src) return res.status(400).json({ error: `row ${rowId} not on order ${orderId}` });
+    const rv = src.rowValue || {};
+    const cur = { code: rv.taxCode, net: String(rv.rowNet.value), tax: String(rv.rowTax.value),
+      ccy: (rv.rowNet && rv.rowNet.currencyCode) || 'GBP', qty: String(src.quantity.magnitude), nominal: src.nominalCode };
+    const zeroBody = {
+      productId: src.productId, productName: 'Shipping superseded — see line below',
+      quantity: { magnitude: cur.qty },
+      rowValue: { taxCode: cur.code, rowNet: { currency: cur.ccy, value: '0.00' }, rowTax: { currency: cur.ccy, value: '0.00' } },
+    };
+    const newBody = {
+      productId: to, productName: String(req.query.label || 'Shipping'),
+      quantity: { magnitude: cur.qty },
+      rowValue: { taxCode: cur.code, rowNet: { currency: cur.ccy, value: cur.net }, rowTax: { currency: cur.ccy, value: cur.tax } },
+    };
+    if (cur.nominal) { zeroBody.nominalCode = cur.nominal; newBody.nominalCode = cur.nominal; }
+    if (req.query.execute !== '1') return res.json({ dryRun: true, orderId, rowId, before: shape(beforeRaw), zeroBody, newBody });
+
+    await purchasingAuto.bpApi('PUT', `/order-service/order/${orderId}/row/${rowId}`, zeroBody);
+    await new Promise((s) => setTimeout(s, 300));
+    let addErr = null;
+    try { await purchasingAuto.bpApi('POST', `/order-service/order/${orderId}/row`, newBody); }
+    catch (e) { addErr = String(e.message || e).slice(0, 300); }
+    const after = shape(await get());
+    const before = shape(beforeRaw);
+    res.json({ orderId, rowId, addError: addErr,
+      totalsUnchanged: JSON.stringify(before.total) === JSON.stringify(after.total),
+      movedNet: cur.net, movedTax: cur.tax, before, after });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Create the Pending PO (+ source note, + stamp PO number on each order).
 // Pass { dryRun:true } to preview via POST, or { orderIds:[...] } to scope.
 app.post('/api/purchasing/create-po', async (req, res) => {
