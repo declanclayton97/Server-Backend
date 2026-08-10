@@ -132,35 +132,52 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
 
   // 3. checkout / placeorder (Mark of goods=WORKWEAR, order ref = our PO#)
   const co = await jfetch('checkout', `${altItemsUrl}/api/fristads-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goodsMark: 'WORKWEAR', orderRef: String(poId), execute: true }) });
-  const reservationNo = co.reservationNo; // Fristads "Reservation No" (= basket id) → goes on our PO ref
+  const reservationNo = co.reservationNo; // Fristads "Reservation No" (= basket id)
   steps.checkout = { allOk: co.allOk, status: co.status, reservationNo };
   if (!co.allOk) throw stepErr('checkout', `checkout fields didn't set/verify on the portal: ${JSON.stringify(co.verify || co)}`);
-  // placeorder redirects to the credit-account payment step (order gets placed there);
-  // we confirm via the order-history pull, so a null orderNo from checkout is expected.
 
-  // 4. pull the Fristads order number (by our PO ref); retry — it may take a moment
-  let order = null;
-  for (let i = 0; i < 20; i++) {                         // the order can take a few minutes to appear in history
-    order = await jfetch('order-pull', `${altItemsUrl}/api/fristads-order?ref=${encodeURIComponent(poId)}`);
-    if (order && order.found && order.orderNo) break;
-    await new Promise((r) => setTimeout(r, 15000));
+  // 3b. Confirm placement by the BASKET CLEARING — immediate + reliable. placeorder redirects
+  // to the credit-account payment step and the basket empties once the order commits; this is
+  // the authoritative placement signal (the order NUMBER only appears in history later, and
+  // indexing can lag 20+ min). If the basket doesn't clear, the order did NOT place → abort.
+  let cartCleared = false;
+  for (let i = 0; i < 8; i++) {
+    const b = await jfetch('place-confirm', `${altItemsUrl}/api/fristads-basket`).catch(() => null);
+    if (b && Number(b.cartCount) === 0) { cartCleared = true; break; }
+    await new Promise((r) => setTimeout(r, 8000));
   }
-  if (!order || !order.found || !order.orderNo) throw stepErr('order-pull', `order not found in Fristads history for PO ${poId} after placeorder — it may not have placed (checkout status ${co.status})`);
-  steps.order = { orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum };
+  if (!cartCleared) throw stepErr('checkout', `placeorder did not clear the Fristads basket — the order may not have placed (checkout status ${co.status})`);
+  steps.checkout.placed = true;
+
+  // 4. pull the Fristads order number by our PO ref (= the ExternalVerificationNo on the order).
+  // Try for ~7 min but DO NOT fail the run if it hasn't indexed — placement is already confirmed
+  // above, so throwing here would leave the order placed-but-unlinked and the SOs un-finalised
+  // (re-order risk). If it's not visible yet, fall back to the reservation no + a note; the real
+  // order number can be backfilled later (our PO# is on the Fristads order as the search key).
+  let order = null;
+  for (let i = 0; i < 21; i++) {
+    order = await jfetch('order-pull', `${altItemsUrl}/api/fristads-order?ref=${encodeURIComponent(poId)}`).catch(() => null);
+    if (order && order.found && order.orderNo) break;
+    await new Promise((r) => setTimeout(r, 20000));
+  }
+  const orderNo = (order && order.found && order.orderNo) ? order.orderNo : null;
+  steps.order = orderNo
+    ? { orderNo, orderStatus: order.orderStatus, sum: order.sum }
+    : { orderNo: null, pending: true, note: `order# not indexed within ~7min — reference set to reservation ${reservationNo}; backfill from our PO ref later` };
 
   // price sanity check (NON-FATAL): the Fristads order total (what they'll invoice,
   // ex-VAT) vs our PO net. A gap means a BP cost price is stale → alert so it can be
   // adjusted; the order still stands (Fristads charges their price regardless).
   const poNet = [...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (l.cost || 0) * l.qty, 0);
-  const fristadsTotal = parseFloat(String(order.sum || '').replace(/[^\d.]/g, '')) || 0;
+  const fristadsTotal = parseFloat(String((order && order.sum) || '').replace(/[^\d.]/g, '')) || 0; // 0 if order# not indexed yet (skips the check)
   const priceGap = fristadsTotal ? +(fristadsTotal - poNet).toFixed(2) : 0;
   steps.priceCheck = { fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap };
   if (fristadsTotal && Math.abs(priceGap) > 0.50) {
     const breakdown = [...(po.soLines || []), ...(po.lowLines || [])].map((l) => `${l.qty} × ${l.sku} — our £${(l.cost || 0).toFixed(2)}/ea (${l.name})`);
     await logPurchasingError(pool, {
       supplier: 'FRISTADS', step: 'price-check',
-      message: `Prices don't match: Fristads order total £${fristadsTotal} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}). A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${order.orderNo} still placed.`,
-      context: { poId, orderNo: order.orderNo, fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap, poLines: breakdown },
+      message: `Prices don't match: Fristads order total £${fristadsTotal} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}). A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${orderNo} still placed.`,
+      context: { poId, orderNo, fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap, poLines: breakdown },
     }).catch(() => {});
   }
 
@@ -168,17 +185,20 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // the API). Record the order number as a PO NOTE (reliable). The legacy web-form "reference"
   // write only renders its editable form when the PO is open in a real browser, so headlessly
   // it fails for POs — make it best-effort/non-fatal so it never blocks the finalize.
-  const poRef = order.orderNo;                           // the Fristads order number goes on the PO reference
+  // Reference = the Fristads order number if it's indexed; otherwise the reservation no as a
+  // stand-in (the real order# can be backfilled — our PO# is on the Fristads order to find it).
+  const poRef = orderNo || `Reservation ${reservationNo}`;
   await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
   let refWritten = false;
   try { await bp.setOrderReferenceLive(poId, poRef); refWritten = true; }   // API PATCH — tax-safe, no reprice
-  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Fristads — order ${order.orderNo} (reservation ${reservationNo}). Reference-set failed: ${e.message}`, FRISTADS_SUPPLIER_CONTACT).catch(() => {}); }
-  steps.link = { reference: poRef, refWritten, reservationNo, orderNo: order.orderNo, status: 7 };
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Fristads — order ${orderNo || '(order# pending indexing)'} (reservation ${reservationNo}). Reference-set failed: ${e.message}`, FRISTADS_SUPPLIER_CONTACT).catch(() => {}); }
+  if (!orderNo) await bp.addOrderNoteLive(poId, `Placed with Fristads (reservation ${reservationNo}). Order# had not indexed yet, so the reference is the reservation no — our PO#${poId} is on the Fristads order (ExternalVerificationNo); backfill the real order# when it appears in history.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
+  steps.link = { reference: poRef, refWritten, reservationNo, orderNo: orderNo || null, orderNoPending: !orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
 
-  return { poId, reservationNo: poRef, orderNo: order.orderNo, orderStatus: order.orderStatus, sum: order.sum, steps };
+  return { poId, reservationNo: poRef, orderNo, orderStatus: order && order.orderStatus, sum: order && order.sum, orderNoPending: !orderNo, steps };
 }
 
 // ── Castle placement chain ───────────────────────────────────────────────────
