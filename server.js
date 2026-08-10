@@ -7833,6 +7833,78 @@ app.get('/api/purchasing/debug-bp', async (req, res) => {
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// SANDBOX-ONLY proving ground for the eBay shipping mapper (the Apps Script job that
+// repoints Brightpearl's generic "Shipping Costs: UK_x" row at a real product).
+// Brightpearl has no row-update endpoint, so the swap is delete-then-add — and that has
+// only ever been proven on purchase orders. This runs it on a real SALES order in the
+// sandbox and returns before/after totals so we can see the money didn't move.
+// Uses purchasingAuto.bpApi = BP_TEST creds, so it CANNOT reach the live account.
+// Dry by default. Reverse a swap by calling it again with from/to exchanged.
+//   /api/purchasing/ebay-ship-swap?orderId=427375&to=27570&label=Test&execute=1
+app.get('/api/purchasing/ebay-ship-swap', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const orderId = parseInt(req.query.orderId, 10);
+  if (!orderId) return res.status(400).json({ error: 'orderId required' });
+  const from = String(req.query.from || '1000');
+  const to = parseInt(req.query.to, 10) || 0;
+  const label = req.query.label ? String(req.query.label) : null;
+  const prefix = String(req.query.prefix || 'shipping costs:').toLowerCase();
+  const execute = req.query.execute === '1';
+  const summarise = (o) => ({
+    status: o.orderStatus,
+    total: o.totalValue,
+    rows: Object.entries(o.orderRows || {}).map(([rowId, r]) => ({
+      rowId, productId: r.productId, productName: r.productName,
+      qty: r.quantity && r.quantity.magnitude,
+      net: r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value,
+      tax: r.rowValue && r.rowValue.rowTax && r.rowValue.rowTax.value,
+      taxCode: r.rowValue && r.rowValue.taxCode, nominalCode: r.nominalCode,
+    })),
+  });
+  try {
+    const get = async () => (await purchasingAuto.bpApi('GET', `/order-service/order/${orderId}`))[0];
+    const beforeRaw = await get();
+    const before = summarise(beforeRaw);
+    const targets = before.rows.filter((r) => String(r.productId) === from
+      && String(r.productName || '').toLowerCase().startsWith(prefix));
+    if (!targets.length) return res.json({ orderId, before, targets: [], note: `no rows on product ${from} starting "${prefix}"` });
+    if (!to) return res.status(400).json({ error: 'to (productId) required' });
+    if (!execute) return res.json({ dryRun: true, orderId, before, targets, wouldBecome: { productId: to, productName: label } });
+
+    const sent = [];
+    for (const t of targets) {
+      const src = beforeRaw.orderRows[t.rowId];
+      const rv = src.rowValue || {};
+      // Copy the money verbatim. NOTE the asymmetry: BP RETURNS currencyCode but ACCEPTS
+      // currency on write. Also preserve nominalCode so the row keeps posting to the same
+      // account rather than inheriting the new product's default.
+      const body = {
+        productId: to,
+        quantity: { magnitude: String(src.quantity.magnitude) },
+        rowValue: {
+          taxCode: rv.taxCode,
+          rowNet: { currency: (rv.rowNet && rv.rowNet.currencyCode) || 'GBP', value: String(rv.rowNet.value) },
+          rowTax: { currency: (rv.rowTax && rv.rowTax.currencyCode) || 'GBP', value: String(rv.rowTax.value) },
+        },
+      };
+      if (label) body.productName = label;
+      if (src.nominalCode) body.nominalCode = src.nominalCode;
+      await purchasingAuto.bpApi('DELETE', `/order-service/order/${orderId}/row/${t.rowId}`);
+      await new Promise((s) => setTimeout(s, 250));
+      await purchasingAuto.bpApi('POST', `/order-service/order/${orderId}/row`, body);
+      await new Promise((s) => setTimeout(s, 250));
+      sent.push({ replacedRowId: t.rowId, body });
+    }
+    const after = summarise(await get());
+    res.json({
+      orderId, executed: true, sent,
+      totalsUnchanged: JSON.stringify(before.total) === JSON.stringify(after.total),
+      before: { total: before.total, rows: before.rows },
+      after: { total: after.total, rows: after.rows },
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Apply an identifier to a product via the safe merge-write helper. This is the
 // write primitive for the stock auto-heal (fill a blank EAN so lookups resolve).
 // body: { productId, ean?, sku? }. Preserves all other identifiers; reversible by
