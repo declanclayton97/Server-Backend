@@ -7732,6 +7732,19 @@ app.post('/api/purchasing/clear-po-field-live', express.json(), async (req, res)
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// LIVE: fire Brightpearl's NATIVE "Email PO" (real BP PDF) via the File Uploader web session
+// (template_print.php). Recipient = `to` (only email_to_0; other rows cleared). body:
+// { poId, contactId, to, subject?, message?, send }. send:false (default) = DRY-RUN: GET the
+// send form and return what it parsed (token, recipient rows, defaults) WITHOUT sending.
+app.post('/api/purchasing/email-po-bp', express.json(), async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.poId || !b.contactId || !b.to) return res.status(400).json({ error: 'poId, contactId and to required' });
+    const bp = await import('./bpWebSession.js');
+    res.json(await bp.emailOrderDocument(b.poId, { contactId: b.contactId, to: b.to, subject: b.subject, message: b.message, templateTypeId: b.templateTypeId || 7, send: b.send === true }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // LIVE: clear a supplier from the SUPPLIERS-NEEDED tag on ordered SOs. Dry-run
 // unless body { execute: true }. Optional setOrderedStatus flips status to 22.
 app.post('/api/purchasing/finalize-tags-live', express.json(), async (req, res) => {

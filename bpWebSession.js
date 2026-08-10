@@ -526,4 +526,54 @@ async function getOrderAllocations(orderId, { client = BP_CLIENT } = {}) {
   return alloc;
 }
 
-export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, getOrderAllocations, lockedValidateOrder, orderAjaxPost, BP_HOST };
+// Trigger Brightpearl's NATIVE "Email order document" (the UI's Email button) via the legacy
+// template_print.php endpoint — this generates BP's real PDF and emails it. Captured from a HAR:
+//   POST /template_print.php?return-to-oid=<id>&oID=<id>&contacts_id=<contact>&template_type_id=7
+//   body (urlencoded): email_index_N, email_to_N (recipient rows), email_cc_N, email_bcc_N,
+//   email_subject, email_message, send_type=pdf, send_from_me=1, __fc_csrf_token.
+// Recipient control: we set ONLY email_to_0 = `to` and CLEAR every other pre-filled row, so the
+// document goes to exactly one address (BP pre-fills the supplier's + account emails otherwise).
+// send:false = DRY-RUN — GETs the form and returns what it parsed (token, recipient rows, defaults)
+// WITHOUT sending. send:true actually emails.
+async function emailOrderDocument(orderId, { contactId, to, subject, message, templateTypeId = 7, send = false, client = BP_CLIENT } = {}) {
+  if (!orderId || !contactId || !to) throw new Error('orderId, contactId and to are required');
+  const url = `${BP_HOST}/template_print.php?return-to-oid=${encodeURIComponent(orderId)}&oID=${encodeURIComponent(orderId)}&contacts_id=${encodeURIComponent(contactId)}&template_type_id=${encodeURIComponent(templateTypeId)}`;
+  // 1. GET the send form → __fc_csrf_token + the recipient rows + default subject/message.
+  const g = await fetchAuthed(url, { client, method: 'GET' });
+  const html = g.html || '';
+  if (looksLikeLoginPage(html)) throw new Error(`template_print not authenticated for ${orderId}`);
+  const token = (html.match(/name="__fc_csrf_token"[^>]*value="([^"]+)"/i) || html.match(/name=["']__fc_csrf_token["'][^>]*content=["']([^"']+)["']/i) || html.match(/__fc_csrf_token["'][^>]*(?:value|content)=["']([^"']+)["']/i) || [])[1];
+  const toRows = [...new Set([...html.matchAll(/name="(email_to_\d+)"/gi)].map((m) => m[1]))];
+  const idxRows = [...new Set([...html.matchAll(/name="(email_index_\d+)"/gi)].map((m) => m[1]))];
+  const defaults = {};
+  for (const m of html.matchAll(/name="(email_(?:to|cc|bcc)_\d+)"[^>]*value="([^"]*)"/gi)) defaults[m[1]] = m[2];
+  const defSubject = (html.match(/name="email_subject"[^>]*value="([^"]*)"/i) || [])[1] || '';
+  const defMessage = (html.match(/name="email_message"[^>]*>([\s\S]*?)<\/textarea>/i) || [, ''])[1].trim();
+  const parsed = { tokenFound: !!token, tokenPrefix: token ? token.slice(0, 14) + '…' : null, toRows, idxRows, defaultRecipients: defaults, defSubject, defMessagePreview: defMessage.slice(0, 120), formPresent: /template_print\.php/i.test(html) && (toRows.length > 0 || html.includes('email_to_0')) };
+  if (!send) return { dryRun: true, orderId, contactId, would_send_to: to, parsed };
+  if (!token) throw new Error('no __fc_csrf_token on template_print form — cannot send');
+  // 2. POST — only email_to_0 = `to`, all other recipient/cc/bcc rows cleared.
+  const rows = toRows.length ? toRows : ['email_to_0'];
+  const body = new URLSearchParams();
+  body.set('return-to-oid', String(orderId));
+  (idxRows.length ? idxRows : ['email_index_0']).forEach((f) => body.set(f, f));
+  rows.forEach((f, i) => { body.set(f, i === 0 ? to : ''); body.set(f.replace('_to_', '_cc_'), ''); body.set(f.replace('_to_', '_bcc_'), ''); });
+  body.set('email_to_0', to); // guarantee slot 0 holds the intended recipient
+  body.set('email_subject', subject || defSubject || 'TuffShop Purchase Order');
+  body.set('email_message', message || defMessage || 'Good Afternoon,\n\nPlease process the order as attached.\n\nAny out of stock items are fine to go onto back order but please advise us of these items by email.');
+  body.set('quickNote', '');
+  body.set('send_type', 'pdf');
+  body.set('send_from_me', '1');
+  body.set('__fc_csrf_token', token);
+  const jar = (await getSession(client)).jar;
+  const cookieHeader = await getCookieHeader(jar, url);
+  const res = await fetch(url, { method: 'POST', headers: { ...BROWSER_HEADERS, Cookie: cookieHeader, 'Content-Type': 'application/x-www-form-urlencoded', Referer: url, Origin: BP_HOST }, body: body.toString(), redirect: 'manual' });
+  await ingestCookies(jar, res, url);
+  const resBody = await res.text();
+  const okStatus = res.status >= 200 && res.status < 400;
+  // BP re-renders the form page on success; a hard error would show an error banner instead.
+  const errored = /class="[^"]*error[^"]*"|Fatal error|not authorised|permission/i.test(resBody.slice(0, 4000));
+  return { sent: okStatus && !errored, status: res.status, sentTo: to, orderId, errored };
+}
+
+export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, getOrderAllocations, lockedValidateOrder, orderAjaxPost, emailOrderDocument, BP_HOST };
