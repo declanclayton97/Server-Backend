@@ -7868,11 +7868,25 @@ app.get('/api/purchasing/ebay-ship-probe', async (req, res) => {
         'PATCH', `/order-service/order/${orderId}`,
         [{ op: 'replace', path: '/delivery/shippingMethodId', value: parseInt(value, 10) || 104 }]));
     } else if (action === 'rowput') {
-      // Does a row-update endpoint exist at all? (Not in the docs; worth one probe.)
+      // PUT /row/{id} DOES exist — a bare body returns ORDC-042 "not supplied", i.e. a
+      // validation error rather than 404. Updating in place avoids the DELETE that
+      // ORDC-053 blocks on a paid order, so send a complete body copied off the row.
       if (!shipRow) return res.status(400).json({ error: 'no shipping row on this order' });
-      out = await attempt('PUT row', () => purchasingAuto.bpApi('PUT', `/order-service/order/${orderId}/row/${shipRow[0]}`, {
+      const src = shipRow[1];
+      const rv = src.rowValue || {};
+      const body = {
         productId: parseInt(value, 10) || 27570,
-      }));
+        productName: String(req.query.label || 'Shipping Royal Mail Tracked 24 (UK_RoyalMailNextDay)'),
+        quantity: { magnitude: String(src.quantity.magnitude) },
+        rowValue: {
+          taxCode: rv.taxCode,
+          rowNet: { currency: (rv.rowNet && rv.rowNet.currencyCode) || 'GBP', value: String(rv.rowNet.value) },
+          rowTax: { currency: (rv.rowTax && rv.rowTax.currencyCode) || 'GBP', value: String(rv.rowTax.value) },
+        },
+      };
+      if (src.nominalCode) body.nominalCode = src.nominalCode;
+      out = await attempt('PUT row (full body)', () => purchasingAuto.bpApi('PUT', `/order-service/order/${orderId}/row/${shipRow[0]}`, body));
+      out.sentBody = body;
     } else {
       return res.status(400).json({ error: 'action must be addrow | shipmethod | rowput' });
     }
