@@ -7714,6 +7714,24 @@ app.get('/api/purchasing/po-cart-lines', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// LIVE: clear a supplier PO custom field (e.g. PCF_CASTLEPO) off SOs when the PO was
+// scrapped/voided but its number is still stamped. body: { orderIds, poField|supplier,
+// ifValue?, execute }. Only removes when the current value matches ifValue (safe).
+app.post('/api/purchasing/clear-po-field-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    const field = b.poField || (purchasingAuto.SUPPLIERS && b.supplier ? (purchasingAuto.SUPPLIERS[String(b.supplier).toUpperCase()] || {}).poField : null);
+    if (!field) return res.status(400).json({ error: 'poField (or a supplier with a known poField) required' });
+    res.json(await purchasingAuto.clearOrderCustomFieldLive({
+      orderIds: Array.isArray(b.orderIds) ? b.orderIds : parseOrderIds(b.orderIds),
+      field,
+      ifValue: b.ifValue != null ? b.ifValue : null,
+      execute: b.execute === true,
+    }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // LIVE: clear a supplier from the SUPPLIERS-NEEDED tag on ordered SOs. Dry-run
 // unless body { execute: true }. Optional setOrderedStatus flips status to 22.
 app.post('/api/purchasing/finalize-tags-live', express.json(), async (req, res) => {

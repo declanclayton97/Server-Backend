@@ -1044,6 +1044,28 @@ export async function stampPoField(supplierKey, orderId, poId) {
   return api('PATCH', `/order-service/order/${orderId}/custom-field`, [{ op: 'add', path: `/${sup.poField}`, value: String(poId) }]);
 }
 
+// LIVE: clear a supplier PO custom field (e.g. PCF_CASTLEPO) off SOs — used when a PO
+// was scrapped/voided but its number is still stamped on the contributing orders. Safe:
+// reads the field first and only removes it when it matches ifValue (so it can't wipe a
+// still-valid PO number). Dry-run unless execute:true.
+export async function clearOrderCustomFieldLive({ orderIds = [], field, ifValue = null, execute = false } = {}) {
+  if (!field) return { error: 'field required' };
+  if (!execute) return { dryRun: true, field, ifValue, orderIds };
+  const results = [];
+  for (const id of orderIds) {
+    try {
+      const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
+      const cur = cf[field];
+      if (cur === undefined || cur === null || String(cur) === '') { results.push({ id, skipped: 'already empty' }); continue; }
+      if (ifValue != null && String(cur) !== String(ifValue)) { results.push({ id, skipped: `value ${cur} != ${ifValue}` }); continue; }
+      await liveWrite('PATCH', `/order-service/order/${id}/custom-field`, [{ op: 'remove', path: `/${field}` }]);
+      results.push({ id, cleared: field, was: cur });
+    } catch (e) { results.push({ id, error: e.message }); }
+    await pause(150);
+  }
+  return { done: true, field, results };
+}
+
 // Post-placement: strip the supplier from the tag, flip status when it was the
 // last supplier, and add an "ordered via PO N" note. Call after the order has
 // actually been placed with the supplier.
