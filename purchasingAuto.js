@@ -984,12 +984,21 @@ export const PLACED_WITH_SUPPLIER_STATUS = 7;
 // size, qty}. Size comes from the row's productOptions (needed by the portal cart).
 export async function getOrderCartLines(orderId) {
   const order = (await liveGet(`/order-service/order/${orderId}`))[0];
-  const lines = [];
+  // Consolidate by SKU (+size): the same variant can sit on SEVERAL PO rows when it
+  // was demanded by multiple sales orders. Supplier baskets add ONE qty per SKU field,
+  // so un-merged duplicates make later rows overwrite earlier ones → the basket
+  // under-orders (e.g. Castle PO 481278: 134-BLK-XL on 3 rows added 1 not 5).
+  const bySku = new Map();
   for (const r of Object.values(order.orderRows || {})) {
     if (String(r.productId) === '1000') continue;
-    lines.push({ sku: r.productSku, size: optValue(r.productOptions, /size/i), qty: parseFloat(r.quantity.magnitude) });
+    const sku = r.productSku;
+    const size = optValue(r.productOptions, /size/i);
+    const qty = parseFloat(r.quantity.magnitude);
+    const key = `${sku}|${size || ''}`;
+    if (bySku.has(key)) bySku.get(key).qty += qty;
+    else bySku.set(key, { sku, size, qty });
   }
-  return lines;
+  return [...bySku.values()];
 }
 
 // LIVE: set a PO's status (e.g. → 7 "Placed with supplier" after the supplier order
