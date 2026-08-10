@@ -622,7 +622,17 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     const rows = [];
     for (const [rowId, r] of entries) {
       const ordered = parseFloat(r.quantity.magnitude);
-      const a = alloc[rowId] || { allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0 };
+      // CRITICAL: the legacy order page only renders a reserved[] allocation input for rows
+      // still needing allocation. A FULFILLED (shipped) row has NO reserved[] input, so it's
+      // absent from `alloc`. Treat "absent from alloc" as fully fulfilled → order nothing
+      // (else we re-order already-shipped rows — e.g. SO 481017 ordered all 7 rows when only
+      // the 2 with reserved[] inputs still needed it). Backorder rows still needing stock DO
+      // render the input (with zeros), so they stay in `alloc` and order correctly.
+      const a = alloc[rowId];
+      if (!a) {
+        demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: 0, fulfilled: ordered, onOrder: 0, inStock: 0, toOrder: 0, note: 'no reserved[] input on order page — treated as fulfilled' });
+        continue;
+      }
       const toOrder = ordered - a.allocated - a.fulfilled - a.onOrder;
       // Audit EVERY considered line (incl. ones we decide NOT to order) so a later
       // "why did it order N?" is answerable from the exact decision-time figures.
