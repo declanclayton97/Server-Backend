@@ -8820,6 +8820,25 @@ async function sendPurchaseOrderEmail(supplier, poId, lines, { to, send } = {}) 
   throw lastErr;
 }
 
+// Remove one LINE from an order via the legacy form re-submit — the only mechanism that
+// works, since the API refuses row deletion on a paid order (ORDC-053) and the web UI's
+// own delete is DOM-only, persisted by re-saving the whole form. Defaults to the SANDBOX
+// and to a DRY RUN: check fieldsAfter, dropping, and especially arraysNotTreatedAsPerLine
+// (must be empty) before ever passing execute=1.
+// ?orderId=&rowId=&client=tuffbsitc[&execute=1]
+app.get('/api/debug/bp-row-delete', async (req, res) => {
+  try {
+    const { deleteOrderRow } = await import('./bpOrderRow.js');
+    const orderId = req.query.orderId;
+    const rowId = String(req.query.rowId || '');
+    if (!orderId || !rowId) return res.status(400).json({ error: 'orderId and rowId required' });
+    res.json(await deleteOrderRow(orderId, rowId, {
+      client: (req.query.client || 'tuffbsitc').toString(),
+      dryRun: req.query.execute !== '1',
+    }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // TEMP debug: fetch a Brightpearl legacy web page as the uploader account, on a
 // chosen client (default sandbox), to discover the order-reference edit endpoint.
 // ?path=/patt-op.php?oID=123 &client=tuffbsitc &find=<regex>
