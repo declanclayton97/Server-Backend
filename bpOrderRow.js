@@ -151,7 +151,11 @@ export async function deleteOrderRow(orderId, orderRowId, { client, dryRun = tru
   for (let attempt = 0; attempt < 2; attempt++) {
     const session = client ? await getSession(client) : await getSession();
     const cookie = await getCookieHeader(session.jar, pageUrl);
-    const pageRes = await fetch(pageUrl, { headers: { ...BROWSER_HEADERS, Cookie: cookie }, redirect: 'manual' });
+    // FOLLOW redirects. With redirect:'manual' a 302 yields an empty body, so the form
+    // is "not found" and the whole thing fails for a reason that has nothing to do with
+    // the order — which is exactly what happened on live while sandbox (a direct 200)
+    // worked fine.
+    const pageRes = await fetch(pageUrl, { headers: { ...BROWSER_HEADERS, Cookie: cookie }, redirect: 'follow' });
     const html = await pageRes.text();
     if (looksLikeLoginPage(html)) {
       if (attempt === 0) continue;
