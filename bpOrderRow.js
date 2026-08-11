@@ -112,11 +112,41 @@ export function planRowDeletion(html, orderRowId) {
   return { fields: parsed.fields, kept, dropped, perLine, suspicious, rowCount: rows.length, rowIndex };
 }
 
+// One authenticated ajaxData.php call with the CSRF token + session cookies.
+async function ajaxCall(session, url, token, method, bodyStr) {
+  const cookie = await getCookieHeader(session.jar, url);
+  const res = await fetch(url, {
+    method,
+    headers: {
+      ...BROWSER_HEADERS,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Requested-With': 'XMLHttpRequest',
+      'X-CSRF-Token': token,
+      Accept: 'application/json, text/javascript, */*; q=0.01',
+      Origin: BP_HOST,
+      Referer: `${BP_HOST}/patt-op.php?scode=invoice`,
+      Cookie: cookie,
+    },
+    body: bodyStr,
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* not json */ }
+  return { status: res.status, json, text: json ? undefined : text.slice(0, 300) };
+}
+
 /**
- * Remove one line from an order by re-submitting the form without it.
- * dryRun defaults to TRUE — it reports the plan and posts nothing.
+ * Remove one line from an order.
+ *
+ * method 'lock' (default) mirrors what the UI actually does to save an order:
+ *   pageLock  ->  ajaxData.php?op=order:validateOrder  ->  release the lock
+ * A plain form POST to patt-op.php (method 'form') returns 302 and silently changes
+ * nothing — verified ~34 times on the sandbox — almost certainly because no page lock
+ * is held. The field set is identical either way; only the transport differs.
+ *
+ * dryRun defaults to TRUE — it reports the plan and writes nothing.
  */
-export async function deleteOrderRow(orderId, orderRowId, { client, dryRun = true } = {}) {
+export async function deleteOrderRow(orderId, orderRowId, { client, dryRun = true, method = 'lock' } = {}) {
   const pageUrl = `${BP_HOST}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`;
   for (let attempt = 0; attempt < 2; attempt++) {
     const session = client ? await getSession(client) : await getSession();
@@ -144,9 +174,26 @@ export async function deleteOrderRow(orderId, orderRowId, { client, dryRun = tru
     // from the <meta> at submit time, so do the same.
     const token = (html.match(/name=["']__fc_csrf_token["'][^>]*content=["']([^"']+)["']/i)
       || html.match(/content=["']([^"']+)["'][^>]*name=["']__fc_csrf_token["']/i) || [])[1];
+    if (!token) throw new Error(`__fc_csrf_token not found on order page ${orderId}`);
+
+    if (method === 'lock') {
+      // Repeated keys matter: sku[], qty[] etc. appear once per remaining line, so the
+      // body is built by appending. An object-keyed URLSearchParams would collapse each
+      // to a single value and wipe out every line but the last.
+      const body = new URLSearchParams();
+      for (const [k, v] of plan.kept) body.append(k, v);
+      body.append('__fc_csrf_token', token);
+      const lockUrl = `${BP_HOST}/ajaxData.php?op=pageLock&resourceId=${encodeURIComponent(orderId)}&resourceTypeId=2`;
+      const saveUrl = `${BP_HOST}/ajaxData.php?op=order:validateOrder&oID=${encodeURIComponent(orderId)}`;
+      const lock = await ajaxCall(session, lockUrl, token, 'POST');
+      const save = await ajaxCall(session, saveUrl, token, 'POST', body.toString());
+      const unlock = await ajaxCall(session, lockUrl, token, 'DELETE');
+      return { ok: save.status === 200, method, lock, save, unlock, ...summary };
+    }
+
     const fd = new FormData();
     for (const [k, v] of plan.kept) fd.append(k, v);
-    if (token) fd.set('__fc_csrf_token', token);
+    fd.set('__fc_csrf_token', token);
     // The form carries a HIDDEN submit, <input type="submit" name="submit_form" value="1">,
     // and BP only processes the save when it is present. parseOrderForm skips submit inputs
     // (a browser only sends the one that was clicked), so without this the POST returns a
