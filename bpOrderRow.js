@@ -187,8 +187,27 @@ export async function deleteOrderRow(orderId, orderRowId, { client, dryRun = tru
       const saveUrl = `${BP_HOST}/ajaxData.php?op=order:validateOrder&oID=${encodeURIComponent(orderId)}`;
       const lock = await ajaxCall(session, lockUrl, token, 'POST');
       const save = await ajaxCall(session, saveUrl, token, 'POST', body.toString());
+
+      // Captured from the live page: clicking "Save changes" runs saveInvoice(), which
+      // fires an XHR POST *and then* calls form.submit(). Doing only one of the two is
+      // why every earlier attempt returned a happy status and changed nothing — the XHR
+      // validates, the form POST is what actually persists. So do both, in that order,
+      // on the same session.
+      const fd2 = new FormData();
+      for (const [k, v] of plan.kept) fd2.append(k, v);
+      fd2.set('__fc_csrf_token', token);
+      fd2.set('submit_form', '1');
+      const postCookie2 = await getCookieHeader(session.jar, pageUrl);
+      const formRes = await fetch(pageUrl, {
+        method: 'POST',
+        headers: { ...BROWSER_HEADERS, Cookie: postCookie2, Origin: BP_HOST, Referer: pageUrl,
+          'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-User': '?1' },
+        body: fd2, redirect: 'manual',
+      });
+
       const unlock = await ajaxCall(session, lockUrl, token, 'DELETE');
-      return { ok: save.status === 200, method, lock, save, unlock, ...summary };
+      return { ok: save.status === 200 && [200, 302].includes(formRes.status), method,
+               lock, save, formPost: { status: formRes.status, location: formRes.headers.get('location') }, unlock, ...summary };
     }
 
     const fd = new FormData();
