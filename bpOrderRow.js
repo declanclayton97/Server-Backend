@@ -147,6 +147,11 @@ export async function deleteOrderRow(orderId, orderRowId, { client, dryRun = tru
     const fd = new FormData();
     for (const [k, v] of plan.kept) fd.append(k, v);
     if (token) fd.set('__fc_csrf_token', token);
+    // The form carries a HIDDEN submit, <input type="submit" name="submit_form" value="1">,
+    // and BP only processes the save when it is present. parseOrderForm skips submit inputs
+    // (a browser only sends the one that was clicked), so without this the POST returns a
+    // perfectly happy 302 and changes nothing — which is exactly what it did first time.
+    fd.set('submit_form', '1');
 
     const postCookie = await getCookieHeader(session.jar, pageUrl);
     const res = await fetch(pageUrl, {
