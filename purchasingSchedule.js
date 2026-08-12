@@ -58,7 +58,7 @@ async function saveState(pool, { id = 1, workingDaysWaited, lastRunDate, result 
 
 // ── error log + alerts ───────────────────────────────────────────────────────
 // Tag an error with the step that raised it so the log/alert is specific.
-const stepErr = (step, message) => Object.assign(new Error(message), { step });
+const stepErr = (step, message, context = null) => Object.assign(new Error(message), { step, ...(context ? { context } : {}) });
 
 async function ensureErrorTable(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_error_log (
@@ -137,20 +137,26 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   if (!co.allOk) throw stepErr('checkout', `checkout fields didn't set/verify on the portal: ${JSON.stringify(co.verify || co)}`);
 
   // 3b. Placement confirmation, two-stage:
+  // Full placeorder diagnostic — recorded on ANY checkout failure (via the error log context) so
+  // we can see WHY it didn't commit (messageType, redirect target, credit/validation text in
+  // respHead) instead of guessing.
+  const coDiag = { placed: co.placed, allOk: co.allOk, status: co.status, messageType: co.messageType, reservationNo, verify: co.verify, respHead: co.respHead };
+  steps.checkout.diag = coDiag;
   //   (a) FAST — placeorder's own response: co.placed = messageType:0 (nested under redirectUrl)
   //       + redirect to the credit-account payment step = ACCEPTED. If not accepted, fail now.
-  if (!co.placed) throw stepErr('checkout', `placeorder not accepted (status ${co.status}, messageType ${co.messageType}): ${JSON.stringify(co.respHead || '').slice(0, 180)}`);
+  if (!co.placed) throw stepErr('checkout', `placeorder not accepted (status ${co.status}, messageType ${co.messageType})`, { checkout: coDiag });
   //   (b) COMMIT — the order commits at the payment step and the BASKET CLEARS 5-10 MIN LATER
   //       (user-observed; NOT instant). Wait up to ~12 min for cartCount→0. If it never clears,
   //       the order was accepted but didn't commit (stuck at payment) → fail so it's caught, not
   //       falsely marked placed. (The old 64s window false-failed good orders.)
-  let cartCleared = false;
+  let cartCleared = false, lastCart = null;
   for (let i = 0; i < 72; i++) {
     const b = await jfetch('place-confirm', `${altItemsUrl}/api/fristads-basket`).catch(() => null);
+    lastCart = b && b.cartCount;
     if (b && Number(b.cartCount) === 0) { cartCleared = true; break; }
     await new Promise((r) => setTimeout(r, 10000));
   }
-  if (!cartCleared) throw stepErr('checkout', `placeorder was accepted but the basket didn't clear within ~12 min — the order may be stuck at the payment step (status ${co.status})`);
+  if (!cartCleared) throw stepErr('checkout', `placeorder was accepted but the basket didn't clear within ~12 min — the order may be stuck at the payment step (status ${co.status})`, { checkout: { ...coDiag, lastCartCount: lastCart } });
   steps.checkout.placed = true;
 
   // 4. pull the Fristads order number by our PO ref (= the ExternalVerificationNo on the order).
@@ -482,7 +488,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     const step = e.step || 'unknown';
     const report = { supplier: cfg.supplierKey, ran: uk.date, dryRun, step, error: e.message };
     // persist to the error log + email a specific alert (what step, what went wrong)
-    await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}` } }).catch(() => {});
+    await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, ...(e.context || {}) } }).catch(() => {});
     if (!dryRun) { try { await saveState(pool, { id: cfg.stateId, workingDaysWaited: (await getState(pool, cfg.stateId)).working_days_waited, lastRunDate: uk.date, result: report }); } catch {} }
     return report;
   } finally { running = false; }
