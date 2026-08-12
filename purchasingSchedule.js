@@ -137,26 +137,16 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   if (!co.allOk) throw stepErr('checkout', `checkout fields didn't set/verify on the portal: ${JSON.stringify(co.verify || co)}`);
 
   // 3b. Placement confirmation, two-stage:
-  // Full placeorder diagnostic — recorded on ANY checkout failure (via the error log context) so
-  // we can see WHY it didn't commit (messageType, redirect target, credit/validation text in
-  // respHead) instead of guessing.
-  const coDiag = { placed: co.placed, allOk: co.allOk, status: co.status, messageType: co.messageType, reservationNo, verify: co.verify, respHead: co.respHead };
+  // Full checkout diagnostic — recorded on ANY checkout failure (via the error log context) so we
+  // can see WHY it didn't confirm (messageType, confirmation status, respHead) instead of guessing.
+  const coDiag = { placed: co.placed, confirmed: co.confirmed, allOk: co.allOk, status: co.status, messageType: co.messageType, confStatus: co.confStatus, reservationNo, verify: co.verify, respHead: co.respHead };
   steps.checkout.diag = coDiag;
-  //   (a) FAST — placeorder's own response: co.placed = messageType:0 (nested under redirectUrl)
-  //       + redirect to the credit-account payment step = ACCEPTED. If not accepted, fail now.
-  if (!co.placed) throw stepErr('checkout', `placeorder not accepted (status ${co.status}, messageType ${co.messageType})`, { checkout: coDiag });
-  //   (b) COMMIT — the order commits at the payment step and the BASKET CLEARS 5-10 MIN LATER
-  //       (user-observed; NOT instant). Wait up to ~12 min for cartCount→0. If it never clears,
-  //       the order was accepted but didn't commit (stuck at payment) → fail so it's caught, not
-  //       falsely marked placed. (The old 64s window false-failed good orders.)
-  let cartCleared = false, lastCart = null;
-  for (let i = 0; i < 72; i++) {
-    const b = await jfetch('place-confirm', `${altItemsUrl}/api/fristads-basket`).catch(() => null);
-    lastCart = b && b.cartCount;
-    if (b && Number(b.cartCount) === 0) { cartCleared = true; break; }
-    await new Promise((r) => setTimeout(r, 10000));
-  }
-  if (!cartCleared) throw stepErr('checkout', `placeorder was accepted but the basket didn't clear within ~12 min — the order may be stuck at the payment step (status ${co.status})`, { checkout: { ...coDiag, lastCartCount: lastCart } });
+  // co.placed = the placeorder → payment → confirmation chain reached the ORDER CONFIRMATION
+  // ("Thank you for your order"). placeorder alone does NOT commit (Aug-2026 portal change); the
+  // Alt-Items checkout now follows the full chain, so this is the authoritative placement signal.
+  // The basket clears + the order NUMBER indexes in the background over the next several minutes,
+  // so we DON'T gate on those (they'd time out on a real placement).
+  if (!co.placed) throw stepErr('checkout', `order not confirmed — the placeorder→payment→confirmation chain failed (status ${co.status}, messageType ${co.messageType}, confirmed ${co.confirmed})`, { checkout: coDiag });
   steps.checkout.placed = true;
 
   // 4. pull the Fristads order number by our PO ref (= the ExternalVerificationNo on the order).
