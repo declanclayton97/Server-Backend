@@ -45,6 +45,10 @@ const DEMAND_STATUS = 23;   // Stock needs ordering
 //   91 Sportswear – Proof Required · 92 Sportswear – Proof Sent
 export const NON_DEMAND_SO_STATUS_IDS = [1, 2, 18, 34, 35, 36, 44, 49, 51, 53, 55, 60, 78, 87, 89, 91, 92, 114, 117];
 const ORDERED_STATUS = 22;  // Ordered Stock Awaiting Delivery
+// Per-SO "don't auto-order these items" blocklist custom field (user-created in BP). Value =
+// SKU(s)/style code(s) to skip on that order (e.g. a pair already ordered elsewhere). Code is
+// env-overridable so it matches whatever PCF code BP assigns.
+const SKIP_SKU_FIELD = process.env.SKIP_SKU_FIELD || 'PCF_SKIPSKU';
 const PENDING_PO_STATUS = 6; // (informational — POs default to this on create)
 const WAREHOUSE_ID = 2;
 
@@ -619,9 +623,22 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // orderable row. Shipping/misc/decoration lines are excluded either way.
     const allTags = tagsOf(tag);
     const singleSupplier = allTags.length === 1 && allTags[0].toUpperCase() === supplierKey;
-    const entries = (singleSupplier && !hasBrandDetect)
+    // Per-SO SKIP list (PCF_SKIPSKU): the user marks items NOT to auto-order on this SO (e.g. a
+    // pair already ordered manually/elsewhere) — everything else still orders. A skip token
+    // matches by exact SKU, a dash-part of the SKU, a SKU substring, or a whole word in the name
+    // (so "126515-940-302", "126515", or "2700" all match the Fristads 2700 line).
+    const skipTokens = String(cf[SKIP_SKU_FIELD] || '').split(/[\s,;|]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+    const isSkipped = (r) => skipTokens.length > 0 && skipTokens.some((t) => {
+      const sku = String(r.productSku || '').toLowerCase();
+      if (sku === t || sku.split('-').includes(t) || sku.includes(t)) return true;
+      try { return new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(String(r.productName || '').toLowerCase()); } catch { return false; }
+    });
+    const candidateRows = (singleSupplier && !hasBrandDetect)
       ? Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r))
       : Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r) && detect(r.productName, r.productSku));
+    // audit-log the skipped rows so it's visible WHY they weren't ordered
+    for (const [rowId, r] of candidateRows) if (isSkipped(r)) demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note: `skipped via ${SKIP_SKU_FIELD}` });
+    const entries = candidateRows.filter(([, r]) => !isSkipped(r));
     if (!entries.length) continue;
     // Only order the UNALLOCATED qty: ordered − allocated − fulfilled − onOrder.
     // Allocation isn't in the order API — read it from the legacy order page.
