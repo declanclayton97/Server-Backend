@@ -10,7 +10,7 @@
 
 import nodemailer from 'nodemailer';
 import * as bp from './purchasingAuto.js';
-import { updateOrderReference } from './bpWebSession.js';
+import { updateOrderReference, emailOrderDocument } from './bpWebSession.js';
 
 const THRESHOLD_NET = Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300); // £ ex-VAT
 const MAX_WAIT_WORKING_DAYS = 3;
@@ -383,8 +383,45 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   return { poId, orderNo, steps };
 }
 
+// ── Uneek placement chain (EMAIL supplier) ───────────────────────────────────
+// No portal: create the combined PO, EMAIL Brightpearl's OWN PO PDF to Uneek's order desk
+// (template_print.php via the File Uploader — send_type=pdf, recipient = ONLY email_to_0),
+// mark the PO Placed, and finalise the SOs. Email suppliers have no supplier order number,
+// so the PO# is the reference.
+const UNEEK_SUPPLIER_CONTACT = 322;
+const UNEEK_ORDER_EMAIL = process.env.UNEEK_ORDER_EMAIL || 'orders@uneekclothing.com';
+async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
+  const steps = {};
+  // 1. combined PO (SO demand + low-inv; stamps the SOs)
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'UNEEK', execute: true, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // 2. EMAIL Brightpearl's real PO PDF to Uneek's order desk (only email_to_0 = the order
+  // address; BP's pre-filled supplier/account rows are cleared inside emailOrderDocument).
+  const mail = await emailOrderDocument(poId, { contactId: UNEEK_SUPPLIER_CONTACT, to: UNEEK_ORDER_EMAIL, send: true });
+  if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${UNEEK_ORDER_EMAIL}: ${JSON.stringify(mail).slice(0, 200)}`);
+  steps.email = { to: UNEEK_ORDER_EMAIL, sent: true, status: mail.status };
+
+  // 3. mark the PO Placed (status 7) + a note recording the email.
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  await bp.addOrderNoteLive(poId, `PO emailed to Uneek (${UNEEK_ORDER_EMAIL}).`, UNEEK_SUPPLIER_CONTACT).catch(() => {});
+  steps.link = { status: 7, emailedTo: UNEEK_ORDER_EMAIL };
+
+  // 4. finalise the contributing SOs (clear the Uneek tag, status → 22, "ordered via PO#" note)
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'UNEEK', poId, noteContactId: UNEEK_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `PO emailed + placed, but finalising SOs failed: ${e.message}`); } }
+  return { poId, emailedTo: UNEEK_ORDER_EMAIL, steps };
+}
+
 const SCHEDULED_SUPPLIERS = {
   FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder, threshold: Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300) },
+  UNEEK: { supplierKey: 'UNEEK', stateId: 3, placeFn: placeUneekOrder, threshold: Number(process.env.UNEEK_FREESHIP_THRESHOLD || 100) }, // email supplier, free carriage @ £100 ex-VAT, no min order
   CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder, threshold: Number(process.env.CASTLE_FREESHIP_THRESHOLD || 150) }, // Castle free carriage @ £150 ex-VAT
   STERLING: { supplierKey: 'STERLING', stateId: 4, placeFn: placeSterlingOrder, threshold: Number(process.env.STERLING_FREESHIP_THRESHOLD || 150) },
 };

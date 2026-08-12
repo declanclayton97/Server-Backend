@@ -8711,6 +8711,24 @@ if (process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Sterling auto-purchase poller scheduled (weekdays 13:00 UK, £150 ex-VAT)');
 }
 
+// Uneek auto-purchase poller — weekdays 16:00 UK. EMAIL supplier: creates the PO, emails
+// Brightpearl's own PO PDF to Uneek's order desk (auto-send), marks placed + finalises.
+// Free-carriage threshold £100 ex-VAT (no min order), state row id 3.
+if (process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return; // weekdays only
+      if (!(uk.hour === 16 && uk.minute < 30)) return; // fire in the 16:00–16:29 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'UNEEK' })
+        .then((r) => { if (!r.skipped) console.log('[uneek-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[uneek-schedule] error:', e.message));
+    } catch (e) { console.error('[uneek-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Uneek auto-purchase poller scheduled (weekdays 16:00 UK, £100 ex-VAT, email)');
+}
+
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;
