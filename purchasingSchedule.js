@@ -136,17 +136,21 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   steps.checkout = { allOk: co.allOk, status: co.status, reservationNo };
   if (!co.allOk) throw stepErr('checkout', `checkout fields didn't set/verify on the portal: ${JSON.stringify(co.verify || co)}`);
 
-  // 3b. Confirm placement by the BASKET CLEARING — immediate + reliable. placeorder redirects
-  // to the credit-account payment step and the basket empties once the order commits; this is
-  // the authoritative placement signal (the order NUMBER only appears in history later, and
-  // indexing can lag 20+ min). If the basket doesn't clear, the order did NOT place → abort.
+  // 3b. Placement confirmation, two-stage:
+  //   (a) FAST — placeorder's own response: co.placed = messageType:0 (nested under redirectUrl)
+  //       + redirect to the credit-account payment step = ACCEPTED. If not accepted, fail now.
+  if (!co.placed) throw stepErr('checkout', `placeorder not accepted (status ${co.status}, messageType ${co.messageType}): ${JSON.stringify(co.respHead || '').slice(0, 180)}`);
+  //   (b) COMMIT — the order commits at the payment step and the BASKET CLEARS 5-10 MIN LATER
+  //       (user-observed; NOT instant). Wait up to ~12 min for cartCount→0. If it never clears,
+  //       the order was accepted but didn't commit (stuck at payment) → fail so it's caught, not
+  //       falsely marked placed. (The old 64s window false-failed good orders.)
   let cartCleared = false;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 72; i++) {
     const b = await jfetch('place-confirm', `${altItemsUrl}/api/fristads-basket`).catch(() => null);
     if (b && Number(b.cartCount) === 0) { cartCleared = true; break; }
-    await new Promise((r) => setTimeout(r, 8000));
+    await new Promise((r) => setTimeout(r, 10000));
   }
-  if (!cartCleared) throw stepErr('checkout', `placeorder did not clear the Fristads basket — the order may not have placed (checkout status ${co.status})`);
+  if (!cartCleared) throw stepErr('checkout', `placeorder was accepted but the basket didn't clear within ~12 min — the order may be stuck at the payment step (status ${co.status})`);
   steps.checkout.placed = true;
 
   // 4. pull the Fristads order number by our PO ref (= the ExternalVerificationNo on the order).
