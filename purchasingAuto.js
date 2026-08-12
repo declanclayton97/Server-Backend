@@ -850,6 +850,12 @@ export async function createComboPOLive(opts = {}) {
   return { created: true, poId, skippedBundles, demandAudit, ...plan };
 }
 
+// Clean a product name for an order NOTE: keep the product name only, dropping the
+// customisation/decoration blob a customer line carries (e.g. "UC105 Active Polo\n\nAdd
+// Customisation - 3 x Add Embroidery\n\nUpload Logo - https://…"). Takes the first non-empty
+// line (the actual product) and collapses whitespace.
+const cleanItemName = (n) => (String(n || '').split(/\r?\n/).map((s) => s.trim()).find(Boolean) || '').replace(/\s+/g, ' ').trim();
+
 // LIVE: strip a supplier from the SUPPLIERS-NEEDED tag (PCF_SUPPLIER) on ordered
 // SOs so they aren't picked up again. If the supplier was the only tag, the field
 // is cleared; optionally flip status to "Ordered Stock Awaiting Delivery" (22).
@@ -881,8 +887,9 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     let noted = false;
     if (poId) {
       const names = (linesByOrder && (linesByOrder[p.id] || linesByOrder[String(p.id)])) || null;
-      const text = (names && names.length)
-        ? `${names.join('\n')}\nOrdered on PO#${poId}`
+      const clean = names ? [...new Set(names.map(cleanItemName).filter(Boolean))] : null; // strip customisation blob; de-dupe
+      const text = (clean && clean.length)
+        ? `${clean.join('\n')}\nOrdered on PO#${poId}`
         : `${key} items ordered via PO#${poId}`;
       const addedOn = new Date().toISOString().replace('Z', '+00:00');
       await liveWrite('POST', `/order-service/order/${p.id}/note`, { text, addedOn, contactId: noteContactId || 1, isPublic: false });
