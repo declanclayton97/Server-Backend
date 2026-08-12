@@ -8884,12 +8884,17 @@ function ukMobileNumber(raw) {
   return null;
 }
 
-// Normalise one contact's Mobile. Dry by default.  ?contactId=&execute=1
+// Normalise one contact's Mobile. Dry by default.
+// ?contactId=&execute=1[&client=tuffbsitc]
 app.get('/api/debug/contact-mobile', async (req, res) => {
   const contactId = parseInt(req.query.contactId, 10);
   if (!contactId) return res.status(400).json({ error: 'contactId required' });
+  // sandbox when a client is given, so the create-path can be proved without writing to a
+  // real customer's record
+  const sandbox = !!req.query.client;
+  const call = (m, p, b) => (sandbox ? purchasingAuto.bpApi(m, p, b) : bpLive(m, p, b));
   try {
-    const get = async () => (await bpLive('GET', `/contact-service/contact/${contactId}`))[0];
+    const get = async () => (await call('GET', `/contact-service/contact/${contactId}`))[0];
     const before = await get();
     const tel = (before.communication && before.communication.telephones) || {};
     // Preference: an existing Mobile, then Telephone, then Secondary.
@@ -8907,10 +8912,12 @@ app.get('/api/debug/contact-mobile', async (req, res) => {
 
     // JSON-Patch so only this one field moves — a full PUT on a contact risks clearing
     // whatever isn't resent, the same trap as the product identity write.
+    // op:'add' NOT 'replace': the whole point is contacts that have no MOB key at all
+    // (eBay puts the number in PRI), and replace on a missing path fails. add upserts.
     let patchErr = null;
     try {
-      await bpLive('PATCH', `/contact-service/contact/${contactId}`,
-        [{ op: 'replace', path: '/communication/telephones/MOB', value: picked.mobile }]);
+      await call('PATCH', `/contact-service/contact/${contactId}`,
+        [{ op: 'add', path: '/communication/telephones/MOB', value: picked.mobile }]);
     } catch (e) { patchErr = String(e.message || e).slice(0, 300); }
     const after = await get();
     res.json({ ...summary, patchErr,
