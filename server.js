@@ -8884,6 +8884,47 @@ function ukMobileNumber(raw) {
   return null;
 }
 
+// Fill the ORDER's Mobile fields. The order carries its own copy of the phone numbers,
+// taken at import and independent of the contact record — so fixing the contact does NOT
+// populate these, which is the mistake this endpoint exists to correct. eBay fills
+// telephone on all three parties and leaves every mobile empty.
+// Dry by default.  ?orderId=&execute=1[&parties=customer,billing,delivery]
+app.get('/api/debug/order-mobile', async (req, res) => {
+  const orderId = parseInt(req.query.orderId, 10);
+  if (!orderId) return res.status(400).json({ error: 'orderId required' });
+  const want = String(req.query.parties || 'customer,billing,delivery').split(',').map((s) => s.trim()).filter(Boolean);
+  try {
+    const get = async () => (await bpLive('GET', `/order-service/order/${orderId}`))[0];
+    const before = await get();
+    const parties = before.parties || {};
+    const plan = [];
+    for (const p of want) {
+      const party = parties[p];
+      if (!party) continue;
+      if (ukMobileNumber(party.mobileTelephone)) { plan.push({ party: p, skip: 'already a valid mobile', current: party.mobileTelephone }); continue; }
+      const m = ukMobileNumber(party.mobileTelephone) || ukMobileNumber(party.telephone);
+      if (!m) { plan.push({ party: p, skip: 'no UK mobile on this party — left as is', telephone: party.telephone || '' }); continue; }
+      plan.push({ party: p, from: party.telephone, set: m });
+    }
+    const toWrite = plan.filter((x) => x.set);
+    const summary = { orderId, status: (before.orderStatus || {}).name, plan };
+    if (!toWrite.length) return res.json({ dryRun: true, ...summary, reason: 'nothing to write' });
+    if (req.query.execute !== '1') return res.json({ dryRun: true, ...summary });
+
+    const results = [];
+    for (const w of toWrite) {
+      try {
+        await bpLive('PATCH', `/order-service/order/${orderId}`,
+          [{ op: 'add', path: `/parties/${w.party}/mobileTelephone`, value: w.set }]);
+        results.push({ party: w.party, ok: true });
+      } catch (e) { results.push({ party: w.party, ok: false, error: String(e.message || e).slice(0, 250) }); }
+    }
+    const after = await get();
+    const shape = (o) => want.reduce((a, p) => { const x = (o.parties || {})[p]; if (x) a[p] = { telephone: x.telephone, mobileTelephone: x.mobileTelephone }; return a; }, {});
+    res.json({ ...summary, results, before: shape(before), after: shape(after) });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Normalise one contact's Mobile. Dry by default.
 // ?contactId=&execute=1[&client=tuffbsitc]
 app.get('/api/debug/contact-mobile', async (req, res) => {
