@@ -8628,6 +8628,30 @@ app.post('/api/purchasing/sterling-worker-dry', express.json({ limit: '2mb' }), 
     res.status(r.status).json(await r.json());
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+// Generic passthrough to the portal-order worker for ANY module (BRIGHTPEARL, CASTLE, …),
+// using the server-side URL/secret so the secret never leaves this box. execute defaults
+// to FALSE — it must be asked for explicitly. Poll results on sterling-worker-job/:id,
+// which is already supplier-agnostic.
+// body: { supplier, lines[], opts?, execute?, async?, ref? }
+app.post('/api/purchasing/worker-run', express.json({ limit: '2mb' }), async (req, res) => {
+  try {
+    const url = process.env.STERLING_WORKER_URL || 'https://portal-order-worker.onrender.com';
+    const secret = process.env.STERLING_WORKER_SECRET || '';
+    const b = req.body || {};
+    if (!b.supplier) return res.status(400).json({ error: 'supplier required' });
+    if (!Array.isArray(b.lines) || !b.lines.length) return res.status(400).json({ error: 'lines[] required' });
+    const payload = {
+      supplier: b.supplier, ref: String(b.ref || ''), lines: b.lines,
+      opts: b.opts || {}, execute: b.execute === true, async: b.async === true,
+    };
+    const r = await fetch(`${url}/place-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-worker-secret': secret },
+      body: JSON.stringify(payload),
+    });
+    res.status(r.status).json(await r.json());
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get('/api/purchasing/sterling-worker-job/:id', async (req, res) => {
   try {
     const url = process.env.STERLING_WORKER_URL || 'https://portal-order-worker.onrender.com';
