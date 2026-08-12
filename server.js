@@ -8884,6 +8884,47 @@ function ukMobileNumber(raw) {
   return null;
 }
 
+// Set the ORDER's Mobile fields through the legacy editor instead of the REST API.
+// The API refuses: PATCH /order-service/order/{id} returns CMNC-043 "path
+// /parties/customer/mobileTelephone not supported", and there is no order-party
+// sub-resource. But order HEADER fields do save via pageLock -> order:validateOrder ->
+// release (that is how supplier PO numbers are stamped), and header fields are handled
+// separately from rows — so this is worth a shot where the row work was not.
+// ?orderId=&mobile=07...[&parties=customer,billing,delivery][&execute=1]
+app.get('/api/debug/order-mobile-form', async (req, res) => {
+  const orderId = parseInt(req.query.orderId, 10);
+  if (!orderId) return res.status(400).json({ error: 'orderId required' });
+  const want = String(req.query.parties || 'customer,billing,delivery').split(',').map((s) => s.trim()).filter(Boolean);
+  try {
+    const get = async () => (await bpLive('GET', `/order-service/order/${orderId}`))[0];
+    const before = await get();
+    const parties = before.parties || {};
+    // explicit ?mobile= wins, else derive each party's own telephone
+    const explicit = req.query.mobile ? ukMobileNumber(req.query.mobile) : null;
+    if (req.query.mobile && !explicit) return res.status(400).json({ error: `"${req.query.mobile}" is not a UK mobile` });
+    const fields = {};
+    const plan = [];
+    for (const p of want) {
+      const party = parties[p];
+      if (!party) continue;
+      const m = explicit || ukMobileNumber(party.mobileTelephone) || ukMobileNumber(party.telephone);
+      if (!m) { plan.push({ party: p, skip: 'no UK mobile available' }); continue; }
+      if (m === party.mobileTelephone) { plan.push({ party: p, skip: 'already set' }); continue; }
+      fields[`${p}_mobile`] = m;               // customer_mobile / billing_mobile / delivery_mobile
+      plan.push({ party: p, set: m, field: `${p}_mobile` });
+    }
+    const shape = (o) => want.reduce((a, p) => { const x = (o.parties || {})[p]; if (x) a[p] = { telephone: x.telephone, mobileTelephone: x.mobileTelephone }; return a; }, {});
+    if (!Object.keys(fields).length) return res.json({ dryRun: true, orderId, plan, reason: 'nothing to write', before: shape(before) });
+    if (req.query.execute !== '1') return res.json({ dryRun: true, orderId, plan, fields, before: shape(before) });
+
+    const saved = await bpLockedValidateOrder(orderId, fields);
+    const after = await get();
+    res.json({ orderId, plan, fields, saved,
+      before: shape(before), after: shape(after),
+      changed: JSON.stringify(shape(before)) !== JSON.stringify(shape(after)) });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Fill the ORDER's Mobile fields. The order carries its own copy of the phone numbers,
 // taken at import and independent of the contact record — so fixing the contact does NOT
 // populate these, which is the mistake this endpoint exists to correct. eBay fills
