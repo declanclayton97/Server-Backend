@@ -8857,6 +8857,68 @@ app.get('/api/debug/bp-row-delete', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ---- eBay customer mobile numbers -------------------------------------------------
+// eBay puts the buyer's number in the contact's Telephone (PRI) and leaves Mobile (MOB)
+// empty, so anything that texts them silently reaches nobody. Values are free text too:
+// "44 7892 872364", "Angela 07587036566", "+44 (0)7123 456789".
+//
+// ukMobileNumber() returns a clean 07xxxxxxxxx or null. Letters and "/,;&|" start a new
+// candidate; spaces and hyphens do NOT, because they occur inside single numbers. A
+// landline or a non-UK number returns null and is never written — filling Mobile with a
+// landline makes a record LOOK fixed while SMS still fails, which is worse than empty.
+function ukMobileNumber(raw) {
+  if (raw == null) return null;
+  for (const seg of String(raw).split(/[A-Za-z]+|[/,;&|]+/)) {
+    let d = seg.replace(/[^\d+]/g, '').replace(/^\+/, '');
+    if (!d) continue;
+    if (d.startsWith('00')) d = d.slice(2);
+    if (d.startsWith('44')) {
+      d = d.slice(2);
+      if (d.startsWith('0')) d = d.slice(1); // "+44 (0)7123..." leaves a trunk 0 behind
+      d = '0' + d;
+    } else if (d[0] === '7' && d.length === 10) {
+      d = '0' + d;
+    }
+    if (/^07\d{9}$/.test(d)) return d;
+  }
+  return null;
+}
+
+// Normalise one contact's Mobile. Dry by default.  ?contactId=&execute=1
+app.get('/api/debug/contact-mobile', async (req, res) => {
+  const contactId = parseInt(req.query.contactId, 10);
+  if (!contactId) return res.status(400).json({ error: 'contactId required' });
+  try {
+    const get = async () => (await bpLive('GET', `/contact-service/contact/${contactId}`))[0];
+    const before = await get();
+    const tel = (before.communication && before.communication.telephones) || {};
+    // Preference: an existing Mobile, then Telephone, then Secondary.
+    const sources = [['MOB', tel.MOB], ['PRI', tel.PRI], ['SEC', tel.SEC]];
+    let picked = null;
+    for (const [k, v] of sources) { const m = ukMobileNumber(v); if (m) { picked = { from: k, raw: v, mobile: m }; break; } }
+    const summary = {
+      contactId, name: `${before.firstName || ''} ${before.lastName || ''}`.trim(),
+      telephonesBefore: tel, picked,
+      wouldChange: picked ? picked.mobile !== tel.MOB : false,
+      note: picked ? undefined : 'no UK mobile found in any field — nothing written (landline/non-UK/blank)',
+    };
+    if (!picked || !summary.wouldChange) return res.json({ dryRun: true, ...summary, reason: picked ? 'already correct' : 'nothing to write' });
+    if (req.query.execute !== '1') return res.json({ dryRun: true, ...summary });
+
+    // JSON-Patch so only this one field moves — a full PUT on a contact risks clearing
+    // whatever isn't resent, the same trap as the product identity write.
+    let patchErr = null;
+    try {
+      await bpLive('PATCH', `/contact-service/contact/${contactId}`,
+        [{ op: 'replace', path: '/communication/telephones/MOB', value: picked.mobile }]);
+    } catch (e) { patchErr = String(e.message || e).slice(0, 300); }
+    const after = await get();
+    res.json({ ...summary, patchErr,
+      telephonesAfter: (after.communication && after.communication.telephones) || {},
+      ok: !patchErr && ((after.communication || {}).telephones || {}).MOB === picked.mobile });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // TEMP debug: fetch a Brightpearl legacy web page as the uploader account, on a
 // chosen client (default sandbox), to discover the order-reference edit endpoint.
 // ?path=/patt-op.php?oID=123 &client=tuffbsitc &find=<regex>
