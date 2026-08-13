@@ -481,7 +481,7 @@ const SCHEDULED_SUPPLIERS = {
 export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false } = {}) {
   const cfg = SCHEDULED_SUPPLIERS[String(supplier).toUpperCase()];
   if (!cfg) return { error: `unknown scheduled supplier ${supplier}` };
-  const threshold = cfg.threshold || THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier
+  const threshold = cfg.threshold ?? THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier — `??` so a deliberate 0 (no minimum, e.g. Snickers) is honoured, not treated as "unset"
   if (running) return { skipped: 'a run is already in progress' };
   running = true;
   const uk = ukNow();
