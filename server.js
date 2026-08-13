@@ -8755,7 +8755,8 @@ if (process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
 
 // Snickers auto-purchase poller — weekdays 10:00 UK. Places via the headless portal-order
 // worker (Hultafors partner portal). ON by default (SNICKERS_SCHEDULE_ENABLED != 'false').
-// No free-carriage minimum (threshold 0 → places whatever demand exists), state row id 5.
+// £300 ex-VAT threshold as a failsafe (SNICKERS_FREESHIP_THRESHOLD; rarely hit — high volume),
+// so tiny orders accumulate instead of placing daily. State row id 5.
 if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -8768,7 +8769,7 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[snickers-schedule] error:', e.message));
     } catch (e) { console.error('[snickers-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
-  console.log('✅ Snickers auto-purchase poller scheduled (weekdays 10:00 UK, no minimum, portal worker)');
+  console.log('✅ Snickers auto-purchase poller scheduled (weekdays 10:00 UK, £300 ex-VAT failsafe, portal worker)');
 }
 
 
