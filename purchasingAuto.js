@@ -60,7 +60,7 @@ const WAREHOUSE_ID = 2;
 export const SUPPLIERS = {
   SNICKERS:     { contactId: 331,   costList: 10, poField: 'PCF_SNICKPO', detect: (n) => /snickers|solid\s*gear/i.test(n || '') },
   BLAKLADER:    { contactId: 323,   costList: 12, poField: 'PCF_BLAKLPO', detect: (n) => /bl[åa]kl[äa]der/i.test(n || '') },
-  PORTWEST:     { contactId: 298,   costList: 7,  poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') },
+  PORTWEST:     { contactId: 298,   costList: 7,  poField: 'PCF_PORTWPO', includeLowInv: false, detect: (n) => /portwest/i.test(n || '') }, // low-inv OFF until min-stock data is sorted — SO demand only
   UNEEK:        { contactId: 322,   costList: 11, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
   'HELLY HANSEN': { contactId: 214, costList: 6,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
   MASCOT:       { contactId: 334,   costList: null, poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
@@ -726,10 +726,14 @@ export async function createComboPOLive(opts = {}) {
     const k = String(l.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + l.qty;
   }
 
-  // 2. low-inventory replenishment (deduped against SO qty for the same SKU)
+  // 2. low-inventory replenishment (deduped against SO qty for the same SKU).
+  // includeLowInv=false (per-supplier via registry, or per-call via opts) orders ONLY
+  // sales-order demand and skips the reorder entirely — used when a supplier's min-stock
+  // data still needs sorting (e.g. PORTWEST). Default ON for every other supplier.
+  const includeLowInv = opts.includeLowInv != null ? (opts.includeLowInv === true) : (reg.includeLowInv !== false);
   const { fetchLowInventory } = await import('./lowInventory.js');
   let statusIds = []; try { statusIds = await liveSalesOrderStatusIds(excludeStatusIds); } catch { /* report default */ }
-  const li = await fetchLowInventory({ supplierId: lowInvSupplierId, statusIds, numResults: 10000 });
+  const li = includeLowInv ? await fetchLowInventory({ supplierId: lowInvSupplierId, statusIds, numResults: 10000 }) : { rows: [] };
   const lowLines = [];
   for (const d of li.rows) {
     if (d.orderQty <= 0) continue;
@@ -745,7 +749,7 @@ export async function createComboPOLive(opts = {}) {
   // the free-delivery threshold (spread evenly), but only if it can actually reach it.
   let padInfo = null;
   const lineNet = (arr) => arr.reduce((a, l) => a + (l.cost || 0) * l.qty, 0);
-  if (padToThreshold > 0) {
+  if (includeLowInv && padToThreshold > 0) {
     const netNormal = lineNet(soLines) + lineNet(lowLines);
     if (netNormal < padToThreshold) {
       // Build pad candidates from the low-inv report rows (incl. at-min items ordering 0).
@@ -797,7 +801,7 @@ export async function createComboPOLive(opts = {}) {
   const plan = {
     supplierKey, contactId, priceListId, reference, warehouseId: WAREHOUSE_ID,
     fillExistingPoId: opts.fillExistingPoId || null,               // echoed so callers can confirm the option is wired
-    soLines, separator: '=====LOW INV====', lowLines, padInfo,
+    soLines, separator: '=====LOW INV====', lowLines, padInfo, includeLowInv,
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
     unresolvedSkus: lowLines.filter((l) => l.unresolved).map((l) => l.sku),
@@ -845,8 +849,10 @@ export async function createComboPOLive(opts = {}) {
     catch (e) { if (/ORDC-023|bundle/i.test(e.message || '')) skippedBundles.push({ sku: l.sku, name: l.name, productId: l.productId, qty: l.qty, from }); else throw e; }
   };
   for (const l of soLines) await tryRow(l, 'SO');
-  await addRow(1000, 1, 0, '=====LOW INV====');           // separator note row (net 0 → no tax)
-  for (const l of lowLines) await tryRow(l, 'low-inv');
+  if (lowLines.length) {
+    await addRow(1000, 1, 0, '=====LOW INV====');         // separator note row (net 0 → no tax) — only when there IS low-inv
+    for (const l of lowLines) await tryRow(l, 'low-inv');
+  }
 
   // note (SO#nnn render as clickable links)
   const nl = [`Auto-PO for ${supplierKey}.`];
