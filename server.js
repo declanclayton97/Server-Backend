@@ -8753,6 +8753,24 @@ if (process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Uneek auto-purchase poller scheduled (weekdays 16:00 UK, £100 ex-VAT, email)');
 }
 
+// Snickers auto-purchase poller — weekdays 10:00 UK. Places via the headless portal-order
+// worker (Hultafors partner portal). ON by default (SNICKERS_SCHEDULE_ENABLED != 'false').
+// No free-carriage minimum (threshold 0 → places whatever demand exists), state row id 5.
+if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return; // weekdays only (no weekend orders)
+      if (!(uk.hour === 10 && uk.minute < 30)) return; // fire in the 10:00–10:29 window (before Fristads 10:30)
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'SNICKERS' })
+        .then((r) => { if (!r.skipped) console.log('[snickers-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[snickers-schedule] error:', e.message));
+    } catch (e) { console.error('[snickers-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Snickers auto-purchase poller scheduled (weekdays 10:00 UK, no minimum, portal worker)');
+}
+
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;

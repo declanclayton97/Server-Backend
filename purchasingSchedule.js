@@ -276,11 +276,11 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
 // Drive the portal worker asynchronously: start a job, then poll until done/error.
 // A full order takes many minutes (WebForms postbacks per line), so we can't hold one
 // HTTP request open — the worker returns a jobId and we poll GET /job/:id.
-async function workerPlaceOrder({ ref, lines, execute }) {
+async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute }) {
   const headers = { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET };
   const start = await jfetch('checkout', `${STERLING_WORKER_URL}/place-order`, {
     method: 'POST', headers,
-    body: JSON.stringify({ supplier: 'STERLING', ref: String(ref), lines, execute, async: true }),
+    body: JSON.stringify({ supplier, ref: String(ref), lines, execute, async: true }),
   });
   const jobId = start && start.jobId;
   if (!jobId) throw stepErr('checkout', `worker didn't start a job: ${JSON.stringify(start)}`);
@@ -419,8 +419,59 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   return { poId, emailedTo: UNEEK_ORDER_EMAIL, steps };
 }
 
+// ── Snickers placement chain (Hultafors partner portal) ──────────────────────
+// Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
+// import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
+// #btnConfirm). Lines are BP SKUs (StockCode) DIRECTLY — no per-line resolution. Full cycle:
+// create PO → worker place → mark placed + ref → finalise SOs (note + status + tag clear),
+// the two-step finalise from the supplier PO checklist. `live` gates the writes (default on).
+const SNICKERS_SUPPLIER_CONTACT = 331;
+async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // Worker lines = the PO's SKUs (skip the =====LOW INV==== separator productId 1000), summed
+  // per SKU. Build from soLines/lowLines (FULL SKUs); the /po-cart-lines route truncates them.
+  const bySku = new Map();
+  for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
+    if (String(l.productId) === '1000' || !l.sku) continue;
+    const k = String(l.sku).toUpperCase();
+    bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty));
+  }
+  const lines = [...bySku.entries()].map(([stockCode, qty]) => ({ stockCode, qty }));
+  if (!lines.length) throw stepErr('resolve', 'no orderable Snickers lines');
+  steps.resolve = { lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0) };
+
+  // Drive the Hultafors worker (async job + poll). ref = PO id → the portal PO-number field.
+  const wr = await workerPlaceOrder({ supplier: 'SNICKERS', ref: poId, lines, execute: live });
+  if (!wr || !wr.placed) throw stepErr('checkout', `Snickers worker did not confirm placement: ${JSON.stringify((wr && (wr.error || wr.statusText)) || wr).slice(0, 250)}`);
+  const orderNo = wr.orderNo || null;
+  steps.checkout = { placed: true, orderNo, poSet: wr.poSet || null };
+
+  // Finalise — BOTH sides (supplier PO checklist item 7). PO: status 7 + reference.
+  const ref = orderNo || `Placed-${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }               // API PATCH — tax-safe
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Snickers — order ${ref}. Reference-set failed: ${e.message}`, SNICKERS_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: ref, refWritten, orderNo, status: 7 };
+
+  // SO: note ("… Ordered on PO#<id>") + status → Ordered Stock Awaiting Delivery + clear tag.
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'SNICKERS', poId, noteContactId: SNICKERS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 const SCHEDULED_SUPPLIERS = {
   FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder, threshold: Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300) },
+  SNICKERS: { supplierKey: 'SNICKERS', stateId: 5, placeFn: placeSnickersOrder, threshold: Number(process.env.SNICKERS_FREESHIP_THRESHOLD || 0) }, // Hultafors portal worker; no minimum (place whatever demand exists)
   UNEEK: { supplierKey: 'UNEEK', stateId: 3, placeFn: placeUneekOrder, threshold: Number(process.env.UNEEK_FREESHIP_THRESHOLD || 100) }, // email supplier, free carriage @ £100 ex-VAT, no min order
   CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder, threshold: Number(process.env.CASTLE_FREESHIP_THRESHOLD || 150) }, // Castle free carriage @ £150 ex-VAT
   STERLING: { supplierKey: 'STERLING', stateId: 4, placeFn: placeSterlingOrder, threshold: Number(process.env.STERLING_FREESHIP_THRESHOLD || 150) },
