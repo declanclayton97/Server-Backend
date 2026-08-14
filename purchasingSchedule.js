@@ -569,11 +569,13 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   }
   // Upload lines = the ACTUAL PO ROWS (canonical Portwest codes, e.g. P351WHR — the SO demand
   // may carry a different internal SKU like 196109 that Portwest's portal doesn't recognise).
-  let cartLines;
-  try { cartLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) })); }
+  let poRowLines;
+  try { poRowLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) })); }
   catch (e) { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); }
-  // Pack/carton rounding NOT enforced by the cart (e.g. P351 sells in boxes of 20): round the
-  // upload qty UP to the given pack multiple, so the cart — and the reconcile below — reflect it.
+  // Upload starts from the PO rows. Pack/carton sizes the cart does NOT enforce (e.g. P351 sells
+  // in boxes of 20) are rounded UP on the UPLOAD so the cart reflects them; the reconcile below
+  // then bumps the PO rows to match the cart (whether from OUR pack rounding or Portwest's own).
+  let cartLines = poRowLines.map((l) => ({ ...l }));
   const packApplied = [];
   if (packSizes && Object.keys(packSizes).length) {
     cartLines = cartLines.map((l) => { const p = Number(packSizes[String(l.sku).toUpperCase()]); if (p > 0 && l.qty % p !== 0) { const q = Math.ceil(l.qty / p) * p; packApplied.push({ sku: l.sku, from: l.qty, to: q, pack: p }); return { ...l, qty: q }; } return l; });
@@ -592,14 +594,16 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   //    min) and bump the PO to match. A line the portal wouldn't take (0 in the cart) is dropped
   //    from the PO. Guard against a systemic failure (empty cart / unexpected extras / mass drop).
   const got = new Map(); for (const l of cart) got.set(String(l.sku).toUpperCase(), (got.get(String(l.sku).toUpperCase()) || 0) + (Number(l.qty) || 0));
+  // Diff the CART against the ORIGINAL PO ROWS (not the pack-adjusted upload) so BOTH Portwest's
+  // carton rounding and our own pack rounding surface as bumps to apply to the PO.
   const bumped = [], droppedLines = [], matched = [];
-  for (const l of cartLines) { const g = got.get(String(l.sku).toUpperCase()) || 0; if (g === 0) droppedLines.push({ sku: l.sku, want: l.qty }); else if (g !== l.qty) bumped.push({ sku: l.sku, from: l.qty, to: g }); else matched.push(l.sku); }
-  const extra = [...got.keys()].filter((s) => !cartLines.some((l) => String(l.sku).toUpperCase() === s));
+  for (const l of poRowLines) { const g = got.get(String(l.sku).toUpperCase()) || 0; if (g === 0) droppedLines.push({ sku: l.sku, want: l.qty }); else if (g !== l.qty) bumped.push({ sku: l.sku, from: l.qty, to: g }); else matched.push(l.sku); }
+  const extra = [...got.keys()].filter((s) => !poRowLines.some((l) => String(l.sku).toUpperCase() === s));
   const cartUnits = [...got.values()].reduce((a, b) => a + b, 0);
-  steps.verify = { poLineCount: cartLines.length, cartLineCount: cart.length, matched: matched.length, bumped, dropped: droppedLines, extra };
+  steps.verify = { poLineCount: poRowLines.length, cartLineCount: cart.length, matched: matched.length, bumped, dropped: droppedLines, extra };
   if (!cart.length || cartUnits === 0) throw stepErr('verify', `Portwest cart is empty after upload — aborting. PO#${poId} left for review.`, { poId });
   if (extra.length) throw stepErr('verify', `Portwest cart has ${extra.length} line(s) NOT on the PO (${extra.slice(0, 8).join(', ')}) — aborting for review. PO#${poId}.`, { poId, extra });
-  if (droppedLines.length > Math.max(3, Math.ceil(cartLines.length * 0.25))) throw stepErr('verify', `${droppedLines.length} of ${cartLines.length} lines dropped from the Portwest cart — too many, aborting for review. PO#${poId}.`, { poId, dropped: droppedLines });
+  if (droppedLines.length > Math.max(3, Math.ceil(poRowLines.length * 0.25))) throw stepErr('verify', `${droppedLines.length} of ${poRowLines.length} lines dropped from the Portwest cart — too many, aborting for review. PO#${poId}.`, { poId, dropped: droppedLines });
 
   // Apply the reconcile to the PO (bump round-ups, drop un-orderable lines) so PO == cart.
   if (bumped.length || droppedLines.length) {
