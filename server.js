@@ -8772,6 +8772,42 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Snickers auto-purchase poller scheduled (weekdays 10:00 UK, £300 ex-VAT failsafe, portal worker)');
 }
 
+// Carhartt auto-purchase poller — weekdays 11:00 UK. Elastic Suite portal (order.carhartt.com).
+// OFF by default (new live placer): needs CARHARTT_SCHEDULE_ENABLED=true here AND
+// CARHARTT_PLACE_ENABLED=true on Alternate-Items. £300 ex-VAT failsafe, state row id 6.
+if (process.env.CARHARTT_SCHEDULE_ENABLED === 'true') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 11 && uk.minute < 30)) return; // 11:00–11:29 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'CARHARTT' })
+        .then((r) => { if (!r.skipped) console.log('[carhartt-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[carhartt-schedule] error:', e.message));
+    } catch (e) { console.error('[carhartt-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Carhartt auto-purchase poller scheduled (weekdays 11:00 UK, £300 ex-VAT failsafe)');
+} else { console.log('⏸️  Carhartt auto-purchase poller DORMANT (set CARHARTT_SCHEDULE_ENABLED=true + CARHARTT_PLACE_ENABLED=true)'); }
+
+// Helly Hansen auto-purchase poller — weekdays 11:30 UK. Elastic Suite portal
+// (b2bwork.hellyhansen.com). OFF by default: needs HELLYHANSEN_SCHEDULE_ENABLED=true here AND
+// HELLYHANSEN_PLACE_ENABLED=true on Alternate-Items. £300 ex-VAT failsafe, state row id 7.
+if (process.env.HELLYHANSEN_SCHEDULE_ENABLED === 'true') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 11 && uk.minute >= 30)) return; // 11:30–11:59 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'HELLY HANSEN' })
+        .then((r) => { if (!r.skipped) console.log('[hellyhansen-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[hellyhansen-schedule] error:', e.message));
+    } catch (e) { console.error('[hellyhansen-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Helly Hansen auto-purchase poller scheduled (weekdays 11:30 UK, £300 ex-VAT failsafe)');
+} else { console.log('⏸️  Helly Hansen auto-purchase poller DORMANT (set HELLYHANSEN_SCHEDULE_ENABLED=true + HELLYHANSEN_PLACE_ENABLED=true)'); }
+
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;
