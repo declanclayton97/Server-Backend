@@ -476,6 +476,19 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 // `live` gates the writes (default on). Contacts: Carhartt 65173, Helly Hansen 214.
 async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, basketPath, padToThreshold = 0, live = true } = {}) {
   const steps = {};
+  // Pre-flight (only on a real run): value the demand + confirm the portal resolves EVERY line
+  // BEFORE creating the BP PO, so a resolution miss can't leave an orphan PO. (The PO is created
+  // before the portal submit, so without this an unresolved line would strand a Pending PO.)
+  if (live) {
+    let preview;
+    try { preview = await bp.createComboPOLive({ supplierKey, execute: false }); }
+    catch (e) { throw stepErr('preflight', `couldn't value the demand: ${e.message}`); }
+    const preLines = [...(preview.soLines || []), ...(preview.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: l.sku, qty: l.qty }));
+    if (preLines.length) {
+      const dry = await jfetch('preflight', `${altItemsUrl}${basketPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: preLines, dryRun: true }) });
+      if (dry.unresolved && dry.unresolved.length) throw stepErr('preflight', `${supplierKey} lines not on the portal (PO NOT created): ${dry.unresolved.join(', ')} — fix the resolver/aliases first`);
+    }
+  }
   let po;
   try { po = await bp.createComboPOLive({ supplierKey, execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }

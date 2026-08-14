@@ -8773,8 +8773,8 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
 }
 
 // Carhartt auto-purchase poller — weekdays 11:00 UK. Elastic Suite portal (order.carhartt.com).
-// OFF by default (new live placer): needs CARHARTT_SCHEDULE_ENABLED=true here AND
-// CARHARTT_PLACE_ENABLED=true on Alternate-Items. £300 ex-VAT failsafe, state row id 6.
+// OFF by default (new live placer): set CARHARTT_SCHEDULE_ENABLED=true to activate.
+// £300 ex-VAT failsafe, state row id 6.
 if (process.env.CARHARTT_SCHEDULE_ENABLED === 'true') {
   setInterval(() => {
     try {
@@ -8788,11 +8788,11 @@ if (process.env.CARHARTT_SCHEDULE_ENABLED === 'true') {
     } catch (e) { console.error('[carhartt-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
   console.log('✅ Carhartt auto-purchase poller scheduled (weekdays 11:00 UK, £300 ex-VAT failsafe)');
-} else { console.log('⏸️  Carhartt auto-purchase poller DORMANT (set CARHARTT_SCHEDULE_ENABLED=true + CARHARTT_PLACE_ENABLED=true)'); }
+} else { console.log('⏸️  Carhartt auto-purchase poller DORMANT (set CARHARTT_SCHEDULE_ENABLED=true to activate)'); }
 
 // Helly Hansen auto-purchase poller — weekdays 11:30 UK. Elastic Suite portal
-// (b2bwork.hellyhansen.com). OFF by default: needs HELLYHANSEN_SCHEDULE_ENABLED=true here AND
-// HELLYHANSEN_PLACE_ENABLED=true on Alternate-Items. £300 ex-VAT failsafe, state row id 7.
+// (b2bwork.hellyhansen.com). OFF by default: set HELLYHANSEN_SCHEDULE_ENABLED=true to activate.
+// £300 ex-VAT failsafe, state row id 7.
 if (process.env.HELLYHANSEN_SCHEDULE_ENABLED === 'true') {
   setInterval(() => {
     try {
@@ -8806,7 +8806,7 @@ if (process.env.HELLYHANSEN_SCHEDULE_ENABLED === 'true') {
     } catch (e) { console.error('[hellyhansen-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
   console.log('✅ Helly Hansen auto-purchase poller scheduled (weekdays 11:30 UK, £300 ex-VAT failsafe)');
-} else { console.log('⏸️  Helly Hansen auto-purchase poller DORMANT (set HELLYHANSEN_SCHEDULE_ENABLED=true + HELLYHANSEN_PLACE_ENABLED=true)'); }
+} else { console.log('⏸️  Helly Hansen auto-purchase poller DORMANT (set HELLYHANSEN_SCHEDULE_ENABLED=true to activate)'); }
 
 
 async function sendOutOfStockEmail(supplier, lines, to) {
