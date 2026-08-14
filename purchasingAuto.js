@@ -144,6 +144,12 @@ export async function setProductIdentity(productId, changes = {}) {
 
 // ---- helpers ----
 const tagsOf = (v) => String(v || '').split('/').map((x) => x.trim()).filter(Boolean);
+// A PCF_SUPPLIER token may carry a trailing note in parens — e.g. "HELLY HANSEN (BACK ORDER)"
+// — a human annotation that the order is on back order. It STILL needs ordering (the OOS line
+// isn't placed yet), so match the supplier ignoring that trailing note. Genuine "hold" notes
+// ("on hold", "do not order", "awaiting"…) are filtered separately by isLeaveNote, and the
+// toOrder maths prevents any double-order. Used for both queue-matching and finalise tag-clear.
+const tagSupplier = (t) => String(t || '').replace(/\s*\([^)]*\)\s*$/, '').trim().toUpperCase();
 // Pick a product-option value by matching the option KEY (names vary: "Size",
 // "Mascot Trouser Size", "Colour", "Color"…).
 const optValue = (opts, re) => { for (const k of Object.keys(opts || {})) if (re.test(k)) return opts[k]; return null; };
@@ -480,7 +486,7 @@ export async function previewLive(supplierKey, orderIds) {
     if (tag) tagCounts[tag] = (tagCounts[tag] || 0) + 1;
     if (!tag) { skipped.noTag++; continue; }
     if (isLeaveNote(tag)) { skipped.leaveNote++; continue; }
-    if (!tagsOf(tag).some((t) => t.toUpperCase() === sup.key)) { skipped.otherSupplier++; continue; }
+    if (!tagsOf(tag).some((t) => tagSupplier(t) === sup.key)) { skipped.otherSupplier++; continue; }
     if (sup.poField && cf[sup.poField]) { skipped.alreadyHasPo++; continue; }
     candidates.push({ id, tag });
   }
@@ -502,7 +508,7 @@ export async function previewLive(supplierKey, orderIds) {
     if (!order) { skipped.noMatchingRows++; continue; }
     let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && sup.detect(r.productName, r.productSku));
     const allTags = tagsOf(cand.tag);
-    if (!rows.length && allTags.length === 1 && allTags[0].toUpperCase() === sup.key) {
+    if (!rows.length && allTags.length === 1 && tagSupplier(allTags[0]) === sup.key) {
       rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r));
     }
     if (!rows.length) { skipped.noMatchingRows++; continue; }
@@ -602,7 +608,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     await pause(120);
     const tag = cf.PCF_SUPPLIER;
     if (!tag || isLeaveNote(tag)) continue;
-    if (!tagsOf(tag).some((t) => t.toUpperCase() === supplierKey)) continue;
+    if (!tagsOf(tag).some((t) => tagSupplier(t) === supplierKey)) continue;
     // Do NOT skip SOs already stamped with this supplier's poField. Still being TAGGED for the
     // supplier (checked just above; the finalize removes the tag once fully ordered) means it
     // still needs ordering — a stamp only records a prior PO. Skipping stamped SOs permanently
@@ -623,7 +629,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // detector and their orders ARE single-supplier, so for them a sole tag = take every
     // orderable row. Shipping/misc/decoration lines are excluded either way.
     const allTags = tagsOf(tag);
-    const singleSupplier = allTags.length === 1 && allTags[0].toUpperCase() === supplierKey;
+    const singleSupplier = allTags.length === 1 && tagSupplier(allTags[0]) === supplierKey;
     // Per-SO SKIP list (PCF_SKIPSKU): the user marks items NOT to auto-order on this SO (e.g. a
     // pair already ordered manually/elsewhere) — everything else still orders. A skip token
     // matches by exact SKU, a dash-part of the SKU, a SKU substring, or a whole word in the name
@@ -909,7 +915,7 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
   for (const id of orderIds) {
     const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
     const before = cf.PCF_SUPPLIER || '';
-    const remaining = tagsOf(before).filter((t) => t.toUpperCase() !== key);
+    const remaining = tagsOf(before).filter((t) => tagSupplier(t) !== key);
     plan.push({ id, before, after: remaining.join(' / '), willClear: remaining.length === 0 });
     await pause(120);
   }
