@@ -746,6 +746,22 @@ export async function createComboPOLive(opts = {}) {
     lowLines.push({ productId, sku: d.sku, name: d.name, qty, cost, unresolved: !productId });
   }
 
+  // 2a. PORTAL PRICE OVERRIDES (Elastic suppliers: Carhartt / Helly Hansen). The live
+  // wholesale price per SKU (captured from the portal draft in the pre-flight) WINS over
+  // Brightpearl's stored cost, so the PO net reconciles to what the supplier actually
+  // invoices — and self-heals any £0/stale BP cost. Keyed by SKU (uppercase); only a real
+  // positive price overrides. Applied before the pad so the threshold maths use it too.
+  const priceOverrides = opts.priceOverrides && typeof opts.priceOverrides === 'object' ? opts.priceOverrides : null;
+  const priceOverridesApplied = [];
+  if (priceOverrides) {
+    const applyOverride = (l) => {
+      const p = Number(priceOverrides[String(l.sku || '').toUpperCase()]);
+      if (Number.isFinite(p) && p > 0 && p !== l.cost) { priceOverridesApplied.push({ sku: l.sku, was: l.cost, now: p }); l.cost = p; }
+    };
+    for (const l of soLines) applyOverride(l);
+    for (const l of lowLines) applyOverride(l);
+  }
+
   // 2b. DAY-3 TOP-UP — pad low-inv up to padMaxPct above each item's min stock to reach
   // the free-delivery threshold (spread evenly), but only if it can actually reach it.
   let padInfo = null;
@@ -803,6 +819,7 @@ export async function createComboPOLive(opts = {}) {
     supplierKey, contactId, priceListId, reference, warehouseId: WAREHOUSE_ID,
     fillExistingPoId: opts.fillExistingPoId || null,               // echoed so callers can confirm the option is wired
     soLines, separator: '=====LOW INV====', lowLines, padInfo, includeLowInv,
+    priceOverridesApplied,                                          // portal-price overrides applied to line costs (Elastic suppliers)
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
     unresolvedSkus: lowLines.filter((l) => l.unresolved).map((l) => l.sku),

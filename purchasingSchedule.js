@@ -479,6 +479,9 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   // Pre-flight (only on a real run): value the demand + confirm the portal resolves EVERY line
   // BEFORE creating the BP PO, so a resolution miss can't leave an orphan PO. (The PO is created
   // before the portal submit, so without this an unresolved line would strand a Pending PO.)
+  // It ALSO harvests the portal's live wholesale price per SKU (pricedLines) → priceOverrides,
+  // so the PO net reconciles to the supplier invoice instead of trusting BP's stored cost.
+  let priceOverrides = null;
   if (live) {
     let preview;
     try { preview = await bp.createComboPOLive({ supplierKey, execute: false }); }
@@ -487,17 +490,22 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
     if (preLines.length) {
       const dry = await jfetch('preflight', `${altItemsUrl}${basketPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: preLines, dryRun: true }) });
       if (dry.unresolved && dry.unresolved.length) throw stepErr('preflight', `${supplierKey} lines not on the portal (PO NOT created): ${dry.unresolved.join(', ')} — fix the resolver/aliases first`);
+      if (Array.isArray(dry.pricedLines) && dry.pricedLines.length) {
+        priceOverrides = {};
+        for (const p of dry.pricedLines) { const price = Number(p.price); if (p.sku && Number.isFinite(price) && price > 0) priceOverrides[String(p.sku).toUpperCase()] = price; }
+        steps.priceOverrides = { count: Object.keys(priceOverrides).length };
+      }
     }
   }
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey, execute: live, padToThreshold, logPool: pool }); }
+  try { po = await bp.createComboPOLive({ supplierKey, execute: live, padToThreshold, priceOverrides, logPool: pool }); }
   catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [], priceOverridesApplied: po.priceOverridesApplied || [] };
 
   // Order lines = the PO's SKUs (skip the =====LOW INV==== separator), summed per SKU.
   const bySku = new Map();
