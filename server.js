@@ -8791,9 +8791,10 @@ if (process.env.CARHARTT_SCHEDULE_ENABLED === 'true') {
 } else { console.log('⏸️  Carhartt auto-purchase poller DORMANT (set CARHARTT_SCHEDULE_ENABLED=true to activate)'); }
 
 // Helly Hansen auto-purchase poller — weekdays 11:30 UK. Elastic Suite portal
-// (b2bwork.hellyhansen.com). OFF by default: set HELLYHANSEN_SCHEDULE_ENABLED=true to activate.
-// £300 ex-VAT failsafe, state row id 7.
-if (process.env.HELLYHANSEN_SCHEDULE_ENABLED === 'true') {
+// (b2bwork.hellyhansen.com). ON by default (HELLYHANSEN_SCHEDULE_ENABLED != 'false').
+// PO line costs come from the portal's live wholesale price (portal wins) so the PO reconciles
+// to the HH invoice; OOS lines get back-ordered. £300 ex-VAT failsafe, state row id 7.
+if (process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -8806,7 +8807,7 @@ if (process.env.HELLYHANSEN_SCHEDULE_ENABLED === 'true') {
     } catch (e) { console.error('[hellyhansen-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
   console.log('✅ Helly Hansen auto-purchase poller scheduled (weekdays 11:30 UK, £300 ex-VAT failsafe)');
-} else { console.log('⏸️  Helly Hansen auto-purchase poller DORMANT (set HELLYHANSEN_SCHEDULE_ENABLED=true to activate)'); }
+} else { console.log('⏸️  Helly Hansen auto-purchase poller DISABLED (HELLYHANSEN_SCHEDULE_ENABLED=false)'); }
 
 
 async function sendOutOfStockEmail(supplier, lines, to) {
