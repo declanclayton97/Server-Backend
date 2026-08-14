@@ -542,7 +542,7 @@ async function placeHellyHansenOrder(pool, altItemsUrl, opts = {}) { return plac
 // delivery). The Alt-Items /api/portwest-order route does upload→place in one call.
 // Same skeleton as Castle. £150 free-carriage threshold. Contact 298.
 const PORTWEST_SUPPLIER_CONTACT = 298;
-async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null, packSizes = {} } = {}) {
+async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null, packSizes = {}, excludeSkus = [] } = {}) {
   const steps = {};
   let poId, soIds, linesByOrder;
   if (existingPoId) {
@@ -572,14 +572,19 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   let poRowLines;
   try { poRowLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) })); }
   catch (e) { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); }
-  // Upload starts from the PO rows. Pack/carton sizes the cart does NOT enforce (e.g. P351 sells
-  // in boxes of 20) are rounded UP on the UPLOAD so the cart reflects them; the reconcile below
-  // then bumps the PO rows to match the cart (whether from OUR pack rounding or Portwest's own).
-  let cartLines = poRowLines.map((l) => ({ ...l }));
+  // Upload starts from the PO rows. packSizes[sku] = how many of OUR units make ONE Portwest
+  // order item (e.g. P351WHR IS a box of 20 masks). The Portwest order qty is therefore
+  // ceil(demand / pack) — 48 masks in boxes of 20 → 3 boxes. The reconcile below then sets the
+  // PO row to that pack count so PO == the actual order.
+  // excludeSkus: leave these OFF the Portwest order entirely (handled manually — e.g. a box/single
+  // unit mismatch). They stay in poRowLines so the reconcile then drops them from the PO too.
+  const excl = new Set((excludeSkus || []).map((s) => String(s).toUpperCase()));
+  let cartLines = poRowLines.filter((l) => !excl.has(String(l.sku).toUpperCase())).map((l) => ({ ...l }));
+  if (excl.size) steps.excluded = [...excl];
   const packApplied = [];
   if (packSizes && Object.keys(packSizes).length) {
-    cartLines = cartLines.map((l) => { const p = Number(packSizes[String(l.sku).toUpperCase()]); if (p > 0 && l.qty % p !== 0) { const q = Math.ceil(l.qty / p) * p; packApplied.push({ sku: l.sku, from: l.qty, to: q, pack: p }); return { ...l, qty: q }; } return l; });
-    if (packApplied.length) steps.packRounding = packApplied;
+    cartLines = cartLines.map((l) => { const p = Number(packSizes[String(l.sku).toUpperCase()]); if (p > 1) { const q = Math.max(1, Math.ceil(l.qty / p)); if (q !== l.qty) { packApplied.push({ sku: l.sku, demandUnits: l.qty, packs: q, packOf: p }); return { ...l, qty: q }; } } return l; });
+    if (packApplied.length) steps.packConversion = packApplied;
   }
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   if (!cartLines.length) throw stepErr('cart', 'no orderable Portwest lines');
@@ -710,8 +715,8 @@ export async function runFristadsScheduled(opts = {}) { return runSupplierSchedu
 // Portwest two-step first-order helpers (review-before-place). prepare = create PO + load
 // the Portwest basket + verify it matches the PO, WITHOUT placing. place = place a PO that
 // prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
-export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSizes = {} }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null, packSizes }); }
-export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {} }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes }); }
+export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null, packSizes, excludeSkus }); }
+export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes, excludeSkus }); }
 
 function ukDateStr(d) { // normalise a pg date (Date or 'YYYY-MM-DD') to YYYY-MM-DD
   if (typeof d === 'string') return d.slice(0, 10);

@@ -8678,7 +8678,7 @@ app.post('/api/purchasing/supplier-scheduled-run', express.json(), async (req, r
 app.post('/api/purchasing/portwest-prepare', express.json(), async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
   if (!pool) return res.status(503).json({ error: 'DB not available' });
-  try { res.json(await purchasingSchedule.portwestPrepare({ pool, altItemsUrl: ALT_ITEMS_URL, poId: (req.body && (req.body.poId || req.body.po)) || req.query.poId || null, packSizes: (req.body && req.body.packSizes) || {} })); }
+  try { res.json(await purchasingSchedule.portwestPrepare({ pool, altItemsUrl: ALT_ITEMS_URL, poId: (req.body && (req.body.poId || req.body.po)) || req.query.poId || null, packSizes: (req.body && req.body.packSizes) || {}, excludeSkus: (req.body && req.body.excludeSkus) || [] })); }
   catch (e) { res.status(400).json({ error: e.message, step: e.step, context: e.context }); }
 });
 // PLACE a PO that prepare already created + verified. Re-verifies the basket == PO, then
@@ -8688,7 +8688,7 @@ app.post('/api/purchasing/portwest-place', express.json(), async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   const poId = (req.body && (req.body.poId || req.body.po)) || req.query.poId;
   if (!poId) return res.status(400).json({ error: 'poId required' });
-  try { res.json(await purchasingSchedule.portwestPlaceExisting({ pool, altItemsUrl: ALT_ITEMS_URL, poId: Number(poId), packSizes: (req.body && req.body.packSizes) || {} })); }
+  try { res.json(await purchasingSchedule.portwestPlaceExisting({ pool, altItemsUrl: ALT_ITEMS_URL, poId: Number(poId), packSizes: (req.body && req.body.packSizes) || {}, excludeSkus: (req.body && req.body.excludeSkus) || [] })); }
   catch (e) { res.status(400).json({ error: e.message, step: e.step, context: e.context }); }
 });
 
