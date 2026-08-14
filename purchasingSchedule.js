@@ -542,6 +542,10 @@ async function placeHellyHansenOrder(pool, altItemsUrl, opts = {}) { return plac
 // delivery). The Alt-Items /api/portwest-order route does upload→place in one call.
 // Same skeleton as Castle. £150 free-carriage threshold. Contact 298.
 const PORTWEST_SUPPLIER_CONTACT = 298;
+// TEMP safety: never auto-order these Portwest codes (unit/pack mismatch being fixed in BP).
+// P351WHR is a BOX OF 20 but BP tracks it in singles → user is re-adding it as a NEW box
+// product. REMOVE from this list once that's done. Applied to every Portwest run (incl. scheduled).
+const PORTWEST_TEMP_EXCLUDE = ['P351WHR'];
 async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null, packSizes = {}, excludeSkus = [] } = {}) {
   const steps = {};
   let poId, soIds, linesByOrder;
@@ -578,7 +582,7 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   // PO row to that pack count so PO == the actual order.
   // excludeSkus: leave these OFF the Portwest order entirely (handled manually — e.g. a box/single
   // unit mismatch). They stay in poRowLines so the reconcile then drops them from the PO too.
-  const excl = new Set((excludeSkus || []).map((s) => String(s).toUpperCase()));
+  const excl = new Set([...(excludeSkus || []), ...PORTWEST_TEMP_EXCLUDE].map((s) => String(s).toUpperCase()));
   let cartLines = poRowLines.filter((l) => !excl.has(String(l.sku).toUpperCase())).map((l) => ({ ...l }));
   if (excl.size) steps.excluded = [...excl];
   const packApplied = [];

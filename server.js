@@ -8837,6 +8837,25 @@ if (process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Helly Hansen auto-purchase poller scheduled (weekdays 11:30 UK, £300 ex-VAT failsafe)');
 } else { console.log('⏸️  Helly Hansen auto-purchase poller DISABLED (HELLYHANSEN_SCHEDULE_ENABLED=false)'); }
 
+// Portwest auto-purchase poller — weekdays 15:00 UK. portwest.com: CSV upload + two-step
+// checkout_summary→place_order, basket-vs-PO reconcile (carton round-ups) + row consolidation.
+// ON by default (PORTWEST_SCHEDULE_ENABLED != 'false'). £150 free-carriage threshold, state row
+// id 8. (P351WHR temporarily excluded in purchasingSchedule — box/single unit mismatch.)
+if (process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 15 && uk.minute < 30)) return; // 15:00–15:29 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'PORTWEST' })
+        .then((r) => { if (!r.skipped) console.log('[portwest-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[portwest-schedule] error:', e.message));
+    } catch (e) { console.error('[portwest-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Portwest auto-purchase poller scheduled (weekdays 15:00 UK, £150 threshold)');
+} else { console.log('⏸️  Portwest auto-purchase poller DISABLED (PORTWEST_SCHEDULE_ENABLED=false)'); }
+
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;
