@@ -542,30 +542,60 @@ async function placeHellyHansenOrder(pool, altItemsUrl, opts = {}) { return plac
 // delivery). The Alt-Items /api/portwest-order route does upload→place in one call.
 // Same skeleton as Castle. £150 free-carriage threshold. Contact 298.
 const PORTWEST_SUPPLIER_CONTACT = 298;
-async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
+async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null } = {}) {
   const steps = {};
-  let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'PORTWEST', execute: true, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
-  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
-  const poId = po.poId;
-  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
-  const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
-
-  // Order lines from the PO-creation result (full SKUs; skip the =====LOW INV==== separator).
-  const cartLines = [...(po.soLines || []), ...(po.lowLines || [])]
-    .filter((l) => String(l.productId) !== '1000' && l.sku)
-    .map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) }));
+  let poId, soIds, linesByOrder, cartLines;
+  if (existingPoId) {
+    // Reuse a PO created by a prior verifyOnly run — re-derive the SO mapping + order lines
+    // from current demand (unchanged over the few minutes between prepare and place).
+    poId = existingPoId;
+    let dry;
+    try { dry = await bp.createComboPOLive({ supplierKey: 'PORTWEST', execute: false }); }
+    catch (e) { throw stepErr('create-po', `couldn't re-read demand for PO ${poId}: ${e.message}`); }
+    soIds = [...new Set((dry.soLines || []).map((l) => l.order).filter(Boolean))];
+    linesByOrder = {};
+    for (const l of (dry.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+    cartLines = [...(dry.soLines || []), ...(dry.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) }));
+    steps.po = { poId, reused: true, soIds };
+  } else {
+    let po;
+    try { po = await bp.createComboPOLive({ supplierKey: 'PORTWEST', execute: true, padToThreshold, logPool: pool }); }
+    catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+    if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+    poId = po.poId;
+    soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+    linesByOrder = {};
+    for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+    // Order lines from the PO-creation result (full SKUs; skip the =====LOW INV==== separator).
+    cartLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) }));
+    steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+  }
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   if (!cartLines.length) throw stepErr('cart', 'no orderable Portwest lines');
 
-  // CSV-upload the order + place it (custref = our PO#) in one route call.
-  const r = await jfetch('checkout', `${altItemsUrl}/api/portwest-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: cartLines, purchaseOrder: String(poId), place: true }) });
-  steps.cart = { uploaded: r.upload && r.upload.units, cartTotalQty: r.checkout && r.checkout.totalQty, expectUnits };
-  if (r.checkout && r.checkout.totalQty != null && r.checkout.totalQty !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${r.checkout.totalQty}, expected ${expectUnits} — some codes didn't load onto the Portwest cart`);
-  if (!r.placed) throw stepErr('checkout', `Portwest did not confirm placement (status ${r.status}): ${JSON.stringify(r.bodyPeek || r.error || r).slice(0, 250)}`);
+  // 1) CSV-upload the order to the cart WITHOUT placing, and read the cart contents back.
+  const up = await jfetch('cart', `${altItemsUrl}/api/portwest-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: cartLines, purchaseOrder: String(poId) }) });
+  const cart = (up.checkout && up.checkout.lines) || [];
+  steps.cart = { uploaded: up.upload && up.upload.units, cartUnits: up.checkout && up.checkout.cartUnits, cartLineCount: cart.length, expectUnits, poLineCount: cartLines.length };
+
+  // 2) HARD VERIFY: the Portwest cart must match the PO line-for-line before we place anything.
+  //    (Portwest can silently drop an unknown code or cap a qty to its max-order allowance.)
+  const want = new Map(); for (const l of cartLines) want.set(String(l.sku).toUpperCase(), (want.get(String(l.sku).toUpperCase()) || 0) + l.qty);
+  const got = new Map(); for (const l of cart) got.set(String(l.sku).toUpperCase(), (got.get(String(l.sku).toUpperCase()) || 0) + (Number(l.qty) || 0));
+  const missing = [], qtyMismatch = [], extra = [];
+  for (const [sku, q] of want) { const g = got.get(sku) || 0; if (g === 0) missing.push({ sku, want: q }); else if (g !== q) qtyMismatch.push({ sku, want: q, got: g }); }
+  for (const [sku, g] of got) { if (!want.has(sku)) extra.push({ sku, got: g }); }
+  const allMatch = !missing.length && !qtyMismatch.length && !extra.length;
+  steps.verify = { allMatch, missing, qtyMismatch, extra };
+  if (!allMatch) throw stepErr('verify', `basket does NOT match the PO — NOT placing. missing:${JSON.stringify(missing).slice(0, 200)} qtyMismatch:${JSON.stringify(qtyMismatch).slice(0, 200)} extra:${JSON.stringify(extra).slice(0, 120)}. PO#${poId} left for review.`, { poId, missing, qtyMismatch, extra });
+
+  // verifyOnly: stop here with the basket loaded + verified == PO. Nothing is placed; the PO
+  // stands for review. A follow-up run with { poId } places this same PO.
+  if (verifyOnly) return { poId, verifyOnly: true, allMatch: true, verify: steps.verify, expectUnits, cartUnits: steps.cart.cartUnits, soIds, steps };
+
+  // 3) Basket verified == PO → place it (custref = our PO#). No re-upload; place the current cart.
+  const r = await jfetch('checkout', `${altItemsUrl}/api/portwest-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ purchaseOrder: String(poId), place: true }) });
+  if (!r.placed) throw stepErr('checkout', `Portwest did not confirm placement (status ${r.status}): ${JSON.stringify(r.bodyPeek || r.error || r).slice(0, 250)}`, { poId, verify: steps.verify });
   const orderNo = r.orderNo || null;
   steps.checkout = { placed: true, orderNo, custref: r.sentCustref };
 
@@ -655,6 +685,12 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
 
 // Back-compat wrapper — the 10:30 poller + existing /fristads-scheduled-run route call this.
 export async function runFristadsScheduled(opts = {}) { return runSupplierScheduled({ ...opts, supplier: 'FRISTADS' }); }
+
+// Portwest two-step first-order helpers (review-before-place). prepare = create PO + load
+// the Portwest basket + verify it matches the PO, WITHOUT placing. place = place a PO that
+// prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
+export async function portwestPrepare({ pool, altItemsUrl }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true }); }
+export async function portwestPlaceExisting({ pool, altItemsUrl, poId }) { return placePortwestOrder(pool, altItemsUrl, { poId }); }
 
 function ukDateStr(d) { // normalise a pg date (Date or 'YYYY-MM-DD') to YYYY-MM-DD
   if (typeof d === 'string') return d.slice(0, 10);

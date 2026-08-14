@@ -8673,6 +8673,25 @@ app.post('/api/purchasing/supplier-scheduled-run', express.json(), async (req, r
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Portwest first-order review flow. PREPARE (non-placing): create the PO, load the Portwest
+// basket, and verify it matches the PO line-for-line — returns the diff, nothing is placed.
+app.post('/api/purchasing/portwest-prepare', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try { res.json(await purchasingSchedule.portwestPrepare({ pool, altItemsUrl: ALT_ITEMS_URL })); }
+  catch (e) { res.status(400).json({ error: e.message, step: e.step, context: e.context }); }
+});
+// PLACE a PO that prepare already created + verified. Re-verifies the basket == PO, then
+// places at Portwest (custref = PO#) + finalises. { poId } required.
+app.post('/api/purchasing/portwest-place', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  const poId = (req.body && (req.body.poId || req.body.po)) || req.query.poId;
+  if (!poId) return res.status(400).json({ error: 'poId required' });
+  try { res.json(await purchasingSchedule.portwestPlaceExisting({ pool, altItemsUrl: ALT_ITEMS_URL, poId: Number(poId) })); }
+  catch (e) { res.status(400).json({ error: e.message, step: e.step, context: e.context }); }
+});
+
 // View recent purchasing errors (also emailed when they happen).
 app.get('/api/purchasing/error-log', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
