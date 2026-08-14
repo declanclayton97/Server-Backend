@@ -542,7 +542,7 @@ async function placeHellyHansenOrder(pool, altItemsUrl, opts = {}) { return plac
 // delivery). The Alt-Items /api/portwest-order route does upload→place in one call.
 // Same skeleton as Castle. £150 free-carriage threshold. Contact 298.
 const PORTWEST_SUPPLIER_CONTACT = 298;
-async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null } = {}) {
+async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null, packSizes = {} } = {}) {
   const steps = {};
   let poId, soIds, linesByOrder;
   if (existingPoId) {
@@ -572,6 +572,13 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   let cartLines;
   try { cartLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) })); }
   catch (e) { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); }
+  // Pack/carton rounding NOT enforced by the cart (e.g. P351 sells in boxes of 20): round the
+  // upload qty UP to the given pack multiple, so the cart — and the reconcile below — reflect it.
+  const packApplied = [];
+  if (packSizes && Object.keys(packSizes).length) {
+    cartLines = cartLines.map((l) => { const p = Number(packSizes[String(l.sku).toUpperCase()]); if (p > 0 && l.qty % p !== 0) { const q = Math.ceil(l.qty / p) * p; packApplied.push({ sku: l.sku, from: l.qty, to: q, pack: p }); return { ...l, qty: q }; } return l; });
+    if (packApplied.length) steps.packRounding = packApplied;
+  }
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   if (!cartLines.length) throw stepErr('cart', 'no orderable Portwest lines');
 
@@ -699,8 +706,8 @@ export async function runFristadsScheduled(opts = {}) { return runSupplierSchedu
 // Portwest two-step first-order helpers (review-before-place). prepare = create PO + load
 // the Portwest basket + verify it matches the PO, WITHOUT placing. place = place a PO that
 // prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
-export async function portwestPrepare({ pool, altItemsUrl, poId = null }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null }); }
-export async function portwestPlaceExisting({ pool, altItemsUrl, poId }) { return placePortwestOrder(pool, altItemsUrl, { poId }); }
+export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSizes = {} }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null, packSizes }); }
+export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {} }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes }); }
 
 function ukDateStr(d) { // normalise a pg date (Date or 'YYYY-MM-DD') to YYYY-MM-DD
   if (typeof d === 'string') return d.slice(0, 10);
