@@ -1093,6 +1093,48 @@ export async function getOrderCartLines(orderId) {
   return [...bySku.values()];
 }
 
+// Reconcile a Portwest PO's rows to what the portal cart will ACTUALLY ship: bump any
+// quantity Portwest rounded up to its carton/min-order, and drop any line the portal wouldn't
+// take (0 in the cart). `cart` = SKU(upper)→qty (Map or object). BP has no row-value update,
+// so a changed row is deleted + re-added preserving unit cost + real tax code (like reprice).
+// Dry-run unless { execute:true }. Returns { bumped:[{sku,from,to}], dropped:[{sku,was}] }.
+export async function reconcilePortwestPO({ poId, cart = {}, execute = false } = {}) {
+  const get = (sku) => { const k = String(sku).toUpperCase(); const v = cart instanceof Map ? cart.get(k) : cart[k]; return v == null ? 0 : Number(v); };
+  const order = (await liveGet(`/order-service/order/${poId}`))[0];
+  const entries = Object.entries(order.orderRows || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+  // Group PO rows by SKU — the same variant can sit on several rows (multiple SOs). The cart
+  // qty is the TOTAL for the SKU, so a changed SKU collapses to ONE row at the cart qty.
+  const bySku = new Map();
+  for (const [rowId, r] of entries) {
+    if (String(r.productId) === '1000') continue;                 // separator/note row — leave it
+    const sku = String(r.productSku);
+    const q = parseFloat(r.quantity.magnitude);
+    const net = parseFloat((r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value) || 0);
+    const cur = bySku.get(sku) || { rowIds: [], qty: 0, net: 0, productId: r.productId };
+    cur.rowIds.push(rowId); cur.qty += q; cur.net += net; cur.productId = r.productId;
+    bySku.set(sku, cur);
+  }
+  const bumped = [], dropped = [], toDelete = [], toReadd = [];
+  for (const [sku, info] of bySku) {
+    const cq = get(sku);
+    if (cq === info.qty) continue;                                // matches (summed) — nothing to do
+    if (cq === 0) { dropped.push({ sku, was: info.qty }); toDelete.push(...info.rowIds); continue; }
+    bumped.push({ sku, from: info.qty, to: cq });
+    toDelete.push(...info.rowIds);
+    toReadd.push({ productId: info.productId, qty: cq, unit: info.qty ? info.net / info.qty : 0 });
+  }
+  if (!execute) return { dryRun: true, poId, bumped, dropped };
+  for (const rowId of toDelete) { await liveWrite('DELETE', `/order-service/order/${poId}/row/${rowId}`); await pause(150); }
+  for (const a of toReadd) {
+    const net = a.unit * a.qty;
+    const code = await productTaxCodeLive(a.productId);
+    const rate = taxRate(code);
+    await liveWrite('POST', `/order-service/order/${poId}/row`, { productId: a.productId, quantity: { magnitude: String(a.qty) }, rowValue: { taxCode: code, rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * rate).toFixed(2) } } });
+    await pause(150);
+  }
+  return { done: true, poId, bumped, dropped };
+}
+
 // LIVE: set a PO's status (e.g. → 7 "Placed with supplier" after the supplier order
 // is placed). Uses the live write client. Single call.
 export async function setOrderStatusLive(orderId, statusId) {

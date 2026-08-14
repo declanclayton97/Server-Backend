@@ -544,10 +544,10 @@ async function placeHellyHansenOrder(pool, altItemsUrl, opts = {}) { return plac
 const PORTWEST_SUPPLIER_CONTACT = 298;
 async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null } = {}) {
   const steps = {};
-  let poId, soIds, linesByOrder, cartLines;
+  let poId, soIds, linesByOrder;
   if (existingPoId) {
-    // Reuse a PO created by a prior verifyOnly run — re-derive the SO mapping + order lines
-    // from current demand (unchanged over the few minutes between prepare and place).
+    // Reuse a PO created by a prior verifyOnly run — re-derive the SO mapping (for the finalise
+    // notes) from current demand (unchanged over the few minutes between prepare and place).
     poId = existingPoId;
     let dry;
     try { dry = await bp.createComboPOLive({ supplierKey: 'PORTWEST', execute: false }); }
@@ -555,7 +555,6 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
     soIds = [...new Set((dry.soLines || []).map((l) => l.order).filter(Boolean))];
     linesByOrder = {};
     for (const l of (dry.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
-    cartLines = [...(dry.soLines || []), ...(dry.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) }));
     steps.po = { poId, reused: true, soIds };
   } else {
     let po;
@@ -566,10 +565,13 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
     soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
     linesByOrder = {};
     for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
-    // Order lines from the PO-creation result (full SKUs; skip the =====LOW INV==== separator).
-    cartLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) }));
     steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
   }
+  // Upload lines = the ACTUAL PO ROWS (canonical Portwest codes, e.g. P351WHR — the SO demand
+  // may carry a different internal SKU like 196109 that Portwest's portal doesn't recognise).
+  let cartLines;
+  try { cartLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) })); }
+  catch (e) { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); }
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   if (!cartLines.length) throw stepErr('cart', 'no orderable Portwest lines');
 
@@ -578,22 +580,30 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   const cart = (up.checkout && up.checkout.lines) || [];
   steps.cart = { uploaded: up.upload && up.upload.units, cartUnits: up.checkout && up.checkout.cartUnits, cartLineCount: cart.length, expectUnits, poLineCount: cartLines.length };
 
-  // 2) HARD VERIFY: the Portwest cart must match the PO line-for-line before we place anything.
-  //    (Portwest can silently drop an unknown code or cap a qty to its max-order allowance.)
-  const want = new Map(); for (const l of cartLines) want.set(String(l.sku).toUpperCase(), (want.get(String(l.sku).toUpperCase()) || 0) + l.qty);
+  // 2) RECONCILE the PO to what Portwest will ACTUALLY ship. Portwest rounds quantities up to
+  //    its carton/min-order, so the cart can hold MORE than we asked — we accept that (order the
+  //    min) and bump the PO to match. A line the portal wouldn't take (0 in the cart) is dropped
+  //    from the PO. Guard against a systemic failure (empty cart / unexpected extras / mass drop).
   const got = new Map(); for (const l of cart) got.set(String(l.sku).toUpperCase(), (got.get(String(l.sku).toUpperCase()) || 0) + (Number(l.qty) || 0));
-  const missing = [], qtyMismatch = [], extra = [];
-  for (const [sku, q] of want) { const g = got.get(sku) || 0; if (g === 0) missing.push({ sku, want: q }); else if (g !== q) qtyMismatch.push({ sku, want: q, got: g }); }
-  for (const [sku, g] of got) { if (!want.has(sku)) extra.push({ sku, got: g }); }
-  const allMatch = !missing.length && !qtyMismatch.length && !extra.length;
-  steps.verify = { allMatch, missing, qtyMismatch, extra };
-  if (!allMatch) throw stepErr('verify', `basket does NOT match the PO — NOT placing. missing:${JSON.stringify(missing).slice(0, 200)} qtyMismatch:${JSON.stringify(qtyMismatch).slice(0, 200)} extra:${JSON.stringify(extra).slice(0, 120)}. PO#${poId} left for review.`, { poId, missing, qtyMismatch, extra });
+  const bumped = [], droppedLines = [], matched = [];
+  for (const l of cartLines) { const g = got.get(String(l.sku).toUpperCase()) || 0; if (g === 0) droppedLines.push({ sku: l.sku, want: l.qty }); else if (g !== l.qty) bumped.push({ sku: l.sku, from: l.qty, to: g }); else matched.push(l.sku); }
+  const extra = [...got.keys()].filter((s) => !cartLines.some((l) => String(l.sku).toUpperCase() === s));
+  const cartUnits = [...got.values()].reduce((a, b) => a + b, 0);
+  steps.verify = { poLineCount: cartLines.length, cartLineCount: cart.length, matched: matched.length, bumped, dropped: droppedLines, extra };
+  if (!cart.length || cartUnits === 0) throw stepErr('verify', `Portwest cart is empty after upload — aborting. PO#${poId} left for review.`, { poId });
+  if (extra.length) throw stepErr('verify', `Portwest cart has ${extra.length} line(s) NOT on the PO (${extra.slice(0, 8).join(', ')}) — aborting for review. PO#${poId}.`, { poId, extra });
+  if (droppedLines.length > Math.max(3, Math.ceil(cartLines.length * 0.25))) throw stepErr('verify', `${droppedLines.length} of ${cartLines.length} lines dropped from the Portwest cart — too many, aborting for review. PO#${poId}.`, { poId, dropped: droppedLines });
 
-  // verifyOnly: stop here with the basket loaded + verified == PO. Nothing is placed; the PO
-  // stands for review. A follow-up run with { poId } places this same PO.
-  if (verifyOnly) return { poId, verifyOnly: true, allMatch: true, verify: steps.verify, expectUnits, cartUnits: steps.cart.cartUnits, soIds, steps };
+  // Apply the reconcile to the PO (bump round-ups, drop un-orderable lines) so PO == cart.
+  if (bumped.length || droppedLines.length) {
+    try { steps.reconcile = await bp.reconcilePortwestPO({ poId, cart: got, execute: true }); }
+    catch (e) { throw stepErr('reconcile', `couldn't update PO ${poId} to match the cart: ${e.message}`, { poId, bumped, dropped: droppedLines }); }
+  }
 
-  // 3) Basket verified == PO → place it (custref = our PO#). No re-upload; place the current cart.
+  // verifyOnly: stop here — PO created + reconciled to match the loaded basket; nothing placed.
+  if (verifyOnly) return { poId, verifyOnly: true, cartUnits, verify: steps.verify, reconcile: steps.reconcile || null, soIds, steps };
+
+  // 3) Place it (custref = our PO#). No re-upload; place the current (reconciled) cart.
   const r = await jfetch('checkout', `${altItemsUrl}/api/portwest-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ purchaseOrder: String(poId), place: true }) });
   if (!r.placed) throw stepErr('checkout', `Portwest did not confirm placement (status ${r.status}): ${JSON.stringify(r.bodyPeek || r.error || r).slice(0, 250)}`, { poId, verify: steps.verify });
   const orderNo = r.orderNo || null;
