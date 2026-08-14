@@ -548,7 +548,7 @@ const SCHEDULED_SUPPLIERS = {
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
-export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false } = {}) {
+export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false, forcePlace = false } = {}) {
   const cfg = SCHEDULED_SUPPLIERS[String(supplier).toUpperCase()];
   if (!cfg) return { error: `unknown scheduled supplier ${supplier}` };
   const threshold = cfg.threshold ?? THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier — `??` so a deliberate 0 (no minimum, e.g. Snickers) is honoured, not treated as "unset"
@@ -577,7 +577,10 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     } else {
       const over = netValue >= threshold;
       const wouldBeDay = state.working_days_waited + 1;
+      // forcePlace: a deliberate MANUAL override to place NOW regardless of the free-carriage
+      // threshold (e.g. an URGENT back-order of a single OOS line). Never set by the pollers.
       if (over) { willPlace = true; reason = 'over-threshold'; }
+      else if (forcePlace) { willPlace = true; reason = `forced place (manual — under £${threshold}, threshold ignored)`; }
       else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS) { willPlace = true; padOnPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — top up low-inv to reach free delivery, else carriage)`; }
       else { decision = `waiting — day ${wouldBeDay} of ${MAX_WAIT_WORKING_DAYS} (£${netValue} < £${threshold})`; newWaitDays = wouldBeDay; }
     }
