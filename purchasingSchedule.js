@@ -549,12 +549,12 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
     // Reuse a PO created by a prior verifyOnly run — re-derive the SO mapping (for the finalise
     // notes) from current demand (unchanged over the few minutes between prepare and place).
     poId = existingPoId;
-    let dry;
-    try { dry = await bp.createComboPOLive({ supplierKey: 'PORTWEST', execute: false }); }
-    catch (e) { throw stepErr('create-po', `couldn't re-read demand for PO ${poId}: ${e.message}`); }
-    soIds = [...new Set((dry.soLines || []).map((l) => l.order).filter(Boolean))];
-    linesByOrder = {};
-    for (const l of (dry.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+    // The contributing SOs come from the PO's OWN note — a fresh demand read would net to zero
+    // (those lines are already on order via this PO), which would skip the SO finalise.
+    let contrib;
+    try { contrib = await bp.getPoContributors(poId); }
+    catch (e) { throw stepErr('create-po', `couldn't read PO ${poId} contributors: ${e.message}`); }
+    soIds = contrib.soIds; linesByOrder = contrib.linesByOrder;
     steps.po = { poId, reused: true, soIds };
   } else {
     let po;

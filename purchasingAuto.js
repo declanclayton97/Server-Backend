@@ -1135,6 +1135,25 @@ export async function reconcilePortwestPO({ poId, cart = {}, execute = false } =
   return { done: true, poId, bumped, dropped };
 }
 
+// Read a PO's contributing SOs from its OWN note (createComboPOLive writes "SO#<id> (<ref>):
+// <sku> x<qty>, …" lines). Returns { soIds:[], linesByOrder:{ id:[{sku,qty}] } }. Used to
+// finalise a REUSED PO whose live demand now nets to zero (it's already on order via that PO).
+export async function getPoContributors(poId) {
+  let notes = [];
+  try { notes = (await liveGet(`/order-service/order/${poId}/note`)) || []; } catch { return { soIds: [], linesByOrder: {} }; }
+  const text = (Array.isArray(notes) ? notes : []).map((x) => x.text || '').join('\n');
+  const soIds = [], linesByOrder = {};
+  for (const line of text.split('\n')) {
+    const m = line.match(/SO#(\d+)\s*\([^)]*\):\s*(.+)$/);
+    if (!m) continue;
+    const id = Number(m[1]); soIds.push(id);
+    const items = [];
+    for (const tok of m[2].split(',')) { const t = tok.trim().match(/^([A-Za-z0-9]+)\s*x(\d+)/); if (t) items.push({ sku: t[1], qty: Number(t[2]) }); }
+    linesByOrder[id] = items;
+  }
+  return { soIds: [...new Set(soIds)], linesByOrder };
+}
+
 // LIVE: set a PO's status (e.g. → 7 "Placed with supplier" after the supplier order
 // is placed). Uses the live write client. Single call.
 export async function setOrderStatusLive(orderId, statusId) {
