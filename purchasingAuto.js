@@ -1135,6 +1135,42 @@ export async function reconcilePortwestPO({ poId, cart = {}, execute = false } =
   return { done: true, poId, bumped, dropped };
 }
 
+// Consolidate duplicate PO rows: any SKU sitting on >1 row (the same variant demanded by
+// several SOs) is collapsed to a SINGLE row at the summed qty (delete its rows + re-add one,
+// preserving the per-unit cost + real tax). Single-row SKUs and the separator are untouched.
+// Dry-run unless { execute:true }. Returns { merged:[{sku,rows,qty}] }.
+export async function consolidatePoRows({ poId, execute = false } = {}) {
+  const order = (await liveGet(`/order-service/order/${poId}`))[0];
+  const entries = Object.entries(order.orderRows || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+  const bySku = new Map();
+  for (const [rowId, r] of entries) {
+    if (String(r.productId) === '1000') continue;
+    const sku = String(r.productSku);
+    const q = parseFloat(r.quantity.magnitude);
+    const net = parseFloat((r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value) || 0);
+    const cur = bySku.get(sku) || { rowIds: [], qty: 0, net: 0, productId: r.productId };
+    cur.rowIds.push(rowId); cur.qty += q; cur.net += net; cur.productId = r.productId;
+    bySku.set(sku, cur);
+  }
+  const merged = [], toDelete = [], toReadd = [];
+  for (const [sku, info] of bySku) {
+    if (info.rowIds.length <= 1) continue;
+    merged.push({ sku, rows: info.rowIds.length, qty: info.qty });
+    toDelete.push(...info.rowIds);
+    toReadd.push({ productId: info.productId, qty: info.qty, unit: info.qty ? info.net / info.qty : 0 });
+  }
+  if (!execute) return { dryRun: true, poId, merged };
+  for (const rowId of toDelete) { await liveWrite('DELETE', `/order-service/order/${poId}/row/${rowId}`); await pause(150); }
+  for (const a of toReadd) {
+    const net = a.unit * a.qty;
+    const code = await productTaxCodeLive(a.productId);
+    const rate = taxRate(code);
+    await liveWrite('POST', `/order-service/order/${poId}/row`, { productId: a.productId, quantity: { magnitude: String(a.qty) }, rowValue: { taxCode: code, rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * rate).toFixed(2) } } });
+    await pause(150);
+  }
+  return { done: true, poId, merged };
+}
+
 // Read a PO's contributing SOs from its OWN note (createComboPOLive writes "SO#<id> (<ref>):
 // <sku> x<qty>, …" lines). Returns { soIds:[], linesByOrder:{ id:[{sku,qty}] } }. Used to
 // finalise a REUSED PO whose live demand now nets to zero (it's already on order via that PO).

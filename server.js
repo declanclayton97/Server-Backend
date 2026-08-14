@@ -8673,6 +8673,15 @@ app.post('/api/purchasing/supplier-scheduled-run', express.json(), async (req, r
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Tidy a PO's duplicate rows (same SKU on several rows → one row per SKU). Read-only unless execute.
+app.post('/api/purchasing/consolidate-po', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const poId = (req.body && (req.body.poId || req.body.po)) || req.query.poId;
+  if (!poId) return res.status(400).json({ error: 'poId required' });
+  try { res.json(await purchasingAuto.consolidatePoRows({ poId: Number(poId), execute: (req.body && req.body.execute === true) || req.query.execute === '1' })); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Portwest first-order review flow. PREPARE (non-placing): create the PO, load the Portwest
 // basket, and verify it matches the PO line-for-line — returns the diff, nothing is placed.
 app.post('/api/purchasing/portwest-prepare', express.json(), async (req, res) => {

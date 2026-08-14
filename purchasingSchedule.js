@@ -615,6 +615,9 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
     try { steps.reconcile = await bp.reconcilePortwestPO({ poId, cart: got, execute: true }); }
     catch (e) { throw stepErr('reconcile', `couldn't update PO ${poId} to match the cart: ${e.message}`, { poId, bumped, dropped: droppedLines }); }
   }
+  // Tidy: collapse any duplicate PO rows (same SKU from several SOs) into one row per SKU.
+  try { const c = await bp.consolidatePoRows({ poId, execute: true }); if (c.merged && c.merged.length) steps.consolidated = c.merged; }
+  catch (e) { steps.consolidateWarn = e.message; }
 
   // verifyOnly: stop here — PO created + reconciled to match the loaded basket; nothing placed.
   if (verifyOnly) return { poId, verifyOnly: true, cartUnits, verify: steps.verify, reconcile: steps.reconcile || null, soIds, steps };
