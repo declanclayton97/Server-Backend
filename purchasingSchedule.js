@@ -536,6 +536,50 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
 async function placeCarharttOrder(pool, altItemsUrl, opts = {}) { return placeElasticOrder(pool, altItemsUrl, { supplierKey: 'CARHARTT', contactId: 65173, basketPath: '/api/carhartt-basket', ...opts }); }
 async function placeHellyHansenOrder(pool, altItemsUrl, opts = {}) { return placeElasticOrder(pool, altItemsUrl, { supplierKey: 'HELLY HANSEN', contactId: 214, basketPath: '/api/hellyhansen-basket', ...opts }); }
 
+// ── Portwest placement chain (portwest.com — CodeIgniter) ────────────────────
+// Whole order goes up as a CSV (item,qty) → the cart lands on /cart/checkout → ONE
+// checkout_summary POST places it with our PO# in `custref` (account payment, default
+// delivery). The Alt-Items /api/portwest-order route does upload→place in one call.
+// Same skeleton as Castle. £150 free-carriage threshold. Contact 298.
+const PORTWEST_SUPPLIER_CONTACT = 298;
+async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
+  const steps = {};
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'PORTWEST', execute: true, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // Order lines from the PO-creation result (full SKUs; skip the =====LOW INV==== separator).
+  const cartLines = [...(po.soLines || []), ...(po.lowLines || [])]
+    .filter((l) => String(l.productId) !== '1000' && l.sku)
+    .map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) }));
+  const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
+  if (!cartLines.length) throw stepErr('cart', 'no orderable Portwest lines');
+
+  // CSV-upload the order + place it (custref = our PO#) in one route call.
+  const r = await jfetch('checkout', `${altItemsUrl}/api/portwest-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: cartLines, purchaseOrder: String(poId), place: true }) });
+  steps.cart = { uploaded: r.upload && r.upload.units, cartTotalQty: r.checkout && r.checkout.totalQty, expectUnits };
+  if (r.checkout && r.checkout.totalQty != null && r.checkout.totalQty !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${r.checkout.totalQty}, expected ${expectUnits} — some codes didn't load onto the Portwest cart`);
+  if (!r.placed) throw stepErr('checkout', `Portwest did not confirm placement (status ${r.status}): ${JSON.stringify(r.bodyPeek || r.error || r).slice(0, 250)}`);
+  const orderNo = r.orderNo || null;
+  steps.checkout = { placed: true, orderNo, custref: r.sentCustref };
+
+  // link + finalise (order# onto PO ref, status 7, SO notes + status 22 + tag clear)
+  const ref = orderNo || `Placed-${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Portwest — order ${ref}. Reference-set failed: ${e.message}`, PORTWEST_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: ref, refWritten, orderNo, status: 7 };
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'PORTWEST', poId, noteContactId: PORTWEST_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 const SCHEDULED_SUPPLIERS = {
   FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder, threshold: Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300) },
   CARHARTT: { supplierKey: 'CARHARTT', stateId: 6, placeFn: placeCarharttOrder, threshold: Number(process.env.CARHARTT_FREESHIP_THRESHOLD || 300) }, // Elastic Suite; also gated on Alt-Items by CARHARTT_PLACE_ENABLED
@@ -545,6 +589,7 @@ const SCHEDULED_SUPPLIERS = {
   UNEEK: { supplierKey: 'UNEEK', stateId: 3, placeFn: placeUneekOrder, threshold: Number(process.env.UNEEK_FREESHIP_THRESHOLD || 100) }, // email supplier, free carriage @ £100 ex-VAT, no min order
   CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder, threshold: Number(process.env.CASTLE_FREESHIP_THRESHOLD || 150) }, // Castle free carriage @ £150 ex-VAT
   STERLING: { supplierKey: 'STERLING', stateId: 4, placeFn: placeSterlingOrder, threshold: Number(process.env.STERLING_FREESHIP_THRESHOLD || 150) },
+  PORTWEST: { supplierKey: 'PORTWEST', stateId: 8, placeFn: placePortwestOrder, threshold: Number(process.env.PORTWEST_FREESHIP_THRESHOLD || 150) }, // portwest.com CSV upload + checkout_summary; free carriage @ £150 ex-VAT (else £7.50)
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
