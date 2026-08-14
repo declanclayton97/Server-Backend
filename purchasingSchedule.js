@@ -699,7 +699,7 @@ export async function runFristadsScheduled(opts = {}) { return runSupplierSchedu
 // Portwest two-step first-order helpers (review-before-place). prepare = create PO + load
 // the Portwest basket + verify it matches the PO, WITHOUT placing. place = place a PO that
 // prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
-export async function portwestPrepare({ pool, altItemsUrl }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true }); }
+export async function portwestPrepare({ pool, altItemsUrl, poId = null }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null }); }
 export async function portwestPlaceExisting({ pool, altItemsUrl, poId }) { return placePortwestOrder(pool, altItemsUrl, { poId }); }
 
 function ukDateStr(d) { // normalise a pg date (Date or 'YYYY-MM-DD') to YYYY-MM-DD
