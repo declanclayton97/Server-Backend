@@ -910,10 +910,31 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     // the "#<orderId>" pattern (was "PO:<id>", which stayed plain text).
     let noted = false;
     if (poId) {
-      const names = (linesByOrder && (linesByOrder[p.id] || linesByOrder[String(p.id)])) || null;
-      const clean = names ? [...new Set(names.map(cleanItemName).filter(Boolean))] : null; // strip customisation blob; de-dupe
-      const text = (clean && clean.length)
-        ? `${clean.join('\n')}\nOrdered on PO#${poId}`
+      // items[] is either legacy name STRINGS, or {sku,qty,name} objects. Render per VARIANT
+      // as "<clean name> — <SKU> x<qty>" (de-dupe by SKU, summing qty) so the note reflects
+      // EVERY ordered variant — product names omit colour/size (Carhartt/HH), so name-only
+      // de-dupe used to collapse e.g. 4 colour/size lines into 2 and under-report the order.
+      const items = (linesByOrder && (linesByOrder[p.id] || linesByOrder[String(p.id)])) || null;
+      let lines = null;
+      if (Array.isArray(items) && items.length) {
+        const bySku = new Map(); const nameOnly = [];
+        for (const it of items) {
+          if (it && typeof it === 'object' && it.sku) {
+            const k = String(it.sku).toUpperCase();
+            const cur = bySku.get(k) || { sku: it.sku, qty: 0, name: cleanItemName(it.name) };
+            cur.qty += Number(it.qty) || 0; bySku.set(k, cur);
+          } else {
+            const nm = cleanItemName(typeof it === 'object' ? it.name : it);
+            if (nm && !nameOnly.includes(nm)) nameOnly.push(nm);
+          }
+        }
+        lines = [
+          ...[...bySku.values()].map((v) => `${v.name ? v.name + ' — ' : ''}${v.sku}${v.qty ? ` x${v.qty}` : ''}`),
+          ...nameOnly,
+        ];
+      }
+      const text = (lines && lines.length)
+        ? `${lines.join('\n')}\nOrdered on PO#${poId}`
         : `${key} items ordered via PO#${poId}`;
       const addedOn = new Date().toISOString().replace('Z', '+00:00');
       await liveWrite('POST', `/order-service/order/${p.id}/note`, { text, addedOn, contactId: noteContactId || 1, isPublic: false });

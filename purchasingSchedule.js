@@ -119,7 +119,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   // item names ordered per SO — for the SO note
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. push the PO lines to the Fristads cart (unresolved = size/item not on the portal)
@@ -214,7 +214,7 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. push PO lines to the Castle basket (SKU-direct; size ignored by Castle).
@@ -339,7 +339,7 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // resolve each PO line (EAN -> search/colour/size); skip service lines; abort on genuinely-unresolved
@@ -400,7 +400,7 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. EMAIL Brightpearl's real PO PDF to Uneek's order desk (only email_to_0 = the order
@@ -435,7 +435,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // Worker lines = the PO's SKUs (skip the =====LOW INV==== separator productId 1000), summed
@@ -496,7 +496,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push(l.name); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // Order lines = the PO's SKUs (skip the =====LOW INV==== separator), summed per SKU.
