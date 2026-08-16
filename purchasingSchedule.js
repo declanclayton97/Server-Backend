@@ -661,17 +661,22 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
-  // Order lines = the PO rows (BP SKU = PenCarrie prodcode "STYLE COLOUR SIZE"), consolidated per SKU.
+  // Order lines from the PO rows, carrying name + colour + size so /api/pencarrie-order can
+  // RESOLVE each BP product → PenCarrie prodcode ("STYLE COLOUR SIZE") — many BP SKUs are numeric
+  // internal codes (e.g. 14185 = Regatta RG045), not prodcodes.
   let orderLines;
-  try { orderLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), ref: `PO${poId}` })); }
+  try { orderLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), name: l.name, colour: l.colour, size: l.size, ref: `PO${poId}` })); }
   catch (e) { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); }
   if (!orderLines.length) throw stepErr('cart', 'no orderable PenCarrie lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
-  // Submit pcautoorder (LIVE gateway unless sandbox). ref = TW<poId>; parkorder=2 processes for
-  // picking; assumebo=1 auto-back-orders shortfalls PenCarrie-side.
-  const r = await jfetch('checkout', `${altItemsUrl}/api/pencarrie-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, reference: `TW${poId}`, parkorder: 2, assumebo: 1, sandbox: !!sandbox }) });
+  // Submit pcautoorder (LIVE gateway unless sandbox). The route resolves each line → prodcode and
+  // REFUSES (ok:false + unresolved[]) if any line can't be mapped — so we never place a short order.
+  // ref = TW<poId>; parkorder=2 processes for picking; assumebo=1 auto-back-orders shortfalls.
+  const r = await jfetch('checkout', `${altItemsUrl}/api/pencarrie-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, reference: `TW${poId}`, parkorder: 2, assumebo: 1, resolve: true, sandbox: !!sandbox }) });
+  if (r.unresolved && r.unresolved.length) throw stepErr('resolve', `${r.unresolved.length} PenCarrie line(s) couldn't be mapped to a prodcode — NOT placing. PO#${poId} left for review. e.g. ${r.unresolved.slice(0, 6).map((u) => u.sku).join(', ')}`, { poId, unresolved: r.unresolved });
   if (!r.ok) throw stepErr('checkout', `PenCarrie did not confirm the order: ${JSON.stringify(r.result || r.error || r.rawSnippet || r).slice(0, 250)}`, { poId });
+  if (r.resolved) steps.resolved = { count: r.resolved };
   const orderNo = r.custorderno || r.ordercode || r.ordno || null;
   const backorderUnits = (r.lines || []).reduce((a, l) => a + (Number(l.backord) || 0), 0);
   steps.checkout = { ok: true, orderNo, ordercode: r.ordercode, custorderno: r.custorderno, backorderUnits, sandbox: !!sandbox };

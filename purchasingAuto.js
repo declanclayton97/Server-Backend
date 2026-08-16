@@ -1091,10 +1091,11 @@ export async function getOrderCartLines(orderId) {
     if (String(r.productId) === '1000') continue;
     const sku = r.productSku;
     const size = optValue(r.productOptions, /size/i);
+    const colour = optValue(r.productOptions, /colou?r/i);
     const qty = parseFloat(r.quantity.magnitude);
     const key = `${sku}|${size || ''}`;
     if (bySku.has(key)) bySku.get(key).qty += qty;
-    else bySku.set(key, { sku, size, qty });
+    else bySku.set(key, { sku, size, colour, name: r.productName, productId: r.productId, qty });
   }
   return [...bySku.values()];
 }
