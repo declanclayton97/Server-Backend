@@ -8874,6 +8874,24 @@ if (process.env.PENCARRIE_SCHEDULE_ENABLED === 'true') {
   console.log('✅ PenCarrie auto-purchase poller scheduled (weekdays 14:00 UK, £150 threshold)');
 } else { console.log('⏸️  PenCarrie auto-purchase poller DORMANT (set PENCARRIE_SCHEDULE_ENABLED=true to activate)'); }
 
+// Blaklader auto-purchase poller — weekdays 09:30 UK. api.blaklader.com order API (POST
+// /order/orders). OFF BY DEFAULT (submit body not yet validated against a real order): set
+// BLAKLADER_SCHEDULE_ENABLED=true to activate. £150 threshold placeholder, state row id 10.
+if (process.env.BLAKLADER_SCHEDULE_ENABLED === 'true') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 9 && uk.minute >= 30)) return; // 09:30–09:59 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'BLAKLADER' })
+        .then((r) => { if (!r.skipped) console.log('[blaklader-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[blaklader-schedule] error:', e.message));
+    } catch (e) { console.error('[blaklader-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Blaklader auto-purchase poller scheduled (weekdays 09:30 UK, £150 threshold)');
+} else { console.log('⏸️  Blaklader auto-purchase poller DORMANT (set BLAKLADER_SCHEDULE_ENABLED=true to activate)'); }
+
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;

@@ -692,6 +692,46 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
   return { poId, orderNo, steps };
 }
 
+// ── Blaklader placement chain (api.blaklader.com order API — no scraping) ─────
+// Create PO → load the lines into the Blaklader basket → POST /order/orders (built from a
+// template order for the account's buyer/address/payment+delivery values) → record the BLK
+// internalId + finalise. SKUs are exact Blåkläder part numbers (no resolver/reconcile). Contact
+// 323. ⚠️ The submit body is NOT yet validated against a real order — only run once confirmed.
+const BLAKLADER_SUPPLIER_CONTACT = 323;
+async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'BLAKLADER', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // Order lines = the PO rows (BP SKU = Blåkläder part number, exact — no resolver).
+  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) }));
+  if (!orderLines.length) throw stepErr('cart', 'no orderable Blaklader lines');
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  // Submit via the Blaklader order API (loads basket then POST /order/orders). place=live.
+  const r = await jfetch('checkout', `${altItemsUrl}/api/blaklader-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: live }) });
+  if (!r.ok) throw stepErr('checkout', `Blaklader did not confirm the order: ${JSON.stringify(r.error || r.add || r).slice(0, 250)}`, { poId });
+  const orderNo = r.internalId || null;
+  steps.checkout = { ok: true, orderNo, sent: r.sent };
+
+  // Finalise: PO status 7 + ref (BLK internalId), SO notes + status 22 + tag clear.
+  const ref = orderNo || `Placed-${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Blaklader — order ${ref}. Reference-set failed: ${e.message}`, BLAKLADER_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: ref, refWritten, orderNo, status: 7 };
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'BLAKLADER', poId, noteContactId: BLAKLADER_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 const SCHEDULED_SUPPLIERS = {
   FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder, threshold: Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300) },
   CARHARTT: { supplierKey: 'CARHARTT', stateId: 6, placeFn: placeCarharttOrder, threshold: Number(process.env.CARHARTT_FREESHIP_THRESHOLD || 300) }, // Elastic Suite; also gated on Alt-Items by CARHARTT_PLACE_ENABLED
@@ -703,6 +743,7 @@ const SCHEDULED_SUPPLIERS = {
   STERLING: { supplierKey: 'STERLING', stateId: 4, placeFn: placeSterlingOrder, threshold: Number(process.env.STERLING_FREESHIP_THRESHOLD || 150) },
   PORTWEST: { supplierKey: 'PORTWEST', stateId: 8, placeFn: placePortwestOrder, threshold: Number(process.env.PORTWEST_FREESHIP_THRESHOLD || 150) }, // portwest.com CSV upload + checkout_summary; free carriage @ £150 ex-VAT (else £7.50)
   PENCARRIE: { supplierKey: 'PENCARRIE', stateId: 9, placeFn: placePencarrieOrder, threshold: Number(process.env.PENCARRIE_FREESHIP_THRESHOLD || 150) }, // official pcautoorder XML API (parkorder=2); £150 threshold placeholder — verify PenCarrie carriage-paid
+  BLAKLADER: { supplierKey: 'BLAKLADER', stateId: 10, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 150) }, // api.blaklader.com order API (POST /order/orders); £150 threshold placeholder — verify carriage; submit body needs first-order validation
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
