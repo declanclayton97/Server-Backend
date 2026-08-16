@@ -8856,6 +8856,24 @@ if (process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Portwest auto-purchase poller scheduled (weekdays 15:00 UK, £150 threshold)');
 } else { console.log('⏸️  Portwest auto-purchase poller DISABLED (PORTWEST_SCHEDULE_ENABLED=false)'); }
 
+// PenCarrie auto-purchase poller — weekdays 14:00 UK. Official pcautoorder XML API (parkorder=2,
+// fully placed). OFF BY DEFAULT (new live placer + PenCarrie API health to confirm): set
+// PENCARRIE_SCHEDULE_ENABLED=true to activate. £150 threshold placeholder, state row id 9.
+if (process.env.PENCARRIE_SCHEDULE_ENABLED === 'true') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 14 && uk.minute < 30)) return; // 14:00–14:29 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'PENCARRIE' })
+        .then((r) => { if (!r.skipped) console.log('[pencarrie-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[pencarrie-schedule] error:', e.message));
+    } catch (e) { console.error('[pencarrie-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ PenCarrie auto-purchase poller scheduled (weekdays 14:00 UK, £150 threshold)');
+} else { console.log('⏸️  PenCarrie auto-purchase poller DORMANT (set PENCARRIE_SCHEDULE_ENABLED=true to activate)'); }
+
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;

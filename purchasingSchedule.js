@@ -643,6 +643,50 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   return { poId, orderNo, steps };
 }
 
+// ── PenCarrie placement chain (official pcautoorder XML API — no web basket) ──
+// A DIRECT-order API (like Ralawise): build lines from the PO rows (BP SKU = PenCarrie prodcode
+// "STYLE COLOUR SIZE") and submit pcautoorder with parkorder=2 (process for picking) + assumebo=1
+// (PenCarrie auto-creates back orders for shortfalls their end). No basket/checkout/reconcile.
+// `sandbox` forces the test gateway. Simplest placeFn of the lot. Contact 204.
+const PENCARRIE_SUPPLIER_CONTACT = 204;
+async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, sandbox = false } = {}) {
+  const steps = {};
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'PENCARRIE', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // Order lines = the PO rows (BP SKU = PenCarrie prodcode "STYLE COLOUR SIZE"), consolidated per SKU.
+  let orderLines;
+  try { orderLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), ref: `PO${poId}` })); }
+  catch (e) { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); }
+  if (!orderLines.length) throw stepErr('cart', 'no orderable PenCarrie lines');
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  // Submit pcautoorder (LIVE gateway unless sandbox). ref = TW<poId>; parkorder=2 processes for
+  // picking; assumebo=1 auto-back-orders shortfalls PenCarrie-side.
+  const r = await jfetch('checkout', `${altItemsUrl}/api/pencarrie-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, reference: `TW${poId}`, parkorder: 2, assumebo: 1, sandbox: !!sandbox }) });
+  if (!r.ok) throw stepErr('checkout', `PenCarrie did not confirm the order: ${JSON.stringify(r.result || r.error || r.rawSnippet || r).slice(0, 250)}`, { poId });
+  const orderNo = r.custorderno || r.ordercode || r.ordno || null;
+  const backorderUnits = (r.lines || []).reduce((a, l) => a + (Number(l.backord) || 0), 0);
+  steps.checkout = { ok: true, orderNo, ordercode: r.ordercode, custorderno: r.custorderno, backorderUnits, sandbox: !!sandbox };
+
+  // Finalise: PO status 7 + ref, SO notes + status 22 + tag clear.
+  const ref = orderNo || `Placed-${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with PenCarrie — order ${ref}. Reference-set failed: ${e.message}`, PENCARRIE_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: ref, refWritten, orderNo, status: 7 };
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'PENCARRIE', poId, noteContactId: PENCARRIE_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 const SCHEDULED_SUPPLIERS = {
   FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder, threshold: Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300) },
   CARHARTT: { supplierKey: 'CARHARTT', stateId: 6, placeFn: placeCarharttOrder, threshold: Number(process.env.CARHARTT_FREESHIP_THRESHOLD || 300) }, // Elastic Suite; also gated on Alt-Items by CARHARTT_PLACE_ENABLED
@@ -653,6 +697,7 @@ const SCHEDULED_SUPPLIERS = {
   CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder, threshold: Number(process.env.CASTLE_FREESHIP_THRESHOLD || 150) }, // Castle free carriage @ £150 ex-VAT
   STERLING: { supplierKey: 'STERLING', stateId: 4, placeFn: placeSterlingOrder, threshold: Number(process.env.STERLING_FREESHIP_THRESHOLD || 150) },
   PORTWEST: { supplierKey: 'PORTWEST', stateId: 8, placeFn: placePortwestOrder, threshold: Number(process.env.PORTWEST_FREESHIP_THRESHOLD || 150) }, // portwest.com CSV upload + checkout_summary; free carriage @ £150 ex-VAT (else £7.50)
+  PENCARRIE: { supplierKey: 'PENCARRIE', stateId: 9, placeFn: placePencarrieOrder, threshold: Number(process.env.PENCARRIE_FREESHIP_THRESHOLD || 150) }, // official pcautoorder XML API (parkorder=2); £150 threshold placeholder — verify PenCarrie carriage-paid
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────

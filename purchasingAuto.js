@@ -81,6 +81,12 @@ export const SUPPLIERS = {
   // Ralawise = distributor (Stanley Stella exclusive + Gildan/AWDis/etc). Detect by
   // Stanley Stella name OR a Ralawise-format SKU (2 letters + 3 digits + …).
   RALAWISE:     { contactId: 205,   costList: null, poField: 'PCF_RALAPO', detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z0-9]/.test(String(sku || '').replace(/[\s_-]/g, '')) },
+  // PenCarrie = leisurewear DISTRIBUTOR (Gildan/AWDis/FOTL/B&C/Kustom Kit/Result/…). Products
+  // are NOT named "pencarrie", so TAG-ONLY (no brand detect): a single-supplier PENCARRIE order
+  // takes all orderable rows; re-pickup prevented by clearing the tag on finalize. Ordering is
+  // the official pcautoorder XML API (not a web basket). Cost = Launch(20) where live repricing
+  // writes; PenCarrie's API single-price is the truer source (TODO override, like the Elastic ones).
+  'PENCARRIE':  { contactId: 204,   costList: 20, poField: null },
 };
 
 // ---- low-level API with throttle back-off ----
