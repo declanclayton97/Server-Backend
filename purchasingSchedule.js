@@ -108,6 +108,26 @@ async function jfetch(step, url, opts) {
   return j;
 }
 
+// Feed the supplier's ACTUAL prices back onto the BP cost (see healSupplierCosts for the rules).
+// Non-fatal, and a DRY RUN unless PRICE_HEAL_ENABLED=true — so shipping this changes nothing until
+// it's switched on, and the run report still shows what it would have done. Anything outside the
+// auto-heal band is raised as a price-heal error for a human rather than written.
+async function healPrices(steps, { supplierKey, poId, changes, pool }) {
+  if (!changes || !changes.length) return;
+  try {
+    const r = await bp.healSupplierCosts({ supplierKey, poId, changes, pool, execute: process.env.PRICE_HEAL_ENABLED === 'true' });
+    if (r.skipped && !Array.isArray(r.skipped)) { steps.priceHeal = r; return; }        // e.g. "no cost list of its own"
+    steps.priceHeal = { listId: r.listId, dryRun: !!r.dryRun, applied: (r.applied || []).length, escalated: (r.escalated || []).length, skipped: (r.skipped || []).length, changes: (r.applied || []).map((a) => `${a.sku} £${Number(a.was).toFixed(2)}->£${Number(a.now).toFixed(2)}`) };
+    for (const e of (r.escalated || [])) {
+      await logPurchasingError(pool, {
+        supplier: supplierKey, step: 'price-heal',
+        message: `${e.sku}: supplier charges £${Number(e.now).toFixed(2)} but BP cost (list ${r.listId}) is £${Number(e.was).toFixed(2)} — ${e.reason}`,
+        context: { poId, ...e },
+      }).catch(() => {});
+    }
+  } catch (e) { steps.priceHealWarn = e.message; }
+}
+
 async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   const steps = {};
   // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs)
@@ -553,6 +573,8 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 
   // SO: note ("… Ordered on PO#<id>") + status → Ordered Stock Awaiting Delivery + clear tag.
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'SNICKERS', poId, noteContactId: SNICKERS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  // heal BP costs from what Hultafors actually charges (lineGaps = their unit price vs our cost)
+  await healPrices(steps, { supplierKey: 'SNICKERS', poId, changes: lineGaps.map((g) => ({ sku: g.sku, was: g.ours, now: g.theirs })), pool });
   return { poId, orderNo, steps };
 }
 
@@ -618,6 +640,8 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   steps.link = { reference: ref, refWritten, orderNo, status: 7 };
   // SO: note + status → Ordered Stock Awaiting Delivery + clear tag.
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey, poId, noteContactId: contactId, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  // heal BP costs from the portal's live wholesale price — already harvested for priceOverrides
+  await healPrices(steps, { supplierKey, poId, changes: (po.priceOverridesApplied || []).map((p) => ({ sku: p.sku, was: p.was, now: p.now })), pool });
   return { poId, orderNo, steps };
 }
 async function placeCarharttOrder(pool, altItemsUrl, opts = {}) { return placeElasticOrder(pool, altItemsUrl, { supplierKey: 'CARHARTT', contactId: 65173, basketPath: '/api/carhartt-basket', ...opts }); }

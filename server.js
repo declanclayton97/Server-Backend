@@ -8688,6 +8688,25 @@ app.post('/api/purchasing/consolidate-po', express.json(), async (req, res) => {
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Price auto-heal, manual/dry-run entry point: body { supplier, poId, changes:[{sku,now}], execute }.
+// Writes each product's cost on the list THAT supplier reads (Snickers 10, HH 6, Portwest 7, Uneek
+// 11, Blaklader 12; Carhartt/Fristads/Castle/Sterling/PenCarrie 20) — never retail. Modest moves
+// apply; anything outside ±PRICE_HEAL_MAX_PCT / ±PRICE_HEAL_MAX_ABS is returned as `escalated` for a
+// human. Dry-run unless execute:true AND PRICE_HEAL_ENABLED=true, and every decision lands in
+// price_heal_log. Use this to replay a supplier's confirmation (e.g. a PenCarrie Goods Confirmation)
+// against Brightpearl without waiting for the next scheduled order.
+app.post('/api/purchasing/price-heal', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  if (!b.supplier || !b.poId) return res.status(400).json({ error: 'supplier and poId required' });
+  if (!Array.isArray(b.changes) || !b.changes.length) return res.status(400).json({ error: 'changes[{sku,now}] required' });
+  const execute = b.execute === true && process.env.PRICE_HEAL_ENABLED === 'true';
+  try {
+    const r = await purchasingAuto.healSupplierCosts({ supplierKey: b.supplier, poId: Number(b.poId), changes: b.changes, pool, execute });
+    res.json({ ...r, executed: execute, note: b.execute === true && !execute ? 'PRICE_HEAL_ENABLED is not true — returned as a dry run' : undefined });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Reconcile a PO's rows to the quantities a supplier's portal ACTUALLY took: body
 // { poId, cart: {SKU: qty}, execute }. Bumps or drops rows to match, preserving each row's
 // per-unit cost and real tax. `reconcilePortwestPO` is supplier-agnostic despite the name —

@@ -1411,6 +1411,93 @@ export async function consolidatePoRows({ poId, execute = false } = {}) {
   return { done: true, poId, merged };
 }
 
+// ── PRICE AUTO-HEAL ──────────────────────────────────────────────────────────
+// After a placement, write the supplier's ACTUAL price back onto the product's cost so the next PO
+// is right without anyone noticing the drift by hand. The rules that keep it safe:
+//  • Writes ONLY the list that supplier reads (reg.costList). CL1001526 was correct on list 20 and
+//    stale on list 10 while Snickers prices from 10 — "just write 20" would have healed nothing.
+//  • Suppliers with costList null (Ralawise, Mascot, dynamic) are SKIPPED: no list of their own to
+//    own, and they price off the sales-order row instead.
+//  • A move must be MODEST to apply automatically: within PRICE_HEAL_MAX_PCT (default 20%) AND
+//    PRICE_HEAL_MAX_ABS (default £5). Anything larger is ESCALATED to the error log for a human —
+//    an 84% drop (CL1001526 £30.70 → £4.80) is as likely a parse or pack/unit error as a real price.
+//  • A SKU that maps to more than one productId on the PO is skipped: several variants can share a
+//    base SKU (25020400 spans four sizes), so we cannot tell which one the price belongs to.
+//  • Never touches retail. Off unless PRICE_HEAL_ENABLED=true. Non-fatal. Every decision — applied,
+//    escalated or skipped — is written to price_heal_log.
+const HEAL_MAX_PCT = Number(process.env.PRICE_HEAL_MAX_PCT || 20) / 100;
+const HEAL_MAX_ABS = Number(process.env.PRICE_HEAL_MAX_ABS || 5);
+let _healLogReady = false;
+async function writeHealLog(pool, rows) {
+  if (!pool || !rows.length) return;
+  if (!_healLogReady) {
+    await pool.query(`CREATE TABLE IF NOT EXISTS price_heal_log (
+      id BIGSERIAL PRIMARY KEY, at TIMESTAMPTZ DEFAULT now(), supplier TEXT, po_id INTEGER,
+      product_id INTEGER, sku TEXT, list_id INTEGER, was NUMERIC, now_price NUMERIC,
+      action TEXT, reason TEXT)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS price_heal_sku_idx ON price_heal_log(sku)`);
+    _healLogReady = true;
+  }
+  for (const r of rows) {
+    await pool.query(`INSERT INTO price_heal_log (supplier, po_id, product_id, sku, list_id, was, now_price, action, reason)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [r.supplier, r.poId, r.productId, r.sku, r.listId, r.was, r.now, r.action, r.reason || null]);
+  }
+}
+// Write one price list on a product, preserving every other populated list (same shape as the
+// /product-price-live route). Cost only — retail is never in `overrides`.
+async function setCostLive(productId, priceListId, value) {
+  const cur = (await liveGet(`/product-service/product-price/${productId}`))[0];
+  const lists = (cur && cur.priceLists) || [];
+  const body = lists.filter((pl) => pl.quantityPrice && pl.quantityPrice['1'] != null)
+    .map((pl) => ({ priceListId: pl.priceListId, quantityPrice: { '1': String(pl.priceListId === priceListId ? value : pl.quantityPrice['1']) } }));
+  if (!body.some((pl) => pl.priceListId === priceListId)) body.push({ priceListId, quantityPrice: { '1': String(value) } });
+  await liveWrite('PUT', `/product-service/product-price/${productId}/price-list`, { priceLists: body });
+}
+export async function healSupplierCosts({ supplierKey, poId, changes = [], pool = null, execute = false } = {}) {
+  const key = String(supplierKey || '').toUpperCase();
+  const reg = SUPPLIERS[key];
+  if (!reg) return { skipped: `unknown supplier ${key}` };
+  if (reg.costList == null) return { skipped: `${key} has no cost list of its own — nothing to heal` };
+  if (!changes.length) return { supplier: key, listId: reg.costList, applied: [], escalated: [], skipped: [] };
+  // map SKU → productId from the PO's own rows, and spot SKUs shared by several variants
+  const rows = await getOrderCartLines(poId).catch(() => []);
+  const pidBySku = new Map();
+  for (const r of rows) {
+    if (!r.sku) continue;
+    const k = String(r.sku).toUpperCase();
+    const set = pidBySku.get(k) || new Set();
+    set.add(String(r.productId)); pidBySku.set(k, set);
+  }
+  const applied = [], escalated = [], skipped = [], logRows = [];
+  for (const c of changes) {
+    const sku = String(c.sku || '').toUpperCase();
+    const now = Number(c.now);
+    const pids = pidBySku.get(sku);
+    const rec = { supplier: key, poId, sku, listId: reg.costList, was: Number(c.was), now, productId: null };
+    if (!Number.isFinite(now) || now <= 0) { skipped.push({ ...rec, reason: 'no usable supplier price' }); logRows.push({ ...rec, action: 'skipped', reason: 'no usable supplier price' }); continue; }
+    if (!pids || pids.size === 0) { skipped.push({ ...rec, reason: 'SKU not on the PO' }); logRows.push({ ...rec, action: 'skipped', reason: 'SKU not on the PO' }); continue; }
+    if (pids.size > 1) { skipped.push({ ...rec, reason: `SKU spans ${pids.size} variants — ambiguous` }); logRows.push({ ...rec, action: 'skipped', reason: 'SKU spans several variants' }); continue; }
+    rec.productId = Number([...pids][0]);
+    const was = await costOfLive(rec.productId, reg.costList, 0);
+    rec.was = was;
+    const diff = +(now - was).toFixed(4);
+    if (Math.abs(diff) < 0.005) { skipped.push({ ...rec, reason: 'already correct' }); continue; }
+    const pct = was > 0 ? Math.abs(diff) / was : 1;
+    if (pct > HEAL_MAX_PCT || Math.abs(diff) > HEAL_MAX_ABS) {
+      const reason = `move of £${diff.toFixed(2)} (${(pct * 100).toFixed(0)}%) exceeds the auto-heal band (±${(HEAL_MAX_PCT * 100).toFixed(0)}% / ±£${HEAL_MAX_ABS}) — needs a human`;
+      escalated.push({ ...rec, diff, reason });
+      logRows.push({ ...rec, action: 'escalated', reason });
+      continue;
+    }
+    if (execute) { try { await setCostLive(rec.productId, reg.costList, now.toFixed(2)); await pause(150); } catch (e) { skipped.push({ ...rec, reason: 'write failed: ' + e.message }); logRows.push({ ...rec, action: 'failed', reason: e.message }); continue; } }
+    applied.push({ ...rec, diff });
+    logRows.push({ ...rec, action: execute ? 'applied' : 'would-apply', reason: null });
+  }
+  if (execute) await writeHealLog(pool, logRows).catch(() => {});
+  return { supplier: key, listId: reg.costList, dryRun: !execute, applied, escalated, skipped };
+}
+
 // Read a PO's contributing SOs from its OWN note (createComboPOLive writes "SO#<id> (<ref>):
 // <sku> x<qty>, …" lines). Returns { soIds:[], linesByOrder:{ id:[{sku,qty}] } }. Used to
 // finalise a REUSED PO whose live demand now nets to zero (it's already on order via that PO).
