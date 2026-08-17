@@ -58,7 +58,14 @@ const WAREHOUSE_ID = 2;
 // rows out of a mixed order). Cost falls back to the SO row's itemCost if the
 // cost list has no price for a product.
 export const SUPPLIERS = {
-  SNICKERS:     { contactId: 331,   costList: 10, poField: 'PCF_SNICKPO', detect: (n) => /snickers|solid\s*gear/i.test(n || '') },
+  // Snickers = the HULTAFORS GROUP account, which supplies SIX brands, only two of which are
+  // named "Snickers"/"Solid Gear": also Hellberg (ear defenders, SKUs like 48012-001), EMMA
+  // (safety footwear, MM…), CLC (tool storage, CL…) and Toe Guard. Per the supplier sheet
+  // ([[reference_supplier_carriage_terms]]) none of those four comes from any OTHER supplier, so
+  // matching them here can't drag a rival supplier's line onto a Snickers PO. They were ordering
+  // fine until d950468 (2026-08-07) made brand-detect suppliers filter by regex even on a sole
+  // tag — that silently stopped Hellberg/EMMA/CLC demand being seen at all (8 SOs by 2026-08-17).
+  SNICKERS:     { contactId: 331,   costList: 10, poField: 'PCF_SNICKPO', detect: (n) => /snickers|solid\s*gear|hellberg|toe\s*guard|hultafors|\bemma\b|\bclc\b/i.test(n || '') },
   BLAKLADER:    { contactId: 323,   costList: 12, poField: 'PCF_BLAKLPO', detect: (n) => /bl[åa]kl[äa]der/i.test(n || '') },
   PORTWEST:     { contactId: 298,   costList: 7,  poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') }, // low-inv ON (min-stock data sorted 2026-08-14): SO demand + reorder
   UNEEK:        { contactId: 322,   costList: 11, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
@@ -619,10 +626,10 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // supplier (checked just above; the finalize removes the tag once fully ordered) means it
     // still needs ordering — a stamp only records a prior PO. Skipping stamped SOs permanently
     // buried RESIDUAL demand from partial/re-allocated orders (e.g. 480109 stamped
-    // PCF_CASTLEPO=480396 but still needed 1× 710-GRY-32L). The toOrder calc below
-    // (ordered − allocated − fulfilled − onOrder) already prevents any double-order: an SO whose
-    // prior PO is still open shows that qty as onOrder → toOrder 0. Runs are sequential (lock),
-    // so there's no stamp-then-regather race within a run.
+    // PCF_CASTLEPO=480396 but still needed 1× 710-GRY-32L). What prevents a double-order is the
+    // finalise step (it clears the tag + moves the SO out of the demand status), NOT the stamp and
+    // NOT `onOrder` — see the toOrder calc below for why product-level onOrder can't be trusted as
+    // "already covered". Runs are sequential (lock), so there's no stamp-then-regather race.
     const order = (await liveGet(`/order-service/order/${id}`))[0];
     await pause(120);
     // Which rows to order (keep the rowId — needed to look up allocation).
@@ -653,7 +660,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     for (const [rowId, r] of candidateRows) if (isSkipped(r)) demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note: `skipped via ${SKIP_SKU_FIELD}` });
     const entries = candidateRows.filter(([, r]) => !isSkipped(r));
     if (!entries.length) continue;
-    // Only order the UNALLOCATED qty: ordered − allocated − fulfilled − onOrder.
+    // Only order the UNALLOCATED qty: ordered − allocated − fulfilled.
     // Allocation isn't in the order API — read it from the legacy order page.
     const alloc = await getOrderAllocations(id, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
     const rows = [];
@@ -670,7 +677,17 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
         demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: 0, fulfilled: ordered, onOrder: 0, inStock: 0, toOrder: 0, note: 'no reserved[] input on order page — treated as fulfilled' });
         continue;
       }
-      const toOrder = ordered - a.allocated - a.fulfilled - a.onOrder;
+      // Order this SO's UNALLOCATED qty: ordered − allocated − fulfilled. `onOrder` is deliberately
+      // NOT subtracted (user, 2026-08-17): in Brightpearl it is a PRODUCT-level figure — stock on
+      // some purchase order somewhere — NOT stock earmarked for THIS sales order. That inbound stock
+      // may be replenishment or already spoken for by other SOs, so treating it as covering this
+      // line under-orders and strands the customer. Subtracting it had silently suppressed real
+      // demand on 10 Snickers SOs (~13 units) that sat tagged in the pool for days.
+      // ⚠️ This means the ONLY guard against re-ordering an SO is the finalise step (tag cleared +
+      // status → Ordered Stock Awaiting Delivery, which drops it out of the demand pool). If a
+      // finalise ever half-fails, that SO WILL be re-ordered next run — onOrder used to mask that.
+      // `onOrder`/`inStock` are still audited on every line below so a double-order is diagnosable.
+      const toOrder = ordered - a.allocated - a.fulfilled;
       // Audit EVERY considered line (incl. ones we decide NOT to order) so a later
       // "why did it order N?" is answerable from the exact decision-time figures.
       demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: a.allocated || 0, fulfilled: a.fulfilled || 0, onOrder: a.onOrder || 0, inStock: a.inStock || 0, toOrder });
