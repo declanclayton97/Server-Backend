@@ -8878,23 +8878,25 @@ if (process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Portwest auto-purchase poller scheduled (weekdays 15:00 UK, £150 threshold)');
 } else { console.log('⏸️  Portwest auto-purchase poller DISABLED (PORTWEST_SCHEDULE_ENABLED=false)'); }
 
-// PenCarrie auto-purchase poller — weekdays 14:00 UK. Official pcautoorder XML API (parkorder=2,
-// fully placed). OFF BY DEFAULT (new live placer + PenCarrie API health to confirm): set
-// PENCARRIE_SCHEDULE_ENABLED=true to activate. £150 threshold placeholder, state row id 9.
-if (process.env.PENCARRIE_SCHEDULE_ENABLED === 'true') {
+// PenCarrie auto-purchase poller — weekdays 15:40 UK (user's chosen slot, 2026-08-17). Official
+// pcautoorder XML API (parkorder=2, fully placed). ON by default now the first live order is proven
+// (TUWO_TW482741 / ordno 7701889, 18 lines, £217.74); set PENCARRIE_SCHEDULE_ENABLED=false to stop.
+// £175 carriage-paid threshold, state row id 9. placePencarrieOrder refuses to finalise unless the
+// order came back from the LIVE gateway, so a missing PENCARRIE_ENV=live fails loudly, not silently.
+if (process.env.PENCARRIE_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
       if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
-      if (!(uk.hour === 14 && uk.minute < 30)) return; // 14:00–14:29 window
+      if (!(uk.hour === 15 && uk.minute >= 40)) return; // 15:40–15:59 window
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'PENCARRIE' })
         .then((r) => { if (!r.skipped) console.log('[pencarrie-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[pencarrie-schedule] error:', e.message));
     } catch (e) { console.error('[pencarrie-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
-  console.log('✅ PenCarrie auto-purchase poller scheduled (weekdays 14:00 UK, £150 threshold)');
-} else { console.log('⏸️  PenCarrie auto-purchase poller DORMANT (set PENCARRIE_SCHEDULE_ENABLED=true to activate)'); }
+  console.log('✅ PenCarrie auto-purchase poller scheduled (weekdays 15:40 UK, £175 threshold)');
+} else { console.log('⏸️  PenCarrie auto-purchase poller DISABLED (PENCARRIE_SCHEDULE_ENABLED=false)'); }
 
 // Blaklader auto-purchase poller — weekdays 09:30 UK. api.blaklader.com order API (POST
 // /order/orders). OFF BY DEFAULT (submit body not yet validated against a real order): set

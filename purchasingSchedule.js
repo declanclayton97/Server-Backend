@@ -763,6 +763,41 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
   const r = await jfetch('checkout', `${altItemsUrl}/api/pencarrie-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, reference: `TW${poId}`, parkorder: 2, assumebo: 1, resolve: true, sandbox: !!sandbox }) });
   if (r.unresolved && r.unresolved.length) throw stepErr('resolve', `${r.unresolved.length} PenCarrie line(s) couldn't be mapped to a prodcode — NOT placing. PO#${poId} left for review. e.g. ${r.unresolved.slice(0, 6).map((u) => u.sku).join(', ')}`, { poId, unresolved: r.unresolved });
   if (!r.ok) throw stepErr('checkout', `PenCarrie did not confirm the order: ${JSON.stringify(r.result || r.error || r.rawSnippet || r).slice(0, 250)}`, { poId });
+  // 🔴 GATEWAY GUARD — Alternate-Items DEFAULTS to the sandbox gateway when neither PENCARRIE_ENV
+  // nor PENCARRIE_GATEWAY is set, and a sandbox order answers exactly like a real one: ok:true,
+  // sent:true, an ordercode, every line "confirmed". Without this check a scheduled run would place
+  // into the sandbox and then mark the PO placed + finalise the SOs, so the demand would disappear
+  // and NOTHING would have been bought — silently, every single day. Caught for real on
+  // 2026-08-17: the first live attempt went to sandbox.pencarrie.com. Refuse before finalising.
+  const PENCARRIE_LIVE_GATEWAY = 'https://pencarrie.com/gateway';
+  if (!sandbox && String(r.gateway || '') !== PENCARRIE_LIVE_GATEWAY) {
+    throw stepErr('gateway', `PenCarrie order went to ${r.gateway || 'an unknown gateway'}, not the LIVE gateway — NOT finalising, nothing has been bought. Set PENCARRIE_ENV=live on Alternate-Items. PO#${poId} left for review; order ${r.ordercode || '(none)'} exists on that gateway only.`, { poId, gateway: r.gateway || null, ordercode: r.ordercode || null });
+  }
+  steps.gateway = r.gateway;
+
+  // price check (NON-FATAL) — pclist's `net` is PenCarrie's OWN order total, i.e. the "My Price"
+  // rate we're actually invoiced. It is the only authoritative price source we have: the local
+  // catalogue index holds LIST prices (~20% higher) and must never be used for this. Same alert
+  // shape as Fristads/Castle, which Snickers also gained today.
+  try {
+    const poNet = +[...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (l.cost || 0) * l.qty, 0).toFixed(2);
+    const code = String(r.ordercode || '');
+    const lst = await jfetch('price-check', `${altItemsUrl}/api/debug/pencarrie?fn=pclist&full=1&ordcode=${encodeURIComponent(code)}`, { method: 'GET' });
+    // `net` precedes `ordcode` in the order element, so anchor on our ordcode to be sure it's ours.
+    const esc = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = new RegExp(`net="([\\d.]+)"[^>]*ordcode="${esc}"`).exec(String(lst.raw || ''));
+    const theirNet = m ? Number(m[1]) : 0;
+    const gap = theirNet ? +(theirNet - poNet).toFixed(2) : 0;
+    steps.priceCheck = { theirNet: theirNet || null, poNet, gap };
+    if (theirNet && Math.abs(gap) > 0.50) {
+      await logPurchasingError(pool, {
+        supplier: 'PENCARRIE', step: 'price-check',
+        message: `Prices don't match: PenCarrie order total £${theirNet} vs our PO net £${poNet} (diff £${gap}). A Brightpearl cost price (list 20) may need adjusting. Order ${code} still placed.`,
+        context: { poId, ordercode: code, theirNet, poNet, gap },
+      }).catch(() => {});
+    }
+  } catch (e) { steps.priceCheckWarn = e.message; }
+
   if (r.resolved) steps.resolved = { count: r.resolved };
   const orderNo = r.custorderno || r.ordercode || r.ordno || null;
   const backorderUnits = (r.lines || []).reduce((a, l) => a + (Number(l.backord) || 0), 0);
