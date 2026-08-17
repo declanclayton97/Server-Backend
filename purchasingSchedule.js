@@ -426,6 +426,24 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
 // create PO → worker place → mark placed + ref → finalise SOs (note + status + tag clear),
 // the two-step finalise from the supplier PO checklist. `live` gates the writes (default on).
 const SNICKERS_SUPPLIER_CONTACT = 331;
+// PACK MINIMUMS — SKUs the Hultafors portal only sells in multiples of N.
+// ⚠️ This is a DIFFERENT rule from Portwest's `packSizes`, which counts BOXES (our unit demand ÷
+// pack = how many boxes to order). Here the portal takes UNITS and rounds nothing itself: a qty
+// that isn't a multiple of the pack is **silently dropped** from the basket at import (the upload
+// step flags HasInvalidLines, validate clears it, and the line just isn't there), after which the
+// order fails stage()'s unit-count gate with NO indication of which line vanished. So round UP to
+// the nearest multiple: a demand of 1 badge holder is ordered as 10.
+// Extend without a deploy via SNICKERS_PACK_MULTIPLES='{"97600400000":10}'.
+const SNICKERS_PACK_MULTIPLES = {
+  '97600400000': 10,   // Snickers 9760 ID badge holder — 10-pack only (user, 2026-08-17; found when order 0004116942 refused over this one £2.66 line)
+};
+function snickersPackMultiples() {
+  let env = {};
+  try { env = JSON.parse(process.env.SNICKERS_PACK_MULTIPLES || '{}'); } catch { /* bad JSON → built-ins only, never blocks a run */ }
+  const out = { ...SNICKERS_PACK_MULTIPLES };
+  for (const [k, v] of Object.entries(env)) { const n = Number(v); if (n > 1) out[String(k).toUpperCase()] = n; }
+  return out;
+}
 async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const steps = {};
   let po;
@@ -446,8 +464,19 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     const k = String(l.sku).toUpperCase();
     bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty));
   }
-  const lines = [...bySku.entries()].map(([stockCode, qty]) => ({ stockCode, qty }));
+  const packs = snickersPackMultiples();
+  const packApplied = [];
+  const lines = [...bySku.entries()].map(([stockCode, qty]) => {
+    const p = Number(packs[stockCode]);
+    if (p > 1 && qty % p !== 0) {
+      const q = Math.ceil(qty / p) * p;
+      packApplied.push({ sku: stockCode, demand: qty, ordered: q, packOf: p });
+      return { stockCode, qty: q };
+    }
+    return { stockCode, qty };
+  });
   if (!lines.length) throw stepErr('resolve', 'no orderable Snickers lines');
+  if (packApplied.length) steps.packRounding = packApplied;
   steps.resolve = { lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0) };
 
   // Drive the Hultafors worker (async job + poll). ref = PO id → the portal PO-number field.
@@ -455,6 +484,64 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   if (!wr || !wr.placed) throw stepErr('checkout', `Snickers worker did not confirm placement: ${JSON.stringify((wr && (wr.error || wr.statusText)) || wr).slice(0, 250)}`);
   const orderNo = wr.orderNo || null;
   steps.checkout = { placed: true, orderNo, poSet: wr.poSet || null };
+
+  // price sanity check (NON-FATAL) — what Hultafors will invoice vs our PO costs. Fristads and
+  // Castle have had this for a while; Snickers didn't, which is how two wrong CLC costs reached a
+  // live order unnoticed on 2026-08-17 (CL1001526 our £30.70 vs their £4.80 — found only by eye,
+  // reading the basket screenshot). Per-LINE when the worker could parse the basket grid, so the
+  // alert names the offending SKU; otherwise the cart total alone, like Fristads.
+  const costBySku = new Map();
+  for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) { if (l.sku) costBySku.set(String(l.sku).toUpperCase(), Number(l.cost) || 0); }
+  const orderedNet = +lines.reduce((a, l) => a + (costBySku.get(l.stockCode) || 0) * l.qty, 0).toFixed(2);
+  const cartTotal = Number(wr.cart && wr.cart.totalCost) || 0;
+  const gap = cartTotal ? +(cartTotal - orderedNet).toFixed(2) : 0;
+  const lineGaps = [];
+  for (const cl of ((wr.cart && wr.cart.lines) || [])) {
+    if (!cl.code || cl.unit == null) continue;
+    const ours = costBySku.get(String(cl.code).toUpperCase());
+    if (ours == null) continue;                                   // not a line we sent (e.g. the add-article row)
+    const d = +(cl.unit - ours).toFixed(2);
+    if (Math.abs(d) > 0.02) lineGaps.push({ sku: cl.code, ours: +ours.toFixed(2), theirs: cl.unit, diffEach: d, qty: cl.qty });
+  }
+  steps.priceCheck = { cartTotal: cartTotal || null, orderedNet, gap, lineGaps };
+  if (lineGaps.length || (cartTotal && Math.abs(gap) > 0.50)) {
+    await logPurchasingError(pool, {
+      supplier: 'SNICKERS', step: 'price-check',
+      message: `Prices don't match: Hultafors basket £${cartTotal || '?'} vs our PO net £${orderedNet} (diff £${gap}).`
+        + (lineGaps.length ? ` Brightpearl cost (Snickers/list 10) looks wrong on: ${lineGaps.map((g) => `${g.sku} ours £${g.ours} vs theirs £${g.theirs}`).join('; ')}.` : '')
+        + ` Order ${orderNo} still placed.`,
+      context: { poId, orderNo, cartTotal, orderedNet, gap, lineGaps, packRounding: packApplied },
+    }).catch(() => {});
+  }
+
+  // If a pack multiple bumped a line, the PO must show what we will actually RECEIVE (10 badge
+  // holders, not 1). Match the PO row by **productId**, not SKU: PO rows carry the BASE product
+  // SKU with size in the options while the portal needs the sales-order row's full variant code
+  // (PO `25020900` vs portal `25020900008`), so SKU-keying mismatches — and a SKU missing from the
+  // cart map is DROPPED, not left alone. Skip with a warning if a SKU spans several products,
+  // rather than risk collapsing distinct size variants into one row.
+  if (packApplied.length) {
+    try {
+      const poRows = (await bp.getOrderCartLines(poId)).filter((r) => r.sku);
+      const map = new Map();
+      for (const r of poRows) { const k = String(r.sku).toUpperCase(); map.set(k, (map.get(k) || 0) + Math.round(r.qty)); }
+      const pidBySku = new Map();
+      for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) { if (l.sku) pidBySku.set(String(l.sku).toUpperCase(), l.productId); }
+      const skipped = [];
+      for (const p of packApplied) {
+        const pid = pidBySku.get(p.sku);
+        const hits = poRows.filter((r) => String(r.productId) === String(pid));
+        const skus = new Set(hits.map((r) => String(r.sku).toUpperCase()));
+        if (!hits.length) { skipped.push({ ...p, reason: 'no PO row for that productId' }); continue; }
+        if (skus.size !== 1) { skipped.push({ ...p, reason: 'productId spans several PO SKUs' }); continue; }
+        const k = [...skus][0];
+        if (poRows.some((r) => String(r.sku).toUpperCase() === k && String(r.productId) !== String(pid))) { skipped.push({ ...p, reason: 'PO SKU shared by other products' }); continue; }
+        map.set(k, p.ordered);
+      }
+      steps.reconcile = await bp.reconcilePortwestPO({ poId, cart: Object.fromEntries(map), execute: live });
+      if (skipped.length) steps.reconcileSkipped = skipped;
+    } catch (e) { steps.reconcileWarn = `couldn't bump the PO to the pack quantities: ${e.message}`; }
+  }
 
   // Finalise — BOTH sides (supplier PO checklist item 7). PO: status 7 + reference.
   const ref = orderNo || `Placed-${poId}`;
