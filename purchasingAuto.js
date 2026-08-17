@@ -203,6 +203,58 @@ async function productTaxCodeLive(productId) {
 }
 const isLeaveNote = (v) => /unable to order|awaiting|leave|do not order|chased|response|on hold/i.test(v || '');
 
+// ── PCF_SUPPLIER parenthetical SCOPE ────────────────────────────────────────
+// The tag's trailing note is USUALLY a human annotation ("HELLY HANSEN (BACK ORDER)"), but it is
+// sometimes a genuine instruction narrowing what to order from that supplier (user, 2026-08-17):
+//   "PENCARRIE (RG165 NAVY, M X1 ONLY)"          → only 1 × RG165 Navy, size M
+//   "RALAWISE (TR010 ONLY) / PENCARRIE (JC020 ONLY)" → per-supplier scopes in one field
+// Without this, a sole PENCARRIE tag hands the supplier EVERY row (it has no brand detect), so
+// SO 481798 would have ordered Uneek polos, hoodies and hi-vis waistcoats off a PenCarrie PO.
+//
+// Telling a scope from an annotation: parse the note into terms, then require that EVERY term is
+// recognised somewhere on the order's rows. "BACK ORDER" fails that ("back" may hit a "BACK PRINT"
+// row but "order" hits nothing) so it stays an annotation and nothing is filtered — i.e. an
+// unrecognised note keeps today's behaviour rather than silently dropping demand.
+const SCOPE_NOISE = new Set(['ONLY', 'IN', 'AND', 'ALL', 'THE', 'FOR', 'PLEASE', 'NOTE', 'OF', 'ITEM', 'ITEMS', 'PCS', 'QTY']);
+const SIZE_WORDS = [['XXS', 'XXSMALL'], ['XS', 'XSMALL'], ['S', 'SMALL'], ['M', 'MEDIUM'], ['L', 'LARGE'], ['XL', 'XLARGE'],
+  ['XXL', '2XL', 'XXLARGE'], ['3XL', 'XXXL'], ['4XL', 'XXXXL'], ['5XL', 'XXXXXL']];
+const sizeEq = (a, b) => {
+  const n = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const x = n(a), y = n(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const g = SIZE_WORDS.find((grp) => grp.includes(x));
+  return !!g && g.includes(y);
+};
+// Parse "(RG165 NAVY, M X1 ONLY)" → { terms:['RG165','NAVY','M'], qty:1 }; null when there's no note.
+export function parseTagScope(tag) {
+  const m = /\(([^)]*)\)\s*$/.exec(String(tag || ''));
+  if (!m) return null;
+  const toks = m[1].toUpperCase().split(/[\s,;]+/).filter(Boolean);
+  const terms = []; let qty = null;
+  for (let i = 0; i < toks.length; i++) {
+    const q = /^[X×](\d+)$/.exec(toks[i]);
+    if (q) { qty = Number(q[1]); continue; }
+    if (/^[X×]$/.test(toks[i]) && /^\d+$/.test(toks[i + 1] || '')) { qty = Number(toks[++i]); continue; }
+    if (SCOPE_NOISE.has(toks[i])) continue;
+    terms.push(toks[i]);
+  }
+  return terms.length || qty != null ? { terms, qty } : null;
+}
+// Does this row satisfy a single scope term? SKU (exact / dash-part / substring), a whole word in
+// the product name, the colour, or the size (letter⇄word aware, since BP stores "Medium" and the
+// note says "M").
+const rowMatchesTerm = (r, term) => {
+  const t = String(term).toUpperCase();
+  const sku = String(r.productSku || '').toUpperCase();
+  if (sku && (sku === t || sku.split('-').includes(t) || sku.includes(t))) return true;
+  const name = String(r.productName || '').toUpperCase();
+  try { if (new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(name)) return true; } catch { /* ignore */ }
+  const colour = String(optValue(r.productOptions, /colou?r/i) || '').toUpperCase();
+  if (colour && (colour === t || colour.split(/[\s/]+/).includes(t))) return true;
+  return sizeEq(optValue(r.productOptions, /size/i), t);
+};
+
 async function costOf(productId, costList, fallback) {
   if (costList == null) return fallback;
   try {
@@ -680,9 +732,42 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       if (sku === e.token || sku.split('-').includes(e.token) || sku.includes(e.token)) return true;
       try { return new RegExp('\\b' + e.token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(String(r.productName || '').toLowerCase()); } catch { return false; }
     }) || null;
-    const candidateRows = (singleSupplier && !hasBrandDetect)
+    let candidateRows = (singleSupplier && !hasBrandDetect)
       ? Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r))
       : Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r) && detect(r.productName, r.productSku));
+    // Apply THIS supplier's parenthetical scope, if its note is a real instruction rather than an
+    // annotation. Only bites when every term is recognised on the order AND at least one row
+    // satisfies them all — otherwise the note is left alone and nothing is filtered.
+    const ourTag = allTags.find((t) => tagSupplier(t) === supplierKey);
+    const scope = parseTagScope(ourTag);
+    let scopeCap = null;
+    if (scope && scope.terms.length) {
+      const recognised = scope.terms.every((t) => candidateRows.some(([, r]) => rowMatchesTerm(r, t)));
+      const qualifying = candidateRows.filter(([, r]) => scope.terms.every((t) => rowMatchesTerm(r, t)));
+      // A term shaped like a product code (RG165, JC020, TR010, or a long numeric SKU) that we
+      // CANNOT satisfy means a real instruction we don't understand — order nothing from this SO and
+      // flag it, rather than fall back to taking every row. Word-only notes (BACK ORDER, LOW STOCK)
+      // are annotations and change nothing.
+      const codeLike = scope.terms.some((t) => /^[A-Z]{1,4}\d{2,}[A-Z0-9-]*$/.test(t) || /^\d{5,}$/.test(t));
+      if (codeLike && !(recognised && qualifying.length)) {
+        for (const [rowId, r] of candidateRows) demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note: `PCF_SUPPLIER scope "${ourTag}" names an item no row satisfies — nothing ordered, needs review` });
+        candidateRows = [];
+      } else if (recognised && qualifying.length) {
+        for (const [rowId, r] of candidateRows) {
+          if (qualifying.some(([q]) => q === rowId)) continue;
+          demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note: `outside the PCF_SUPPLIER scope "${ourTag}"` });
+        }
+        candidateRows = qualifying;
+        // "X1" caps the TOTAL units taken from this SO, spent lowest rowId first.
+        if (scope.qty != null) {
+          scopeCap = new Map(); let left = scope.qty;
+          for (const [rowId, r] of [...qualifying].sort((a, b) => Number(a[0]) - Number(b[0]))) {
+            const take = Math.min(left, parseFloat(r.quantity.magnitude) || 0);
+            scopeCap.set(rowId, Math.max(0, take)); left -= take;
+          }
+        }
+      }
+    }
     // How many units each row loses to the skip list. A COUNTED token is a budget spent across
     // every row it matches (lowest rowId first, so the outcome is deterministic when the same SKU
     // sits on several rows); an UNCOUNTED token takes the whole row.
@@ -731,9 +816,11 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       // status → Ordered Stock Awaiting Delivery, which drops it out of the demand pool). If a
       // finalise ever half-fails, that SO WILL be re-ordered next run — onOrder used to mask that.
       // `onOrder`/`inStock` are still audited on every line below so a double-order is diagnosable.
-      // …minus any units the SO's skip list withholds from THIS row (PCF_SKIPSKU "sku x1").
+      // …minus any units the SO's skip list withholds from THIS row (PCF_SKIPSKU "sku x1"), and
+      // capped by a PCF_SUPPLIER scope quantity ("PENCARRIE (RG165 NAVY, M X1 ONLY)" → at most 1).
       const skipQty = skipByRow.get(rowId) || 0;
-      const toOrder = ordered - a.allocated - a.fulfilled - skipQty;
+      const cap = scopeCap ? (scopeCap.get(rowId) || 0) : Infinity;
+      const toOrder = Math.min(ordered - a.allocated - a.fulfilled - skipQty, cap);
       // Audit EVERY considered line (incl. ones we decide NOT to order) so a later
       // "why did it order N?" is answerable from the exact decision-time figures.
       demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: a.allocated || 0, fulfilled: a.fulfilled || 0, onOrder: a.onOrder || 0, inStock: a.inStock || 0, toOrder, ...(skipQty ? { skipped: skipQty, note: `${skipQty} withheld via ${SKIP_SKU_FIELD}` } : {}) });
