@@ -1101,6 +1101,19 @@ export async function createComboPOLive(opts = {}) {
   // the sole re-pickup guard.
   if (poField) for (const c of contributors) await liveWrite('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${poField}`, value: String(poId) }]);
 
+  // ONE ROW PER VARIANT. The same product/colour/size demanded by several sales orders lands as
+  // several rows, which makes booking the delivery in a matching exercise — the goods arrive as one
+  // pile of N and the PO shows it split across rows. Collapse them at birth (per-unit cost and real
+  // tax preserved), so EVERY supplier's PO is tidy, not just Portwest, whose flow already did this.
+  // Per-SO traceability is unaffected: it lives in the PO note above and in demand_log, not in the
+  // row split. Non-fatal — a tidy-up must never lose a created PO. Opt out with dedupeRows:false.
+  if (opts.dedupeRows !== false) {
+    try {
+      const c = await consolidatePoRows({ poId, execute: true });
+      if (c.merged && c.merged.length) { plan.consolidated = c.merged; }
+    } catch (e) { plan.consolidateWarn = e.message; }
+  }
+
   // audit trail: persist the per-line demand decision for this PO (best-effort, non-fatal)
   if (opts.logPool) { try { await writeDemandLog(opts.logPool, poId, supplierKey, demandAudit); } catch (e) { /* logging must never break a PO */ } }
 
@@ -1362,20 +1375,27 @@ export async function reconcilePortwestPO({ poId, cart = {}, execute = false } =
 export async function consolidatePoRows({ poId, execute = false } = {}) {
   const order = (await liveGet(`/order-service/order/${poId}`))[0];
   const entries = Object.entries(order.orderRows || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
-  const bySku = new Map();
+  // Key on productId, NOT productSku. In Brightpearl the productId IS the variant (a specific
+  // colour+size), whereas several variants can SHARE a base SKU with the size held in
+  // productOptions — on PO 482661, SKU 25020400 sat on 6 rows across 4 productIds (Small, Medium,
+  // Large, XL). Grouping by SKU would have merged four different sizes into one row of 21: worse
+  // than the duplication it set out to fix, and it loses the size. Grouping by productId merges
+  // only genuine duplicates of the same variant (that same PO had 25562900006 and 90014104000 twice
+  // each, and 25020400 Medium and XL twice each — those are the ones that should collapse).
+  const byVariant = new Map();
   for (const [rowId, r] of entries) {
-    if (String(r.productId) === '1000') continue;
-    const sku = String(r.productSku);
+    if (String(r.productId) === '1000') continue;                 // separator / note row — leave alone
+    const key = String(r.productId);
     const q = parseFloat(r.quantity.magnitude);
     const net = parseFloat((r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value) || 0);
-    const cur = bySku.get(sku) || { rowIds: [], qty: 0, net: 0, productId: r.productId };
-    cur.rowIds.push(rowId); cur.qty += q; cur.net += net; cur.productId = r.productId;
-    bySku.set(sku, cur);
+    const cur = byVariant.get(key) || { rowIds: [], qty: 0, net: 0, productId: r.productId, sku: r.productSku };
+    cur.rowIds.push(rowId); cur.qty += q; cur.net += net;
+    byVariant.set(key, cur);
   }
   const merged = [], toDelete = [], toReadd = [];
-  for (const [sku, info] of bySku) {
+  for (const [, info] of byVariant) {
     if (info.rowIds.length <= 1) continue;
-    merged.push({ sku, rows: info.rowIds.length, qty: info.qty });
+    merged.push({ sku: info.sku, productId: info.productId, rows: info.rowIds.length, qty: info.qty });
     toDelete.push(...info.rowIds);
     toReadd.push({ productId: info.productId, qty: info.qty, unit: info.qty ? info.net / info.qty : 0 });
   }
