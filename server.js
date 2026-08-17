@@ -8682,6 +8682,22 @@ app.post('/api/purchasing/consolidate-po', express.json(), async (req, res) => {
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// Reconcile a PO's rows to the quantities a supplier's portal ACTUALLY took: body
+// { poId, cart: {SKU: qty}, execute }. Bumps or drops rows to match, preserving each row's
+// per-unit cost and real tax. `reconcilePortwestPO` is supplier-agnostic despite the name —
+// the Portwest flow calls it internally for carton round-ups, and this route makes it usable
+// for any supplier whose portal changes a quantity (first case: Snickers ID badge holders
+// 97600400000, which the Hultafors portal only sells in 10-packs, so a demand of 1 must be
+// ordered — and received — as 10). Dry-run unless execute:true.
+app.post('/api/purchasing/reconcile-po', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  if (!b.poId) return res.status(400).json({ error: 'poId required' });
+  if (!b.cart || typeof b.cart !== 'object' || Array.isArray(b.cart)) return res.status(400).json({ error: 'cart {SKU: qty} required' });
+  try { res.json(await purchasingAuto.reconcilePortwestPO({ poId: Number(b.poId), cart: b.cart, execute: b.execute === true })); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // Portwest first-order review flow. PREPARE (non-placing): create the PO, load the Portwest
 // basket, and verify it matches the PO line-for-line — returns the diff, nothing is placed.
 app.post('/api/purchasing/portwest-prepare', express.json(), async (req, res) => {
