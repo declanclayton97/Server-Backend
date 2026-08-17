@@ -103,7 +103,22 @@ export const SUPPLIERS = {
   // takes all orderable rows; re-pickup prevented by clearing the tag on finalize. Ordering is
   // the official pcautoorder XML API (not a web basket). Cost = Launch(20) where live repricing
   // writes; PenCarrie's API single-price is the truer source (TODO override, like the Elastic ones).
-  'PENCARRIE':  { contactId: 204,   costList: 20, poField: null },
+  // BRAND DETECT built from BRANDS_supplier_list_NEW_2025.xlsx — the 51 brands whose supplier
+  // column names PenCarrie ([[reference_supplier_carriage_terms]]). Before this, PenCarrie had NO
+  // detect, so `dynamicDetect` fell back to a regex on its own NAME — which never matches a
+  // distributor's products. On any MULTI-supplier order that meant zero candidate rows, no audit
+  // row, and a silent "no demand": SO 482060 / 482218 / 482673 all tagged "PENCARRIE (CHECKED) /
+  // <other>" were skipped entirely while holding real Result / Regatta / Bagbase demand (2026-08-17).
+  // "(CHECKED)" is the buyer confirming PenCarrie has the stock, i.e. order from them rather than
+  // Ralawise/BTC/Prestige — an annotation, NOT a scope, and it's stripped on finalise by tagSupplier.
+  // ⚠️ "SF" is deliberately LEFT OUT — a two-letter token collides with too much. An SF product on a
+  // multi-supplier order will not be detected; scope the tag if that ever comes up.
+  // Verified against 48 real product names: matches all 18 lines of the first live order (PO 482741)
+  // and none of the Portwest/Uneek/Snickers/Apache/TuffStuff/Fort/Blaklader/CT/AS0xx lines sharing
+  // those orders. Shared brands (AWDis, Gildan, Regatta… also sold by Ralawise/BTC/Prestige) resolve
+  // to PenCarrie here, which is what "(CHECKED)" is asserting.
+  'PENCARRIE':  { contactId: 204,   costList: 20, poField: null,
+    detect: (n) => /\b(afd|anthem|awdis|babybugz|bagbase|beechfield|bella|brand\s*lab|canterbury|comfort\s*grip|craghoppers|denny'?s|ecologie|finden\s*hales|flexfit|front\s*row|fruit\s*of\s*the\s*loom|gildan|henbury|kariban|kimood|kustom\s*kit|larkwood|le\s*chef|mantis|mumbles|native\s*spirit|neoblue|premier|pro\s*rtx|proact|quadra|regatta|result|russell|so\s*denim|sol'?s|spiro|stormtech|tactical\s*threads|tee\s*jays|tombo|towel\s*city|warrior|westford\s*mill|yoko|yupoong)\b/i.test(n || '') },
 };
 
 // ---- low-level API with throttle back-off ----
@@ -278,6 +293,10 @@ const SUPPLIER_ALIASES = {
   DISLEY: /disley/i,
   OCTOGRIP: /octogrip/i,
 };
+// A registry entry may have no `detect` (a tag-only distributor). The demand read falls back to
+// dynamicDetect; the preview/diagnostic paths called sup.detect() straight and threw
+// "sup.detect is not a function" the moment such a supplier had a surviving candidate order.
+const detectOf = (sup) => (sup && sup.detect) || dynamicDetect(sup && sup.key);
 function dynamicDetect(key) {
   const k = String(key || '').toUpperCase();
   if (SUPPLIER_ALIASES[k]) { const re = SUPPLIER_ALIASES[k]; return (n) => re.test(n || ''); }
@@ -345,7 +364,7 @@ async function findContributors(sup, orderIds) {
     if (!tagsOf(tag).some((t) => t.toUpperCase() === sup.key)) continue;      // not this supplier
     if (sup.poField && cf[sup.poField]) continue;                             // already has a PO for this supplier
     const order = (await api('GET', `/order-service/order/${id}`))[0];
-    let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && sup.detect(r.productName, r.productSku));
+    let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && detectOf(sup)(r.productName, r.productSku));
     // Single-supplier order where the name-detector matched nothing (common for
     // email suppliers whose products aren't named after the supplier): take all
     // product rows — the whole order was tagged for this one supplier.
@@ -587,7 +606,7 @@ export async function previewLive(supplierKey, orderIds) {
   for (const cand of candidates) {
     const order = orderById[String(cand.id)];
     if (!order) { skipped.noMatchingRows++; continue; }
-    let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && sup.detect(r.productName, r.productSku));
+    let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && detectOf(sup)(r.productName, r.productSku));
     const allTags = tagsOf(cand.tag);
     if (!rows.length && allTags.length === 1 && tagSupplier(allTags[0]) === sup.key) {
       rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r));
@@ -803,7 +822,19 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       if (s > 0 && s >= rowQty) demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: rowQty, allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, skipped: s, note: `skipped via ${SKIP_SKU_FIELD}` });
     }
     const entries = candidateRows.filter(([rowId, r]) => (skipByRow.get(rowId) || 0) < (parseFloat(r.quantity.magnitude) || 0));
-    if (!entries.length) continue;
+    // An order TAGGED for this supplier that yields NOTHING is the dangerous case — it's how a
+    // brand-detect gap hides real demand with no error and no trace: Hellberg/EMMA/CLC on Snickers
+    // orders (d950468, 7–17 Aug) and every multi-supplier PenCarrie order until its detect existed.
+    // Record why, per row, so a miss is queryable in demand_log instead of vanishing. Only when the
+    // order contributes nothing — a partially-matched order isn't suspicious and would just be noise.
+    if (!entries.length) {
+      for (const [rowId, r] of orderableRows) {
+        demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName,
+          ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0,
+          note: `tagged "${tag}" for ${supplierKey} but NO row was selected — ${hasBrandDetect ? "none matched its brand detect" : "no rows orderable"}; demand may be hidden` });
+      }
+      continue;
+    }
     // Only order the UNALLOCATED qty: ordered − allocated − fulfilled.
     // Allocation isn't in the order API — read it from the legacy order page.
     const alloc = await getOrderAllocations(id, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
