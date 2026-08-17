@@ -8239,10 +8239,16 @@ const RETAIL_LIST = 3;
 app.post('/api/purchasing/product-price-live', async (req, res) => {
   if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
-  const { productId, cost, retail } = req.body || {};
+  // priceListId targets a cost list OTHER than Launch(20) — suppliers differ (Snickers 10,
+  // Portwest 7, Blaklader 12), and a stale cost on the supplier's OWN list is invisible to a
+  // Launch-only write. First case: CL1001526 was right on list 20 (£4.80) but stale on list 10
+  // (£30.70), which is the list the Snickers PO actually priced from.
+  const { productId, cost, retail, priceListId } = req.body || {};
   if (!productId) return res.status(400).json({ error: 'productId required' });
+  const costList = priceListId != null && priceListId !== '' ? Number(priceListId) : COST_LIST;
+  if (!Number.isFinite(costList) || costList <= 0) return res.status(400).json({ error: 'priceListId must be a positive number' });
   const overrides = {};
-  if (cost != null && cost !== '') overrides[COST_LIST] = String(cost);
+  if (cost != null && cost !== '') overrides[costList] = String(cost);
   if (retail != null && retail !== '') overrides[RETAIL_LIST] = String(retail);
   if (!Object.keys(overrides).length) return res.status(400).json({ error: 'cost or retail required' });
   try {
@@ -8256,10 +8262,10 @@ app.post('/api/purchasing/product-price-live', async (req, res) => {
     await bpLive('PUT', `/product-service/product-price/${productId}/price-list`, { priceLists: body });
     const after = await readAll();
     res.json({
-      productId,
-      wroteCost: cost != null && cost !== '' ? String(valOf(after, COST_LIST)) === String(cost) : null,
+      productId, costListId: costList,
+      wroteCost: cost != null && cost !== '' ? Number(valOf(after, costList)) === Number(cost) : null,
       wroteRetail: retail != null && retail !== '' ? String(valOf(after, RETAIL_LIST)) === String(retail) : null,
-      cost: valOf(after, COST_LIST), retail: valOf(after, RETAIL_LIST),
+      cost: valOf(after, costList), retail: valOf(after, RETAIL_LIST),
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });

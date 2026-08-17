@@ -45,6 +45,16 @@ const DEMAND_STATUS = 23;   // Stock needs ordering
 //   91 Sportswear – Proof Required · 92 Sportswear – Proof Sent
 export const NON_DEMAND_SO_STATUS_IDS = [1, 2, 18, 34, 35, 36, 44, 49, 51, 53, 55, 60, 78, 87, 89, 91, 92, 114, 117];
 const ORDERED_STATUS = 22;  // Ordered Stock Awaiting Delivery
+// Some sales orders carry a decoration instruction as a free-text row (productId 1000, the
+// "Misc item" product, the same carrier as shipping rows): "+++ PLEASE PUT TO PROOF REQUIRED
+// ONCE ORDERED +++". Those must land on Proof Required, NOT Ordered Stock, once their stock is
+// on order (user, 2026-08-17 — SO 482510 went to 22 and had to be corrected by hand).
+// 34 = "Proof Required-Send to Customer". NOTE Brightpearl also has 91 "Sportswear - Proof
+// Required"; if sportswear orders need that instead, set PROOF_REQUIRED_STATUS_ID.
+const PROOF_REQUIRED_STATUS = Number(process.env.PROOF_REQUIRED_STATUS_ID || 34);
+const PROOF_ROW_RE = /please\s+put\s+to\s+proof\s+required\s+once\s+ordered/i;
+export const orderNeedsProof = (order) =>
+  Object.values((order && order.orderRows) || {}).some((r) => PROOF_ROW_RE.test(String(r.productName || '')));
 // Per-SO "don't auto-order these items" blocklist custom field (user-created in BP). Value =
 // SKU(s)/style code(s) to skip on that order (e.g. a pair already ordered elsewhere). Code is
 // env-overridable so it matches whatever PCF code BP assigns.
@@ -939,7 +949,12 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
     const before = cf.PCF_SUPPLIER || '';
     const remaining = tagsOf(before).filter((t) => tagSupplier(t) !== key);
-    plan.push({ id, before, after: remaining.join(' / '), willClear: remaining.length === 0 });
+    // Read the order too, so a "PLEASE PUT TO PROOF REQUIRED ONCE ORDERED" row can route the
+    // status to Proof Required instead of Ordered Stock. Non-fatal: if the read fails we fall
+    // back to the normal ordered status rather than block the finalise.
+    let needsProof = false;
+    try { needsProof = orderNeedsProof((await liveGet(`/order-service/order/${id}`))[0]); } catch { /* keep default */ }
+    plan.push({ id, before, after: remaining.join(' / '), willClear: remaining.length === 0, needsProof });
     await pause(120);
   }
   if (!execute) return { dryRun: true, supplierKey: key, poId, setOrderedStatus, plan };
@@ -949,8 +964,12 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     if (p.before && p.after) await liveWrite('PATCH', `/order-service/order/${p.id}/custom-field`, [{ op: 'add', path: '/PCF_SUPPLIER', value: p.after }]);
     else if (p.before && !p.after) await liveWrite('PATCH', `/order-service/order/${p.id}/custom-field`, [{ op: 'remove', path: '/PCF_SUPPLIER' }]);
     // status: → Ordered Stock Awaiting Delivery ONLY when no supplier remains (else stays on SNO)
-    let statusChanged = false;
-    if (setOrderedStatus && p.willClear) { await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: ORDERED_STATUS }); statusChanged = true; }
+    let statusChanged = false, statusSet = null;
+    if (setOrderedStatus && p.willClear) {
+      statusSet = p.needsProof ? PROOF_REQUIRED_STATUS : ORDERED_STATUS;
+      await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: statusSet });
+      statusChanged = true;
+    }
     // note on the SO: the item names ordered for this SO, then "Ordered on PO#<poId>".
     // The '#' before the id is REQUIRED — BP only renders a clickable order link for
     // the "#<orderId>" pattern (was "PO:<id>", which stayed plain text).
@@ -986,7 +1005,7 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
       await liveWrite('POST', `/order-service/order/${p.id}/note`, { text, addedOn, contactId: noteContactId || 1, isPublic: false });
       noted = true;
     }
-    results.push({ id: p.id, tag: p.after || '(cleared)', keptOnSNO: !p.willClear, statusChanged, noted });
+    results.push({ id: p.id, tag: p.after || '(cleared)', keptOnSNO: !p.willClear, statusChanged, statusSet, proofRequired: !!p.needsProof, noted });
     await pause(150);
   }
   return { done: true, supplierKey: key, poId, setOrderedStatus, results };
