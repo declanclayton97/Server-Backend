@@ -657,18 +657,52 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // pair already ordered manually/elsewhere) — everything else still orders. A skip token
     // matches by exact SKU, a dash-part of the SKU, a SKU substring, or a whole word in the name
     // (so "126515-940-302", "126515", or "2700" all match the Fristads 2700 line).
-    const skipTokens = String(cf[SKIP_SKU_FIELD] || '').split(/[\s,;|]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
-    const isSkipped = (r) => skipTokens.length > 0 && skipTokens.some((t) => {
+    // QUANTITIES (user, 2026-08-17): a token may carry a count — "332410509990 x1" skips ONE unit
+    // and still orders the rest, so a row of 2 orders 1. No count = skip the whole line (the
+    // original behaviour). Entries split on comma/semicolon/pipe/newline OR plain whitespace, so
+    // "126515 2700" is still two tokens; a bare "x1" (or "x 1") attaches to the token BEFORE it
+    // instead of becoming a token in its own right — which is what it used to do, and it could
+    // then match a SKU or a product name by accident.
+    const skipEntries = [];
+    for (const chunk of String(cf[SKIP_SKU_FIELD] || '').split(/[,;|\n]+/)) {
+      const toks = chunk.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      for (let i = 0; i < toks.length; i++) {
+        let qty = null;
+        const m = /^[x×](\d+)$/.exec(toks[i]);
+        if (m) qty = Number(m[1]);
+        else if (/^[x×]$/.test(toks[i]) && /^\d+$/.test(toks[i + 1] || '')) qty = Number(toks[++i]);
+        if (qty != null) { if (skipEntries.length) skipEntries[skipEntries.length - 1].qty = qty; continue; }
+        skipEntries.push({ token: toks[i], qty: null, used: 0 });
+      }
+    }
+    const matchSkip = (r) => skipEntries.find((e) => {
       const sku = String(r.productSku || '').toLowerCase();
-      if (sku === t || sku.split('-').includes(t) || sku.includes(t)) return true;
-      try { return new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(String(r.productName || '').toLowerCase()); } catch { return false; }
-    });
+      if (sku === e.token || sku.split('-').includes(e.token) || sku.includes(e.token)) return true;
+      try { return new RegExp('\\b' + e.token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(String(r.productName || '').toLowerCase()); } catch { return false; }
+    }) || null;
     const candidateRows = (singleSupplier && !hasBrandDetect)
       ? Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r))
       : Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r) && detect(r.productName, r.productSku));
-    // audit-log the skipped rows so it's visible WHY they weren't ordered
-    for (const [rowId, r] of candidateRows) if (isSkipped(r)) demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note: `skipped via ${SKIP_SKU_FIELD}` });
-    const entries = candidateRows.filter(([, r]) => !isSkipped(r));
+    // How many units each row loses to the skip list. A COUNTED token is a budget spent across
+    // every row it matches (lowest rowId first, so the outcome is deterministic when the same SKU
+    // sits on several rows); an UNCOUNTED token takes the whole row.
+    const skipByRow = new Map();
+    for (const [rowId, r] of [...candidateRows].sort((a, b) => Number(a[0]) - Number(b[0]))) {
+      const e = matchSkip(r);
+      if (!e) continue;
+      const rowQty = parseFloat(r.quantity.magnitude) || 0;
+      if (e.qty == null) { skipByRow.set(rowId, rowQty); continue; }
+      const take = Math.min(Math.max(0, e.qty - e.used), rowQty);
+      if (take > 0) { e.used += take; skipByRow.set(rowId, take); }
+    }
+    // audit-log the FULLY skipped rows so it's visible WHY they weren't ordered (a partially
+    // skipped row still orders, and carries its `skipped` count on the normal audit line below)
+    for (const [rowId, r] of candidateRows) {
+      const s = skipByRow.get(rowId) || 0;
+      const rowQty = parseFloat(r.quantity.magnitude) || 0;
+      if (s > 0 && s >= rowQty) demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: rowQty, allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, skipped: s, note: `skipped via ${SKIP_SKU_FIELD}` });
+    }
+    const entries = candidateRows.filter(([rowId, r]) => (skipByRow.get(rowId) || 0) < (parseFloat(r.quantity.magnitude) || 0));
     if (!entries.length) continue;
     // Only order the UNALLOCATED qty: ordered − allocated − fulfilled.
     // Allocation isn't in the order API — read it from the legacy order page.
@@ -697,10 +731,12 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       // status → Ordered Stock Awaiting Delivery, which drops it out of the demand pool). If a
       // finalise ever half-fails, that SO WILL be re-ordered next run — onOrder used to mask that.
       // `onOrder`/`inStock` are still audited on every line below so a double-order is diagnosable.
-      const toOrder = ordered - a.allocated - a.fulfilled;
+      // …minus any units the SO's skip list withholds from THIS row (PCF_SKIPSKU "sku x1").
+      const skipQty = skipByRow.get(rowId) || 0;
+      const toOrder = ordered - a.allocated - a.fulfilled - skipQty;
       // Audit EVERY considered line (incl. ones we decide NOT to order) so a later
       // "why did it order N?" is answerable from the exact decision-time figures.
-      demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: a.allocated || 0, fulfilled: a.fulfilled || 0, onOrder: a.onOrder || 0, inStock: a.inStock || 0, toOrder });
+      demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: a.allocated || 0, fulfilled: a.fulfilled || 0, onOrder: a.onOrder || 0, inStock: a.inStock || 0, toOrder, ...(skipQty ? { skipped: skipQty, note: `${skipQty} withheld via ${SKIP_SKU_FIELD}` } : {}) });
       if (toOrder <= 0) continue; // fully allocated / already ordered — skip
       rows.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty: toOrder, orderedQty: ordered, allocation: a, itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0, taxCode: (r.rowValue && r.rowValue.taxCode) || null });
     }
