@@ -80,7 +80,14 @@ export const SUPPLIERS = {
   PORTWEST:     { contactId: 298,   costList: 7,  poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') }, // low-inv ON (min-stock data sorted 2026-08-14): SO demand + reorder
   UNEEK:        { contactId: 322,   costList: 11, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
   'HELLY HANSEN': { contactId: 214, costList: 6,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
-  MASCOT:       { contactId: 334,   costList: null, poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
+  // Launch(20) IS populated for Mascot — the null here was a config gap, not missing data (sampled
+  // from PO 476715: EAN 5711074495160 → list20 9.41, EAN 5711074486861 → 11.77). Without it, costs
+  // fell back to the sales-order row's itemCost and the price healer skipped Mascot entirely.
+  // ⚠️ Do NOT heal Mascot costs from its B2B basket: that cart shows LIST price (the same polo reads
+  // £15.95 there = list3/list13 RRP, vs the £9.41 real cost). Mascot applies the discount when the
+  // order is created — which is what the button labelled "Check Discount" actually does — so the true
+  // net price only exists after createOrder. See [[project_mascot_ordering]].
+  MASCOT:       { contactId: 334,   costList: 20,   poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
