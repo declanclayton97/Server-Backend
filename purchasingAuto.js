@@ -562,8 +562,14 @@ export async function previewLive(supplierKey, orderIds) {
     if (!tag) { skipped.noTag++; continue; }
     if (isLeaveNote(tag)) { skipped.leaveNote++; continue; }
     if (!tagsOf(tag).some((t) => tagSupplier(t) === sup.key)) { skipped.otherSupplier++; continue; }
-    if (sup.poField && cf[sup.poField]) { skipped.alreadyHasPo++; continue; }
-    candidates.push({ id, tag });
+    // A stamped poField is NOT a reason to skip — the real demand read (gatherLiveDemand) counts
+    // these, because a stamp only records a PRIOR PO while the tag surviving means there is still
+    // something to order (residual demand from a partial or re-allocated order). This preview used
+    // to drop them, so it under-reported demand and disagreed with what a run would actually do —
+    // e.g. SO 481102 showed as "alreadyHasPo, excluded" while its 3 × Fort 167 were genuinely
+    // outstanding (2026-08-17). Counted now for visibility, not skipped.
+    if (sup.poField && cf[sup.poField]) skipped.alreadyHasPo++;
+    candidates.push({ id, tag, stampedPo: (sup.poField && cf[sup.poField]) || null });
   }
 
   // 4. Full order for each candidate (id-set batches, per-order fallback) → rows.
@@ -859,13 +865,21 @@ async function writeDemandLog(pool, poId, supplierKey, demandAudit) {
       in_stock NUMERIC, to_order NUMERIC, logged_at TIMESTAMPTZ DEFAULT now())`);
     await pool.query(`CREATE INDEX IF NOT EXISTS demand_log_po_idx ON demand_log(po_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS demand_log_sku_idx ON demand_log(sku)`);
+    // `skipped` + `note` carry WHY a line was withheld or dropped — units held back by PCF_SKIPSKU,
+    // rows outside a PCF_SUPPLIER scope, a row treated as fulfilled because the order page rendered
+    // no reserved[] input. Those reasons existed only in the API response before, so a past run's
+    // decision couldn't be queried later, which is the whole point of this table. ADD COLUMN IF NOT
+    // EXISTS so existing deployments migrate on the next run.
+    await pool.query(`ALTER TABLE demand_log ADD COLUMN IF NOT EXISTS skipped NUMERIC`);
+    await pool.query(`ALTER TABLE demand_log ADD COLUMN IF NOT EXISTS note TEXT`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS demand_log_so_idx ON demand_log(so_id)`);
     _demandLogReady = true;
   }
   for (const d of demandAudit) {
     await pool.query(
-      `INSERT INTO demand_log (po_id, supplier, so_id, product_id, sku, name, ordered, allocated, fulfilled, on_order, in_stock, to_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [poId, supplierKey, d.soId, d.productId, d.sku, d.name, d.ordered, d.allocated, d.fulfilled, d.onOrder, d.inStock, d.toOrder]);
+      `INSERT INTO demand_log (po_id, supplier, so_id, product_id, sku, name, ordered, allocated, fulfilled, on_order, in_stock, to_order, skipped, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [poId, supplierKey, d.soId, d.productId, d.sku, d.name, d.ordered, d.allocated, d.fulfilled, d.onOrder, d.inStock, d.toOrder, d.skipped ?? null, d.note ?? null]);
   }
 }
 

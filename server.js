@@ -7691,7 +7691,7 @@ app.get('/api/purchasing/demand-log', async (req, res) => {
     if (req.query.sku) { params.push(String(req.query.sku).toUpperCase()); where.push(`upper(sku) = $${params.length}`); }
     if (req.query.so) { params.push(parseInt(req.query.so, 10)); where.push(`so_id = $${params.length}`); }
     if (req.query.days) { params.push(parseInt(req.query.days, 10)); where.push(`logged_at > now() - ($${params.length} || ' days')::interval`); }
-    const sql = `SELECT po_id, supplier, so_id, sku, name, ordered, allocated, fulfilled, on_order, in_stock, to_order, logged_at
+    const sql = `SELECT po_id, supplier, so_id, sku, name, ordered, allocated, fulfilled, on_order, in_stock, to_order, skipped, note, logged_at
                  FROM demand_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
                  ORDER BY logged_at DESC, po_id DESC LIMIT ${Math.min(parseInt(req.query.limit, 10) || 500, 2000)}`;
     const r = await pool.query(sql, params);
