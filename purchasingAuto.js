@@ -732,9 +732,10 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       if (sku === e.token || sku.split('-').includes(e.token) || sku.includes(e.token)) return true;
       try { return new RegExp('\\b' + e.token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(String(r.productName || '').toLowerCase()); } catch { return false; }
     }) || null;
+    const orderableRows = Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r));
     let candidateRows = (singleSupplier && !hasBrandDetect)
-      ? Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r))
-      : Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r) && detect(r.productName, r.productSku));
+      ? orderableRows
+      : orderableRows.filter(([, r]) => detect(r.productName, r.productSku));
     // Apply THIS supplier's parenthetical scope, if its note is a real instruction rather than an
     // annotation. Only bites when every term is recognised on the order AND at least one row
     // satisfies them all — otherwise the note is left alone and nothing is filtered.
@@ -742,8 +743,16 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     const scope = parseTagScope(ourTag);
     let scopeCap = null;
     if (scope && scope.terms.length) {
-      const recognised = scope.terms.every((t) => candidateRows.some(([, r]) => rowMatchesTerm(r, t)));
-      const qualifying = candidateRows.filter(([, r]) => scope.terms.every((t) => rowMatchesTerm(r, t)));
+      // A TAG-ONLY supplier (no brand regex) sharing an order with other suppliers would otherwise
+      // be filtered by `dynamicDetect`, a regex on the supplier's own NAME — which can never match
+      // a distributor's products ("pencarrie" appears in no product name), so it would order
+      // nothing at all. Where such a supplier carries an explicit scope, that scope IS the row
+      // selector, so evaluate it against every orderable row instead. This is what makes
+      // "PENCARRIE (RS121M ONLY) / PORTWEST" work the way a human would expect.
+      const rowsForScope = (!hasBrandDetect && !singleSupplier) ? orderableRows : candidateRows;
+      const recognised = scope.terms.every((t) => rowsForScope.some(([, r]) => rowMatchesTerm(r, t)));
+      const qualifying = rowsForScope.filter(([, r]) => scope.terms.every((t) => rowMatchesTerm(r, t)));
+      if (recognised && qualifying.length) candidateRows = rowsForScope;   // so the drop-audit below reports against the right set
       // A term shaped like a product code (RG165, JC020, TR010, or a long numeric SKU) that we
       // CANNOT satisfy means a real instruction we don't understand — order nothing from this SO and
       // flag it, rather than fall back to taking every row. Word-only notes (BACK ORDER, LOW STOCK)
