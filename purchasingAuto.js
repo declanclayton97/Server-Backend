@@ -1229,7 +1229,7 @@ export async function stampPoFieldLive({ orderIds = [], supplierKey, poField, po
 // Re-price an existing PO's rows from a price list (BP has no row-value update, so
 // each row is deleted + re-added at the correct cost, preserving order + separator).
 // Dry-run unless { execute: true }. Used to correct a PO built on the wrong list.
-export async function repriceComboPOLive({ poId, priceListId = 20, keepNet = false, execute = false } = {}) {
+export async function repriceComboPOLive({ poId, priceListId = 20, keepNet = false, execute = false, allowMiscRows = false } = {}) {
   // keepNet=true: keep each row's CURRENT net (don't recompute from the price list)
   // and just re-add — used to RESTORE row tax after the legacy reference-write zeroes
   // it (the API stores explicit rowTax; only the legacy form drops it).
@@ -1242,6 +1242,15 @@ export async function repriceComboPOLive({ poId, priceListId = 20, keepNet = fal
     const oldNet = parseFloat((r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value) || 0);
     const cost = isSep ? 0 : (keepNet ? (qty ? oldNet / qty : 0) : await costOfLive(r.productId, priceListId, qty ? oldNet / qty : 0));
     plan.push({ rowId, productId: r.productId, qty, name: r.productName, isSep, oldNet: oldNet.toFixed(2), newNet: (cost * qty).toFixed(2), cost });
+  }
+  // ⚠️ SAFETY: the re-add below forces every productId-1000 row to the name "=====LOW INV====" with
+  // net 0. That is correct for the separator this module creates, but it would SILENTLY rename and
+  // zero any OTHER misc row — a "Shipping:" line, or a
+  // "+++ PLEASE PUT TO PROOF REQUIRED ONCE ORDERED +++" instruction (both live on productId 1000).
+  // Refuse rather than damage them; pass allowMiscRows:true only if you have checked the PO by hand.
+  const miscRows = plan.filter((p) => p.isSep && String(p.name || "").trim() !== "=====LOW INV====");
+  if (miscRows.length && allowMiscRows !== true) {
+    return { refused: true, poId, priceListId, reason: miscRows.length + ' productId-1000 row(s) are NOT the =====LOW INV==== separator — repricing would rename and zero them', miscRows: miscRows.map((m) => m.name), plan };
   }
   if (!execute) return { dryRun: true, poId, priceListId, plan };
   for (const p of plan) { await liveWrite('DELETE', `/order-service/order/${poId}/row/${p.rowId}`); await pause(150); }

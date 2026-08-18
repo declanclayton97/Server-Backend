@@ -118,6 +118,26 @@ async function healPrices(steps, { supplierKey, poId, changes, pool }) {
     const r = await bp.healSupplierCosts({ supplierKey, poId, changes, pool, execute: process.env.PRICE_HEAL_ENABLED === 'true' });
     if (r.skipped && !Array.isArray(r.skipped)) { steps.priceHeal = r; return; }        // e.g. "no cost list of its own"
     steps.priceHeal = { listId: r.listId, dryRun: !!r.dryRun, applied: (r.applied || []).length, escalated: (r.escalated || []).length, skipped: (r.skipped || []).length, changes: (r.applied || []).map((a) => `${a.sku} £${Number(a.was).toFixed(2)}->£${Number(a.now).toFixed(2)}`) };
+    // Healing fixes the PRODUCT cost; the PO still carries the cost it snapshotted when it was
+    // created, so it stays wrong until re-priced — that needed doing by hand three times before this
+    // (user, 2026-08-18). Re-price from the SUPPLIER'S OWN list, only when a heal actually applied.
+    // repriceComboPOLive refuses if the PO holds a productId-1000 row that is not the =====LOW INV====
+    // separator, so a Shipping or proof-instruction row can never be renamed and zeroed by this.
+    if (r.applied && r.applied.length && process.env.PRICE_HEAL_ENABLED === 'true') {
+      try {
+        const rp = await bp.repriceComboPOLive({ poId, priceListId: r.listId, execute: true });
+        steps.priceHealReprice = rp.refused
+          ? { refused: true, reason: rp.reason, miscRows: rp.miscRows }
+          : { done: !!rp.done, priceListId: r.listId, rows: (rp.plan || []).length };
+        if (rp.refused) {
+          await logPurchasingError(pool, {
+            supplier: supplierKey, step: 'price-heal-reprice',
+            message: `Costs were healed but PO#${poId} was NOT re-priced: ${rp.reason}. The PO still shows the old cost — re-price it by hand after checking those rows.`,
+            context: { poId, listId: r.listId, miscRows: rp.miscRows },
+          }).catch(() => {});
+        }
+      } catch (e) { steps.priceHealRepriceWarn = e.message; }
+    }
     for (const e of (r.escalated || [])) {
       await logPurchasingError(pool, {
         supplier: supplierKey, step: 'price-heal',
