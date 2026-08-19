@@ -8841,7 +8841,7 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Snickers auto-purchase poller scheduled (weekdays 10:00 UK, £300 ex-VAT failsafe, portal worker)');
 }
 
-// Carhartt auto-purchase poller — weekdays 11:00 UK. Elastic Suite portal (order.carhartt.com).
+// Carhartt auto-purchase poller — Mon/Wed/Fri 13:30 UK. Elastic Suite portal (order.carhartt.com).
 // OFF by default (new live placer): set CARHARTT_SCHEDULE_ENABLED=true to activate.
 // £300 ex-VAT failsafe, state row id 6.
 if (process.env.CARHARTT_SCHEDULE_ENABLED === 'true') {
@@ -8849,17 +8849,17 @@ if (process.env.CARHARTT_SCHEDULE_ENABLED === 'true') {
     try {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
-      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
-      if (!(uk.hour === 11 && uk.minute < 30)) return; // 11:00–11:29 window
+      if (!['Mon', 'Wed', 'Fri'].includes(uk.weekday)) return;   // Carhartt process orders Wed & Fri (user, 2026-08-19)
+      if (!(uk.hour === 13 && uk.minute >= 30)) return; // 13:30–13:59 window
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'CARHARTT' })
         .then((r) => { if (!r.skipped) console.log('[carhartt-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[carhartt-schedule] error:', e.message));
     } catch (e) { console.error('[carhartt-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
-  console.log('✅ Carhartt auto-purchase poller scheduled (weekdays 11:00 UK, £300 ex-VAT failsafe)');
+  console.log('✅ Carhartt auto-purchase poller scheduled (Mon/Wed/Fri 13:30 UK, £300 ex-VAT failsafe)');
 } else { console.log('⏸️  Carhartt auto-purchase poller DORMANT (set CARHARTT_SCHEDULE_ENABLED=true to activate)'); }
 
-// Helly Hansen auto-purchase poller — weekdays 11:30 UK. Elastic Suite portal
+// Helly Hansen auto-purchase poller — weekdays 11:00 UK. Elastic Suite portal
 // (b2bwork.hellyhansen.com). ON by default (HELLYHANSEN_SCHEDULE_ENABLED != 'false').
 // PO line costs come from the portal's live wholesale price (portal wins) so the PO reconciles
 // to the HH invoice; OOS lines get back-ordered. £300 ex-VAT failsafe, state row id 7.
@@ -8869,13 +8869,13 @@ if (process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
       if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
-      if (!(uk.hour === 11 && uk.minute >= 30)) return; // 11:30–11:59 window
+      if (!(uk.hour === 11 && uk.minute < 30)) return; // 11:00–11:29 window
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'HELLY HANSEN' })
         .then((r) => { if (!r.skipped) console.log('[hellyhansen-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[hellyhansen-schedule] error:', e.message));
     } catch (e) { console.error('[hellyhansen-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
-  console.log('✅ Helly Hansen auto-purchase poller scheduled (weekdays 11:30 UK, £300 ex-VAT failsafe)');
+  console.log('✅ Helly Hansen auto-purchase poller scheduled (weekdays 11:00 UK, £300 ex-VAT failsafe)');
 } else { console.log('⏸️  Helly Hansen auto-purchase poller DISABLED (HELLYHANSEN_SCHEDULE_ENABLED=false)'); }
 
 // Portwest auto-purchase poller — weekdays 15:00 UK. portwest.com: CSV upload + two-step
