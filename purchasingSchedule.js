@@ -960,6 +960,24 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     const netValue = Number(lines.reduce((a, l) => a + (l.cost || 0) * l.qty, 0).toFixed(2));
     const units = (plan.soUnits || 0) + (plan.lowUnits || 0);
 
+    // A tag is a human saying "this supplier is needed on this order". Contributing no rows means
+    // we disagree, and the usual cause is a product this supplier's brand detect doesn't know about
+    // — Hellberg/EMMA/CLC were invisible to Snickers that way for ten days, and SO 482630 sat
+    // tagged UNEEK since 18 Aug with five unordered lines. Report it EVERY day the demand is valued,
+    // not only when an order is placed: a supplier that never reaches its threshold (Uneek) would
+    // otherwise never say a word. severity 'review' — nothing is broken and nothing is blocked.
+    if (plan.tagFlags && plan.tagFlags.length && !dryRun) {
+      const detail = plan.tagFlags.map((f) => `SO ${f.soId} (tagged "${f.tag}") — ${f.reason}\n` +
+        f.rows.slice(0, 12).map((r) => `      ${r.qty} × ${r.sku || '(no SKU)'}  ${r.name || ''}`).join('\n') +
+        (f.rows.length > 12 ? `\n      …and ${f.rows.length - 12} more rows` : '')).join('\n\n');
+      await logPurchasingError(pool, {
+        supplier: cfg.supplierKey, step: 'tagged-but-nothing-to-order', severity: 'review',
+        message: `${plan.tagFlags.length} order(s) are tagged for ${cfg.supplierKey} but contributed NOTHING to today's demand. `
+          + `That usually means an item on them isn't recognised as a ${cfg.supplierKey} product — please check whether it should have been ordered.\n\n${detail}`,
+        context: { supplier: cfg.supplierKey, orders: plan.tagFlags.map((f) => ({ soId: f.soId, tag: f.tag, reason: f.reason, rows: f.rows.length })) },
+      }).catch(() => {});
+    }
+
     let decision, willPlace = false, reason = null, newWaitDays = state.working_days_waited, padOnPlace = false;
     if (netValue <= 0) {
       decision = 'no demand'; newWaitDays = 0;

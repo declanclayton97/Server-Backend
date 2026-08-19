@@ -743,6 +743,12 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
   }
   const contributors = [];
   const demandAudit = [];                                          // per-line decision breakdown (for the audit log)
+  // Orders TAGGED for this supplier that yield NOTHING. Detected here since forever and only ever
+  // written to demand_log, where nobody looks: SO 482630 sat tagged UNEEK from 18 Aug with five
+  // unordered lines, and surfaced solely because the user counted the orders by hand. A tag says a
+  // human decided this supplier is needed; contributing no rows means we disagree with them, and
+  // that disagreement should be argued out loud rather than filed.
+  const tagFlags = [];
   for (const id of ids) {
     const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
     await pause(120);
@@ -825,6 +831,8 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       const codeLike = scope.terms.some((t) => /^[A-Z]{1,4}\d{2,}[A-Z0-9-]*$/.test(t) || /^\d{5,}$/.test(t));
       if (codeLike && !(recognised && qualifying.length)) {
         for (const [rowId, r] of candidateRows) demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note: `PCF_SUPPLIER scope "${ourTag}" names an item no row satisfies — nothing ordered, needs review` });
+        tagFlags.push({ soId: id, tag, reason: `the scope "${ourTag}" names an item no row on the order satisfies`,
+          rows: candidateRows.map(([, r]) => ({ sku: r.productSku, name: r.productName, qty: parseFloat(r.quantity.magnitude) })) });
         candidateRows = [];
       } else if (recognised && qualifying.length) {
         for (const [rowId, r] of candidateRows) {
@@ -873,6 +881,8 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
           ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0,
           note: `tagged "${tag}" for ${supplierKey} but NO row was selected — ${hasBrandDetect ? "none matched its brand detect" : "no rows orderable"}; demand may be hidden` });
       }
+      tagFlags.push({ soId: id, tag, reason: hasBrandDetect ? `none of its rows matched the ${supplierKey} brand detect` : "no rows on the order were orderable",
+        rows: orderableRows.map(([, r]) => ({ sku: r.productSku, name: r.productName, qty: parseFloat(r.quantity.magnitude) })) });
       continue;
     }
     // Only order the UNALLOCATED qty: ordered − allocated − fulfilled.
@@ -919,7 +929,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       lines: rows.map((r) => ({ productId: r.productId, sku: r.sku, name: r.name, qty: r.qty, orderedQty: r.orderedQty, allocation: r.allocation, itemCost: r.itemCost, taxCode: r.taxCode })),
     });
   }
-  return { contributors, demandAudit };
+  return { contributors, demandAudit, tagFlags };
 }
 
 // Persist the per-line demand decision to the demand_log table (best-effort). Lets a later
@@ -975,7 +985,7 @@ export async function createComboPOLive(opts = {}) {
   // 1. SO-driven demand + per-SKU qty (for dedupe). hasBrandDetect = this is a hardcoded
   // brand-regex supplier (vs a dynamic/email supplier with a weak name-derived detector).
   const hasBrandDetect = !!(opts.detect || reg.detect);
-  const { contributors, demandAudit } = await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect });
+  const { contributors, demandAudit, tagFlags } = await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect });
   const soLines = []; const soQtyBySku = {};
   for (const c of contributors) for (const l of c.lines) {
     const cost = await costOfLive(l.productId, priceListId, l.itemCost);
@@ -1079,6 +1089,7 @@ export async function createComboPOLive(opts = {}) {
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
     unresolvedSkus: lowLines.filter((l) => l.unresolved).map((l) => l.sku),
+    tagFlags,                                                       // on the PLAN, not just the created PO: the daily value-check is a dry run, and a supplier that never reaches its threshold (Uneek) would otherwise never report
   };
 
   if (!execute) return { dryRun: true, ...plan };
