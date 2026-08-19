@@ -8842,9 +8842,9 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
 }
 
 // Carhartt auto-purchase poller — Mon/Wed/Fri 13:30 UK. Elastic Suite portal (order.carhartt.com).
-// OFF by default (new live placer): set CARHARTT_SCHEDULE_ENABLED=true to activate.
+// ON by default since 2026-08-19 (user) — set CARHARTT_SCHEDULE_ENABLED=false to stop.
 // £300 ex-VAT failsafe, state row id 6.
-if (process.env.CARHARTT_SCHEDULE_ENABLED === 'true') {
+if (process.env.CARHARTT_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -8857,7 +8857,7 @@ if (process.env.CARHARTT_SCHEDULE_ENABLED === 'true') {
     } catch (e) { console.error('[carhartt-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
   console.log('✅ Carhartt auto-purchase poller scheduled (Mon/Wed/Fri 13:30 UK, £300 ex-VAT failsafe)');
-} else { console.log('⏸️  Carhartt auto-purchase poller DORMANT (set CARHARTT_SCHEDULE_ENABLED=true to activate)'); }
+} else { console.log('⏸️  Carhartt auto-purchase poller DISABLED (CARHARTT_SCHEDULE_ENABLED=false)'); }
 
 // Helly Hansen auto-purchase poller — weekdays 11:00 UK. Elastic Suite portal
 // (b2bwork.hellyhansen.com). ON by default (HELLYHANSEN_SCHEDULE_ENABLED != 'false').
