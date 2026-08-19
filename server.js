@@ -8663,6 +8663,45 @@ app.get('/api/purchasing/sterling-resolve-test', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// READ-ONLY: resolve an EXISTING PO's rows into the worker payload. When a run aborts at checkout
+// the PO survives with the right rows on it, and re-running the whole chain just builds a second one
+// — three Sterling POs existed on 19 Aug for one order. This lets an existing PO be driven to the
+// portal instead of replaced.
+// Unlike /sterling-resolve-test (which reports search/colour/size for eyeballing) this returns the
+// FULL resolved line, leg/waist/legIndex/legCount included. Those matter: a leg×waist trouser grid
+// has unlabelled rows, so without legIndex the matcher cannot tell 29 leg from 33 leg. Dropping
+// them would silently order the wrong length.
+// Dedupe is by shop VARIANT (search|colour|size), summing qty, exactly as placeSterlingOrder does —
+// the basket keeps the LAST qty for a repeated add rather than the sum, so two PO rows for the same
+// variant must arrive as one line or units go missing.
+app.get('/api/purchasing/sterling-resolve-po', async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const poId = Number(req.query.poId);
+  if (!poId) return res.status(400).json({ error: 'poId required' });
+  try {
+    const order = (await purchasingAuto.bpLiveGet(`/order-service/order/${poId}`))[0];
+    if (!order) return res.status(404).json({ error: `PO ${poId} not found` });
+    const { resolveSterlingLine, isNonSterlingOrderable } = await import('./sterlingResolve.js');
+    const rows = Object.values(order.orderRows || {}).filter((r) => String(r.productId) !== '1000');
+    const byVariant = new Map(); const unresolved = []; const skipped = [];
+    for (const r of rows) {
+      const sku = r.productSku, qty = Math.round(parseFloat(r.quantity.magnitude));
+      if (isNonSterlingOrderable(sku)) { skipped.push(sku); continue; }
+      const x = await resolveSterlingLine({ sku, productId: r.productId });
+      if (!x.resolved) { unresolved.push({ sku, ean: x.ean }); continue; }
+      const key = [x.search, x.colour || '', x.size].map((s) => String(s).trim().toLowerCase()).join('|');
+      if (byVariant.has(key)) byVariant.get(key).qty += qty;
+      else byVariant.set(key, { search: x.search, colour: x.colour, size: x.size, qty, leg: x.leg, waist: x.waist, legIndex: x.legIndex, legCount: x.legCount });
+    }
+    const lines = [...byVariant.values()];
+    res.json({
+      poId, status: order.orderStatus && order.orderStatus.orderStatusId, reference: order.reference,
+      poRows: rows.length, poUnits: rows.reduce((a, r) => a + Math.round(parseFloat(r.quantity.magnitude)), 0),
+      lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0), unresolved, skipped, payload: lines,
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Fire a Sterling worker DRY-RUN (execute:false) with an explicit deduped lines[] payload,
 // using the server-side worker URL/secret. Returns the async jobId; poll with the job route
 // below. Used to verify per-line qty staging before a real placement. Never places.
