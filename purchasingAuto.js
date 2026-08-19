@@ -1527,7 +1527,20 @@ export async function healSupplierCosts({ supplierKey, poId, changes = [], pool 
     rec.was = was;
     const diff = +(now - was).toFixed(4);
     if (Math.abs(diff) < 0.005) { skipped.push({ ...rec, reason: 'already correct' }); continue; }
-    const pct = was > 0 ? Math.abs(diff) / was : 1;
+    // A cost of ZERO is not a price that moved — it is a MISSING price, and the band was never
+    // meant to protect it. On 2026-08-19 Helly Hansen raised nine review alerts in one run and five
+    // were £0.00 costs (72183_590-L, 70295_269-L/-4XL, 79249_951-L, 79241_991-L/-S), each reported
+    // as a "100% move" needing a human. There is no wrong direction to guard against: 0 is never a
+    // real cost, and the supplier's own invoice price is authoritative. So heal it outright, and
+    // record that it came from an empty cost rather than a normal move.
+    const fromNothing = !(was > 0);
+    if (fromNothing) {
+      if (execute) { try { await setCostLive(rec.productId, reg.costList, now.toFixed(2)); await pause(150); } catch (e) { skipped.push({ ...rec, reason: 'write failed: ' + e.message }); logRows.push({ ...rec, action: 'failed', reason: e.message }); continue; } }
+      applied.push({ ...rec, diff, fromNothing: true });
+      logRows.push({ ...rec, action: execute ? 'applied' : 'would-apply', reason: 'BP cost was empty — filled from the supplier price' });
+      continue;
+    }
+    const pct = Math.abs(diff) / was;
     if (pct > HEAL_MAX_PCT || Math.abs(diff) > HEAL_MAX_ABS) {
       const reason = `move of £${diff.toFixed(2)} (${(pct * 100).toFixed(0)}%) exceeds the auto-heal band (±${(HEAL_MAX_PCT * 100).toFixed(0)}% / ±£${HEAL_MAX_ABS}) — needs a human`;
       escalated.push({ ...rec, diff, reason });

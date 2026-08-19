@@ -72,26 +72,43 @@ async function ensureErrorTable(pool) {
 }
 
 // Persist an error AND email an alert. Used for every failure in the flow.
-export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null } = {}) {
+export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error' } = {}) {
   try { if (pool) { await ensureErrorTable(pool); await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context) VALUES ($1,$2,$3,$4)`, [supplier, step, message, context ? JSON.stringify(context) : null]); } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
-  try { await sendAlertEmail({ supplier, step, message, context }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); }
+  try { await sendAlertEmail({ supplier, step, message, context, severity }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); }
 }
 
 function transporter() {
   return nodemailer.createTransport({ host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com', port: parseInt(process.env.SMTP_PORT || '2525'), secure: false, auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS } });
 }
 
-async function sendAlertEmail({ supplier, step, message, context }) {
+// severity 'error'  = the run stopped, nothing further was placed.
+// severity 'review'  = the ORDER WENT THROUGH; this is a data issue to fix afterwards (a price
+//                      check, a heal outside the auto-apply band, a PO that could not be re-priced).
+// They used to render identically — "⚠ … auto-purchase FAILED … Nothing further was placed on this
+// run" — so nine Helly Hansen price-heal escalations on 2026-08-19 read as nine failed runs when the
+// order had in fact been placed (HH 569124, £661). Never let a non-fatal alert claim a failure.
+async function sendAlertEmail({ supplier, step, message, context, severity = 'error' }) {
   if (!process.env.SMTP_PASS) return;
   const when = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
-  const html = `<p style="color:#c62828"><strong>⚠ ${supplier} auto-purchase failed</strong> — ${when}</p>
+  const review = severity === 'review';
+  const colour = review ? '#e65100' : '#c62828';
+  const heading = review ? `${supplier} auto-purchase — NEEDS REVIEW` : `${supplier} auto-purchase failed`;
+  const footer = review
+    ? `<p><strong>The order was placed.</strong> This is flagged for a human to correct in Brightpearl — nothing is blocked and the next scheduled run is unaffected.</p>`
+    : `<p>Nothing further was placed on this run. Check Brightpearl + the ${supplier} portal, then it will retry on the next scheduled run.</p>`;
+  const html = `<p style="color:${colour}"><strong>${review ? 'ⓘ' : '⚠'} ${heading}</strong> — ${when}</p>
     <ul>
       <li><strong>Step:</strong> ${step}</li>
-      <li><strong>Problem:</strong> ${escapeHtml(message)}</li>
+      <li><strong>${review ? 'Detail' : 'Problem'}:</strong> ${escapeHtml(message)}</li>
     </ul>
     ${context ? `<pre style="background:#f5f5f5;padding:8px;border-radius:4px;white-space:pre-wrap">${escapeHtml(JSON.stringify(context, null, 2))}</pre>` : ''}
-    <p>Nothing further was placed on this run. Check Brightpearl + the ${supplier} portal, then it will retry on the next scheduled run.</p>`;
-  await transporter().sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO, subject: `⚠ ${supplier} auto-purchase error — ${step}`, html, text: `${supplier} auto-purchase error at step "${step}": ${message}\n\n${context ? JSON.stringify(context, null, 2) : ''}` });
+    ${footer}`;
+  await transporter().sendMail({
+    from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO,
+    subject: `${review ? 'ⓘ' : '⚠'} ${supplier} auto-purchase ${review ? 'review' : 'error'} — ${step}`,
+    html,
+    text: `${supplier} auto-purchase ${review ? 'REVIEW (order was placed)' : 'ERROR (run stopped)'} at step "${step}": ${message}\n\n${context ? JSON.stringify(context, null, 2) : ''}`,
+  });
 }
 const escapeHtml = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
@@ -131,7 +148,7 @@ async function healPrices(steps, { supplierKey, poId, changes, pool }) {
           : { done: !!rp.done, priceListId: r.listId, rows: (rp.plan || []).length };
         if (rp.refused) {
           await logPurchasingError(pool, {
-            supplier: supplierKey, step: 'price-heal-reprice',
+            supplier: supplierKey, step: 'price-heal-reprice', severity: 'review',
             message: `Costs were healed but PO#${poId} was NOT re-priced: ${rp.reason}. The PO still shows the old cost — re-price it by hand after checking those rows.`,
             context: { poId, listId: r.listId, miscRows: rp.miscRows },
           }).catch(() => {});
@@ -140,7 +157,7 @@ async function healPrices(steps, { supplierKey, poId, changes, pool }) {
     }
     for (const e of (r.escalated || [])) {
       await logPurchasingError(pool, {
-        supplier: supplierKey, step: 'price-heal',
+        supplier: supplierKey, step: 'price-heal', severity: 'review',
         message: `${e.sku}: supplier charges £${Number(e.now).toFixed(2)} but BP cost (list ${r.listId}) is £${Number(e.was).toFixed(2)} — ${e.reason}`,
         context: { poId, ...e },
       }).catch(() => {});
@@ -215,7 +232,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   if (fristadsTotal && Math.abs(priceGap) > 0.50) {
     const breakdown = [...(po.soLines || []), ...(po.lowLines || [])].map((l) => `${l.qty} × ${l.sku} — our £${(l.cost || 0).toFixed(2)}/ea (${l.name})`);
     await logPurchasingError(pool, {
-      supplier: 'FRISTADS', step: 'price-check',
+      supplier: 'FRISTADS', step: 'price-check', severity: 'review',
       message: `Prices don't match: Fristads order total £${fristadsTotal} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}). A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${orderNo} still placed.`,
       context: { poId, orderNo, fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap, poLines: breakdown },
     }).catch(() => {});
@@ -293,7 +310,7 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   if (castleGoods && Math.abs(priceGap) > 0.50) {
     const breakdown = [...(po.soLines || []), ...(po.lowLines || [])].map((l) => `${l.qty} × ${l.sku} — our £${(l.cost || 0).toFixed(2)}/ea (${l.name})`);
     await logPurchasingError(pool, {
-      supplier: 'CASTLE', step: 'price-check',
+      supplier: 'CASTLE', step: 'price-check', severity: 'review',
       message: `Prices don't match: Castle goods total £${castleGoods} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}). A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${order.orderNo} still placed.`,
       context: { poId, orderNo: order.orderNo, castleGoods, poNet: +poNet.toFixed(2), gap: priceGap, poLines: breakdown },
     }).catch(() => {});
@@ -546,7 +563,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   steps.priceCheck = { cartTotal: cartTotal || null, orderedNet, gap, lineGaps };
   if (lineGaps.length || (cartTotal && Math.abs(gap) > 0.50)) {
     await logPurchasingError(pool, {
-      supplier: 'SNICKERS', step: 'price-check',
+      supplier: 'SNICKERS', step: 'price-check', severity: 'review',
       message: `Prices don't match: Hultafors basket £${cartTotal || '?'} vs our PO net £${orderedNet} (diff £${gap}).`
         + (lineGaps.length ? ` Brightpearl cost (Snickers/list 10) looks wrong on: ${lineGaps.map((g) => `${g.sku} ours £${g.ours} vs theirs £${g.theirs}`).join('; ')}.` : '')
         + ` Order ${orderNo} still placed.`,
@@ -835,7 +852,7 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
     steps.priceCheck = { theirNet: theirNet || null, poNet, gap };
     if (theirNet && Math.abs(gap) > 0.50) {
       await logPurchasingError(pool, {
-        supplier: 'PENCARRIE', step: 'price-check',
+        supplier: 'PENCARRIE', step: 'price-check', severity: 'review',
         message: `Prices don't match: PenCarrie order total £${theirNet} vs our PO net £${poNet} (diff £${gap}). A Brightpearl cost price (list 20) may need adjusting. Order ${code} still placed.`,
         context: { poId, ordercode: code, theirNet, poNet, gap },
       }).catch(() => {});
