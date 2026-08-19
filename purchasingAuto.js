@@ -827,7 +827,7 @@ async function skuToProductId(sku) {
 
 // SO demand on live (status 23, tag contains supplierKey, not a leave-note, not
 // already carrying this supplier's PO). Mirrors findContributors, GET-only reads.
-async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect = false }) {
+async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect = false, contactId = null }) {
   let ids = [], firstResult = 1;
   for (let g = 0; g < 40; g++) {
     const s = await liveGet(`/order-service/sales-order-search?orderStatusId=${DEMAND_STATUS}&pageSize=500&firstResult=${firstResult}`);
@@ -899,9 +899,34 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       try { return new RegExp('\\b' + e.token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(String(r.productName || '').toLowerCase()); } catch { return false; }
     }) || null;
     const orderableRows = Object.entries(order.orderRows).filter(([, r]) => !isNonOrderableRow(r));
+    // UNION, not replacement. A row belongs to this supplier if its NAME says so (the long-standing
+    // brand regex) OR if Brightpearl's own primarySupplierId says so. Name matching is an inference
+    // and fails silently whenever a product BP already attributes to the supplier is not named after
+    // it — "STANDARD HI VIS BOMBER JACKET (UC804 …)" is Uneek's own product that /uneek/i cannot see,
+    // and Hellberg/EMMA/CLC were invisible to Snickers for ten days in August the same way.
+    // Measured across all nine scheduled suppliers before shipping (detect-compare, 2026-08-19):
+    // +7 units gained, 0 lost. Additive by construction, so no supplier can regress — which is why
+    // this unions rather than replaces. Replacing would have dropped every "(CHECKED)" row, where we
+    // deliberately buy from someone OTHER than the product's primary supplier.
+    // Only the rows the name REJECTED need looking up, batched into one call per order.
+    const supplierOwned = new Set();
+    if (contactId) {
+      const unknown = [...new Set(orderableRows.filter(([, r]) => !detect(r.productName, r.productSku))
+        .map(([, r]) => r.productId).filter((p) => p && String(p) !== '1000'))];
+      if (unknown.length) {
+        try {
+          const arr = await liveGet(`/product-service/product/${unknown.join(',')}`) || [];
+          for (const p of (Array.isArray(arr) ? arr : [arr])) {
+            if (p && p.id != null && String(p.primarySupplierId) === String(contactId)) supplierOwned.add(String(p.id));
+          }
+        } catch { /* additive only: if the lookup fails we fall back to name matching, never worse */ }
+        await pause(150);
+      }
+    }
+    const belongsHere = (r) => detect(r.productName, r.productSku) || supplierOwned.has(String(r.productId));
     let candidateRows = (singleSupplier && !hasBrandDetect)
       ? orderableRows
-      : orderableRows.filter(([, r]) => detect(r.productName, r.productSku));
+      : orderableRows.filter(([, r]) => belongsHere(r));
     // Apply THIS supplier's parenthetical scope, if its note is a real instruction rather than an
     // annotation. Only bites when every term is recognised on the order AND at least one row
     // satisfies them all — otherwise the note is left alone and nothing is filtered.
@@ -1080,7 +1105,11 @@ export async function createComboPOLive(opts = {}) {
   // 1. SO-driven demand + per-SKU qty (for dedupe). hasBrandDetect = this is a hardcoded
   // brand-regex supplier (vs a dynamic/email supplier with a weak name-derived detector).
   const hasBrandDetect = !!(opts.detect || reg.detect);
-  const { contributors, demandAudit, tagFlags } = await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect });
+  const { contributors, demandAudit, tagFlags } = await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect,
+    // REGISTRY contactId only. `contactId` above falls back to 37419 (Fristads) for a supplier that
+    // is not in the registry, and unioning on that would pull Fristads products into a dynamically
+    // resolved supplier's demand. No registry entry, no supplier-owned union — name matching only.
+    contactId: (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].contactId) || null });
   const soLines = []; const soQtyBySku = {};
   for (const c of contributors) for (const l of c.lines) {
     const cost = await costOfLive(l.productId, priceListId, l.itemCost);
