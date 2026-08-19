@@ -8173,12 +8173,22 @@ app.post('/api/purchasing/set-primary-supplier-live', express.json(), async (req
       if (b.expectCurrentSupplierId != null && String(cur) !== String(b.expectCurrentSupplierId)) { out.skipped.push({ productId, name, currentSupplierId: cur, reason: `current supplier is ${cur}, expected ${b.expectCurrentSupplierId}` }); continue; }
       if (String(cur) === String(supplierId)) { out.skipped.push({ productId, name, reason: 'already set' }); continue; }
       if (!out.execute) { out.changed.push({ productId, name, from: cur, to: supplierId, dryRun: true }); continue; }
-      p.primarySupplierId = supplierId;
-      await bpLive('PUT', `/product-service/product/${productId}`, p);
-      // Read back rather than assume the write landed.
-      const a = await bpLive('GET', `/product-service/product/${productId}`);
-      const ap = Array.isArray(a) ? a[0] : a;
-      const now = ap && (ap.primarySupplierId ?? null);
+      // primarySupplierId is READ-ONLY on the product record: PUTting it there returns 200 and
+      // changes nothing. All 20 waistcoats reported a successful write and were still on 18049
+      // afterwards — only the read-back caught it. The association really lives on the /supplier
+      // sub-resource, which reads back as { "<productId>": [supplierId, ...] }, primary first.
+      // The accepted body shape is undocumented for this account, so try the bare array, verify,
+      // then the wrapped form — each attempt confirmed by re-reading the product, never by the
+      // response code, since that is precisely the assumption that just failed.
+      let now = cur;
+      for (const body of [[supplierId], { supplierIds: [supplierId] }]) {
+        try { await bpLive('PUT', `/product-service/product/${productId}/supplier`, body); }
+        catch (e) { out.failed.push({ productId, name, reason: `PUT /supplier rejected ${JSON.stringify(body)}: ${e.message}` }); continue; }
+        const chk = await bpLive('GET', `/product-service/product/${productId}`);
+        const cp = Array.isArray(chk) ? chk[0] : chk;
+        now = cp && (cp.primarySupplierId ?? null);
+        if (String(now) === String(supplierId)) break;
+      }
       if (String(now) === String(supplierId)) out.changed.push({ productId, name, from: cur, to: now });
       else out.failed.push({ productId, name, reason: `write did not stick — still ${now}` });
     } catch (e) { out.failed.push({ productId, reason: e.message }); }
