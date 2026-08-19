@@ -111,7 +111,18 @@ export const SUPPLIERS = {
   SNICKERS:     { contactId: 331,   costList: 20, poField: 'PCF_SNICKPO', detect: (n) => /snickers|solid\s*gear|hellberg|toe\s*guard|hultafors|\bemma\b|\bclc\b/i.test(n || '') },
   BLAKLADER:    { contactId: 323,   costList: 20, poField: 'PCF_BLAKLPO', detect: (n) => /bl[åa]kl[äa]der/i.test(n || '') },
   PORTWEST:     { contactId: 298,   costList: 20, poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') }, // low-inv ON (min-stock data sorted 2026-08-14): SO demand + reorder
-  UNEEK:        { contactId: 322,   costList: 20, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
+  // The 20 "HI VIS WAISTCOAT" products are Uneek UC801 (user, 2026-08-19) but sit under Future
+  // Garments (18049) in BP, and Brightpearl will NOT let the API move a primary supplier: PUTting
+  // primarySupplierId onto the product returns 200 and changes nothing, and so does the /supplier
+  // sub-resource. So claim them here, by ID.
+  // By ID and not by name deliberately — BeeSwift (326) sells "Hi Vis Waistcoat -Yellow or Orange"
+  // and "Be-Seen WCENGSH Short Hi Vis Waistcoat", so any name rule loose enough to catch ours would
+  // hand BeeSwift waistcoats to Uneek as well. Only the EXACT string "HI VIS WAISTCOAT" is unique to
+  // these 20, and that is luck rather than a guarantee.
+  // NOTE: this fixes ORDERING only. The low-inventory report is fetched per supplier id, so these
+  // products still replenish under Future Garments, not Uneek.
+  UNEEK:        { contactId: 322,   costList: 20, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || ''),
+    claimProductIds: [53344, 53345, 53346, 53347, 53348, 53349, 53350, 53351, 53352, 53353, 53354, 53355, 53356, 53357, 53358, 53359, 53360, 53361, 56975, 56976] },
   'HELLY HANSEN': { contactId: 214, costList: 20, portalPriceIsPreDiscount: true, supplierDiscountPct: 0.42,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
   // Launch(20) IS populated for Mascot — the null here was a config gap, not missing data (sampled
   // from PO 476715: EAN 5711074495160 → list20 9.41, EAN 5711074486861 → 11.77). Without it, costs
@@ -923,7 +934,10 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
         await pause(150);
       }
     }
-    const belongsHere = (r) => detect(r.productName, r.productSku) || supplierOwned.has(String(r.productId));
+    // Explicit per-supplier claims count too: products BP attributes elsewhere that we nonetheless
+    // buy from this supplier, where that attribution cannot be corrected in Brightpearl at all.
+    const claimed = new Set(((SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].claimProductIds) || []).map(String));
+    const belongsHere = (r) => detect(r.productName, r.productSku) || supplierOwned.has(String(r.productId)) || claimed.has(String(r.productId));
     let candidateRows = (singleSupplier && !hasBrandDetect)
       ? orderableRows
       : orderableRows.filter(([, r]) => belongsHere(r));
