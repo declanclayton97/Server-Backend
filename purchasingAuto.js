@@ -1302,6 +1302,77 @@ export async function repriceComboPOLive({ poId, priceListId = 20, keepNet = fal
   return { done: true, poId, priceListId, rows: plan.length };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fold a lump-sum supplier discount row INTO the line costs.
+//
+// Helly Hansen (and Carhartt) quote LIST on the availability sheet and take the trade discount
+// once, at invoice, as a single negative row. The PO total is then right and every single line is
+// wrong — PO 483239 booked £661.00 of list-priced rows against a "42% Discount" row of -£277.62 to
+// reach the real £383.38, which means goods-in would have valued that stock ~42% high per line.
+//
+// This rewrites each product row to unit x (1 - discountPct) and deletes the lump row, so the PO
+// nets to exactly the same figure while each line finally carries the real cost.
+//
+// THE SAFETY IS THE RECONCILIATION: the folded rows must net to the PO's CURRENT total (discount
+// row included) within a penny. If they don't, the discount is not uniform across the lines and a
+// flat percentage is the wrong tool — so it refuses and changes nothing. Nothing here is guesswork.
+// ─────────────────────────────────────────────────────────────────────────────
+const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+export async function absorbSupplierDiscountPOLive({ poId, discountPct, execute = false } = {}) {
+  const pct = Number(discountPct);
+  if (!(pct > 0 && pct < 1)) throw new Error('discountPct must be a fraction between 0 and 1 (0.42 for 42%)');
+  const order = (await liveGet(`/order-service/order/${poId}`))[0];
+  if (!order) throw new Error(`PO ${poId} not found`);
+
+  const entries = Object.entries(order.orderRows || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+  const netOf = (r) => parseFloat((r.rowValue && r.rowValue.rowNet && r.rowValue.rowNet.value) || 0);
+  const keep = [], lump = [];
+  for (const [rowId, r] of entries) {
+    const qty = parseFloat(r.quantity.magnitude);
+    const net = netOf(r);
+    const rec = { rowId, productId: r.productId, sku: r.productSku || '', name: r.productName || '', qty, oldNet: round2(net), oldUnit: qty ? round2(net / qty) : 0 };
+    if (String(r.productId) === '1000' && net < 0) lump.push(rec); else keep.push(rec);
+  }
+  if (!lump.length) return { refused: true, poId, reason: 'no negative productId-1000 row on this PO — there is no lump discount to absorb' };
+  // A non-discount misc row (a "Shipping:" line, a proof instruction) must not be silently dropped
+  // or re-priced, so bail rather than guess what it meant.
+  const misc = keep.filter((k) => String(k.productId) === '1000');
+  if (misc.length) return { refused: true, poId, reason: `${misc.length} other productId-1000 row(s) present — check them by hand first`, miscRows: misc.map((m) => m.name) };
+
+  const plan = keep.map((k) => { const newUnit = round2(k.oldUnit * (1 - pct)); return { ...k, newUnit, newNet: round2(newUnit * k.qty) }; });
+  const currentTotal = round2(entries.reduce((s, [, r]) => s + netOf(r), 0));   // list rows + the negative lump
+  const foldedTotal = round2(plan.reduce((s, p) => s + p.newNet, 0));
+  const drift = round2(foldedTotal - currentTotal);
+  const summary = { poId, discountPct: pct, lumpRow: lump.map((l) => `${l.name} ${l.oldNet.toFixed(2)}`), currentTotal, foldedTotal, drift, rows: plan.length };
+  if (Math.abs(drift) > 0.02) {
+    return { refused: true, ...summary, reason: `folding ${(pct * 100).toFixed(0)}% into the lines nets £${foldedTotal.toFixed(2)} but the PO is £${currentTotal.toFixed(2)} (out by £${drift.toFixed(2)}) — the discount is not a flat ${(pct * 100).toFixed(0)}% on every line, so do NOT use a single rate here`, plan };
+  }
+  if (!execute) return { dryRun: true, ...summary, plan };
+
+  for (const r of [...keep, ...lump]) { await liveWrite('DELETE', `/order-service/order/${poId}/row/${r.rowId}`); await pause(150); }
+  const readded = [];
+  for (const p of plan) {
+    const code = await productTaxCodeLive(p.productId);
+    const rate = taxRate(code);
+    await liveWrite('POST', `/order-service/order/${poId}/row`, {
+      productId: p.productId,
+      quantity: { magnitude: String(p.qty) },
+      rowValue: { taxCode: code, rowNet: { currency: 'GBP', value: p.newNet.toFixed(2) }, rowTax: { currency: 'GBP', value: round2(p.newNet * rate).toFixed(2) } },
+    });
+    readded.push(`${p.sku || p.productId} ${p.qty} x £${p.newUnit.toFixed(2)}`);
+    await pause(150);
+  }
+  return { done: true, ...summary, readded };
+}
+
+// Point a PO's header at a different price list — the list only defaults what a human sees when
+// adding a row by hand in BP, but leaving Helly Hansen's POs pointing at the dead list 6 is exactly
+// how the "this PO has no prices" confusion started.
+export async function setOrderPriceListLive(orderId, priceListId) {
+  return liveWrite('PATCH', `/order-service/order/${orderId}`, [{ op: 'replace', path: '/priceListId', value: Number(priceListId) }]);
+}
+
 // Create the Pending PO (+ source note) and stamp the PO number onto each
 // contributing order (linkage + dedupe). Does NOT strip tags or change status.
 export async function createPO(supplierKey, { orderIds, dryRun } = {}) {

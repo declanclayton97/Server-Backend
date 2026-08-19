@@ -7764,6 +7764,24 @@ app.post('/api/purchasing/finalize-tags-live', express.json(), async (req, res) 
 });
 
 // Re-price a PO's rows from a price list (dry-run unless body { execute: true }).
+// Fold a supplier's lump-sum discount row into the line costs (Helly Hansen / Carhartt style).
+// Refuses unless the folded rows reconcile to the PO's existing total, so it cannot invent a price.
+// { poId, discountPct: 0.42, execute: true, priceListId?: 20 }
+app.post('/api/purchasing/absorb-discount-po', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  if (!b.poId) return res.status(400).json({ error: 'poId required' });
+  try {
+    const out = await purchasingAuto.absorbSupplierDiscountPOLive({ poId: Number(b.poId), discountPct: Number(b.discountPct), execute: b.execute === true });
+    // Only repoint the header once the rows are actually right.
+    if (out.done && b.priceListId) {
+      try { await purchasingAuto.setOrderPriceListLive(Number(b.poId), Number(b.priceListId)); out.priceListSetTo = Number(b.priceListId); }
+      catch (e) { out.priceListWarn = e.message; }
+    }
+    res.json(out);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.post('/api/purchasing/reprice-po-live', express.json(), async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
   try {
