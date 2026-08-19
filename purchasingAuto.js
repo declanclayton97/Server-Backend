@@ -990,7 +990,7 @@ export async function createComboPOLive(opts = {}) {
   const includeLowInv = opts.includeLowInv != null ? (opts.includeLowInv === true) : (reg.includeLowInv !== false);
   const { fetchLowInventory } = await import('./lowInventory.js');
   let statusIds = []; try { statusIds = await liveSalesOrderStatusIds(excludeStatusIds); } catch { /* report default */ }
-  const li = includeLowInv ? await fetchLowInventory({ supplierId: lowInvSupplierId, statusIds, numResults: 10000 }) : { rows: [] };
+  const li = includeLowInv ? await fetchLowInventory({ supplierId: lowInvSupplierId, statusIds }) : { rows: [] };   // numResults omitted on purpose: 10000 silently got us 50 (see lowInventory.js)
   const lowLines = [];
   for (const d of li.rows) {
     if (d.orderQty <= 0) continue;

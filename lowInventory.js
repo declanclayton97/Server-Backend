@@ -51,15 +51,29 @@ export function parseLowInventoryTable(html) {
 }
 
 // Fetch the low-inventory report for a supplier/brand, scoped by SO statuses.
-export async function fetchLowInventory({ client = 'tuffworkwear', supplierId, manufacturerId, statusIds = [], numResults = 10000 } = {}) {
+// Brightpearl accepts numResults up to 500 and SILENTLY FALLS BACK TO ITS DEFAULT OF 50 for
+// anything larger. We asked for 10000, so every replenishment read since this was written has seen
+// FIFTY rows — Snickers alone has 233. Measured 2026-08-19: n=250 -> 233 rows (all of them),
+// n=500 -> 233, n=1000 -> 50, n=10000 -> 50. Asking for more returned less, and nothing said so.
+// The user found roughly GBP13k of reordering the report had never surfaced.
+const MAX_NUM_RESULTS = 500;
+
+export async function fetchLowInventory({ client = 'tuffworkwear', supplierId, manufacturerId, statusIds = [], numResults = MAX_NUM_RESULTS } = {}) {
+  // Clamp rather than trust the caller: passing 10000 is what caused the silent truncation, and a
+  // number over the limit is always a mistake we would rather correct than honour.
+  const n = Math.min(Math.max(1, Number(numResults) || MAX_NUM_RESULTS), MAX_NUM_RESULTS);
   const p = new URLSearchParams();
   p.set('p', 'report'); p.set('report', 'product-lowstock');
   if (supplierId) p.set('supplierId', String(supplierId));
   if (manufacturerId) p.set('manufacturerId', String(manufacturerId));
-  p.set('numResults', String(numResults));
+  p.set('numResults', String(n));
   for (const s of statusIds) p.append('salesOrderStatusId[]', String(s));
   const url = `${BP_HOST}/p.php?${p.toString()}`;
   const { status, html } = await fetchAuthed(url, { client });
   const isLogin = /name=["']email_address["']|Brightpearl - Login|data-theme=["']sage["']/i.test(html);
-  return { status, isLogin, htmlLen: (html || '').length, rows: isLogin ? [] : parseLowInventoryTable(html), url, html };
+  const rows = isLogin ? [] : parseLowInventoryTable(html);
+  // At exactly the ceiling we cannot tell "500 rows" from "the first 500 of more". Say so loudly
+  // rather than let a truncated read look like a complete one — that is the whole failure above.
+  const truncated = rows.length >= n;
+  return { status, isLogin, htmlLen: (html || '').length, rows, url, html, numResults: n, truncated };
 }

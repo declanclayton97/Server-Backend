@@ -7610,7 +7610,7 @@ app.get('/api/purchasing/debug-lowstock', async (req, res) => {
       supplierId: req.query.supplierId != null ? req.query.supplierId : 37419,
       manufacturerId: req.query.manufacturerId,
       statusIds,
-      numResults: req.query.n ? parseInt(req.query.n, 10) : 10000,
+      numResults: req.query.n ? parseInt(req.query.n, 10) : undefined,
     });
     const toOrder = r.rows.filter((x) => x.orderQty > 0);
     if (req.query.sku) {
