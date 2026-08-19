@@ -8570,6 +8570,37 @@ app.post('/api/purchasing/seed-test-order', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// Set a LIVE order's status. The neighbouring /cancel-order writes to bpApi — the TEST account —
+// so there was no way to cancel a real PO from here at all; cancelling PO 483299 on 19 Aug needed a
+// human in Brightpearl. An orphaned PO is not cosmetic: while it exists its low-inventory lines read
+// as onOrder, so they drop out of the next demand scan silently (483299 hid 16 of 18 lines, and a
+// retry would have ordered 2 items and reported success).
+// Dry-run unless { execute: true }. Refuses anything but the statuses we actually use, so this
+// cannot be pointed at an arbitrary status by mistake.
+const LIVE_STATUS_ALLOWED = { 62: 'PO Cancelled', 7: 'Placed with supplier', 6: 'Pending PO', 22: 'Ordered Stock', 23: 'Stock needs ordering' };
+app.post('/api/purchasing/set-order-status-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  const orderId = Number(b.orderId), statusId = Number(b.statusId);
+  if (!orderId) return res.status(400).json({ error: 'orderId required' });
+  if (!LIVE_STATUS_ALLOWED[statusId]) return res.status(400).json({ error: `statusId must be one of ${Object.keys(LIVE_STATUS_ALLOWED).join(', ')}` });
+  try {
+    // Always report what it IS before touching it — a cancel aimed at the wrong id is unrecoverable.
+    const cur = (await purchasingAuto.bpLiveGet(`/order-service/order/${orderId}`))[0] || {};
+    const before = {
+      orderId, type: cur.orderTypeCode, reference: cur.reference,
+      statusId: cur.orderStatus && cur.orderStatus.orderStatusId,
+      supplier: cur.parties && cur.parties.supplier && cur.parties.supplier.companyName,
+      net: cur.totalValue && cur.totalValue.net, rows: Object.keys(cur.orderRows || {}).length,
+    };
+    if (b.execute !== true) return res.json({ dryRun: true, before, wouldSet: `${statusId} (${LIVE_STATUS_ALLOWED[statusId]})` });
+    await purchasingAuto.setOrderStatusLive(orderId, statusId);
+    const after = (await purchasingAuto.bpLiveGet(`/order-service/order/${orderId}`))[0] || {};
+    const now = after.orderStatus && after.orderStatus.orderStatusId;
+    res.json({ done: now === statusId, before, statusId, statusName: LIVE_STATUS_ALLOWED[statusId], confirmedStatus: now });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // TEMP (sandbox cleanup) — set an order's status (default cancel SO=5, PO=62).
 app.post('/api/purchasing/cancel-order', async (req, res) => {
   if (!requirePurchasing(res)) return;
