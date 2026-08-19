@@ -109,13 +109,13 @@ async function jfetch(step, url, opts) {
 }
 
 // Feed the supplier's ACTUAL prices back onto the BP cost (see healSupplierCosts for the rules).
-// Non-fatal, and a DRY RUN unless PRICE_HEAL_ENABLED=true — so shipping this changes nothing until
+// Non-fatal. ON by default since 2026-08-19 (user); set PRICE_HEAL_ENABLED=false to put it back to
 // it's switched on, and the run report still shows what it would have done. Anything outside the
 // auto-heal band is raised as a price-heal error for a human rather than written.
 async function healPrices(steps, { supplierKey, poId, changes, pool }) {
   if (!changes || !changes.length) return;
   try {
-    const r = await bp.healSupplierCosts({ supplierKey, poId, changes, pool, execute: process.env.PRICE_HEAL_ENABLED === 'true' });
+    const r = await bp.healSupplierCosts({ supplierKey, poId, changes, pool, execute: process.env.PRICE_HEAL_ENABLED !== 'false' });
     if (r.skipped && !Array.isArray(r.skipped)) { steps.priceHeal = r; return; }        // e.g. "no cost list of its own"
     steps.priceHeal = { listId: r.listId, dryRun: !!r.dryRun, applied: (r.applied || []).length, escalated: (r.escalated || []).length, skipped: (r.skipped || []).length, changes: (r.applied || []).map((a) => `${a.sku} £${Number(a.was).toFixed(2)}->£${Number(a.now).toFixed(2)}`) };
     // Healing fixes the PRODUCT cost; the PO still carries the cost it snapshotted when it was
@@ -123,7 +123,7 @@ async function healPrices(steps, { supplierKey, poId, changes, pool }) {
     // (user, 2026-08-18). Re-price from the SUPPLIER'S OWN list, only when a heal actually applied.
     // repriceComboPOLive refuses if the PO holds a productId-1000 row that is not the =====LOW INV====
     // separator, so a Shipping or proof-instruction row can never be renamed and zeroed by this.
-    if (r.applied && r.applied.length && process.env.PRICE_HEAL_ENABLED === 'true') {
+    if (r.applied && r.applied.length && process.env.PRICE_HEAL_ENABLED !== 'false') {
       try {
         const rp = await bp.repriceComboPOLive({ poId, priceListId: r.listId, execute: true });
         steps.priceHealReprice = rp.refused
