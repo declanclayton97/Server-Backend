@@ -121,7 +121,7 @@ export const SUPPLIERS = {
   // order is created — which is what the button labelled "Check Discount" actually does — so the true
   // net price only exists after createOrder. See [[project_mascot_ordering]].
   MASCOT:       { contactId: 334,   costList: 20,   poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
-  CARHARTT:     { contactId: 65173, costList: 20, portalPriceIsPreDiscount: true, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
+  CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
   // Castle Clothing distributes TuffStuff / Makita / Fort (+ Fort Footwear) and the
@@ -1587,8 +1587,12 @@ export async function healSupplierCosts({ supplierKey, poId, changes = [], pool 
   const reg = SUPPLIERS[key];
   if (!reg) return { skipped: `unknown supplier ${key}` };
   if (reg.costList == null) return { skipped: `${key} has no cost list of its own — nothing to heal` };
-  // NEVER heal from a price that has not had the trade discount taken off it. The Elastic
-  // availability sheets (Helly Hansen, Carhartt) quote col-K at LIST, and the discount is applied
+  // NEVER heal from a price that has not had the trade discount taken off it. Nearly every supplier
+  // quotes a price that is already net — Helly Hansen is the exception: they show LIST and work the
+  // discount out at the very end. Carhartt was flagged here too, on nothing better than sharing the
+  // Elastic code path, and its sheet turned out to be net all along (103296 £11.50 = Launch £11.50,
+  // vs RRP £16.65; 105072 £63.00 = £63.00 vs RRP £104.99). Do not assume from the integration style.
+  // HH apply the discount
   // once, as a lump, at invoice — HH PO 483239 carried £661 of list-priced rows and a single
   // "42% Discount" row of -£277.62 to reach the real £383.38. Comparing that £80/£110/£37 against
   // BP's already-net cost makes every line look 35-45% stale: all nine "escalations" on
