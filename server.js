@@ -8143,6 +8143,50 @@ app.get('/api/purchasing/weight-put-test', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// LIVE: repoint products at a different PRIMARY SUPPLIER. Product data, not pricing — but it now
+// drives ORDERING too (row selection unions the name regex with primarySupplierId), so a wrong id
+// here silently sends stock to the wrong supplier. Hence: dry-run by default and two independent
+// guards that must BOTH hold per product, checked against the live record at the moment of writing.
+//   expectName              — the product's name must equal this exactly
+//   expectCurrentSupplierId — it must currently belong to this supplier
+// A product failing either is skipped and reported, never written. That is what makes a
+// 20-product change safe to run against a catalogue where 76 neighbouring products look similar:
+// Future Garments' 20 "HI VIS WAISTCOAT" records are bought from Uneek, while its Aqua TS178,
+// TR795 AQUA and PS020 FGXeco lines (56 products) are genuinely theirs and must not move.
+// body: { productIds:[], supplierId, expectName, expectCurrentSupplierId, execute }
+app.post('/api/purchasing/set-primary-supplier-live', express.json(), async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live product writes disabled — set HEAL_LIVE_ENABLED=true' });
+  const b = req.body || {};
+  const ids = Array.isArray(b.productIds) ? b.productIds.map(Number).filter(Boolean) : [];
+  const supplierId = Number(b.supplierId);
+  if (!ids.length) return res.status(400).json({ error: 'productIds[] required' });
+  if (!supplierId) return res.status(400).json({ error: 'supplierId required' });
+  const out = { supplierId, execute: b.execute === true, changed: [], skipped: [], failed: [] };
+  for (const productId of ids) {
+    try {
+      const g = await bpLive('GET', `/product-service/product/${productId}`);
+      const p = Array.isArray(g) ? g[0] : g;
+      if (!p) { out.failed.push({ productId, reason: 'not found' }); continue; }
+      const name = ((p.salesChannels && p.salesChannels[0] && p.salesChannels[0].productName) || '').trim();
+      const cur = p.primarySupplierId ?? null;
+      if (b.expectName != null && name !== String(b.expectName).trim()) { out.skipped.push({ productId, name, reason: `name is not "${b.expectName}"` }); continue; }
+      if (b.expectCurrentSupplierId != null && String(cur) !== String(b.expectCurrentSupplierId)) { out.skipped.push({ productId, name, currentSupplierId: cur, reason: `current supplier is ${cur}, expected ${b.expectCurrentSupplierId}` }); continue; }
+      if (String(cur) === String(supplierId)) { out.skipped.push({ productId, name, reason: 'already set' }); continue; }
+      if (!out.execute) { out.changed.push({ productId, name, from: cur, to: supplierId, dryRun: true }); continue; }
+      p.primarySupplierId = supplierId;
+      await bpLive('PUT', `/product-service/product/${productId}`, p);
+      // Read back rather than assume the write landed.
+      const a = await bpLive('GET', `/product-service/product/${productId}`);
+      const ap = Array.isArray(a) ? a[0] : a;
+      const now = ap && (ap.primarySupplierId ?? null);
+      if (String(now) === String(supplierId)) out.changed.push({ productId, name, from: cur, to: now });
+      else out.failed.push({ productId, name, reason: `write did not stick — still ${now}` });
+    } catch (e) { out.failed.push({ productId, reason: e.message }); }
+  }
+  out.summary = { changed: out.changed.length, skipped: out.skipped.length, failed: out.failed.length };
+  res.json(out);
+});
+
 // READ-ONLY live BP GET proxy, restricted to product-service paths — for inspecting
 // product custom fields / metadata on the live account (sandbox has none defined).
 app.get('/api/purchasing/bp-live-get', async (req, res) => {
