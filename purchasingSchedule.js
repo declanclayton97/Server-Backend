@@ -955,7 +955,22 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       // pads low-inv up to +40% above min to reach free delivery — else normal + carriage.
       const padTo = padOnPlace ? threshold : 0;
       if (dryRun) { decision = `WOULD place (${reason})`; }
-      else { placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo }); decision = `placed — ${reason}`; newWaitDays = 0; }
+      else {
+        // CLAIM THE DAY BEFORE TOUCHING THE SUPPLIER. last_run_date used to be written only at the
+        // very END of a run, so anything that killed the process between placing and finishing —
+        // a deploy, a crash, an OOM — left NO record that we had run, and the next 5-minute tick
+        // placed the SAME order again. That is not theoretical: on 2026-08-19 two deploys inside
+        // the Fristads window produced orphan PO 483226, real order 2597307 (PO 483228) and then a
+        // DUPLICATE live order 2597326 (PO 483231) — £539.85 ordered twice, caught by the user, and
+        // returnable only with a restocking fee. `running` is a module-level lock so it dies with
+        // the process too and protects nothing here.
+        // Writing the date first flips the failure mode: a crash now means the order is SKIPPED and
+        // visible (no run report, demand still queued) instead of DUPLICATED and invisible.
+        // A deliberate re-run is still possible with force:true.
+        await saveState(pool, { id: cfg.stateId, workingDaysWaited: 0, lastRunDate: uk.date, result: { supplier: cfg.supplierKey, ran: uk.date, claimedAt: `${uk.hour}:${String(uk.minute).padStart(2, '0')}`, state: 'placing — day claimed before contacting the supplier' } }).catch(() => {});
+        placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo });
+        decision = `placed — ${reason}`; newWaitDays = 0;
+      }
     }
 
     const report = { supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold, decision, reason, workingDaysWaited: newWaitDays, placement };
