@@ -52,9 +52,36 @@ const ORDERED_STATUS = 22;  // Ordered Stock Awaiting Delivery
 // 34 = "Proof Required-Send to Customer". NOTE Brightpearl also has 91 "Sportswear - Proof
 // Required"; if sportswear orders need that instead, set PROOF_REQUIRED_STATUS_ID.
 const PROOF_REQUIRED_STATUS = Number(process.env.PROOF_REQUIRED_STATUS_ID || 34);
-const PROOF_ROW_RE = /please\s+put\s+to\s+proof\s+required\s+once\s+ordered/i;
-export const orderNeedsProof = (order) =>
-  Object.values((order && order.orderRows) || {}).some((r) => PROOF_ROW_RE.test(String(r.productName || '')));
+// Staff write routing instructions as free-text rows on productId 1000, in one family:
+//   "+++ PLEASE PUT TO <target status> ONCE <trigger> +++"
+// A scan of 2,500 sales orders (2026-08-19) found FOURTEEN spellings of it, and BOTH halves matter:
+//   target  — PROOF REQUIRED (34) · PROOF SENT (35) · ORDERED STOCK (22) · STOCK NEEDS ORDERING (23)
+//   trigger — ORDERED · PICKED · PROOFED
+// We finalise at the ORDERED trigger, so ONLY "ONCE ORDERED" rows may change the status here.
+// "ONCE PICKED" (7 orders) and "ONCE PROOFED" (13) fire LATER in the process — acting on them at
+// order time would advance the order early, so they are deliberately ignored.
+// Tolerates the real spellings seen: with or without spaces inside the +++, "SET TO" for "PUT TO",
+// a missing "PUT", the "PROOF REQUIED" typo, and trailing prose after the trigger word.
+const STATUS_TARGETS = [
+  [/PROOF\s*REQUI?R?E?D/, 34],          // matches both "PROOF REQUIRED" and the real-world "PROOF REQUIED" typo
+  [/PROOF\s*SENT/, 35],
+  [/ORDERED\s*STOCK/, 22],
+  [/STOCK\s*NEEDS\s*ORDERING/, 23],
+];
+const normInstruction = (t) => String(t || '').toUpperCase().replace(/[+*#_]+/g, ' ').replace(/\s+/g, ' ').trim();
+// → { statusId, marker } when a row says to change status AT ORDER TIME; otherwise null.
+export function orderStatusInstruction(order) {
+  for (const r of Object.values((order && order.orderRows) || {})) {
+    const raw = String(r.productName || '');
+    const m = /PLEASE\s+(?:PUT\s+|SET\s+)?TO\s+(.+?)\s+ONCE\s+([A-Z]+)/.exec(normInstruction(raw));
+    if (!m) continue;
+    if (!/^ORDERED$/.test(m[2])) continue;               // fires at picking/proofing, not at ordering
+    for (const [re, id] of STATUS_TARGETS) if (re.test(m[1])) return { statusId: id, marker: raw.trim().slice(0, 120) };
+  }
+  return null;
+}
+// kept for compatibility: true when the instruction routes to any proof status
+export const orderNeedsProof = (order) => { const i = orderStatusInstruction(order); return !!i && [34, 35, 91, 92].includes(i.statusId); };
 // Per-SO "don't auto-order these items" blocklist custom field (user-created in BP). Value =
 // SKU(s)/style code(s) to skip on that order (e.g. a pair already ordered elsewhere). Code is
 // env-overridable so it matches whatever PCF code BP assigns.
@@ -1149,9 +1176,9 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     // Read the order too, so a "PLEASE PUT TO PROOF REQUIRED ONCE ORDERED" row can route the
     // status to Proof Required instead of Ordered Stock. Non-fatal: if the read fails we fall
     // back to the normal ordered status rather than block the finalise.
-    let needsProof = false;
-    try { needsProof = orderNeedsProof((await liveGet(`/order-service/order/${id}`))[0]); } catch { /* keep default */ }
-    plan.push({ id, before, after: remaining.join(' / '), willClear: remaining.length === 0, needsProof });
+    let instruction = null;
+    try { instruction = orderStatusInstruction((await liveGet(`/order-service/order/${id}`))[0]); } catch { /* keep default */ }
+    plan.push({ id, before, after: remaining.join(' / '), willClear: remaining.length === 0, instruction, needsProof: !!(instruction && instruction.statusId !== ORDERED_STATUS) });
     await pause(120);
   }
   if (!execute) return { dryRun: true, supplierKey: key, poId, setOrderedStatus, plan };
@@ -1163,7 +1190,8 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     // status: → Ordered Stock Awaiting Delivery ONLY when no supplier remains (else stays on SNO)
     let statusChanged = false, statusSet = null;
     if (setOrderedStatus && p.willClear) {
-      statusSet = p.needsProof ? PROOF_REQUIRED_STATUS : ORDERED_STATUS;
+      // an "ONCE ORDERED" instruction row decides the status; PROOF_REQUIRED_STATUS_ID still overrides the 34 case
+      statusSet = p.instruction ? (p.instruction.statusId === 34 ? PROOF_REQUIRED_STATUS : p.instruction.statusId) : ORDERED_STATUS;
       await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: statusSet });
       statusChanged = true;
     }
@@ -1202,7 +1230,7 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
       await liveWrite('POST', `/order-service/order/${p.id}/note`, { text, addedOn, contactId: noteContactId || 1, isPublic: false });
       noted = true;
     }
-    results.push({ id: p.id, tag: p.after || '(cleared)', keptOnSNO: !p.willClear, statusChanged, statusSet, proofRequired: !!p.needsProof, noted });
+    results.push({ id: p.id, tag: p.after || '(cleared)', keptOnSNO: !p.willClear, statusChanged, statusSet, proofRequired: !!p.needsProof, instruction: p.instruction ? p.instruction.marker : null, noted });
     await pause(150);
   }
   return { done: true, supplierKey: key, poId, setOrderedStatus, results };
