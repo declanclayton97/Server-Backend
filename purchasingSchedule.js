@@ -637,9 +637,17 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
       const dry = await jfetch('preflight', `${altItemsUrl}${basketPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: preLines, dryRun: true }) });
       if (dry.unresolved && dry.unresolved.length) throw stepErr('preflight', `${supplierKey} lines not on the portal (PO NOT created): ${dry.unresolved.join(', ')} — fix the resolver/aliases first`);
       if (Array.isArray(dry.pricedLines) && dry.pricedLines.length) {
+        // The Elastic sheet quotes LIST. Convert to net HERE, at the single point the price enters
+        // the system, so the PO rows, the SO costings and the healer all see the same real number and
+        // no lump discount row is ever needed. PO 483239 had to be rebuilt by hand for want of this.
+        const disc = Number((bp.SUPPLIERS[supplierKey] || {}).supplierDiscountPct) || 0;
         priceOverrides = {};
-        for (const p of dry.pricedLines) { const price = Number(p.price); if (p.sku && Number.isFinite(price) && price > 0) priceOverrides[String(p.sku).toUpperCase()] = price; }
-        steps.priceOverrides = { count: Object.keys(priceOverrides).length };
+        for (const p of dry.pricedLines) {
+          const price = Number(p.price);
+          if (!p.sku || !Number.isFinite(price) || price <= 0) continue;
+          priceOverrides[String(p.sku).toUpperCase()] = disc > 0 ? Math.round(price * (1 - disc) * 100) / 100 : price;
+        }
+        steps.priceOverrides = { count: Object.keys(priceOverrides).length, discountPct: disc || null };
       }
     }
   }

@@ -112,7 +112,7 @@ export const SUPPLIERS = {
   BLAKLADER:    { contactId: 323,   costList: 20, poField: 'PCF_BLAKLPO', detect: (n) => /bl[åa]kl[äa]der/i.test(n || '') },
   PORTWEST:     { contactId: 298,   costList: 20, poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') }, // low-inv ON (min-stock data sorted 2026-08-14): SO demand + reorder
   UNEEK:        { contactId: 322,   costList: 20, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
-  'HELLY HANSEN': { contactId: 214, costList: 20, portalPriceIsPreDiscount: true,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
+  'HELLY HANSEN': { contactId: 214, costList: 20, portalPriceIsPreDiscount: true, supplierDiscountPct: 0.42,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
   // Launch(20) IS populated for Mascot — the null here was a config gap, not missing data (sampled
   // from PO 476715: EAN 5711074495160 → list20 9.41, EAN 5711074486861 → 11.77). Without it, costs
   // fell back to the sales-order row's itemCost and the price healer skipped Mascot entirely.
@@ -1595,7 +1595,9 @@ export async function healSupplierCosts({ supplierKey, poId, changes = [], pool 
   // 2026-08-19 were this, and the empty-cost heal would have WRITTEN the inflated list price in.
   // BP's Launch(20) costs were correct the whole time. Until the portal hands us a net price per
   // line, these suppliers report for review and write nothing.
-  if (reg.portalPriceIsPreDiscount) {
+  // Once the rate is known the harvested price is converted to net before it ever reaches the PO
+  // or the healer, so there is nothing left to guard against — only an UNKNOWN rate is dangerous.
+  if (reg.portalPriceIsPreDiscount && !(reg.supplierDiscountPct > 0)) {
     return { supplier: key, listId: reg.costList, skipped: `${key}: the portal quotes LIST prices (discount applied at invoice) — cost healing is disabled for this supplier; check against the discounted invoice by hand` };
   }
   if (!changes.length) return { supplier: key, listId: reg.costList, applied: [], escalated: [], skipped: [] };
