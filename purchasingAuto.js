@@ -102,11 +102,17 @@ export const SUPPLIERS = {
   // matching them here can't drag a rival supplier's line onto a Snickers PO. They were ordering
   // fine until d950468 (2026-08-07) made brand-detect suppliers filter by regex even on a sole
   // tag — that silently stopped Hellberg/EMMA/CLC demand being seen at all (8 SOs by 2026-08-17).
-  SNICKERS:     { contactId: 331,   costList: 10, poField: 'PCF_SNICKPO', detect: (n) => /snickers|solid\s*gear|hellberg|toe\s*guard|hultafors|\bemma\b|\bclc\b/i.test(n || '') },
-  BLAKLADER:    { contactId: 323,   costList: 12, poField: 'PCF_BLAKLPO', detect: (n) => /bl[åa]kl[äa]der/i.test(n || '') },
-  PORTWEST:     { contactId: 298,   costList: 7,  poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') }, // low-inv ON (min-stock data sorted 2026-08-14): SO demand + reorder
-  UNEEK:        { contactId: 322,   costList: 11, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
-  'HELLY HANSEN': { contactId: 214, costList: 6, portalPriceIsPreDiscount: true,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
+  // COST LIST = 20 (Launch) FOR EVERY SUPPLIER. The business prices on Launch and nothing else is
+  // maintained; the per-supplier lists (Snickers 10, Portwest 7, Uneek 11, Blaklader 12, Helly
+  // Hansen 6) were partial stale copies. HH list 6 held prices for only 2 of the 7 products on PO
+  // 483239 — which is why that PO looked like it had no costs at all — and where it did exist it
+  // matched Launch exactly. Sampled before the switch: Snickers and Blaklader identical on both,
+  // Portwest DX411BKRS 6.95→7.50, Uneek 25599/25672/25670 2.90→2.70 and 27777 12.00→11.50.
+  SNICKERS:     { contactId: 331,   costList: 20, poField: 'PCF_SNICKPO', detect: (n) => /snickers|solid\s*gear|hellberg|toe\s*guard|hultafors|\bemma\b|\bclc\b/i.test(n || '') },
+  BLAKLADER:    { contactId: 323,   costList: 20, poField: 'PCF_BLAKLPO', detect: (n) => /bl[åa]kl[äa]der/i.test(n || '') },
+  PORTWEST:     { contactId: 298,   costList: 20, poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') }, // low-inv ON (min-stock data sorted 2026-08-14): SO demand + reorder
+  UNEEK:        { contactId: 322,   costList: 20, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || '') },
+  'HELLY HANSEN': { contactId: 214, costList: 20, portalPriceIsPreDiscount: true,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
   // Launch(20) IS populated for Mascot — the null here was a config gap, not missing data (sampled
   // from PO 476715: EAN 5711074495160 → list20 9.41, EAN 5711074486861 → 11.77). Without it, costs
   // fell back to the sales-order row's itemCost and the price healer skipped Mascot entirely.
