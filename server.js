@@ -7772,7 +7772,7 @@ app.post('/api/purchasing/absorb-discount-po', express.json(), async (req, res) 
   const b = req.body || {};
   if (!b.poId) return res.status(400).json({ error: 'poId required' });
   try {
-    const out = await purchasingAuto.absorbSupplierDiscountPOLive({ poId: Number(b.poId), discountPct: Number(b.discountPct), execute: b.execute === true });
+    const out = await purchasingAuto.absorbSupplierDiscountPOLive({ poId: Number(b.poId), discountPct: Number(b.discountPct), expectedNet: b.expectedNet != null ? Number(b.expectedNet) : null, execute: b.execute === true });
     // Only repoint the header once the rows are actually right.
     if (out.done && b.priceListId) {
       try { await purchasingAuto.setOrderPriceListLive(Number(b.poId), Number(b.priceListId)); out.priceListSetTo = Number(b.priceListId); }

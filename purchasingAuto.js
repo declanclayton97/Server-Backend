@@ -1319,7 +1319,7 @@ export async function repriceComboPOLive({ poId, priceListId = 20, keepNet = fal
 // ─────────────────────────────────────────────────────────────────────────────
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
-export async function absorbSupplierDiscountPOLive({ poId, discountPct, execute = false } = {}) {
+export async function absorbSupplierDiscountPOLive({ poId, discountPct, expectedNet = null, execute = false } = {}) {
   const pct = Number(discountPct);
   if (!(pct > 0 && pct < 1)) throw new Error('discountPct must be a fraction between 0 and 1 (0.42 for 42%)');
   const order = (await liveGet(`/order-service/order/${poId}`))[0];
@@ -1334,19 +1334,26 @@ export async function absorbSupplierDiscountPOLive({ poId, discountPct, execute 
     const rec = { rowId, productId: r.productId, sku: r.productSku || '', name: r.productName || '', qty, oldNet: round2(net), oldUnit: qty ? round2(net / qty) : 0 };
     if (String(r.productId) === '1000' && net < 0) lump.push(rec); else keep.push(rec);
   }
-  if (!lump.length) return { refused: true, poId, reason: 'no negative productId-1000 row on this PO — there is no lump discount to absorb' };
+  if (!lump.length && expectedNet == null) return { refused: true, poId, reason: 'no negative productId-1000 row and no expectedNet — there is nothing independent to check a flat rate against, so this will not guess' };
   // A non-discount misc row (a "Shipping:" line, a proof instruction) must not be silently dropped
   // or re-priced, so bail rather than guess what it meant.
   const misc = keep.filter((k) => String(k.productId) === '1000');
   if (misc.length) return { refused: true, poId, reason: `${misc.length} other productId-1000 row(s) present — check them by hand first`, miscRows: misc.map((m) => m.name) };
 
   const plan = keep.map((k) => { const newUnit = round2(k.oldUnit * (1 - pct)); return { ...k, newUnit, newNet: round2(newUnit * k.qty) }; });
-  const currentTotal = round2(entries.reduce((s, [, r]) => s + netOf(r), 0));   // list rows + the negative lump
+  const currentTotal = round2(entries.reduce((s, [, r]) => s + netOf(r), 0));   // list rows + any negative lump
   const foldedTotal = round2(plan.reduce((s, p) => s + p.newNet, 0));
-  const drift = round2(foldedTotal - currentTotal);
-  const summary = { poId, discountPct: pct, lumpRow: lump.map((l) => `${l.name} ${l.oldNet.toFixed(2)}`), currentTotal, foldedTotal, drift, rows: plan.length };
+  // WHAT THE FOLD IS CHECKED AGAINST — never the same arithmetic that produced it:
+  //   • lump row present  → the PO already nets to the invoice figure, so use its own total
+  //   • expectedNet given → the invoice figure, supplied by the caller (e.g. read off the PO before
+  //                         someone deleted the lump row, or off the supplier's confirmation)
+  // Without one of those it refuses above, because "list x 0.58 equals list x 0.58" proves nothing.
+  const anchor = lump.length ? currentTotal : round2(expectedNet);
+  const anchorSource = lump.length ? `the PO's own total, which already nets ${lump.length} lump discount row(s)` : 'the expectedNet passed in';
+  const drift = round2(foldedTotal - anchor);
+  const summary = { poId, discountPct: pct, lumpRow: lump.map((l) => `${l.name} ${l.oldNet.toFixed(2)}`), listTotal: round2(keep.reduce((s, k) => s + k.oldNet, 0)), currentTotal, foldedTotal, anchor, anchorSource, drift, rows: plan.length };
   if (Math.abs(drift) > 0.02) {
-    return { refused: true, ...summary, reason: `folding ${(pct * 100).toFixed(0)}% into the lines nets £${foldedTotal.toFixed(2)} but the PO is £${currentTotal.toFixed(2)} (out by £${drift.toFixed(2)}) — the discount is not a flat ${(pct * 100).toFixed(0)}% on every line, so do NOT use a single rate here`, plan };
+    return { refused: true, ...summary, reason: `folding ${(pct * 100).toFixed(0)}% into the lines nets £${foldedTotal.toFixed(2)} against £${anchor.toFixed(2)} from ${anchorSource} (out by £${drift.toFixed(2)}) — the discount is not a flat ${(pct * 100).toFixed(0)}% on every line, so do NOT use a single rate here`, plan };
   }
   if (!execute) return { dryRun: true, ...summary, plan };
 
