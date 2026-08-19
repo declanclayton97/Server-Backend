@@ -567,6 +567,101 @@ export async function setOrderReferenceLive(orderId, reference) {
   return liveWrite('PATCH', `/order-service/order/${orderId}`, [{ op: 'replace', path: '/reference', value: String(reference) }]);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// READ-ONLY: what would change if row selection keyed on the product's PRIMARY SUPPLIER
+// instead of a regex over its NAME?
+//
+// Today every supplier picks its rows with a regex on the product name. That is an inference, and
+// it fails silently whenever a product BP already attributes to the supplier happens not to be
+// named after it: Hellberg/EMMA/CLC were invisible to Snickers for ten days in August, and
+// "STANDARD HI VIS BOMBER JACKET (UC804 …)" is primarySupplierId 322 — Uneek's own product — that
+// the /uneek/i detect cannot see. Brightpearl already holds the answer we are guessing at.
+//
+// This writes NOTHING and orders NOTHING. It reports, per tagged order:
+//   agree        — both methods select the row (no change)
+//   supplierOnly — BP says this supplier, the name does not → WOULD BE GAINED
+//   nameOnly     — the name says this supplier, BP does not → WOULD BE LOST
+//
+// nameOnly is the number that decides it. Those are rows we order today and would stop ordering,
+// and they are legitimate whenever we deliberately buy from someone other than the primary supplier
+// — which is exactly what a "(CHECKED)" tag means. Read both columns before changing anything.
+// ─────────────────────────────────────────────────────────────────────────────
+export async function compareDetectLive(supplierKey, { limitOrders = 0 } = {}) {
+  const k = String(supplierKey || '').toUpperCase();
+  const sup = SUPPLIERS[k] ? { key: k, ...SUPPLIERS[k] } : { key: k, detect: dynamicDetect(k), contactId: null };
+  if (!sup.contactId) return { error: `${k} has no contactId in the registry — cannot compare against a primary supplier` };
+  const detect = detectOf(sup);
+
+  // Same pool + same tag filter as findContributors/previewLive, so this compares like with like.
+  const ids = [];
+  let firstResult = 1;
+  for (let guard = 0; guard < 40; guard++) {
+    const s = await liveGet(`/order-service/sales-order-search?orderStatusId=${DEMAND_STATUS}&pageSize=500&firstResult=${firstResult}`);
+    const idx = {}; s.metaData.columns.forEach((c, i) => { idx[c.name] = i; });
+    const page = s.results.map((r) => r[idx.salesOrderId]);
+    ids.push(...page);
+    if (!s.metaData.morePagesAvailable || !page.length) break;
+    firstResult += 500;
+    await pause(250);
+  }
+
+  const tagged = [];
+  for (const id of ids) {
+    const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
+    await pause(120);
+    const tag = cf.PCF_SUPPLIER;
+    if (!tag || isLeaveNote(tag)) continue;
+    if (!tagsOf(tag).some((t) => tagSupplier(t) === sup.key)) continue;
+    tagged.push({ id, tag });
+    if (limitOrders && tagged.length >= limitOrders) break;
+  }
+
+  // Rows first, then ONE batched product read for every distinct productId across them —
+  // per-product lookups would be hundreds of calls against the shared live rate limit.
+  const orders = [];
+  for (const t of tagged) {
+    const a = await liveGet(`/order-service/order/${t.id}`);
+    const o = Array.isArray(a) ? a[0] : a;
+    if (o) orders.push({ ...t, rows: Object.values(o.orderRows || {}).filter((r) => !isNonOrderableRow(r)) });
+    await pause(120);
+  }
+  const pids = [...new Set(orders.flatMap((o) => o.rows.map((r) => r.productId)).filter((p) => p && String(p) !== '1000'))];
+  const supplierOf = {};
+  for (const batch of chunk(pids, 100)) {
+    try {
+      const arr = await liveGet(`/product-service/product/${batch.join(',')}`) || [];
+      for (const p of (Array.isArray(arr) ? arr : [arr])) if (p && p.id != null) supplierOf[String(p.id)] = p.primarySupplierId ?? null;
+    } catch { /* fall back per id below */ }
+    await pause(200);
+  }
+  for (const p of pids) if (supplierOf[String(p)] === undefined) {
+    try { const a = await liveGet(`/product-service/product/${p}`); const x = Array.isArray(a) ? a[0] : a; supplierOf[String(p)] = (x && x.primarySupplierId) ?? null; await pause(120); } catch { supplierOf[String(p)] = null; }
+  }
+
+  const bucket = { agree: [], supplierOnly: [], nameOnly: [] };
+  for (const o of orders) {
+    for (const r of o.rows) {
+      const byName = !!detect(r.productName, r.productSku);
+      const bySupplier = String(supplierOf[String(r.productId)] ?? '') === String(sup.contactId);
+      if (!byName && !bySupplier) continue;
+      const rec = { soId: o.id, tag: o.tag, sku: r.productSku, name: String(r.productName || '').slice(0, 70), qty: parseFloat(r.quantity.magnitude), primarySupplierId: supplierOf[String(r.productId)] ?? null };
+      if (byName && bySupplier) bucket.agree.push(rec);
+      else if (bySupplier) bucket.supplierOnly.push(rec);
+      else bucket.nameOnly.push(rec);
+    }
+  }
+  const units = (a) => a.reduce((n, r) => n + (r.qty || 0), 0);
+  return {
+    supplier: sup.key, contactId: sup.contactId, taggedOrders: orders.length,
+    summary: {
+      agree: { rows: bucket.agree.length, units: units(bucket.agree) },
+      wouldGain: { rows: bucket.supplierOnly.length, units: units(bucket.supplierOnly) },
+      wouldLose: { rows: bucket.nameOnly.length, units: units(bucket.nameOnly) },
+    },
+    wouldGain: bucket.supplierOnly, wouldLose: bucket.nameOnly,
+  };
+}
+
 export async function previewLive(supplierKey, orderIds) {
   const k = String(supplierKey || '').toUpperCase();
   // Use the hardcoded registry detector/poField (same as production). contactId/

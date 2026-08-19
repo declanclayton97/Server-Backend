@@ -7641,6 +7641,15 @@ app.get('/api/purchasing/debug-lowstock', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// READ-ONLY: would keying row selection on the product's PRIMARY SUPPLIER pick up more (or less)
+// than the current name regex? ?supplier=UNEEK[&limitOrders=]. Writes nothing, orders nothing.
+app.get('/api/purchasing/detect-compare', async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    res.json(await purchasingAuto.compareDetectLive(req.query.supplier || 'UNEEK', { limitOrders: req.query.limitOrders ? parseInt(req.query.limitOrders, 10) : 0 }));
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // LIVE combined PO (SO demand + =====LOW INV==== separator + reorder replenishment).
 // DRY-RUN by default — returns the full plan and writes NOTHING. Writes only when
 // the body has { execute: true }.
