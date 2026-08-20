@@ -1438,6 +1438,48 @@ export async function stampPoFieldLive({ orderIds = [], supplierKey, poField, po
 // Re-price an existing PO's rows from a price list (BP has no row-value update, so
 // each row is deleted + re-added at the correct cost, preserving order + separator).
 // Dry-run unless { execute: true }. Used to correct a PO built on the wrong list.
+// Set ONE PO row's unit cost. repriceComboPOLive rewrites EVERY row from a price list, which is the
+// wrong instrument when a PO deliberately carries invoice-specific prices: on PO 483480 the 9933
+// lines are correctly £16.56 (Blaklader discount that colour) while Launch says £18.40, and a
+// wholesale reprice would silently undo them. It was the reverse slip that caused this — 8833L got
+// repriced to £16.56 alongside the 9933 pair when Blaklader charge it in full.
+// Delete + re-add is how BP changes a row price; the row's real tax code is preserved rather than a
+// blanket T20, and expectCurrent must match before anything is touched.
+// body: { poId, sku, unitCost, expectCurrent, execute }
+export async function setPoRowCostLive({ poId, sku, unitCost, expectCurrent = null, execute = false } = {}) {
+  const cost = Number(unitCost);
+  if (!poId || !sku || !(cost >= 0)) throw new Error('poId, sku and unitCost required');
+  const order = (await liveGet(`/order-service/order/${poId}`))[0];
+  if (!order) throw new Error(`PO ${poId} not found`);
+  const entries = Object.entries(order.orderRows || {})
+    .filter(([, r]) => String(r.productSku || '').toUpperCase() === String(sku).toUpperCase());
+  if (!entries.length) return { refused: true, poId, sku, reason: 'no row on this PO has that SKU' };
+  if (entries.length > 1) return { refused: true, poId, sku, reason: `${entries.length} rows share that SKU — refusing to guess which` };
+  const [rowId, r] = entries[0];
+  const qty = parseFloat(r.quantity.magnitude);
+  const was = Number((parseFloat(r.rowValue.rowNet.value) / qty).toFixed(2));
+  if (expectCurrent != null && Math.abs(was - Number(expectCurrent)) > 0.005) {
+    return { refused: true, poId, sku, was, reason: `row is £${was.toFixed(2)}, expected £${Number(expectCurrent).toFixed(2)} — not touching it` };
+  }
+  const plan = { poId, sku, rowId, qty, was, now: cost, rowNetWas: Number((was * qty).toFixed(2)), rowNetNow: Number((cost * qty).toFixed(2)) };
+  if (!execute) return { dryRun: true, ...plan };
+  const code = r.rowValue.taxCode || await productTaxCodeLive(r.productId);
+  const rate = taxRate(code);
+  const net = cost * qty;
+  await liveWrite('DELETE', `/order-service/order/${poId}/row/${rowId}`);
+  await pause(150);
+  await liveWrite('POST', `/order-service/order/${poId}/row`, {
+    productId: r.productId, quantity: { magnitude: String(qty) },
+    rowValue: { taxCode: code, rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * rate).toFixed(2) } },
+  });
+  // Read back rather than trust the write — a PO that says it changed and did not is worse than one
+  // that plainly failed.
+  const after = (await liveGet(`/order-service/order/${poId}`))[0];
+  const row = Object.values(after.orderRows || {}).find((x) => String(x.productSku || '').toUpperCase() === String(sku).toUpperCase());
+  const nowUnit = row ? Number((parseFloat(row.rowValue.rowNet.value) / parseFloat(row.quantity.magnitude)).toFixed(2)) : null;
+  return { done: Math.abs((nowUnit ?? -1) - cost) < 0.005, ...plan, confirmedUnit: nowUnit, poNet: after.totalValue && after.totalValue.net };
+}
+
 export async function repriceComboPOLive({ poId, priceListId = 20, keepNet = false, execute = false, allowMiscRows = false } = {}) {
   // keepNet=true: keep each row's CURRENT net (don't recompute from the price list)
   // and just re-add — used to RESTORE row tax after the legacy reference-write zeroes

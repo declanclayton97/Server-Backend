@@ -7675,6 +7675,15 @@ app.patch('/api/purchasing/pending-lines/:id', express.json(), async (req, res) 
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Set ONE PO row unit cost (delete + re-add, tax preserved). Dry-run unless execute:true;
+// expectCurrent guards against repricing a row that has already moved.
+app.post('/api/purchasing/set-po-row-cost-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  try { res.json(await purchasingAuto.setPoRowCostLive({ poId: Number(b.poId), sku: b.sku, unitCost: b.unitCost, expectCurrent: b.expectCurrent, execute: b.execute === true })); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // LIVE combined PO (SO demand + =====LOW INV==== separator + reorder replenishment).
 // DRY-RUN by default — returns the full plan and writes NOTHING. Writes only when
 // the body has { execute: true }.
