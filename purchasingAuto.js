@@ -132,6 +132,15 @@ export const SUPPLIERS = {
   // order is created — which is what the button labelled "Check Discount" actually does — so the true
   // net price only exists after createOrder. See [[project_mascot_ordering]].
   MASCOT:       { contactId: 334,   costList: 20,   poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
+  // Scruffs Workwear Ltd — EMAIL supplier (salesorders@scruffs.com), same shape as Uneek. Carriage
+  // paid at GBP100 ex-VAT, confirmed by carriage appearing on a GBP90 order (user, 2026-08-20).
+  // poField PCF_STOCKPO is the SHARED "Any Other Suppliers" field, also used by Engel (PO 483521) —
+  // an order needing BOTH would have one PO number overwrite the other, so give Scruffs its own
+  // field if that ever comes up.
+  // A brand detect is ESSENTIAL here, not cosmetic: without a registry entry the tag-only fallback
+  // treats a single "Scruffs" tag as "take every row", and a dry run built a PO carrying a Snickers
+  // 6972 trouser at GBP90.35 and a Blaklader waistcoat at GBP0.
+  SCRUFFS:      { contactId: 130243, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 130243, detect: (n) => /scruffs/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
