@@ -1021,7 +1021,25 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     }
     // Only order the UNALLOCATED qty: ordered − allocated − fulfilled.
     // Allocation isn't in the order API — read it from the legacy order page.
-    const alloc = await getOrderAllocations(id, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+    // THAT PAGE INTERMITTENTLY RENDERS WITH NO reserved[] INPUTS AT ALL. Same order, same session,
+    // five consecutive reads on 2026-08-20 returned 6, 6, 6, 6, 0. An empty read is indistinguishable
+    // from "every row is fulfilled" — see the absent-from-alloc rule below — so one flake silently
+    // drops the ENTIRE order out of demand with no error anywhere. That is why Blaklader valued at
+    // £1,274 and £824 within minutes of each other, and it has been happening to every supplier.
+    // So do not believe an empty read the first time: retry before concluding there is nothing to
+    // allocate. A genuinely fulfilled order costs two extra page fetches; a flake gets recovered.
+    let alloc = await getOrderAllocations(id, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' });
+    for (let attempt = 0; attempt < 2 && !Object.keys(alloc).length; attempt++) {
+      await pause(700);
+      try { alloc = await getOrderAllocations(id, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' }); }
+      catch { /* keep the empty read and let the retries run out */ }
+    }
+    if (!Object.keys(alloc).length) {
+      // Still empty after retries. Might be genuine (all fulfilled) or a persistent read failure —
+      // record it so a silently-dropped order is at least queryable afterwards.
+      tagFlags.push({ soId: id, tag, reason: 'the order page returned no allocation rows after 3 reads — every row will be treated as fulfilled, so this order contributes nothing. If that is wrong, the page read is failing',
+        rows: entries.map(([, r]) => ({ sku: r.productSku, name: r.productName, qty: parseFloat(r.quantity.magnitude) })) });
+    }
     const rows = [];
     for (const [rowId, r] of entries) {
       const ordered = parseFloat(r.quantity.magnitude);
