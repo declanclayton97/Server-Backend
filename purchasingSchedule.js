@@ -77,6 +77,17 @@ export async function listPendingLines(pool, supplier, { includeConsumed = false
   return r.rows;
 }
 
+export async function updatePendingLine(pool, id, { qty, note, remove } = {}) {
+  if (!pool) return { error: "no database" };
+  await ensurePendingTable(pool);
+  if (remove) { await pool.query("DELETE FROM purchasing_pending_lines WHERE id=$1 AND consumed_at IS NULL", [id]); return { removed: id }; }
+  const r = await pool.query(
+    "UPDATE purchasing_pending_lines SET qty=COALESCE($2,qty), note=COALESCE($3,note) WHERE id=$1 AND consumed_at IS NULL RETURNING *",
+    [id, qty != null ? Math.round(Number(qty)) : null, note != null ? String(note) : null],
+  );
+  return r.rows[0] || { error: "not found or already consumed" };
+}
+
 async function consumePendingLines(pool, ids, poId) {
   if (!pool || !ids.length) return;
   await pool.query(`UPDATE purchasing_pending_lines SET consumed_at=now(), consumed_po=$2 WHERE id = ANY($1::int[])`, [ids, poId]);

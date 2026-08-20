@@ -7668,6 +7668,13 @@ app.post('/api/purchasing/pending-lines', express.json(), async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// PATCH a carry-forward line: { qty } / { note } / { remove: true }. Consumed lines are immutable.
+app.patch('/api/purchasing/pending-lines/:id', express.json(), async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try { res.json(await purchasingSchedule.updatePendingLine(pool, Number(req.params.id), req.body || {})); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // LIVE combined PO (SO demand + =====LOW INV==== separator + reorder replenishment).
 // DRY-RUN by default — returns the full plan and writes NOTHING. Writes only when
 // the body has { execute: true }.
