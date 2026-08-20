@@ -902,15 +902,27 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // Order lines = the PO rows (BP SKU = Blåkläder part number, exact — no resolver).
-  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) }));
+  // cost and name are sent for MULTIPACK detection, not for pricing. One BP unit can be a pack that
+  // Blaklader sell per piece: PO 483480 ordered 1 x 362510428600L expecting five shirts and bought
+  // ONE, because their 3625 is a "5 pcs multipack" at 4.55 an item against BP's 22.75 unit cost.
+  // Alt-Items compares BP cost against their per-piece price and refuses unless that ratio and the
+  // pack size in the name agree. Without the cost it has nothing to compare and cannot detect it.
+  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name }));
   if (!orderLines.length) throw stepErr('cart', 'no orderable Blaklader lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
   // Submit via the Blaklader order API (loads basket then POST /order/orders). place=live.
   const r = await jfetch('checkout', `${altItemsUrl}/api/blaklader-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: live }) });
+  // A pack-size we could not verify stops the run with a message that names the SKU, rather than
+  // ordering an unchecked multiple. That is the failure mode being fixed here, so it must not be
+  // possible to sail past it.
+  const pw = (r.basket && r.basket.packWarns) || r.packWarns || [];
+  if (pw.length) throw stepErr('cart', `Blaklader pack size could not be verified on ${pw.length} line(s) — NOT ordered, PO#${poId} left for review: ${pw.map((w) => `${w.sku}: ${w.warn}`).join(' | ').slice(0, 300)}`, { poId, packWarns: pw });
   if (!r.ok) throw stepErr('checkout', `Blaklader did not confirm the order: ${JSON.stringify(r.error || r.add || r).slice(0, 250)}`, { poId });
   const orderNo = r.internalId || null;
-  steps.checkout = { ok: true, orderNo, sent: r.sent };
+  // packNotes records every line whose quantity was multiplied, so a 1-becomes-5 is visible in the
+  // run report instead of only showing up on the invoice.
+  steps.checkout = { ok: true, orderNo, sent: r.sent, packMultiplied: (r.basket && r.basket.packNotes) || r.packNotes || [] };
 
   // Finalise: PO status 7 + ref (BLK internalId), SO notes + status 22 + tag clear.
   const ref = orderNo || `Placed-${poId}`;
