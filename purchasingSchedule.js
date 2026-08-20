@@ -32,6 +32,56 @@ export function ukNow(d = new Date()) {
 export const isUkWeekday = (wd) => !['Sat', 'Sun'].includes(wd);
 
 // ── state ────────────────────────────────────────────────────────────────────
+// ── Carry-forward lines ───────────────────────────────────────────────────────
+// Things that must go on a supplier's NEXT order but which BP demand will never produce again,
+// because the sales order they belong to was already finalised. First case: PO 483480 bought ONE
+// 3625 shirt where the BP unit is a 5-pack, so four are owed to SO 483415 — and that SO is closed,
+// so no future demand scan will ever ask for them.
+//
+// A note in a PO or an email does not order anything. This does: the next run for that supplier
+// appends these lines to the cart, and only marks them consumed once the order is actually placed.
+// If the run aborts they stay pending and go on the run after.
+//
+// qty is in the SUPPLIER'S OWN UNITS and is sent RAW — no multipack multiplication. The 3625 case is
+// four PIECES, which is not a whole BP pack, and that is exactly the shape these will usually take.
+async function ensurePendingTable(pool) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_pending_lines (
+    id serial PRIMARY KEY,
+    supplier text NOT NULL,
+    sku text NOT NULL,
+    qty int NOT NULL,
+    note text,
+    created_at timestamptz DEFAULT now(),
+    consumed_at timestamptz,
+    consumed_po int
+  )`);
+}
+
+export async function addPendingLine(pool, { supplier, sku, qty, note }) {
+  if (!pool) return { error: 'no database' };
+  await ensurePendingTable(pool);
+  const r = await pool.query(
+    `INSERT INTO purchasing_pending_lines (supplier, sku, qty, note) VALUES ($1,$2,$3,$4) RETURNING *`,
+    [String(supplier).toUpperCase(), String(sku), Math.round(Number(qty) || 0), note || null],
+  );
+  return r.rows[0];
+}
+
+export async function listPendingLines(pool, supplier, { includeConsumed = false } = {}) {
+  if (!pool) return [];
+  await ensurePendingTable(pool);
+  const r = await pool.query(
+    `SELECT * FROM purchasing_pending_lines WHERE supplier=$1 ${includeConsumed ? '' : 'AND consumed_at IS NULL'} ORDER BY id`,
+    [String(supplier).toUpperCase()],
+  );
+  return r.rows;
+}
+
+async function consumePendingLines(pool, ids, poId) {
+  if (!pool || !ids.length) return;
+  await pool.query(`UPDATE purchasing_pending_lines SET consumed_at=now(), consumed_po=$2 WHERE id = ANY($1::int[])`, [ids, poId]);
+}
+
 async function ensureTable(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS fristads_purchase_schedule (
     id int PRIMARY KEY DEFAULT 1,
@@ -908,6 +958,12 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // Alt-Items compares BP cost against their per-piece price and refuses unless that ratio and the
   // pack size in the name agree. Without the cost it has nothing to compare and cannot detect it.
   const orderLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name }));
+  // Carry-forward lines: owed to a sales order that is already finalised, so no demand scan will
+  // ever ask for them again. Sent RAW — qty is already in Blaklader's own units (pieces), so the
+  // multipack multiplier must not touch them.
+  const pending = await listPendingLines(pool, 'BLAKLADER').catch(() => []);
+  for (const p of pending) orderLines.push({ sku: String(p.sku), qty: Math.round(p.qty), rawQty: true, pendingId: p.id, note: p.note });
+  if (pending.length) steps.pending = { count: pending.length, lines: pending.map((p) => `${p.sku} x${p.qty}${p.note ? ` (${p.note})` : ''}`) };
   if (!orderLines.length) throw stepErr('cart', 'no orderable Blaklader lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
@@ -923,6 +979,10 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // packNotes records every line whose quantity was multiplied, so a 1-becomes-5 is visible in the
   // run report instead of only showing up on the invoice.
   steps.checkout = { ok: true, orderNo, sent: r.sent, packMultiplied: (r.basket && r.basket.packNotes) || r.packNotes || [] };
+  // Only now, with the order actually placed. An aborted run leaves them pending for the next one —
+  // marking them consumed any earlier would lose them silently, which is the failure this exists to
+  // undo in the first place.
+  if (pending.length) await consumePendingLines(pool, pending.map((p) => p.id), poId).catch(() => {});
 
   // Finalise: PO status 7 + ref (BLK internalId), SO notes + status 22 + tag clear.
   const ref = orderNo || `Placed-${poId}`;

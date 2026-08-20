@@ -7650,6 +7650,24 @@ app.get('/api/purchasing/detect-compare', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// Carry-forward lines for a supplier's NEXT order — things owed that BP demand will never ask for
+// again because the sales order is already finalised. GET to list, POST to add.
+// POST { supplier, sku, qty, note }   qty is in the SUPPLIER'S units and is sent RAW.
+app.get('/api/purchasing/pending-lines', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try {
+    res.json({ supplier: (req.query.supplier || 'BLAKLADER').toString().toUpperCase(),
+      lines: await purchasingSchedule.listPendingLines(pool, req.query.supplier || 'BLAKLADER', { includeConsumed: req.query.all != null }) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/purchasing/pending-lines', express.json(), async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  const b = req.body || {};
+  if (!b.supplier || !b.sku || !(Number(b.qty) > 0)) return res.status(400).json({ error: 'supplier, sku and qty>0 required' });
+  try { res.json(await purchasingSchedule.addPendingLine(pool, b)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // LIVE combined PO (SO demand + =====LOW INV==== separator + reorder replenishment).
 // DRY-RUN by default — returns the full plan and writes NOTHING. Writes only when
 // the body has { execute: true }.
