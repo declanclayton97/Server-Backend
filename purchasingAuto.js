@@ -267,7 +267,15 @@ async function productTaxCodeLive(productId) {
   try { const p = (await liveGet(`/product-service/product/${productId}`))[0]; code = (p && p.financialDetails && p.financialDetails.taxCode && p.financialDetails.taxCode.code) || 'T20'; } catch { /* default */ }
   _productTaxCache[productId] = code; return code;
 }
-const isLeaveNote = (v) => /unable to order|awaiting|leave|do not order|chased|response|on hold/i.test(v || '');
+// "/" SEPARATES INDEPENDENT NOTES. A hold phrase in one of them says nothing about the others, so a
+// leave-note holds the order only when EVERY token is one.
+// SO 478849 was tagged "Snickers   / Portwest / unable to order UV2124001" and sat unordered from
+// 29 July to 20 August — 49 rows of Snickers and Portwest held back by a note about a UVEX earplug,
+// which is a productId-1000 note row and was never orderable anyway. Testing the phrase against the
+// whole string let one item's problem cancel the entire order, for every supplier, silently.
+// Kept STRICT when the tag is only a note ("on hold", "awaiting response"): that still holds it.
+const isLeaveNoteToken = (v) => /unable to order|awaiting|leave|do not order|chased|response|on hold/i.test(v || '');
+const isLeaveNote = (v) => { const toks = tagsOf(v); return toks.length ? toks.every(isLeaveNoteToken) : isLeaveNoteToken(v); };
 
 // ── PCF_SUPPLIER parenthetical SCOPE ────────────────────────────────────────
 // The tag's trailing note is USUALLY a human annotation ("HELLY HANSEN (BACK ORDER)"), but it is
