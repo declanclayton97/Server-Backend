@@ -9068,10 +9068,13 @@ if (process.env.PENCARRIE_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ PenCarrie auto-purchase poller scheduled (weekdays 15:40 UK, £175 threshold)');
 } else { console.log('⏸️  PenCarrie auto-purchase poller DISABLED (PENCARRIE_SCHEDULE_ENABLED=false)'); }
 
-// Blaklader auto-purchase poller — weekdays 09:30 UK. api.blaklader.com order API (POST
-// /order/orders). OFF BY DEFAULT (submit body not yet validated against a real order): set
-// BLAKLADER_SCHEDULE_ENABLED=true to activate. £150 threshold placeholder, state row id 10.
-if (process.env.BLAKLADER_SCHEDULE_ENABLED === 'true') {
+// Blaklader auto-purchase poller — weekdays 09:30 UK. Submits through the STOREFRONT
+// (POST https://www.blaklader.uk/api/orders/send), not the api host. Carriage paid @ £300 ex-VAT,
+// state row id 10.
+// ON by default since 2026-08-20 (user) — set BLAKLADER_SCHEDULE_ENABLED=false to stop. It was
+// dormant while the submit was unvalidated; that is now settled, and the basket is verified against
+// the request before anything is sent, so a short basket refuses instead of ordering.
+if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -9083,8 +9086,8 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED === 'true') {
         .catch((e) => console.error('[blaklader-schedule] error:', e.message));
     } catch (e) { console.error('[blaklader-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
-  console.log('✅ Blaklader auto-purchase poller scheduled (weekdays 09:30 UK, £150 threshold)');
-} else { console.log('⏸️  Blaklader auto-purchase poller DORMANT (set BLAKLADER_SCHEDULE_ENABLED=true to activate)'); }
+  console.log('✅ Blaklader auto-purchase poller scheduled (weekdays 09:30 UK, £300 carriage-paid threshold)');
+} else { console.log('⏸️  Blaklader auto-purchase poller DISABLED (BLAKLADER_SCHEDULE_ENABLED=false)'); }
 
 
 async function sendOutOfStockEmail(supplier, lines, to) {
