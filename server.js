@@ -9122,6 +9122,23 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   }, 5 * 60 * 1000);
   console.log('✅ Blaklader auto-purchase poller scheduled (weekdays 09:30 UK, £300 carriage-paid threshold)');
 } else { console.log('⏸️  Blaklader auto-purchase poller DISABLED (BLAKLADER_SCHEDULE_ENABLED=false)'); }
+// Scruffs auto-purchase poller — weekdays 14:00 UK. Email supplier: Brightpearl builds the PO and
+// emails its own PDF to salesorders@scruffs.com, so there is no portal step to fail. Carriage
+// minimum £100 ex-VAT, state row id 11. 14:00–14:29 is a clear slot — nothing else runs in hour 14.
+if (process.env.SCRUFFS_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 14 && uk.minute < 30)) return; // 14:00–14:29 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'SCRUFFS' })
+        .then((r) => { if (!r.skipped) console.log('[scruffs-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[scruffs-schedule] error:', e.message));
+    } catch (e) { console.error('[scruffs-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Scruffs auto-purchase poller scheduled (weekdays 14:00 UK, £100 carriage minimum)');
+} else { console.log('⏸️  Scruffs auto-purchase poller DISABLED (SCRUFFS_SCHEDULE_ENABLED=false)'); }
 
 
 async function sendOutOfStockEmail(supplier, lines, to) {

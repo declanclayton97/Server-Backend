@@ -537,6 +537,46 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   return { poId, emailedTo: UNEEK_ORDER_EMAIL, steps };
 }
 
+// ── Scruffs placement chain (email supplier) ─────────────────────────────────
+// Same shape as Uneek: Brightpearl builds and emails its own PO PDF, so there is no portal or API
+// to go wrong. First order placed by hand 2026-08-20 (PO 483634, £108.70) to prove the address.
+// Carriage minimum is £100 ex-VAT — a £90 order was seen carrying carriage, so treat it as real.
+// poField is the SHARED PCF_STOCKPO ("Any Other Suppliers"), which Engel also writes to; that field
+// is the dedupe guard, so until PCF_SCRUFFSPO exists an Engel-stamped SO looks already-ordered here.
+const SCRUFFS_SUPPLIER_CONTACT = 130243;
+const SCRUFFS_ORDER_EMAIL = process.env.SCRUFFS_ORDER_EMAIL || 'salesorders@scruffs.com';
+
+async function placeScruffsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
+  const steps = {};
+  // 1. combined PO (SO demand + low-inv; stamps the SOs)
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'SCRUFFS', execute: true, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // 2. EMAIL Brightpearl's real PO PDF to the Scruffs order desk. Only email_to_0 is set —
+  // emailOrderDocument clears BP's pre-filled rows, which for this contact include
+  // "SalesOrders@Scruffs.com / CS@scruffs.com" stored as ONE address and two of our own
+  // sales@tuffshop.co.uk rows. Sending those unedited would bounce and CC ourselves.
+  const mail = await emailOrderDocument(poId, { contactId: SCRUFFS_SUPPLIER_CONTACT, to: SCRUFFS_ORDER_EMAIL, subject: `Purchase Order: #${poId}`, send: true });
+  if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${SCRUFFS_ORDER_EMAIL}: ${JSON.stringify(mail).slice(0, 200)}`);
+  steps.email = { to: SCRUFFS_ORDER_EMAIL, sent: true, status: mail.status };
+
+  // 3. mark the PO Placed (status 7) + a note recording the email.
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  await bp.addOrderNoteLive(poId, `PO emailed to Scruffs (${SCRUFFS_ORDER_EMAIL}).`, SCRUFFS_SUPPLIER_CONTACT).catch(() => {});
+  steps.link = { status: 7, emailedTo: SCRUFFS_ORDER_EMAIL };
+
+  // 4. finalise the contributing SOs (clear the Scruffs tag, status → 22, "ordered via PO#" note)
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'SCRUFFS', poId, noteContactId: SCRUFFS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `PO emailed + placed, but finalising SOs failed: ${e.message}`); } }
+  return { poId, emailedTo: SCRUFFS_ORDER_EMAIL, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -1017,6 +1057,7 @@ const SCHEDULED_SUPPLIERS = {
   PORTWEST: { supplierKey: 'PORTWEST', stateId: 8, placeFn: placePortwestOrder, threshold: Number(process.env.PORTWEST_FREESHIP_THRESHOLD || 150) }, // portwest.com CSV upload + checkout_summary; free carriage @ £150 ex-VAT (else £7.50)
   PENCARRIE: { supplierKey: 'PENCARRIE', stateId: 9, placeFn: placePencarrieOrder, threshold: Number(process.env.PENCARRIE_FREESHIP_THRESHOLD || 175) }, // official pcautoorder XML API (parkorder=2); carriage paid @ £175 ex-VAT, else £8.70 (BRANDS_supplier_list_NEW_2025.xlsx "Supplier Info", 2026-08-17 — was a £150 guess)
   BLAKLADER: { supplierKey: 'BLAKLADER', stateId: 10, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300) }, // api.blaklader.com order API (POST /order/orders); carriage paid @ £300 ex-VAT, else £13.00 (same sheet — was a £150 guess); submit body still needs first-order validation
+  SCRUFFS: { supplierKey: 'SCRUFFS', stateId: 11, placeFn: placeScruffsOrder, threshold: Number(process.env.SCRUFFS_FREESHIP_THRESHOLD || 100) }, // email supplier (salesorders@scruffs.com), BP emails its own PO PDF; carriage minimum £100 ex-VAT — a £90 order was seen carrying carriage
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
