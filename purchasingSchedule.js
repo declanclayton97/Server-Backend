@@ -940,10 +940,51 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
     let preview;
     try { preview = await bp.createComboPOLive({ supplierKey, execute: false }); }
     catch (e) { throw stepErr('preflight', `couldn't value the demand: ${e.message}`); }
-    const preLines = [...(preview.soLines || []), ...(preview.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: l.sku, qty: l.qty }));
+    // name/colour/size go with the line so the portal can fall back to style + colour NAME + size
+    // when neither our SKU nor our EAN is in its sheet. 802211-001L aborted the whole Carhartt run
+    // on 2026-08-21 for exactly that: it is style SC4223M in Black/L, in the sheet with 5,718
+    // available, but our SKU carries a legacy code and our EAN appears nowhere in the sheet.
+    const preLines = [...(preview.soLines || []), ...(preview.lowLines || [])]
+      .filter((l) => String(l.productId) !== '1000' && l.sku)
+      .map((l) => ({ sku: l.sku, qty: l.qty, name: l.name, colour: l.colour, size: l.size, productId: l.productId }));
+    // Fill in colour/size for anything the demand read did not carry them for — only for lines that
+    // need it, so this costs one batched product read at most.
+    const needVariant = preLines.filter((l) => !l.colour || !l.size).map((l) => l.productId).filter(Boolean);
+    if (needVariant.length) {
+      try {
+        const ids = [...new Set(needVariant)].sort((a, b) => a - b);   // BP 400s on an unsorted id set
+        const arr = await bp.bpLiveGet(`/product-service/product/${ids.join(',')}`) || [];
+        const byId = {};
+        for (const p of (Array.isArray(arr) ? arr : [arr])) {
+          if (!p || p.id == null) continue;
+          const v = {};
+          for (const o of (p.variations || [])) v[String(o.optionName || '').toLowerCase()] = o.optionValue;
+          byId[String(p.id)] = v;
+        }
+        for (const l of preLines) {
+          const v = byId[String(l.productId)];
+          if (!v) continue;
+          if (!l.colour) l.colour = v.colour || v.color || null;
+          if (!l.size) l.size = v.size || null;
+        }
+      } catch { /* additive only — without it we simply fall back to the old behaviour */ }
+    }
     if (preLines.length) {
       const dry = await jfetch('preflight', `${altItemsUrl}${basketPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: preLines, dryRun: true }) });
       if (dry.unresolved && dry.unresolved.length) throw stepErr('preflight', `${supplierKey} lines not on the portal (PO NOT created): ${dry.unresolved.join(', ')} — fix the resolver/aliases first`);
+      // A line rescued by the style+colour-name+size fallback is REPORTED, not silently accepted:
+      // it means our SKU or EAN disagrees with the supplier sheet and should be corrected at
+      // source, or the alias quietly carries a wrong mapping forever.
+      if (Array.isArray(dry.aliased) && dry.aliased.length) {
+        steps.aliased = dry.aliased;
+        await logPurchasingError(pool, {
+          supplier: supplierKey, step: 'sku-alias', severity: 'review',
+          message: `${dry.aliased.length} ${supplierKey} line(s) only resolved by matching style + colour + size, because our SKU/EAN is not in the supplier sheet. `
+            + 'They WERE ordered. Worth correcting the SKU or EAN in Brightpearl:\n'
+            + dry.aliased.map((a) => `      ${a.sku} -> style ${a.matchedStyle} ${a.colour}/${a.size} (UPC ${a.upc})`).join('\n'),
+          context: { supplier: supplierKey, aliased: dry.aliased },
+        }).catch(() => {});
+      }
       if (Array.isArray(dry.pricedLines) && dry.pricedLines.length) {
         // The Elastic sheet quotes LIST. Convert to net HERE, at the single point the price enters
         // the system, so the PO rows, the SO costings and the healer all see the same real number and
