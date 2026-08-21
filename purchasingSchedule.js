@@ -77,9 +77,19 @@ export async function listPendingLines(pool, supplier, { includeConsumed = false
   return r.rows;
 }
 
-export async function updatePendingLine(pool, id, { qty, note, remove } = {}) {
+export async function updatePendingLine(pool, id, { qty, note, remove, consumedPoId } = {}) {
   if (!pool) return { error: "no database" };
   await ensurePendingTable(pool);
+  // Mark a line FULFILLED rather than deleting it. When PO 483751 was placed by hand the only
+  // option was `remove`, which threw away the record of what was owed and why; consumed_at +
+  // consumed_po keep it. `remove` stays for lines added in error.
+  if (consumedPoId) {
+    const c = await pool.query(
+      "UPDATE purchasing_pending_lines SET consumed_at=now(), consumed_po=$2 WHERE id=$1 AND consumed_at IS NULL RETURNING *",
+      [id, consumedPoId],
+    );
+    return c.rows[0] || { error: "not found or already consumed" };
+  }
   if (remove) { await pool.query("DELETE FROM purchasing_pending_lines WHERE id=$1 AND consumed_at IS NULL", [id]); return { removed: id }; }
   const r = await pool.query(
     "UPDATE purchasing_pending_lines SET qty=COALESCE($2,qty), note=COALESCE($3,note) WHERE id=$1 AND consumed_at IS NULL RETURNING *",

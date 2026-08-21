@@ -8179,7 +8179,20 @@ app.post('/api/purchasing/product-name-append-live', async (req, res) => {
 // Reports whether weight updated AND whether key fields survived, then restores.
 app.get('/api/purchasing/weight-put-test', async (req, res) => {
   if (!requirePurchasing(res)) return;
-  const pid = parseInt(req.query.productId, 10) || 1019;
+  // ?sku= is resolved to a productId. Previously ONLY productId was read and it fell back to
+  // 1019, so passing a sku returned product 1019's prices under whatever sku you asked about -
+  // it reported the same figures for two different Fristads codes on 2026-08-21 and looked real.
+  let pid = parseInt(req.query.productId, 10) || 0;
+  if (!pid && req.query.sku) {
+    try {
+      const sr = await purchasingAuto.bpLiveGet(`/product-service/product-search?SKU=${encodeURIComponent(req.query.sku)}`);
+      const cols = ((sr && sr.metaData && sr.metaData.columns) || []).map((c) => c.name);
+      const row = ((sr && sr.results) || [])[0];
+      if (row) pid = row[cols.indexOf('productId')];
+    } catch (e) { return res.status(502).json({ error: `sku lookup failed: ${e.message}` }); }
+    if (!pid) return res.status(404).json({ error: `no product found for SKU ${req.query.sku}` });
+  }
+  if (!pid) return res.status(400).json({ error: 'productId or sku required' });
   const w = Number(req.query.weight || 0.15);
   const snap = (p) => ({ weight: p && p.stock && p.stock.weight, sku: p && p.identity && p.identity.sku, name: p && p.salesChannels && p.salesChannels[0] && p.salesChannels[0].productName, brandId: p && p.brandId, taxCode: p && p.financialDetails && p.financialDetails.taxCode });
   try {
@@ -8745,6 +8758,14 @@ app.post('/api/purchasing/fristads-scheduled-run', express.json(), async (req, r
   if (!pool) return res.status(503).json({ error: 'DB not available (schedule state)' });
   try {
     const b = { ...req.query, ...(req.body || {}) };
+    // This route is FRISTADS-ONLY and used to IGNORE a `supplier` field entirely, so POSTing
+    // {supplier:'X'} here silently ran Fristads instead - harmless with dryRun (state is only
+    // written when !dryRun) and decidedly not harmless without. Refuse loudly and point at the
+    // generic route rather than quietly running the wrong supplier.
+    const asked = b.supplier != null ? String(b.supplier).toUpperCase() : null;
+    if (asked && asked !== 'FRISTADS') {
+      return res.status(400).json({ error: `this route only runs FRISTADS (you asked for ${asked}) - use POST /api/purchasing/supplier-scheduled-run` });
+    }
     res.json(await purchasingSchedule.runFristadsScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, dryRun: b.dryRun === '1' || b.dryRun === true, force: b.force === '1' || b.force === true }));
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
@@ -8955,8 +8976,15 @@ app.get('/api/purchasing/error-log', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 30, 200);
     await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_error_log (id serial PRIMARY KEY, created_at timestamptz DEFAULT now(), supplier text, step text, message text, context jsonb)`);
-    const r = await pool.query(`SELECT id, created_at, supplier, step, message, context FROM purchasing_error_log ORDER BY id DESC LIMIT $1`, [limit]);
-    res.json({ count: r.rows.length, errors: r.rows });
+    // ?supplier= and ?step= used to be ACCEPTED AND IGNORED, so asking about one supplier quietly
+    // returned everyone's rows - which reads as 'that supplier errored' when it did not.
+    const where = [], args = [];
+    if (req.query.supplier) { args.push(String(req.query.supplier).toUpperCase()); where.push(`upper(supplier) = $${args.length}`); }
+    if (req.query.step) { args.push(String(req.query.step)); where.push(`step = $${args.length}`); }
+    args.push(limit);
+    const r = await pool.query(`SELECT id, created_at, supplier, step, message, context FROM purchasing_error_log`
+      + (where.length ? ` WHERE ${where.join(' AND ')}` : '') + ` ORDER BY id DESC LIMIT $${args.length}`, args);
+    res.json({ count: r.rows.length, filtered: { supplier: req.query.supplier || null, step: req.query.step || null }, errors: r.rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
