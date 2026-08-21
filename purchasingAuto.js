@@ -154,7 +154,10 @@ export const SUPPLIERS = {
   // some carry a Brightpearl-internal code instead (ML070622072) and will NOT resolve — the basket
   // line-count check catches that and refuses rather than ordering short.
   // Shares PCF_STOCKPO — safe now that PO fields append rather than overwrite.
-  CHADWICK: { contactId: 42485, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 42485, detect: (n) => /^ct\s/i.test(n || '') },
+  // brandIds is the AUTHORITATIVE match — every Chadwick product carries brandId 213. The name
+  // detect is kept only as a cheap first pass that saves a product lookup on rows it already
+  // recognises; brand is what catches anything renamed, which a "CT " prefix never would.
+  CHADWICK: { contactId: 42485, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 42485, brandIds: [213], detect: (n) => /^ct\s/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
@@ -1002,14 +1005,23 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // deliberately buy from someone OTHER than the product's primary supplier.
     // Only the rows the name REJECTED need looking up, batched into one call per order.
     const supplierOwned = new Set();
-    if (contactId) {
+    const brandOwned = new Set();
+    // BRAND is the authoritative signal, not the product name. A name detect is a guess about how
+    // someone typed the product; the brand is a field on the record. Chadwick is the clean case —
+    // every one of its products carries brandId 213 — and brand catches anything renamed, which a
+    // prefix match never would. It costs NOTHING extra: this lookup already fetches the full
+    // product for every row the name detect missed, and brandId is on that same payload.
+    const brandIds = new Set(((SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].brandIds) || []).map(String));
+    if (contactId || brandIds.size) {
       const unknown = [...new Set(orderableRows.filter(([, r]) => !detect(r.productName, r.productSku))
         .map(([, r]) => r.productId).filter((p) => p && String(p) !== '1000'))];
       if (unknown.length) {
         try {
           const arr = await liveGet(`/product-service/product/${unknown.join(',')}`) || [];
           for (const p of (Array.isArray(arr) ? arr : [arr])) {
-            if (p && p.id != null && String(p.primarySupplierId) === String(contactId)) supplierOwned.add(String(p.id));
+            if (!p || p.id == null) continue;
+            if (contactId && String(p.primarySupplierId) === String(contactId)) supplierOwned.add(String(p.id));
+            if (brandIds.size && p.brandId != null && brandIds.has(String(p.brandId))) brandOwned.add(String(p.id));
           }
         } catch { /* additive only: if the lookup fails we fall back to name matching, never worse */ }
         await pause(150);
@@ -1018,7 +1030,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // Explicit per-supplier claims count too: products BP attributes elsewhere that we nonetheless
     // buy from this supplier, where that attribution cannot be corrected in Brightpearl at all.
     const claimed = new Set(((SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].claimProductIds) || []).map(String));
-    const belongsHere = (r) => detect(r.productName, r.productSku) || supplierOwned.has(String(r.productId)) || claimed.has(String(r.productId));
+    const belongsHere = (r) => detect(r.productName, r.productSku) || supplierOwned.has(String(r.productId)) || brandOwned.has(String(r.productId)) || claimed.has(String(r.productId));
     let candidateRows = (singleSupplier && !hasBrandDetect)
       ? orderableRows
       : orderableRows.filter(([, r]) => belongsHere(r));
