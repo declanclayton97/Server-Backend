@@ -644,6 +644,17 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   // priceWarns makes a stale cost list visible in the run report instead of only on the invoice.
   steps.checkout = { ok: true, orderNo, total: r.total, expectNet: r.expectNet, priceWarns: r.priceWarns || [] };
 
+  // Feed those differences into the SAME healer every other supplier uses, rather than leaving them
+  // as a line in a report nobody reads. Performance Brands quote NET on the product grid — verified
+  // line-by-line against order #24454, where PB94C/PB278/PB271 matched the PO to the penny — so a
+  // difference here is a genuinely wrong cost, not a discount, and is safe to heal.
+  // (Contrast Mascot and the Elastic suppliers, whose portals quote LIST: a "mismatch" there is the
+  // discount and must never be healed.)
+  await healPrices(steps, {
+    supplierKey: 'PERFORMANCE BRANDS', poId, pool,
+    changes: (r.priceWarns || []).filter((w) => w.sku && Number(w.sitePrice) > 0).map((w) => ({ sku: w.sku, was: w.bpCost, now: w.sitePrice })),
+  });
+
   // A LOW-INVENTORY line that could not be ordered is dropped rather than allowed to abort the run
   // — see the reasoning in performanceBrands.js — but it must never disappear quietly. Log it for
   // review so a top-up that keeps failing gets noticed instead of silently never arriving.
@@ -1314,6 +1325,32 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // marking them consumed any earlier would lose them silently, which is the failure this exists to
   // undo in the first place.
   if (pending.length) await consumePendingLines(pool, pending.map((p) => p.id), poId).catch(() => {});
+
+  // PRICE CHECK against what Blaklader will ACTUALLY invoice. Blaklader had no price check at all,
+  // and diffing PO 483751 against BLK-1923644 by hand on 2026-08-21 found two real cost errors that
+  // nothing would otherwise have caught: 712018009900C40 at £13.65 against £22.45 charged (retail
+  // £32.21, so it showed 58% margin and really made 30%), and 150113109900C60 at £43.15 vs £41.40.
+  //
+  // MULTIPACK LINES ARE EXCLUDED. One BP unit can be a pack Blaklader sell per piece — 3625104299004XL
+  // is one unit of ours at £22.75 and five of theirs at £4.55. Comparing unit prices there would
+  // "find" a 5x error on a line that reconciles perfectly, and healing it would destroy a correct
+  // cost. packNotes already records exactly which lines were multiplied, so they are skipped.
+  try {
+    const packed = new Set(((r.basket && r.basket.packNotes) || r.packNotes || []).map((p) => String(p.sku || p).toUpperCase()));
+    const inv = await jfetch('price-check', `${altItemsUrl}/api/blaklader-order-lines?internalId=${encodeURIComponent(orderNo || '')}`, { method: 'GET' });
+    const theirs = new Map();
+    for (const l of (inv.lines || [])) if (l.sku && Number(l.price) > 0) theirs.set(String(l.sku).toUpperCase(), Number(l.price));
+    const changes = [];
+    for (const l of orderLines) {
+      const k = String(l.sku).toUpperCase();
+      if (packed.has(k) || l.rawQty) continue;                 // multipack or carry-forward — not comparable per unit
+      const now = theirs.get(k);
+      if (now == null || !(l.cost > 0)) continue;
+      if (Math.abs(now - l.cost) > 0.005) changes.push({ sku: l.sku, was: l.cost, now });
+    }
+    steps.priceCheck = { compared: theirs.size, skippedPacks: packed.size, differences: changes.length };
+    await healPrices(steps, { supplierKey: 'BLAKLADER', poId, pool, changes });
+  } catch (e) { steps.priceCheckWarn = `couldn't price-check against ${orderNo}: ${e.message}`; }
 
   // Finalise: PO status 7 + ref (BLK internalId), SO notes + status 22 + tag clear.
   const ref = orderNo || `Placed-${poId}`;
