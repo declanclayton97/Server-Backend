@@ -8532,7 +8532,20 @@ app.get('/api/purchasing/price-lists', async (req, res) => {
 // priceListId is retail vs cost and the exact value shape before writing. ?productId=
 app.get('/api/purchasing/price-inspect', async (req, res) => {
   if (!requirePurchasing(res)) return;
-  const pid = parseInt(req.query.productId, 10) || 1019;
+  // ?sku= is resolved to a productId. This used to read ONLY productId and fall back to 1019, so
+  // passing a sku returned product 1019's prices labelled as whatever sku you asked about — it
+  // reported identical figures for two different Fristads codes on 2026-08-21 and looked real.
+  let pid = parseInt(req.query.productId, 10) || 0;
+  if (!pid && req.query.sku) {
+    try {
+      const sr = await purchasingAuto.bpLiveGet(`/product-service/product-search?SKU=${encodeURIComponent(req.query.sku)}`);
+      const cols = ((sr && sr.metaData && sr.metaData.columns) || []).map((c) => c.name);
+      const row = ((sr && sr.results) || [])[0];
+      if (row) pid = row[cols.indexOf('productId')];
+    } catch (e) { return res.status(502).json({ error: `sku lookup failed: ${e.message}` }); }
+    if (!pid) return res.status(404).json({ error: `no product found for SKU ${req.query.sku}` });
+  }
+  if (!pid) return res.status(400).json({ error: 'productId or sku required' });
   try {
     const priceResp = await purchasingAuto.bpApi('GET', `/product-service/product-price/${pid}`);
     const prodResp = await purchasingAuto.bpApi('GET', `/product-service/product/${pid}`);
