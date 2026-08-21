@@ -1548,6 +1548,39 @@ export async function stampPoFieldLive({ orderIds = [], supplierKey, poField, po
 
 
 
+
+// Add a real STOCK row to a PO, addressed by SKU. Needed to put back a row that was removed in
+// error — on PO 483845 the Portwest reconcile deleted 25 x C472YERL/XL because it compared an
+// un-normalised code against a normalised cart map, and nothing else could restore it.
+// Refuses if the SKU already has a row (use setPoRowCostLive to change one) and reads the PO back
+// rather than trusting the write. Dry-run unless { execute: true }.
+// body: { poId, sku, qty, unitCost, execute }
+export async function addPoProductRowLive({ poId, sku, qty, unitCost, execute = false } = {}) {
+  if (!poId || !sku || !(Number(qty) > 0) || !(Number(unitCost) >= 0)) throw new Error('poId, sku, qty>0 and unitCost required');
+  const q = Number(qty), cost = Number(unitCost);
+  const po = (await liveGet(`/order-service/order/${poId}`))[0];
+  if (!po) throw new Error(`PO ${poId} not found`);
+  if (Object.values(po.orderRows || {}).some((r) => String(r.productSku || '').toUpperCase() === String(sku).toUpperCase())) {
+    return { refused: true, poId, sku, reason: 'that SKU already has a row on this PO' };
+  }
+  const search = await liveGet(`/product-service/product-search?SKU=${encodeURIComponent(sku)}`);
+  const cols = ((search && search.metaData && search.metaData.columns) || []).map((c) => c.name);
+  const row = ((search && search.results) || [])[0];
+  const productId = row ? row[cols.indexOf('productId')] : null;
+  if (!productId) return { refused: true, poId, sku, reason: 'no Brightpearl product with that SKU' };
+  const plan = { poId, sku, productId, qty: q, unitCost: cost, rowNet: Number((cost * q).toFixed(2)), poNetWas: po.totalValue && po.totalValue.net };
+  if (!execute) return { dryRun: true, ...plan };
+  const code = await productTaxCodeLive(productId);
+  const rate = taxRate(code);
+  const net = cost * q;
+  await liveWrite('POST', `/order-service/order/${poId}/row`, {
+    productId, quantity: { magnitude: String(q) },
+    rowValue: { taxCode: code, rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * rate).toFixed(2) } },
+  });
+  const after = (await liveGet(`/order-service/order/${poId}`))[0];
+  const landed = Object.values((after && after.orderRows) || {}).some((r) => String(r.productSku || '').toUpperCase() === String(sku).toUpperCase());
+  return { done: landed, ...plan, poNetNow: after && after.totalValue && after.totalValue.net };
+}
 // Add a TEXT/misc row to a PO — productId 1000, the same non-stock carrier the "=====LOW INV===="
 // separator and the "Shipping:" rows use. It carries a value for invoice matching WITHOUT creating
 // a stock expectation, which is the whole point: on PO 483751 the four carry-forward t-shirts
@@ -1858,7 +1891,18 @@ export async function getOrderCartLines(orderId) {
 // so a changed row is deleted + re-added preserving unit cost + real tax code (like reprice).
 // Dry-run unless { execute:true }. Returns { bumped:[{sku,from,to}], dropped:[{sku,was}] }.
 export async function reconcilePortwestPO({ poId, cart = {}, execute = false } = {}) {
-  const get = (sku) => { const k = String(sku).toUpperCase(); const v = cart instanceof Map ? cart.get(k) : cart[k]; return v == null ? 0 : Number(v); };
+  // SLASH-NORMALISE both sides. Portwest sizes can contain a slash ("L/XL") which the cart's
+  // delete-line URL does not reliably carry, so the caller's cart map is keyed C472YERL while the
+  // PO row is C472YERL/XL. Reading it literally returns 0 and DELETES a row that is sitting in the
+  // cart perfectly happily — which is exactly what happened to 25 vests on PO 483845 on
+  // 2026-08-21, immediately after the verify comparison was normalised and this one was not.
+  const nk = (s) => String(s).toUpperCase().replace(/\//g, '');
+  const get = (sku) => {
+    const k = nk(sku);
+    if (cart instanceof Map) { for (const [ck, cv] of cart) if (nk(ck) === k) return Number(cv) || 0; return 0; }
+    for (const ck of Object.keys(cart || {})) if (nk(ck) === k) return Number(cart[ck]) || 0;
+    return 0;
+  };
   const order = (await liveGet(`/order-service/order/${poId}`))[0];
   const entries = Object.entries(order.orderRows || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
   // Group PO rows by SKU — the same variant can sit on several rows (multiple SOs). The cart

@@ -7687,6 +7687,13 @@ app.patch('/api/purchasing/pending-lines/:id', express.json(), async (req, res) 
 // something to leave to a typo. Dry-run unless execute:true.
 // body: { poId, sku, expectQty, execute }
 // Add a TEXT/misc row (productId 1000) to a PO — value for invoice matching, no stock expectation.
+// Add a real STOCK row to a PO by SKU — for putting back a row removed in error.
+app.post('/api/purchasing/add-po-product-row-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  try { res.json(await purchasingAuto.addPoProductRowLive({ poId: Number(b.poId), sku: b.sku, qty: b.qty, unitCost: b.unitCost, execute: b.execute === true })); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
 app.post('/api/purchasing/add-po-misc-row-live', express.json(), async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
   const b = req.body || {};
