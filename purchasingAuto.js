@@ -314,7 +314,21 @@ async function poFieldHasSupplierPo(value, sup, get) {
 // isn't placed yet), so match the supplier ignoring that trailing note. Genuine "hold" notes
 // ("on hold", "do not order", "awaiting"…) are filtered separately by isLeaveNote, and the
 // toOrder maths prevents any double-order. Used for both queue-matching and finalise tag-clear.
-const tagSupplier = (t) => String(t || '').replace(/\s*\([^)]*\)\s*$/, '').trim().toUpperCase();
+// A tag is typed by a human, so it arrives with human punctuation. Only the trailing
+// parenthetical scope note used to be stripped, which meant "STERLING," never matched STERLING
+// and the order was silently skipped by every run — the tag looked correct in Brightpearl, so
+// nothing pointed at the comma. Trailing punctuation and doubled spaces are now normalised too.
+// Aliases are for names that differ by more than punctuation; keep them EXPLICIT rather than
+// stripping a trailing "S", so SNICKERS can never quietly resolve to something else.
+const TAG_ALIASES = { CHADWICKS: 'CHADWICK' };
+const tagSupplier = (t) => {
+  const base = String(t || '')
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .replace(/[.,;:]+$/, '')
+    .trim().replace(/\s+/g, ' ')
+    .toUpperCase();
+  return TAG_ALIASES[base] || base;
+};
 // Pick a product-option value by matching the option KEY (names vary: "Size",
 // "Mascot Trouser Size", "Colour", "Color"…).
 const optValue = (opts, re) => { for (const k of Object.keys(opts || {})) if (re.test(k)) return opts[k]; return null; };
