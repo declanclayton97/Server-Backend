@@ -1527,6 +1527,43 @@ export async function stampPoFieldLive({ orderIds = [], supplierKey, poField, po
   return { done: true, field, poId, results };
 }
 
+
+// Remove ONE row from a PO, addressed by SKU rather than rowId. Needed when a line turns out to be
+// unorderable and the PO should stop claiming it is on order — on PO 483708 the Y-Shield H3 White
+// hard hat was out of stock at Performance Brands with no back-order route (their out-of-stock grid
+// cells carry no quantity input at all, unlike Castle's).
+// /api/debug/bp-row-delete already existed but drives the Brightpearl WEB UI and returned
+// "order form not found on the page". This uses the live API instead — note bpApi/api point at a
+// DIFFERENT client than liveGet/liveWrite and cannot see these POs at all, which is why this lives
+// here rather than in a route.
+// Refuses unless exactly one row carries the SKU, and unless expectQty matches when given —
+// deleting the wrong row of a PO is not something to leave to a typo.
+// Dry-run unless { execute: true }.
+export async function removePoRowLive({ poId, sku, expectQty = null, execute = false } = {}) {
+  if (!poId || !sku) throw new Error('poId and sku required');
+  const read = async () => (await liveGet(`/order-service/order/${poId}`))[0];
+  const po = await read();
+  if (!po) throw new Error(`PO ${poId} not found`);
+  const hits = Object.entries(po.orderRows || {})
+    .filter(([, r]) => String(r.productSku || '').toUpperCase() === String(sku).toUpperCase());
+  if (!hits.length) return { refused: true, poId, sku, reason: 'no row on this PO has that SKU' };
+  if (hits.length > 1) return { refused: true, poId, sku, reason: `${hits.length} rows share that SKU — refusing to guess which` };
+  const [rowId, row] = hits[0];
+  const qty = parseFloat(row.quantity.magnitude);
+  const rowNet = parseFloat(row.rowValue.rowNet.value);
+  if (expectQty != null && Math.abs(qty - Number(expectQty)) > 0.001) {
+    return { refused: true, poId, sku, qty, reason: `row qty is ${qty}, expected ${expectQty} — not touching it` };
+  }
+  const plan = { poId, sku, rowId, qty, rowNet, name: row.productName || null, poNetWas: po.totalValue && po.totalValue.net };
+  if (!execute) return { dryRun: true, ...plan };
+  await liveWrite('DELETE', `/order-service/order/${poId}/row/${rowId}`);
+  // Read back rather than trust the write — a PO that says it dropped a line and did not is worse
+  // than one that plainly failed.
+  const after = await read();
+  const still = Object.values((after && after.orderRows) || {})
+    .some((r) => String(r.productSku || '').toUpperCase() === String(sku).toUpperCase());
+  return { done: !still, ...plan, poNetNow: after && after.totalValue && after.totalValue.net };
+}
 // Re-price an existing PO's rows from a price list (BP has no row-value update, so
 // each row is deleted + re-added at the correct cost, preserving order + separator).
 // Dry-run unless { execute: true }. Used to correct a PO built on the wrong list.
