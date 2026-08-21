@@ -577,6 +577,69 @@ async function placeScruffsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {})
   return { poId, emailedTo: SCRUFFS_ORDER_EMAIL, steps };
 }
 
+// ── Performance Brands placement chain (WooCommerce trade shop) ──────────────
+// Alt-Items resolves each of our SKUs against the LIVE variation grid, loads the basket and checks
+// out on the b2b_credit_limit trade CREDIT account (no card is ever involved). Our PO number goes in
+// their required `po_field` — the site refuses the order outright without it.
+// First order placed by hand 2026-08-21 (#24454, £416.73) to prove the flow before automating.
+// Free delivery at £200 + VAT; under that it is £7.00 flat.
+const PERFORMANCE_BRANDS_SUPPLIER_CONTACT = 11611;
+
+async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'PERFORMANCE BRANDS', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // name is sent as well as sku because a few of our products carry a Brightpearl-internal SKU with
+  // no supplier code in it (191339 is the Y-Shield H3) and can only be found by the style code in
+  // the NAME. cost is sent so Alt-Items can report where the supplier's live price disagrees with
+  // our Launch cost — PB56C was £43.05 against £39.50 when this was built.
+  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])]
+    .filter((l) => String(l.productId) !== '1000' && l.sku)
+    .map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name }));
+  if (!orderLines.length) throw stepErr('cart', 'no orderable Performance Brands lines');
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  const r = await jfetch('checkout', `${altItemsUrl}/api/performance-brands-order`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: live }),
+  });
+
+  // A line we could not resolve stops the run naming the SKU and the reason, rather than quietly
+  // ordering a short basket. Out-of-stock is called out separately because this site offers NO
+  // back-order route at all (its out-of-stock cells have no quantity input), so those lines need a
+  // human to chase the supplier rather than a retry.
+  if (r.failed && r.failed.length) {
+    const oos = r.failed.filter((f) => f.outOfStock).map((f) => f.sku);
+    throw stepErr('resolve', `${r.failed.length} line(s) could not be ordered — NOT ordered, PO#${poId} left for review: `
+      + r.failed.map((f) => `${f.sku}: ${f.reason}`).join(' | ').slice(0, 400)
+      + (oos.length ? ` — ${oos.length} of these are OUT OF STOCK and cannot be back-ordered on this site; email sales@performance-brands.com` : ''),
+      { poId, failed: r.failed });
+  }
+  if (!r.ok) throw stepErr(r.step || 'checkout', `Performance Brands did not confirm the order: ${String(r.error || JSON.stringify(r)).slice(0, 300)}`, { poId });
+
+  const orderNo = r.orderNo || null;
+  // priceWarns makes a stale cost list visible in the run report instead of only on the invoice.
+  steps.checkout = { ok: true, orderNo, total: r.total, expectNet: r.expectNet, priceWarns: r.priceWarns || [] };
+
+  const ref = orderNo || `Placed-${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Performance Brands — order ${ref}. Reference-set failed: ${e.message}`, PERFORMANCE_BRANDS_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: ref, refWritten, orderNo, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'PERFORMANCE BRANDS', poId, noteContactId: PERFORMANCE_BRANDS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -1058,6 +1121,7 @@ const SCHEDULED_SUPPLIERS = {
   PENCARRIE: { supplierKey: 'PENCARRIE', stateId: 9, placeFn: placePencarrieOrder, threshold: Number(process.env.PENCARRIE_FREESHIP_THRESHOLD || 175) }, // official pcautoorder XML API (parkorder=2); carriage paid @ £175 ex-VAT, else £8.70 (BRANDS_supplier_list_NEW_2025.xlsx "Supplier Info", 2026-08-17 — was a £150 guess)
   BLAKLADER: { supplierKey: 'BLAKLADER', stateId: 10, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300) }, // api.blaklader.com order API (POST /order/orders); carriage paid @ £300 ex-VAT, else £13.00 (same sheet — was a £150 guess); submit body still needs first-order validation
   SCRUFFS: { supplierKey: 'SCRUFFS', stateId: 11, placeFn: placeScruffsOrder, threshold: Number(process.env.SCRUFFS_FREESHIP_THRESHOLD || 100) }, // email supplier (salesorders@scruffs.com), BP emails its own PO PDF; carriage minimum £100 ex-VAT — a £90 order was seen carrying carriage
+  'PERFORMANCE BRANDS': { supplierKey: 'PERFORMANCE BRANDS', stateId: 12, placeFn: placePerformanceBrandsOrder, threshold: Number(process.env.PERFORMANCE_BRANDS_FREESHIP_THRESHOLD || 200) }, // WooCommerce trade shop; free delivery @ £200 ex-VAT (user), else £7.00 flat. Needs PERFORMANCE_BRANDS_USER/PASS on Alt-Items
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────

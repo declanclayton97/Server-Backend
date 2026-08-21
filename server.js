@@ -9154,6 +9154,25 @@ if (process.env.SCRUFFS_SCHEDULE_ENABLED !== 'false') {
   }, 5 * 60 * 1000);
   console.log('✅ Scruffs auto-purchase poller scheduled (weekdays 14:00 UK, £100 carriage minimum)');
 } else { console.log('⏸️  Scruffs auto-purchase poller DISABLED (SCRUFFS_SCHEDULE_ENABLED=false)'); }
+// Performance Brands auto-purchase poller — weekdays 14:30 UK. WooCommerce trade shop: Alt-Items
+// resolves each SKU against the live variation grid, loads the basket and checks out on the
+// b2b_credit_limit trade credit account. Free delivery @ £200 ex-VAT, state row id 12.
+// 14:30–14:59 sits between Scruffs (14:00) and Portwest (15:00).
+// Requires PERFORMANCE_BRANDS_USER / PERFORMANCE_BRANDS_PASS on the Alt-Items service.
+if (process.env.PERFORMANCE_BRANDS_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 14 && uk.minute >= 30)) return; // 14:30–14:59 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'PERFORMANCE BRANDS' })
+        .then((r) => { if (!r.skipped) console.log('[performance-brands-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[performance-brands-schedule] error:', e.message));
+    } catch (e) { console.error('[performance-brands-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Performance Brands auto-purchase poller scheduled (weekdays 14:30 UK, £200 free-delivery threshold)');
+} else { console.log('⏸️  Performance Brands auto-purchase poller DISABLED (PERFORMANCE_BRANDS_SCHEDULE_ENABLED=false)'); }
 
 
 async function sendOutOfStockEmail(supplier, lines, to) {

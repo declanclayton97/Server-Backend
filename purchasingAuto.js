@@ -2015,7 +2015,12 @@ export async function getPoContributors(poId) {
     if (!m) continue;
     const id = Number(m[1]); soIds.push(id);
     const items = [];
-    for (const tok of m[2].split(',')) { const t = tok.trim().match(/^([A-Za-z0-9]+)\s*x(\d+)/); if (t) items.push({ sku: t[1], qty: Number(t[2]) }); }
+    // SKUs carry hyphens and dots (PB94C-BLK-09, PB56C-BRN-10.5, 815-BLK-34). The old
+    // [A-Za-z0-9]+ stopped at the first hyphen, so nothing matched and this returned EMPTY item
+    // lists for most suppliers — which silently degraded every rebuilt SO note to the bare
+    // "<SUPPLIER> items ordered via PO#<id>". It only ever looked right for Scruffs, whose codes
+    // (T56579) happen to be alphanumeric.
+    for (const tok of m[2].split(',')) { const t = tok.trim().match(/^([A-Za-z0-9][\w.\/-]*)\s*x(\d+)/); if (t) items.push({ sku: t[1], qty: Number(t[2]) }); }
     linesByOrder[id] = items;
   }
   return { soIds: [...new Set(soIds)], linesByOrder };
