@@ -242,6 +242,56 @@ export async function setProductIdentity(productId, changes = {}) {
 
 // ---- helpers ----
 const tagsOf = (v) => String(v || '').split('/').map((x) => x.trim()).filter(Boolean);
+// ── PO-number fields hold MORE THAN ONE number ───────────────────────────────
+// These fields were written with `value: String(poId)`, i.e. a straight overwrite, which loses
+// history in two separate ways:
+//   1. PCF_STOCKPO is the SHARED "Any Other Suppliers" field — Engel and Scruffs both write to it,
+//      so whoever ordered second erased the other supplier's PO number.
+//   2. Even on a dedicated field, a SECOND PO for the same supplier on the same SO (residual demand
+//      from a partial or re-allocated order — see the gatherLiveDemand note about SO 480109) erased
+//      the first, so the SO no longer showed which PO covered which part.
+// Appending fixes both. Same " / " separator the PCF_SUPPLIER tag and the note fields already use,
+// so a human reading the field in Brightpearl sees the familiar shape.
+const PO_SEP = ' / ';
+export const poNumbersOf = (v) => String(v || '').split(/[\/,;]+/).map((s) => s.trim()).filter(Boolean);
+export const appendPoNumber = (existing, poId) => {
+  const have = poNumbersOf(existing);
+  const add = String(poId).trim();
+  return (have.includes(add) ? have : [...have, add]).join(PO_SEP);
+};
+// Read-modify-write one SO's PO field. getCf(orderId) → custom-field object; write(method, path,
+// body). A failed read is treated as "no existing value" rather than aborting the stamp: losing the
+// linkage entirely is worse than losing one older number, and the PO note still records the SOs.
+async function stampPoAppend(orderId, field, poId, getCf, write) {
+  let cur = '';
+  try { cur = ((await getCf(orderId)) || {})[field] || ''; } catch { cur = ''; }
+  const value = appendPoNumber(cur, poId);
+  if (value === String(cur || '').trim()) return { orderId, field, value, unchanged: true };
+  await write('PATCH', `/order-service/order/${orderId}/custom-field`, [{ op: 'add', path: `/${field}`, value }]);
+  return { orderId, field, value, was: cur || null };
+}
+// Which supplier raised a given PO. Cached — a PO's supplier never changes.
+const _poSupplierCache = new Map();
+async function poSupplierContactId(poId, get) {
+  const k = String(poId);
+  if (_poSupplierCache.has(k)) return _poSupplierCache.get(k);
+  let cid = null;
+  try {
+    const o = (await get('GET', `/order-service/order/${k}`))[0];
+    cid = (o && o.parties && o.parties.supplier && o.parties.supplier.contactId) ?? null;
+  } catch { cid = null; }
+  _poSupplierCache.set(k, cid);
+  return cid;
+}
+// "Does this SO already have a PO from THIS supplier?" — which is NOT the same question as "is the
+// field non-empty" once the field can carry several suppliers' numbers.
+async function poFieldHasSupplierPo(value, sup, get) {
+  const nums = poNumbersOf(value);
+  if (!nums.length) return false;
+  if (!sup.contactId) return true; // can't tell whose it is — keep the old, cautious behaviour
+  for (const n of nums) if (await poSupplierContactId(n, get) === Number(sup.contactId)) return true;
+  return false;
+}
 // A PCF_SUPPLIER token may carry a trailing note in parens — e.g. "HELLY HANSEN (BACK ORDER)"
 // — a human annotation that the order is on back order. It STILL needs ordering (the OOS line
 // isn't placed yet), so match the supplier ignoring that trailing note. Genuine "hold" notes
@@ -430,7 +480,7 @@ async function findContributors(sup, orderIds) {
     const tag = cf.PCF_SUPPLIER;
     if (!tag || isLeaveNote(tag)) continue;                                   // empty / leave-note
     if (!tagsOf(tag).some((t) => t.toUpperCase() === sup.key)) continue;      // not this supplier
-    if (sup.poField && cf[sup.poField]) continue;                             // already has a PO for this supplier
+    if (sup.poField && await poFieldHasSupplierPo(cf[sup.poField], sup, api)) continue; // already has a PO from THIS supplier (the field may list several suppliers' POs)
     const order = (await api('GET', `/order-service/order/${id}`))[0];
     let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && detectOf(sup)(r.productName, r.productSku));
     // Single-supplier order where the name-detector matched nothing (common for
@@ -1323,7 +1373,7 @@ export async function createComboPOLive(opts = {}) {
   // stamp the PO number onto each contributing SO (linkage + dedupe) — only if this
   // supplier has a dedicated PO custom field. Otherwise the tag-clear on finalize is
   // the sole re-pickup guard.
-  if (poField) for (const c of contributors) await liveWrite('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${poField}`, value: String(poId) }]);
+  if (poField) for (const c of contributors) await stampPoAppend(c.id, poField, poId, (id) => liveGet(`/order-service/order/${id}/custom-field`), liveWrite);
 
   // ONE ROW PER VARIANT. The same product/colour/size demanded by several sales orders lands as
   // several rows, which makes booking the delivery in a matching exercise — the goods arrive as one
@@ -1437,8 +1487,8 @@ export async function stampPoFieldLive({ orderIds = [], supplierKey, poField, po
   if (!execute) return { dryRun: true, field, poId, orderIds };
   const results = [];
   for (const id of orderIds) {
-    await liveWrite('PATCH', `/order-service/order/${id}/custom-field`, [{ op: 'add', path: `/${field}`, value: String(poId) }]);
-    results.push({ id, stamped: field, value: String(poId) });
+    const r = await stampPoAppend(id, field, poId, (x) => liveGet(`/order-service/order/${x}/custom-field`), liveWrite);
+    results.push({ id, stamped: field, value: r.value, was: r.was || null, unchanged: !!r.unchanged });
     await pause(150);
   }
   return { done: true, field, poId, results };
@@ -1649,7 +1699,7 @@ export async function createPO(supplierKey, { orderIds, dryRun } = {}) {
 
   // 4. stamp the PO number onto each contributing SO (linkage + dedupe)
   for (const c of contributors) {
-    if (sup.poField) await api('PATCH', `/order-service/order/${c.id}/custom-field`, [{ op: 'add', path: `/${sup.poField}`, value: String(poId) }]);
+    if (sup.poField) await stampPoAppend(c.id, sup.poField, poId, (id) => api('GET', `/order-service/order/${id}/custom-field`), api);
   }
 
   return { created: true, poId, ...plan };
@@ -1941,7 +1991,7 @@ export async function createSupplierPO(supplierKey, lineItems, opts = {}) {
 export async function stampPoField(supplierKey, orderId, poId) {
   const sup = await resolveSupplier(supplierKey);
   if (!sup.poField) return { skipped: true, reason: 'no poField for supplier' };
-  return api('PATCH', `/order-service/order/${orderId}/custom-field`, [{ op: 'add', path: `/${sup.poField}`, value: String(poId) }]);
+  return stampPoAppend(orderId, sup.poField, poId, (id) => api('GET', `/order-service/order/${id}/custom-field`), api);
 }
 
 // LIVE: clear a supplier PO custom field (e.g. PCF_CASTLEPO) off SOs — used when a PO
