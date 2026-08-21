@@ -1411,10 +1411,36 @@ const cleanItemName = (n) => (String(n || '').split(/\r?\n/).map((s) => s.trim()
 // SOs so they aren't picked up again. If the supplier was the only tag, the field
 // is cleared; optionally flip status to "Ordered Stock Awaiting Delivery" (22).
 // Dry-run unless { execute: true }.
-export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', poId = null, noteContactId = null, setOrderedStatus = false, linesByOrder = null, execute = false } = {}) {
+export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', poId = null, noteContactId = null, setOrderedStatus = false, linesByOrder = null, execute = false } = {}) { // eslint-disable-line prefer-const
   // linesByOrder: { <soId>: ["<item name>", ...] } — when given, the SO note lists the
   // ordered item names (one per line) then "Ordered on PO:<poId>".
   const key = String(supplierKey).toUpperCase();
+  // A manual finalise (curl, or a repair after a part-failed run) rarely has linesByOrder to hand,
+  // and without it the SO note degrades to a bare "<SUPPLIER> items ordered via PO#<id>" with no
+  // items or quantities — which is exactly what happened to the four Scruffs SOs on PO 483634.
+  // The PO's own note already records "SO#<id> (<ref>): <sku> x<qty>", so rebuild from that rather
+  // than silently write the poorer note. Best-effort: a failure here just restores the old wording.
+  if (!linesByOrder && poId) {
+    try {
+      const rebuilt = (await getPoContributors(poId)).linesByOrder;
+      if (rebuilt && Object.keys(rebuilt).length) {
+        // getPoContributors yields {sku, qty} only; the note reads far better with the product
+        // name, so borrow it from the PO rows (same SKUs, by definition).
+        const nameBySku = {};
+        try {
+          const po = (await liveGet(`/order-service/order/${poId}`))[0];
+          for (const r of Object.values((po && po.orderRows) || {})) {
+            const k = String(r.productSku || '').toUpperCase();
+            if (k) nameBySku[k] = r.productName;
+          }
+        } catch { /* names are a nicety, not a requirement */ }
+        for (const items of Object.values(rebuilt)) {
+          for (const it of items) it.name = nameBySku[String(it.sku).toUpperCase()] || null;
+        }
+        linesByOrder = rebuilt;
+      }
+    } catch { /* keep the plain note */ }
+  }
   const plan = [];
   for (const id of orderIds) {
     const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
