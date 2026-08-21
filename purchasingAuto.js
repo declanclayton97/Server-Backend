@@ -148,6 +148,13 @@ export const SUPPLIERS = {
   // are short enough to collide with other suppliers' codes. Shares PCF_STOCKPO — safe now that PO
   // fields append rather than overwrite. Free delivery at £200 + VAT, else £7 flat.
   'PERFORMANCE BRANDS': { contactId: 11611, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 11611, detect: (n) => /^perf\b|performance\s*brands|lemaitre|safetix|y-?shield|virgo/i.test(n || '') },
+  // Chadwick Textiles (portal.chadwicktextiles.co.uk). 3,753 products, every one named "CT <style>
+  // …", so the name detect is reliable and the primarySupplierId union covers anything renamed.
+  // Their order upload keys on the ITEM CODE, which most of our SKUs already are (882-01-A-L), but
+  // some carry a Brightpearl-internal code instead (ML070622072) and will NOT resolve — the basket
+  // line-count check catches that and refuses rather than ordering short.
+  // Shares PCF_STOCKPO — safe now that PO fields append rather than overwrite.
+  CHADWICK: { contactId: 42485, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 42485, detect: (n) => /^ct\s/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },

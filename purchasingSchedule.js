@@ -731,6 +731,59 @@ async function placeMascotOrder(pool, altItemsUrl, { padToThreshold = 0, live = 
   return { poId, orderNo: sapNumber, steps };
 }
 
+// ── Chadwick placement chain (portal.chadwicktextiles.co.uk) ────────────────
+// Alt-Items uploads the lines (POST /qx/wcp-ordupload with json=[{Item,Quantity}] — their
+// "spreadsheet upload" is parsed in the browser, so no file is ever built) and then places the
+// order with POST /qx/wcp-cartorder, whose response body IS the Chadwick order number.
+// Our PO number goes in `pono`.
+// NOT yet proven on a real order — the supplied HAR loaded the cart but never checked out, so the
+// checkout shape was read out of my-basket.php's own jQuery. Treat the first live run as the test.
+const CHADWICK_SUPPLIER_CONTACT = 42485;
+
+async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'CHADWICK', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // Chadwick key on their ITEM CODE, which most of our SKUs already are (882-01-A-L). Some products
+  // carry a Brightpearl-internal code instead (ML070622072) which their upload will silently drop —
+  // the basket line-count check in Alt-Items catches that and refuses rather than ordering short.
+  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])]
+    .filter((l) => String(l.productId) !== '1000' && l.sku)
+    .map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name }));
+  if (!orderLines.length) throw stepErr('cart', 'no orderable Chadwick lines');
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  const r = await jfetch('checkout', `${altItemsUrl}/api/chadwick-order`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: live }),
+  });
+  if (!r.ok) {
+    const miss = (r.missing && r.missing.length) ? ` — item codes Chadwick did not accept: ${r.missing.join(', ').slice(0, 200)}` : '';
+    throw stepErr(r.step || 'checkout', `Chadwick did not confirm the order: ${String(r.error || JSON.stringify(r)).slice(0, 250)}${miss}`, { poId, missing: r.missing });
+  }
+
+  const orderNo = r.orderNo || null;
+  steps.checkout = { ok: true, orderNo, cartCount: r.cartCount, rid: r.rid };
+
+  const ref = orderNo || `Placed-${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Chadwick — order ${ref}. Reference-set failed: ${e.message}`, CHADWICK_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: ref, refWritten, orderNo, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'CHADWICK', poId, noteContactId: CHADWICK_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -1214,6 +1267,7 @@ const SCHEDULED_SUPPLIERS = {
   SCRUFFS: { supplierKey: 'SCRUFFS', stateId: 11, placeFn: placeScruffsOrder, threshold: Number(process.env.SCRUFFS_FREESHIP_THRESHOLD || 100) }, // email supplier (salesorders@scruffs.com), BP emails its own PO PDF; carriage minimum £100 ex-VAT — a £90 order was seen carrying carriage
   'PERFORMANCE BRANDS': { supplierKey: 'PERFORMANCE BRANDS', stateId: 12, placeFn: placePerformanceBrandsOrder, threshold: Number(process.env.PERFORMANCE_BRANDS_FREESHIP_THRESHOLD || 200) }, // WooCommerce trade shop; free delivery @ £200 ex-VAT (user), else £7.00 flat. Needs PERFORMANCE_BRANDS_USER/PASS on Alt-Items
   MASCOT: { supplierKey: 'MASCOT', stateId: 13, placeFn: placeMascotOrder, threshold: Number(process.env.MASCOT_FREESHIP_THRESHOLD || 250) }, // b2b.mascot.dk two-stage SAP commit (CreateOrder then ReleaseOrder); free carriage @ £250 ex-VAT. Basket shows LIST price (~1.695x our cost) — never threshold-test on it
+  CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 150) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder). NO POLLER YET — runnable only via /api/purchasing/supplier-scheduled-run until a slot is agreed. THRESHOLD IS A GUESS: £150 is a placeholder, Chadwick's real carriage terms are unconfirmed
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
