@@ -301,12 +301,82 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   const priceGap = fristadsTotal ? +(fristadsTotal - poNet).toFixed(2) : 0;
   steps.priceCheck = { fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap };
   if (fristadsTotal && Math.abs(priceGap) > 0.50) {
-    const breakdown = [...(po.soLines || []), ...(po.lowLines || [])].map((l) => `${l.qty} × ${l.sku} — our £${(l.cost || 0).toFixed(2)}/ea (${l.name})`);
+    // A total-only gap can't say WHICH line is wrong — the 302119-940-47 insole (their Rec. Price
+    // £8.50 sitting in our cost column against a true trade cost of £4.25) had to be found by hand.
+    // So pull the placed order's own line prices and name the offender.
+    //
+    // Matching is by 6-digit ARTICLE, not by SKU, because the two systems don't agree on a SKU:
+    // their line reads "100222-900" + a display size of "L" where ours is 100222-910-407 — a
+    // different colour code AND a numeric size code. The article is the only key both sides share.
+    // Non-fatal throughout: the order is placed and Fristads charge their price regardless.
+    const ourLines = [...(po.soLines || []), ...(po.lowLines || [])];
+    const breakdown = ourLines.map((l) => `${l.qty} × ${l.sku} — our £${(l.cost || 0).toFixed(2)}/ea (${l.name})`);
+    const artOf = (sku) => (String(sku).match(/^(\d{6})/) || [])[1] || null;
+    let changes = [];
+    const ambiguous = [];
+    let lineNote = null;
+    try {
+      const det = await jfetch('price-check', `${altItemsUrl}/api/fristads-order-lines?ref=${encodeURIComponent(orderNo || "")}`, { method: 'GET' });
+      // Refuse to act on a partial parse: if their line totals don't add up to the order total then
+      // a line was missed, and a missing line reads as a price difference that isn't there.
+      if (det && det.reconciles === false) {
+        lineNote = `line prices ignored — parsed £${det.linesTotal} across ${det.lineCount} lines but the order totals £${det.sum}`;
+      } else if (det && det.lineCount) {
+        const theirs = new Map(); // article → { qty, sum }
+        for (const l of det.lines || []) {
+          const art = artOf(l.code);
+          if (!art || !(l.lineSum > 0) || !(l.qty > 0)) continue;
+          const t = theirs.get(art) || { qty: 0, sum: 0 };
+          t.qty += l.qty; t.sum += l.lineSum;
+          theirs.set(art, t);
+        }
+        const ours = new Map(); // article → { qty, net, rows[] }
+        for (const l of ourLines) {
+          const art = artOf(l.sku);
+          if (!art || !(l.cost > 0) || !(l.qty > 0)) continue;
+          const o = ours.get(art) || { qty: 0, net: 0, rows: [] };
+          o.qty += l.qty; o.net += l.cost * l.qty; o.rows.push(l);
+          ours.set(art, o);
+        }
+        for (const [art, o] of ours) {
+          const t = theirs.get(art);
+          if (!t) continue;
+          // A qty mismatch is the multipack signature (one of our units = N of theirs), where any
+          // unit-price comparison is meaningless — see the Blaklader 3625104299004XL case.
+          if (t.qty !== o.qty) continue;
+          const theirUnit = +(t.sum / t.qty).toFixed(4);
+          const ourUnit = +(o.net / o.qty).toFixed(4);
+          if (Math.abs(theirUnit - ourUnit) <= 0.005) continue;
+          // Only one row for this article → the wrong cost is pinned to a SKU and can be healed.
+          // Several rows → the article is out but not which size, so name it and leave it alone.
+          if (o.rows.length === 1) changes.push({ sku: o.rows[0].sku, was: o.rows[0].cost, now: theirUnit });
+          else ambiguous.push({ article: art, ourUnit, theirUnit, skus: o.rows.map((r) => r.sku) });
+        }
+        steps.priceCheck.lines = {
+          articlesCompared: [...ours.keys()].filter((k) => theirs.has(k)).length,
+          differences: changes.length + ambiguous.length,
+          named: changes.map((c) => c.sku),
+          ambiguous: ambiguous.map((x) => x.article),
+        };
+      }
+    } catch (e) { lineNote = `couldn't read line prices from order ${orderNo}: ${e.message}`; }
+    if (lineNote) steps.priceCheck.lineWarn = lineNote;
+
+    const parts = [];
+    for (const c of changes) parts.push(`${c.sku} ours £${c.was.toFixed(2)} vs theirs £${c.now.toFixed(2)}`);
+    for (const x of ambiguous) parts.push(`article ${x.article} ours £${x.ourUnit.toFixed(2)} vs theirs £${x.theirUnit.toFixed(2)} (spans ${x.skus.join(", ")} — size not pinned)`);
+    const named = parts.length
+      ? ` Offending line(s): ${parts.join("; ")}.`
+      : `${lineNote ? " " + lineNote + "." : " Couldn't pin it to a line."}`;
     await logPurchasingError(pool, {
       supplier: 'FRISTADS', step: 'price-check', severity: 'review',
-      message: `Prices don't match: Fristads order total £${fristadsTotal} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}). A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${orderNo} still placed.`,
-      context: { poId, orderNo, fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap, poLines: breakdown },
+      message: `Prices don't match: Fristads order total £${fristadsTotal} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}).${named} A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${orderNo} still placed.`,
+      context: { poId, orderNo, fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap, changes, ambiguous, poLines: breakdown },
     }).catch(() => {});
+
+    // Fristads quote TRADE prices — the £4.25 insole proves it — not list like the Elastic
+    // portals, so a difference pinned to a single SKU is safe to heal.
+    if (changes.length) await healPrices(steps, { supplierKey: 'FRISTADS', poId, pool, changes });
   }
 
   // 5. mark the PO placed + link the Fristads order. Status → Placed FIRST (guaranteed via
