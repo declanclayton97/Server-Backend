@@ -8179,20 +8179,7 @@ app.post('/api/purchasing/product-name-append-live', async (req, res) => {
 // Reports whether weight updated AND whether key fields survived, then restores.
 app.get('/api/purchasing/weight-put-test', async (req, res) => {
   if (!requirePurchasing(res)) return;
-  // ?sku= is resolved to a productId. Previously ONLY productId was read and it fell back to
-  // 1019, so passing a sku returned product 1019's prices under whatever sku you asked about -
-  // it reported the same figures for two different Fristads codes on 2026-08-21 and looked real.
-  let pid = parseInt(req.query.productId, 10) || 0;
-  if (!pid && req.query.sku) {
-    try {
-      const sr = await purchasingAuto.bpLiveGet(`/product-service/product-search?SKU=${encodeURIComponent(req.query.sku)}`);
-      const cols = ((sr && sr.metaData && sr.metaData.columns) || []).map((c) => c.name);
-      const row = ((sr && sr.results) || [])[0];
-      if (row) pid = row[cols.indexOf('productId')];
-    } catch (e) { return res.status(502).json({ error: `sku lookup failed: ${e.message}` }); }
-    if (!pid) return res.status(404).json({ error: `no product found for SKU ${req.query.sku}` });
-  }
-  if (!pid) return res.status(400).json({ error: 'productId or sku required' });
+  const pid = parseInt(req.query.productId, 10) || 1019;
   const w = Number(req.query.weight || 0.15);
   const snap = (p) => ({ weight: p && p.stock && p.stock.weight, sku: p && p.identity && p.identity.sku, name: p && p.salesChannels && p.salesChannels[0] && p.salesChannels[0].productName, brandId: p && p.brandId, taxCode: p && p.financialDetails && p.financialDetails.taxCode });
   try {
