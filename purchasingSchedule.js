@@ -928,6 +928,34 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 // side by <X>_PLACE_ENABLED, and it refuses on any unresolved line). Full cycle: create BP
 // PO → POST /api/<x>-basket {place} → mark placed + ref → finalise SOs (note+status+tag).
 // `live` gates the writes (default on). Contacts: Carhartt 65173, Helly Hansen 214.
+// Fill in colour/size from Brightpearl's variant options for any line missing them, and RETURN the
+// same array so it can be used either way. ONE function used by BOTH the preflight and the
+// checkout, deliberately: enriching only the preflight is worse than not enriching at all, because
+// the preflight then passes, the PO gets created, and the checkout — sending bare SKUs — refuses on
+// the very line the preflight just resolved. PO 483861 was orphaned exactly that way on 2026-08-21.
+// Costs one batched product read at most, and only for lines that actually need it.
+async function withVariantDetail(lines) {
+  const need = lines.filter((l) => !l.colour || !l.size).map((l) => l.productId).filter(Boolean);
+  if (!need.length) return lines;
+  try {
+    const ids = [...new Set(need)].sort((a, b) => a - b);   // Brightpearl 400s on an unsorted id set
+    const arr = await bp.bpLiveGet(`/product-service/product/${ids.join(',')}`) || [];
+    const byId = {};
+    for (const p of (Array.isArray(arr) ? arr : [arr])) {
+      if (!p || p.id == null) continue;
+      const v = {};
+      for (const o of (p.variations || [])) v[String(o.optionName || '').toLowerCase()] = o.optionValue;
+      byId[String(p.id)] = v;
+    }
+    for (const l of lines) {
+      const v = byId[String(l.productId)];
+      if (!v) continue;
+      if (!l.colour) l.colour = v.colour || v.color || null;
+      if (!l.size) l.size = v.size || null;
+    }
+  } catch { /* additive only — without it we simply fall back to the old behaviour */ }
+  return lines;
+}
 async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, basketPath, padToThreshold = 0, live = true } = {}) {
   const steps = {};
   // Pre-flight (only on a real run): value the demand + confirm the portal resolves EVERY line
@@ -947,28 +975,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
     const preLines = [...(preview.soLines || []), ...(preview.lowLines || [])]
       .filter((l) => String(l.productId) !== '1000' && l.sku)
       .map((l) => ({ sku: l.sku, qty: l.qty, name: l.name, colour: l.colour, size: l.size, productId: l.productId }));
-    // Fill in colour/size for anything the demand read did not carry them for — only for lines that
-    // need it, so this costs one batched product read at most.
-    const needVariant = preLines.filter((l) => !l.colour || !l.size).map((l) => l.productId).filter(Boolean);
-    if (needVariant.length) {
-      try {
-        const ids = [...new Set(needVariant)].sort((a, b) => a - b);   // BP 400s on an unsorted id set
-        const arr = await bp.bpLiveGet(`/product-service/product/${ids.join(',')}`) || [];
-        const byId = {};
-        for (const p of (Array.isArray(arr) ? arr : [arr])) {
-          if (!p || p.id == null) continue;
-          const v = {};
-          for (const o of (p.variations || [])) v[String(o.optionName || '').toLowerCase()] = o.optionValue;
-          byId[String(p.id)] = v;
-        }
-        for (const l of preLines) {
-          const v = byId[String(l.productId)];
-          if (!v) continue;
-          if (!l.colour) l.colour = v.colour || v.color || null;
-          if (!l.size) l.size = v.size || null;
-        }
-      } catch { /* additive only — without it we simply fall back to the old behaviour */ }
-    }
+    await withVariantDetail(preLines);
     if (preLines.length) {
       const dry = await jfetch('preflight', `${altItemsUrl}${basketPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: preLines, dryRun: true }) });
       if (dry.unresolved && dry.unresolved.length) throw stepErr('preflight', `${supplierKey} lines not on the portal (PO NOT created): ${dry.unresolved.join(', ')} — fix the resolver/aliases first`);
@@ -1012,9 +1019,21 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
 
   // Order lines = the PO's SKUs (skip the =====LOW INV==== separator), summed per SKU.
   const bySku = new Map();
-  for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) { if (String(l.productId) === '1000' || !l.sku) continue; const k = String(l.sku).toUpperCase(); bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty)); }
-  const lines = [...bySku.entries()].map(([sku, qty]) => ({ sku, qty }));
+  for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
+    if (String(l.productId) === '1000' || !l.sku) continue;
+    const k = String(l.sku).toUpperCase();
+    const cur = bySku.get(k) || { qty: 0, name: l.name, productId: l.productId, colour: l.colour, size: l.size };
+    cur.qty += Math.round(l.qty);
+    if (!cur.name) cur.name = l.name;
+    bySku.set(k, cur);
+  }
+  let lines = [...bySku.entries()].map(([sku, v]) => ({ sku, qty: v.qty, name: v.name, colour: v.colour, size: v.size, productId: v.productId }));
   if (!lines.length) throw stepErr('resolve', `no orderable ${supplierKey} lines`);
+  // Carry name/colour/size through to the CHECKOUT too, not just the preflight. Enriching only the
+  // preflight is worse than not enriching at all: the preflight then PASSES, the PO gets created,
+  // and the checkout - sending bare SKUs - refuses on the very line the preflight just resolved.
+  // That is exactly how PO 483861 was orphaned on 2026-08-21 over 802211-001L.
+  lines = await withVariantDetail(lines);
   steps.resolve = { lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0) };
 
   // Build + submit the document via the Alt-Items basket route (ref = PO# → the document PO field).
