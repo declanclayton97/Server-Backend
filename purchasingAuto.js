@@ -141,6 +141,13 @@ export const SUPPLIERS = {
   // treats a single "Scruffs" tag as "take every row", and a dry run built a PO carrying a Snickers
   // 6972 trouser at GBP90.35 and a Blaklader waistcoat at GBP0.
   SCRUFFS:      { contactId: 130243, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 130243, detect: (n) => /scruffs/i.test(n || '') },
+  // Performance Brands (WooCommerce trade store). 918 products across SEVERAL brands they
+  // distribute — PERF (302), LEMAITRE (116), SAFETIX (52), Y-SHIELD, VIRGO — so a name detect alone
+  // misses about a third of the catalogue. The BP primarySupplierId union carries the remainder;
+  // broad SKU prefixes (PB/CT/CC/ML/TB/CF/FA) were deliberately NOT used as a detector because they
+  // are short enough to collide with other suppliers' codes. Shares PCF_STOCKPO — safe now that PO
+  // fields append rather than overwrite. Free delivery at £200 + VAT, else £7 flat.
+  'PERFORMANCE BRANDS': { contactId: 11611, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 11611, detect: (n) => /^perf\b|performance\s*brands|lemaitre|safetix|y-?shield|virgo/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
