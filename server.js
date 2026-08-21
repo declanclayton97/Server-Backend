@@ -9180,6 +9180,27 @@ if (process.env.PERFORMANCE_BRANDS_SCHEDULE_ENABLED !== 'false') {
   }, 5 * 60 * 1000);
   console.log('✅ Performance Brands auto-purchase poller scheduled (weekdays 14:30 UK, £200 free-delivery threshold)');
 } else { console.log('⏸️  Performance Brands auto-purchase poller DISABLED (PERFORMANCE_BRANDS_SCHEDULE_ENABLED=false)'); }
+// Mascot auto-purchase poller — weekdays 11:30 UK. Alt-Items fills the basket then runs Mascot's
+// TWO-STAGE SAP commit (CreateOrder → ReleaseOrder). Free carriage @ £250 ex-VAT, state row id 13.
+// 11:30–11:59 sits after Helly Hansen (11:00) and before Castle (12:00). HH is a portal run that can
+// overrun its 30 minutes and hold the single `running` lock; that only costs Mascot a tick, because
+// the poller retries every 5 minutes across its own window.
+// A ReleaseOrder failure is reported with needsHuman + the SAP number and MUST NOT be re-run: the
+// CreateOrder before it has already left a draft at Mascot that Brightpearl cannot see.
+if (process.env.MASCOT_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 11 && uk.minute >= 30)) return; // 11:30–11:59 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'MASCOT' })
+        .then((r) => { if (!r.skipped) console.log('[mascot-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[mascot-schedule] error:', e.message));
+    } catch (e) { console.error('[mascot-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Mascot auto-purchase poller scheduled (weekdays 11:30 UK, £250 threshold)');
+} else { console.log('⏸️  Mascot auto-purchase poller DISABLED (MASCOT_SCHEDULE_ENABLED=false)'); }
 
 
 async function sendOutOfStockEmail(supplier, lines, to) {

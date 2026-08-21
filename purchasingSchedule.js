@@ -640,6 +640,66 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   return { poId, orderNo, steps };
 }
 
+// ── Mascot placement chain (b2b.mascot.dk, ASP.NET portal) ──────────────────
+// Alt-Items fills the basket, then runs Mascot's TWO-STAGE commit: /Sap/CreateOrder creates the SAP
+// order (the portal's "Check Discount" button) and /Sap/ReleaseOrder commits it (the "Release"
+// button). Our PO number goes in DealerRequisitionNumber — not RequisitionNumber, which is what the
+// original scope wrongly said.
+// First order placed by hand 2026-08-21: SAP 0006520340 for PO 483781, 11 units.
+// Free-carriage threshold £250.
+//
+// Mascot's basket shows LIST prices — they ran exactly 1.695x our Launch cost on every line of that
+// first order (£986.45 list = £581.98 to us). So the run report deliberately records the list value
+// WITHOUT comparing it to the PO: a "mismatch" there is the discount, not an error.
+const MASCOT_SUPPLIER_CONTACT = 334;
+
+async function placeMascotOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await bp.createComboPOLive({ supplierKey: 'MASCOT', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // name is sent because the EAN resolver narrows the catalogue by the style code parsed out of the
+  // product NAME before matching our EAN against the size rows.
+  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])]
+    .filter((l) => String(l.productId) !== '1000' && l.sku)
+    .map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name }));
+  if (!orderLines.length) throw stepErr('cart', 'no orderable Mascot lines');
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  const r = await jfetch('checkout', `${altItemsUrl}/api/mascot-order`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: live }),
+  });
+
+  // A release failure is the one outcome that must never be retried: CreateOrder has already left a
+  // draft at Mascot that Brightpearl cannot see, so a re-run would order everything twice. Surface
+  // the SAP number in the message so a human can release or cancel that exact draft.
+  if (r.needsHuman || r.step === 'release') {
+    throw stepErr('release', `${r.error || 'ReleaseOrder failed'} — PO#${poId} left for review. DO NOT re-run Mascot until SAP ${r.sapNumber || '(unknown)'} is released or cancelled in the portal.`, { poId, sapNumber: r.sapNumber, needsHuman: true });
+  }
+  if (!r.ok) throw stepErr(r.step || 'checkout', `Mascot did not confirm the order: ${String(r.error || JSON.stringify(r)).slice(0, 300)}`, { poId, basket: r.basket });
+
+  const sapNumber = r.sapNumber || null;
+  steps.checkout = { ok: true, sapNumber, units: r.units, listValue: r.listValue, lineCount: r.lineCount };
+
+  const ref = sapNumber || `Placed-${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Mascot — SAP order ${ref}. Reference-set failed: ${e.message}`, MASCOT_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: ref, refWritten, sapNumber, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'MASCOT', poId, noteContactId: MASCOT_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo: sapNumber, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -1122,6 +1182,7 @@ const SCHEDULED_SUPPLIERS = {
   BLAKLADER: { supplierKey: 'BLAKLADER', stateId: 10, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300) }, // api.blaklader.com order API (POST /order/orders); carriage paid @ £300 ex-VAT, else £13.00 (same sheet — was a £150 guess); submit body still needs first-order validation
   SCRUFFS: { supplierKey: 'SCRUFFS', stateId: 11, placeFn: placeScruffsOrder, threshold: Number(process.env.SCRUFFS_FREESHIP_THRESHOLD || 100) }, // email supplier (salesorders@scruffs.com), BP emails its own PO PDF; carriage minimum £100 ex-VAT — a £90 order was seen carrying carriage
   'PERFORMANCE BRANDS': { supplierKey: 'PERFORMANCE BRANDS', stateId: 12, placeFn: placePerformanceBrandsOrder, threshold: Number(process.env.PERFORMANCE_BRANDS_FREESHIP_THRESHOLD || 200) }, // WooCommerce trade shop; free delivery @ £200 ex-VAT (user), else £7.00 flat. Needs PERFORMANCE_BRANDS_USER/PASS on Alt-Items
+  MASCOT: { supplierKey: 'MASCOT', stateId: 13, placeFn: placeMascotOrder, threshold: Number(process.env.MASCOT_FREESHIP_THRESHOLD || 250) }, // b2b.mascot.dk two-stage SAP commit (CreateOrder then ReleaseOrder); free carriage @ £250 ex-VAT. Basket shows LIST price (~1.695x our cost) — never threshold-test on it
 };
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
