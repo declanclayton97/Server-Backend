@@ -7677,6 +7677,43 @@ app.patch('/api/purchasing/pending-lines/:id', express.json(), async (req, res) 
 
 // Set ONE PO row unit cost (delete + re-add, tax preserved). Dry-run unless execute:true;
 // expectCurrent guards against repricing a row that has already moved.
+
+// Remove ONE row from a PO, addressed by SKU rather than rowId. Needed when a line turns out to be
+// unorderable — on PO 483708 the Y-Shield H3 White hard hat was out of stock at the supplier with no
+// back-order route, so the PO had to stop claiming it was on order.
+// /api/debug/bp-row-delete exists but drives the Brightpearl WEB UI and returned "order form not
+// found on the page"; this goes at the API instead. Refuses unless exactly one row carries the SKU,
+// and (optionally) unless the quantity matches expectQty — deleting the wrong row of a PO is not
+// something to leave to a typo. Dry-run unless execute:true.
+// body: { poId, sku, expectQty, execute }
+app.post('/api/purchasing/remove-po-row-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  if (!b.poId || !b.sku) return res.status(400).json({ error: 'poId and sku required' });
+  try {
+    const read = async () => (await purchasingAuto.bpApi('GET', `/order-service/order/${b.poId}`))[0];
+    const po = await read();
+    if (!po) return res.status(404).json({ error: `PO ${b.poId} not found` });
+    const hits = Object.entries(po.orderRows || {})
+      .filter(([, r]) => String(r.productSku || '').toUpperCase() === String(b.sku).toUpperCase());
+    if (!hits.length) return res.json({ refused: true, reason: 'no row on this PO has that SKU', poId: b.poId, sku: b.sku });
+    if (hits.length > 1) return res.json({ refused: true, reason: `${hits.length} rows share that SKU — refusing to guess which`, poId: b.poId, sku: b.sku });
+    const [rowId, row] = hits[0];
+    const qty = parseFloat(row.quantity.magnitude);
+    const net = parseFloat(row.rowValue.rowNet.value);
+    if (b.expectQty != null && Math.abs(qty - Number(b.expectQty)) > 0.001) {
+      return res.json({ refused: true, reason: `row qty is ${qty}, expected ${b.expectQty} — not touching it`, poId: b.poId, sku: b.sku });
+    }
+    const plan = { poId: b.poId, sku: b.sku, rowId, qty, rowNet: net, name: row.productName || null, poNetWas: po.totalValue && po.totalValue.net };
+    if (b.execute !== true) return res.json({ dryRun: true, ...plan });
+    await purchasingAuto.bpApi('DELETE', `/order-service/order/${b.poId}/row/${rowId}`);
+    // Read back rather than trust the write.
+    const after = await read();
+    const still = Object.values((after && after.orderRows) || {})
+      .some((r) => String(r.productSku || '').toUpperCase() === String(b.sku).toUpperCase());
+    res.json({ done: !still, ...plan, poNetNow: after && after.totalValue && after.totalValue.net });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.post('/api/purchasing/set-po-row-cost-live', express.json(), async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
   const b = req.body || {};
