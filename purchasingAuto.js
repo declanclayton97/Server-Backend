@@ -1528,6 +1528,39 @@ export async function stampPoFieldLive({ orderIds = [], supplierKey, poField, po
 }
 
 
+
+// Add a TEXT/misc row to a PO — productId 1000, the same non-stock carrier the "=====LOW INV===="
+// separator and the "Shipping:" rows use. It carries a value for invoice matching WITHOUT creating
+// a stock expectation, which is the whole point: on PO 483751 the four carry-forward t-shirts
+// (362510428600L ×4, £4.55 each) are genuinely being bought and invoiced, but their STOCK was
+// already accounted for on PO 483480 — that order's single BP unit was a 5-pack and only one piece
+// arrived. A stock row here would book the same shirts in twice.
+// Refuses to duplicate an identical name on the same PO, so a re-run cannot silently double it.
+// Dry-run unless { execute: true }.
+export async function addPoMiscRowLive({ poId, name, net, qty = 1, taxCode = 'T20', execute = false } = {}) {
+  if (!poId || !name) throw new Error('poId and name required');
+  const value = Number(net);
+  if (!(value >= 0)) throw new Error('net must be a number >= 0');
+  const po = (await liveGet(`/order-service/order/${poId}`))[0];
+  if (!po) throw new Error(`PO ${poId} not found`);
+  const already = Object.values(po.orderRows || {})
+    .some((r) => String(r.productId) === '1000' && String(r.productName || '').trim() === String(name).trim());
+  if (already) return { refused: true, poId, name, reason: 'a misc row with that exact text is already on this PO' };
+  const rate = taxRate(taxCode);
+  const plan = { poId, name, qty, net: Number(value.toFixed(2)), taxCode, poNetWas: po.totalValue && po.totalValue.net };
+  if (!execute) return { dryRun: true, ...plan };
+  await liveWrite('POST', `/order-service/order/${poId}/row`, {
+    productId: 1000,
+    productName: name,
+    quantity: { magnitude: String(qty) },
+    rowValue: { taxCode, rowNet: { currency: 'GBP', value: value.toFixed(2) }, rowTax: { currency: 'GBP', value: (value * rate).toFixed(2) } },
+  });
+  // Read back rather than trust the write.
+  const after = (await liveGet(`/order-service/order/${poId}`))[0];
+  const landed = Object.values((after && after.orderRows) || {})
+    .some((r) => String(r.productId) === '1000' && String(r.productName || '').trim() === String(name).trim());
+  return { done: landed, ...plan, poNetNow: after && after.totalValue && after.totalValue.net };
+}
 // Remove ONE row from a PO, addressed by SKU rather than rowId. Needed when a line turns out to be
 // unorderable and the PO should stop claiming it is on order — on PO 483708 the Y-Shield H3 White
 // hard hat was out of stock at Performance Brands with no back-order route (their out-of-stock grid

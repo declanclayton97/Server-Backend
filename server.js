@@ -7686,6 +7686,13 @@ app.patch('/api/purchasing/pending-lines/:id', express.json(), async (req, res) 
 // and (optionally) unless the quantity matches expectQty — deleting the wrong row of a PO is not
 // something to leave to a typo. Dry-run unless execute:true.
 // body: { poId, sku, expectQty, execute }
+// Add a TEXT/misc row (productId 1000) to a PO — value for invoice matching, no stock expectation.
+app.post('/api/purchasing/add-po-misc-row-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  try { res.json(await purchasingAuto.addPoMiscRowLive({ poId: Number(b.poId), name: b.name, net: b.net, qty: b.qty, taxCode: b.taxCode, execute: b.execute === true })); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
 app.post('/api/purchasing/remove-po-row-live', express.json(), async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
   const b = req.body || {};
