@@ -1069,7 +1069,14 @@ const PORTWEST_SUPPLIER_CONTACT = 298;
 // TEMP safety: never auto-order these Portwest codes (unit/pack mismatch being fixed in BP).
 // P351WHR is a BOX OF 20 but BP tracks it in singles → user is re-adding it as a NEW box
 // product. REMOVE from this list once that's done. Applied to every Portwest run (incl. scheduled).
-const PORTWEST_TEMP_EXCLUDE = ['P351WHR'];
+//
+// 196109 is the SAME product as P351WHR — it is the Brightpearl SKU our PO rows actually carry,
+// while P351WHR is Portwest's own code. On PO 483845 (2026-08-21) this exclusion therefore did NOT
+// match: the line went up as 196109, Portwest did not recognise it, and it was dropped. The right
+// outcome, but by luck rather than by the guard — had Portwest accepted that code we would have
+// bought 48 loose masks against an explicit instruction not to. An exclusion has to be expressed in
+// the code the PO ROW carries, so BOTH spellings are listed until the box product replaces it.
+const PORTWEST_TEMP_EXCLUDE = ['P351WHR', '196109'];
 async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null, packSizes = {}, excludeSkus = [] } = {}) {
   const steps = {};
   let poId, soIds, linesByOrder;
