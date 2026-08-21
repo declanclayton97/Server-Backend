@@ -611,9 +611,14 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   // no supplier code in it (191339 is the Y-Shield H3) and can only be found by the style code in
   // the NAME. cost is sent so Alt-Items can report where the supplier's live price disagrees with
   // our Launch cost — PB56C was £43.05 against £39.50 when this was built.
-  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])]
+  const orderLines = [
+    ...(po.soLines || []).map((l) => ({ ...l, lowInv: false })),
+    ...(po.lowLines || []).map((l) => ({ ...l, lowInv: true })),
+  ]
     .filter((l) => String(l.productId) !== '1000' && l.sku)
-    .map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name }));
+    // lowInv must survive this map: Alt-Items uses it to decide whether an unorderable line drops
+    // out or kills the run.
+    .map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name, lowInv: !!l.lowInv }));
   if (!orderLines.length) throw stepErr('cart', 'no orderable Performance Brands lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
@@ -638,6 +643,22 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   const orderNo = r.orderNo || null;
   // priceWarns makes a stale cost list visible in the run report instead of only on the invoice.
   steps.checkout = { ok: true, orderNo, total: r.total, expectNet: r.expectNet, priceWarns: r.priceWarns || [] };
+
+  // A LOW-INVENTORY line that could not be ordered is dropped rather than allowed to abort the run
+  // — see the reasoning in performanceBrands.js — but it must never disappear quietly. Log it for
+  // review so a top-up that keeps failing gets noticed instead of silently never arriving.
+  const dropped = r.droppedLowInv || [];
+  if (dropped.length) {
+    steps.droppedLowInv = dropped;
+    await logPurchasingError(pool, {
+      supplier: 'PERFORMANCE BRANDS', step: 'low-inv-dropped', severity: 'review',
+      message: `${dropped.length} low-inventory line(s) could NOT be ordered and were left off PO#${poId}. `
+        + `Customer demand was unaffected and the order was placed. This supplier has no back-order route, `
+        + `so these need stock or an email to sales@performance-brands.com:\n`
+        + dropped.map((d) => `      ${d.qty} × ${d.sku} — ${d.reason}`).join('\n'),
+      context: { poId, dropped },
+    }).catch(() => {});
+  }
 
   const ref = orderNo || `Placed-${poId}`;
   await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
