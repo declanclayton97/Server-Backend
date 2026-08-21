@@ -8534,8 +8534,11 @@ app.get('/api/purchasing/price-inspect', async (req, res) => {
   }
   if (!pid) return res.status(400).json({ error: 'productId or sku required' });
   try {
-    const priceResp = await purchasingAuto.bpApi('GET', `/product-service/product-price/${pid}`);
-    const prodResp = await purchasingAuto.bpApi('GET', `/product-service/product/${pid}`);
+    // bpLiveGet, not bpApi. bpApi points at a DIFFERENT Brightpearl client that cannot see live
+    // products at all — with the sku lookup fixed this route immediately 404'd on product 360049,
+    // which does exist. Same trap that made removePoRowLive report "PO not found" for a real PO.
+    const priceResp = await purchasingAuto.bpLiveGet(`/product-service/product-price/${pid}`);
+    const prodResp = await purchasingAuto.bpLiveGet(`/product-service/product/${pid}`);
     const p = Array.isArray(prodResp) ? prodResp[0] : prodResp;
     const priceLists = (priceResp[0] && priceResp[0].priceLists) || priceResp;
     res.json({
