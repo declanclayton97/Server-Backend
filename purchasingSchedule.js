@@ -1107,12 +1107,18 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   //    its carton/min-order, so the cart can hold MORE than we asked — we accept that (order the
   //    min) and bump the PO to match. A line the portal wouldn't take (0 in the cart) is dropped
   //    from the PO. Guard against a systemic failure (empty cart / unexpected extras / mass drop).
-  const got = new Map(); for (const l of cart) got.set(String(l.sku).toUpperCase(), (got.get(String(l.sku).toUpperCase()) || 0) + (Number(l.qty) || 0));
+  // Compare on a SLASH-NORMALISED code. Portwest sizes can contain a slash ("L/XL") and the cart's
+  // delete-line URL does not reliably carry it, so our PO row C472YERL/XL and the cart's C472YERL
+  // are the SAME line. Matching them literally produced two contradictory findings at once on
+  // 2026-08-21 — the cart code counted as an unexpected extra AND the PO row counted as dropped —
+  // and aborted PO 483845 over a cart that was entirely correct.
+  const nk = (s) => String(s).toUpperCase().replace(/\//g, '');
+  const got = new Map(); for (const l of cart) got.set(nk(l.sku), (got.get(nk(l.sku)) || 0) + (Number(l.qty) || 0));
   // Diff the CART against the ORIGINAL PO ROWS (not the pack-adjusted upload) so BOTH Portwest's
   // carton rounding and our own pack rounding surface as bumps to apply to the PO.
   const bumped = [], droppedLines = [], matched = [];
-  for (const l of poRowLines) { const g = got.get(String(l.sku).toUpperCase()) || 0; if (g === 0) droppedLines.push({ sku: l.sku, want: l.qty }); else if (g !== l.qty) bumped.push({ sku: l.sku, from: l.qty, to: g }); else matched.push(l.sku); }
-  const extra = [...got.keys()].filter((s) => !poRowLines.some((l) => String(l.sku).toUpperCase() === s));
+  for (const l of poRowLines) { const g = got.get(nk(l.sku)) || 0; if (g === 0) droppedLines.push({ sku: l.sku, want: l.qty }); else if (g !== l.qty) bumped.push({ sku: l.sku, from: l.qty, to: g }); else matched.push(l.sku); }
+  const extra = [...got.keys()].filter((s) => !poRowLines.some((l) => nk(l.sku) === s));
   const cartUnits = [...got.values()].reduce((a, b) => a + b, 0);
   steps.verify = { poLineCount: poRowLines.length, cartLineCount: cart.length, matched: matched.length, bumped, dropped: droppedLines, extra };
   if (!cart.length || cartUnits === 0) throw stepErr('verify', `Portwest cart is empty after upload — aborting. PO#${poId} left for review.`, { poId });
