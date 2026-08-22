@@ -172,23 +172,32 @@ async function sendAlertEmail({ supplier, step, message, context, severity = 'er
   if (!process.env.SMTP_PASS) return;
   const when = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
   const review = severity === 'review';
-  const colour = review ? '#e65100' : '#c62828';
-  const heading = review ? `${supplier} auto-purchase — NEEDS REVIEW` : `${supplier} auto-purchase failed`;
-  const footer = review
+  // 'info' is a NOTIFICATION, not a problem — currently "we changed a cost price in Brightpearl".
+  // Without its own rendering it inherited the error styling and went out as "auto-purchase
+  // failed", which is how nine price-heal escalations once read as nine failed runs.
+  const info = severity === 'info';
+  const colour = info ? '#2e7d32' : review ? '#e65100' : '#c62828';
+  const mark = info || review ? 'ⓘ' : '⚠';
+  const heading = info ? `${supplier} — Brightpearl cost prices updated`
+    : review ? `${supplier} auto-purchase — NEEDS REVIEW`
+    : `${supplier} auto-purchase failed`;
+  const footer = info
+    ? `<p><strong>Nothing is wrong and nothing needs doing.</strong> The supplier charged a different price to the one held in Brightpearl, so the cost (Launch/list 20) was corrected automatically and the PO re-priced to match. Told to you because every automatic cost change is worth seeing.</p>`
+    : review
     ? `<p><strong>The order was placed.</strong> This is flagged for a human to correct in Brightpearl — nothing is blocked and the next scheduled run is unaffected.</p>`
     : `<p>Nothing further was placed on this run. Check Brightpearl + the ${supplier} portal, then it will retry on the next scheduled run.</p>`;
-  const html = `<p style="color:${colour}"><strong>${review ? 'ⓘ' : '⚠'} ${heading}</strong> — ${when}</p>
+  const html = `<p style="color:${colour}"><strong>${mark} ${heading}</strong> — ${when}</p>
     <ul>
       <li><strong>Step:</strong> ${step}</li>
-      <li><strong>${review ? 'Detail' : 'Problem'}:</strong> ${escapeHtml(message)}</li>
+      <li><strong>${info ? 'Change' : review ? 'Detail' : 'Problem'}:</strong> ${escapeHtml(message)}</li>
     </ul>
     ${context ? `<pre style="background:#f5f5f5;padding:8px;border-radius:4px;white-space:pre-wrap">${escapeHtml(JSON.stringify(context, null, 2))}</pre>` : ''}
     ${footer}`;
   await transporter().sendMail({
     from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO,
-    subject: `${review ? 'ⓘ' : '⚠'} ${supplier} auto-purchase ${review ? 'review' : 'error'} — ${step}`,
+    subject: info ? `ⓘ ${supplier} — cost price updated in Brightpearl` : `${mark} ${supplier} auto-purchase ${review ? 'review' : 'error'} — ${step}`,
     html,
-    text: `${supplier} auto-purchase ${review ? 'REVIEW (order was placed)' : 'ERROR (run stopped)'} at step "${step}": ${message}\n\n${context ? JSON.stringify(context, null, 2) : ''}`,
+    text: `${supplier} ${info ? 'COST PRICE UPDATED (no action needed)' : review ? 'auto-purchase REVIEW (order was placed)' : 'auto-purchase ERROR (run stopped)'} at step "${step}": ${message}\n\n${context ? JSON.stringify(context, null, 2) : ''}`,
   });
 }
 const escapeHtml = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -221,6 +230,18 @@ async function healPrices(steps, { supplierKey, poId, changes, pool }) {
     // (user, 2026-08-18). Re-price from the SUPPLIER'S OWN list, only when a heal actually applied.
     // repriceComboPOLive refuses if the PO holds a productId-1000 row that is not the =====LOW INV====
     // separator, so a Shipping or proof-instruction row can never be renamed and zeroed by this.
+    // Every cost written to Brightpearl gets an alert. Applied heals used to appear ONLY in the run
+    // report — the escalated ones emailed, the ones actually CHANGED did not — so the automatic
+    // edits to live cost data were the invisible ones. severity 'info' renders as a notification,
+    // not a failure, and is kept out of the triage work queue.
+    if (r.applied && r.applied.length && !r.dryRun) {
+      const list = r.applied.map((a) => `${a.sku} £${Number(a.was).toFixed(2)} → £${Number(a.now).toFixed(2)}`).join('; ');
+      await logPurchasingError(pool, {
+        supplier: supplierKey, step: 'price-heal-applied', severity: 'info',
+        message: `${r.applied.length} cost price(s) corrected on list ${r.listId} from what ${supplierKey} actually charged: ${list}`,
+        context: { poId, listId: r.listId, applied: r.applied },
+      }).catch(() => {});
+    }
     if (r.applied && r.applied.length && process.env.PRICE_HEAL_ENABLED !== 'false') {
       try {
         const rp = await bp.repriceComboPOLive({ poId, priceListId: r.listId, execute: true });

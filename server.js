@@ -8997,6 +8997,9 @@ app.get('/api/purchasing/error-log', async (req, res) => {
     // ?unhandled=1 is the triage WORK QUEUE: rows nobody has claimed yet. Without it an automated
     // pass re-diagnoses the same failure on every run.
     if (req.query.unhandled === '1') where.push(`handled_at IS NULL`);
+    // severity 'info' rows are NOTIFICATIONS (e.g. "a cost price was corrected"), not work. They
+    // would otherwise sit in the unhandled queue forever and read as a backlog of failures.
+    if (req.query.includeInfo !== '1' && !req.query.severity) where.push(`(severity IS DISTINCT FROM 'info')`);
     if (req.query.sinceHours) { args.push(Number(req.query.sinceHours)); where.push(`created_at > now() - ($${args.length} || ' hours')::interval`); }
     args.push(limit);
     const r = await pool.query(`SELECT id, created_at, supplier, step, message, context, severity, handled_at, handled_by, handled_note FROM purchasing_error_log`
