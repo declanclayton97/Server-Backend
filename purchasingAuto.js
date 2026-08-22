@@ -2115,6 +2115,35 @@ export async function healSupplierCosts({ supplierKey, poId, changes = [], pool 
 // Read a PO's contributing SOs from its OWN note (createComboPOLive writes "SO#<id> (<ref>):
 // <sku> x<qty>, …" lines). Returns { soIds:[], linesByOrder:{ id:[{sku,qty}] } }. Used to
 // finalise a REUSED PO whose live demand now nets to zero (it's already on order via that PO).
+// Every PO raised for this supplier TODAY, with its status. This is the hard evidence behind any
+// decision to re-run a supplier after a failure: the scheduler's day-claim says whether a run was
+// ATTEMPTED, but only Brightpearl says whether an order actually landed. On 2026-08-19 a duplicate
+// live order (£539.85) had to be cancelled with the supplier — a check like this would have caught
+// it, because the first PO was already sitting there at status Placed.
+export async function supplierPosToday(supplierKey) {
+  const sup = SUPPLIERS[String(supplierKey).toUpperCase()];
+  if (!sup) throw new Error(`unknown supplier ${supplierKey}`);
+  const p = {};
+  for (const x of new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date())) p[x.type] = x.value;
+  const today = `${p.year}-${p.month}-${p.day}`;
+  const search = await liveGet(`/order-service/order-search?orderTypeId=2&createdOn=${today}/&pageSize=500`);
+  const cols = ((search && search.metaData && search.metaData.columns) || []).map((c) => c.name);
+  const iId = cols.indexOf('orderId'), iStatus = cols.indexOf('orderStatusId'), iContact = cols.indexOf('contactId'), iCreated = cols.indexOf('createdOn');
+  const rows = ((search && search.results) || [])
+    .filter((r) => iContact < 0 || String(r[iContact]) === String(sup.contactId))
+    .map((r) => ({ poId: r[iId], statusId: iStatus >= 0 ? Number(r[iStatus]) : null, createdOn: iCreated >= 0 ? r[iCreated] : null }));
+  return {
+    supplier: String(supplierKey).toUpperCase(),
+    contactId: sup.contactId,
+    today,
+    // contactId missing from the search columns would silently match every supplier's POs, which
+    // would read as "already ordered" for everyone — say so rather than guess.
+    contactFilterApplied: iContact >= 0,
+    pos: rows,
+    placed: rows.filter((r) => r.statusId === PLACED_WITH_SUPPLIER_STATUS),
+  };
+}
+
 export async function getPoContributors(poId) {
   let notes = [];
   try { notes = (await liveGet(`/order-service/order/${poId}/note`)) || []; } catch { return { soIds: [], linesByOrder: {} }; }

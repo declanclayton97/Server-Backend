@@ -1460,6 +1460,44 @@ const SCHEDULED_SUPPLIERS = {
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). NO POLLER YET — runnable only via /api/purchasing/supplier-scheduled-run until a slot is agreed
 };
 
+// ── what the scheduler currently knows ───────────────────────────────────────
+// Deploy safety used to be a pure guess from the clock: refuse from 10 minutes before a window
+// until 45 minutes after it opens. Chain that across every supplier and the whole trading day is
+// blocked bar a five-minute gap at 12:45 — so "fix it and get it back in before the next window"
+// was impossible to do safely.
+//
+// The actual hazard is narrower. On 2026-08-19 the damage was done by restarting the service
+// WHILE A RUN WAS IN FLIGHT: the day-claim never saved, so the poller fired again and placed a
+// duplicate live order. A restart is harmless to a supplier that has ALREADY claimed today, because
+// the claim stops it firing again regardless.
+//
+// So expose the two facts that decide it — is a run in flight, and who has claimed today — and let
+// the caller reason from those instead of from the clock.
+export const isRunInFlight = () => running;
+
+export async function schedulerState(pool) {
+  const uk = ukNow();
+  const suppliers = [];
+  for (const [key, cfg] of Object.entries(SCHEDULED_SUPPLIERS)) {
+    let st = null;
+    try { st = await getState(pool, cfg.stateId); } catch { /* a missing row is not fatal here */ }
+    const lastRunDate = st && st.last_run_date ? ukDateStr(st.last_run_date) : null;
+    suppliers.push({
+      supplier: key,
+      stateId: cfg.stateId,
+      lastRunDate,
+      claimedToday: lastRunDate === uk.date,
+      thresholdNet: cfg.threshold,
+    });
+  }
+  return {
+    uk: { ...uk, isWeekday: isUkWeekday(uk.weekday) },
+    running,
+    suppliers,
+    note: 'claimedToday=true means that supplier will NOT fire again today, so a restart cannot cause a duplicate run for it.',
+  };
+}
+
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
 export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false, forcePlace = false } = {}) {
   const cfg = SCHEDULED_SUPPLIERS[String(supplier).toUpperCase()];

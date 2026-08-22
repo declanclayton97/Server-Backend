@@ -9009,6 +9009,69 @@ app.get('/api/purchasing/error-log', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// What the scheduler currently knows: is a run in flight, and who has already claimed today.
+// A deploy is dangerous while a run is IN FLIGHT (the 2026-08-19 duplicate came from restarting
+// mid-run so the day-claim never saved). It is NOT dangerous for a supplier that has already
+// claimed today, because the claim stops it firing again whatever happens to the process.
+app.get('/api/purchasing/run-state', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try { res.json(await purchasingSchedule.schedulerState(pool)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Go/no-go on re-running a supplier after a failure. READ-ONLY — it decides nothing and places
+// nothing; it gathers the evidence so a caller (or an unattended triage pass) cannot re-run on a
+// hunch. Ordering twice cannot be undone by a revert, so every check defaults to UNSAFE when it
+// cannot prove otherwise.
+app.get('/api/purchasing/force-run-safety', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  const supplier = String(req.query.supplier || '').toUpperCase();
+  if (!supplier) return res.status(400).json({ error: 'supplier query param required' });
+  try {
+    const sched = await purchasingSchedule.schedulerState(pool);
+    const entry = sched.suppliers.find((s) => s.supplier === supplier);
+    if (!entry) return res.status(400).json({ error: `${supplier} is not a scheduled supplier`, known: sched.suppliers.map((s) => s.supplier) });
+
+    let bp = null, bpError = null;
+    try { bp = await purchasingAuto.supplierPosToday(supplier); }
+    catch (e) { bpError = e.message; }
+
+    await purchasingSchedule.ensureErrorTable(pool);
+    const errs = await pool.query(
+      `SELECT id, step, message, severity, created_at, handled_at FROM purchasing_error_log
+       WHERE upper(supplier) = $1 AND created_at > now() - interval '20 hours' ORDER BY id DESC LIMIT 20`, [supplier]);
+
+    const blockers = [];
+    if (sched.running) blockers.push('a purchasing run is IN FLIGHT right now — wait for it to finish');
+    if (!entry.claimedToday) blockers.push('this supplier has NOT claimed today, so its own poller will still run — forcing would duplicate that');
+    if (bpError) blockers.push(`could not read today's POs from Brightpearl (${bpError}) — cannot prove an order was not already placed`);
+    else {
+      if (!bp.contactFilterApplied) blockers.push('the PO search returned no contactId column, so POs could not be attributed to this supplier — cannot prove anything');
+      if (bp.placed.length) blockers.push(`Brightpearl already has ${bp.placed.length} PO(s) at Placed for this supplier today (${bp.placed.map((p) => p.poId).join(', ')}) — an order went out`);
+    }
+    const reviewToday = errs.rows.filter((r) => r.severity === 'review');
+    if (reviewToday.length) blockers.push(`today's failure(s) include severity 'review', which means an order DID go through (rows ${reviewToday.map((r) => r.id).join(', ')})`);
+    if (!errs.rows.length) blockers.push('no logged failure for this supplier in the last 20 hours — nothing to re-run for');
+
+    res.json({
+      supplier,
+      safeToForceRun: blockers.length === 0,
+      blockers,
+      checks: {
+        runInFlight: sched.running,
+        claimedToday: entry.claimedToday,
+        lastRunDate: entry.lastRunDate,
+        posToday: bp ? bp.pos : null,
+        placedToday: bp ? bp.placed : null,
+        bpError,
+        recentErrors: errs.rows.map((r) => ({ id: r.id, step: r.step, severity: r.severity, handled: !!r.handled_at, at: r.created_at })),
+      },
+      ukNow: sched.uk,
+      reminder: 'safeToForceRun only means no evidence of an existing order was found. Re-read it after any deploy.',
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Claim an error as handled, recording WHO dealt with it and WHAT they did. Written for the
 // automated triage pass so it doesn't re-work the same failure every hour, but a human marking one
 // off by hand is the same call. Deliberately refuses to re-claim a row that is already handled —

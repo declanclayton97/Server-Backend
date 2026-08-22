@@ -66,20 +66,49 @@ const mins = hh * 60 + mm;
 const BUFFER_AFTER = 15, BUFFER_BEFORE = 10;
 const pad = (n) => String(n).padStart(2, '0');
 
+// --live consults the running service instead of guessing from the clock alone. Chaining the
+// clock-only rule across every supplier blocks the ENTIRE trading day bar five minutes at 12:45,
+// which makes "fix it and get it back in before the next window" impossible. The real hazard is
+// narrower: a restart WHILE A RUN IS IN FLIGHT loses the day-claim, so the poller fires again and
+// duplicates the order. A supplier that has already claimed today cannot fire again, so its window
+// is harmless. Falls back to the strict clock rule if the service can't be reached — an unreachable
+// service is not permission to deploy blind.
+const live = process.argv.includes('--live');
+const API = process.env.PURCHASING_API || 'https://server-backend-1i47.onrender.com';
+let claimed = null, runInFlight = null, liveError = null;
+if (live) {
+  try {
+    const r = await fetch(`${API}/api/purchasing/run-state`, { signal: AbortSignal.timeout(20000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const s = await r.json();
+    runInFlight = !!s.running;
+    claimed = new Set((s.suppliers || []).filter((x) => x.claimedToday).map((x) => x.supplier.toUpperCase()));
+  } catch (e) { liveError = e.message; }
+}
+// Poller names here vs SCHEDULED_SUPPLIERS keys there.
+const KEY = { 'Helly Hansen': 'HELLY HANSEN', 'Performance Brands': 'PERFORMANCE BRANDS' };
+const hasClaimed = (name) => !!claimed && claimed.has((KEY[name] || name).toUpperCase());
+
 let blocking = null, next = null;
 for (const p of POLLERS) {
   if (!runsToday(p)) continue;
+  // Already ran today → it cannot fire again, so its window no longer blocks.
+  if (claimed && hasClaimed(p.name)) continue;
   const start = p.h * 60 + p.m, end = start + 30 + BUFFER_AFTER;
   if (mins >= start && mins < end) blocking = { ...p, why: 'window open (or a run may still be finishing)' };
   else if (mins >= start - BUFFER_BEFORE && mins < start) blocking = { ...p, why: `window opens within ${start - mins} min` };
   if (mins < start && (!next || start < next.start)) next = { ...p, start };
 }
+// A run in flight blocks everything, whoever it belongs to — that is the case that actually caused
+// the duplicate order.
+if (runInFlight) blocking = { name: 'a run in flight', h: hh, m: mm, why: 'a purchasing run is executing right now — a restart would lose its day-claim' };
 
 // Walk FORWARD past every window that would still block, rather than reporting only when THIS one
 // closes — "clear again at 10:45" is a time you are still blocked at, and on a bad day you believe it.
 let clearAt = null;
 if (blocking) {
-  const windows = POLLERS.filter(runsToday).map((p) => ({ name: p.name, start: p.h * 60 + p.m })).sort((a, b) => a.start - b.start);
+  const windows = POLLERS.filter((p) => runsToday(p) && !(claimed && hasClaimed(p.name)))
+    .map((p) => ({ name: p.name, start: p.h * 60 + p.m })).sort((a, b) => a.start - b.start);
   let clear = blocking.h * 60 + blocking.m + 30 + BUFFER_AFTER, moved = true;
   while (moved) {
     moved = false;
@@ -98,6 +127,10 @@ const result = {
   blocking: blocking ? { supplier: blocking.name, window: `${pad(blocking.h)}:${pad(blocking.m)}`, why: blocking.why } : null,
   clearAt,
   next: next ? { supplier: next.name, window: `${pad(next.h)}:${pad(next.m)}`, inMinutes: next.start - mins } : null,
+  mode: live ? (liveError ? 'clock-only (live check FAILED, fell back to strict)' : 'live') : 'clock-only',
+  liveError,
+  runInFlight,
+  alreadyClaimedToday: claimed ? [...claimed].sort() : null,
   afterDeploy: 'Re-check that supplier for a duplicate PO before reporting all-clear.',
 };
 
