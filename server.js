@@ -8985,16 +8985,52 @@ app.get('/api/purchasing/error-log', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 30, 200);
-    await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_error_log (id serial PRIMARY KEY, created_at timestamptz DEFAULT now(), supplier text, step text, message text, context jsonb)`);
+    // One shared table definition (purchasingSchedule) — this route used to CREATE its own with a
+    // different column list, so a column added in one place was missing in the other.
+    await purchasingSchedule.ensureErrorTable(pool);
     // ?supplier= and ?step= used to be ACCEPTED AND IGNORED, so asking about one supplier quietly
     // returned everyone's rows - which reads as 'that supplier errored' when it did not.
     const where = [], args = [];
     if (req.query.supplier) { args.push(String(req.query.supplier).toUpperCase()); where.push(`upper(supplier) = $${args.length}`); }
     if (req.query.step) { args.push(String(req.query.step)); where.push(`step = $${args.length}`); }
+    if (req.query.severity) { args.push(String(req.query.severity)); where.push(`severity = $${args.length}`); }
+    // ?unhandled=1 is the triage WORK QUEUE: rows nobody has claimed yet. Without it an automated
+    // pass re-diagnoses the same failure on every run.
+    if (req.query.unhandled === '1') where.push(`handled_at IS NULL`);
+    if (req.query.sinceHours) { args.push(Number(req.query.sinceHours)); where.push(`created_at > now() - ($${args.length} || ' hours')::interval`); }
     args.push(limit);
-    const r = await pool.query(`SELECT id, created_at, supplier, step, message, context FROM purchasing_error_log`
+    const r = await pool.query(`SELECT id, created_at, supplier, step, message, context, severity, handled_at, handled_by, handled_note FROM purchasing_error_log`
       + (where.length ? ` WHERE ${where.join(' AND ')}` : '') + ` ORDER BY id DESC LIMIT $${args.length}`, args);
-    res.json({ count: r.rows.length, filtered: { supplier: req.query.supplier || null, step: req.query.step || null }, errors: r.rows });
+    res.json({
+      count: r.rows.length,
+      filtered: { supplier: req.query.supplier || null, step: req.query.step || null, severity: req.query.severity || null, unhandled: req.query.unhandled === '1', sinceHours: req.query.sinceHours || null },
+      errors: r.rows,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Claim an error as handled, recording WHO dealt with it and WHAT they did. Written for the
+// automated triage pass so it doesn't re-work the same failure every hour, but a human marking one
+// off by hand is the same call. Deliberately refuses to re-claim a row that is already handled —
+// two passes racing the same error is exactly how the same fix gets applied twice.
+// body: { by, note, force }
+app.post('/api/purchasing/error-log/:id/handled', express.json(), async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'numeric id required' });
+  const { by = 'unknown', note = '', force = false } = req.body || {};
+  if (!note) return res.status(400).json({ error: 'note required — record what was actually done' });
+  try {
+    await purchasingSchedule.ensureErrorTable(pool);
+    const cur = await pool.query('SELECT id, handled_at, handled_by, handled_note FROM purchasing_error_log WHERE id = $1', [id]);
+    if (!cur.rows.length) return res.status(404).json({ error: `no error row ${id}` });
+    if (cur.rows[0].handled_at && !force) {
+      return res.status(409).json({ error: 'already handled', alreadyHandled: cur.rows[0] });
+    }
+    const r = await pool.query(
+      `UPDATE purchasing_error_log SET handled_at = now(), handled_by = $2, handled_note = $3 WHERE id = $1
+       RETURNING id, supplier, step, severity, handled_at, handled_by, handled_note`, [id, String(by), String(note)]);
+    res.json({ ok: true, row: r.rows[0] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

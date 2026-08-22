@@ -131,7 +131,9 @@ async function saveState(pool, { id = 1, workingDaysWaited, lastRunDate, result 
 // Tag an error with the step that raised it so the log/alert is specific.
 const stepErr = (step, message, context = null) => Object.assign(new Error(message), { step, ...(context ? { context } : {}) });
 
-async function ensureErrorTable(pool) {
+// Exported because server.js used to CREATE this table itself with its own column list, so a
+// column added here was missing over there depending on which ran first. One definition now.
+export async function ensureErrorTable(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_error_log (
     id serial PRIMARY KEY,
     created_at timestamptz DEFAULT now(),
@@ -140,11 +142,19 @@ async function ensureErrorTable(pool) {
     message text,
     context jsonb
   )`);
+  // severity was only ever passed to the email, never stored — so nothing reading the log could
+  // tell "the run stopped" from "the order went through, fix the data afterwards".
+  // handled_* lets an automated triage pass claim a row, so the same error isn't worked twice.
+  await pool.query(`ALTER TABLE purchasing_error_log
+    ADD COLUMN IF NOT EXISTS severity text,
+    ADD COLUMN IF NOT EXISTS handled_at timestamptz,
+    ADD COLUMN IF NOT EXISTS handled_by text,
+    ADD COLUMN IF NOT EXISTS handled_note text`);
 }
 
 // Persist an error AND email an alert. Used for every failure in the flow.
 export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error' } = {}) {
-  try { if (pool) { await ensureErrorTable(pool); await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context) VALUES ($1,$2,$3,$4)`, [supplier, step, message, context ? JSON.stringify(context) : null]); } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
+  try { if (pool) { await ensureErrorTable(pool); await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context, severity) VALUES ($1,$2,$3,$4,$5)`, [supplier, step, message, context ? JSON.stringify(context) : null, severity]); } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
   try { await sendAlertEmail({ supplier, step, message, context, severity }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); }
 }
 
