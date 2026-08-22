@@ -154,8 +154,53 @@ export async function ensureErrorTable(pool) {
 
 // Persist an error AND email an alert. Used for every failure in the flow.
 export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error' } = {}) {
-  try { if (pool) { await ensureErrorTable(pool); await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context, severity) VALUES ($1,$2,$3,$4,$5)`, [supplier, step, message, context ? JSON.stringify(context) : null, severity]); } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
+  let errorId = null;
+  try { if (pool) { await ensureErrorTable(pool); const r = await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context, severity) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [supplier, step, message, context ? JSON.stringify(context) : null, severity]); errorId = r.rows[0] && r.rows[0].id; } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
   try { await sendAlertEmail({ supplier, step, message, context, severity }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); }
+  try { await fireTriageRoutine({ supplier, step, message, context, severity, errorId }); } catch (e) { console.error('[purchasing-error-log] triage fire failed:', e.message); }
+}
+
+// Push a failure at the triage routine the moment it happens, instead of a routine waking on a
+// timer and asking whether anything broke. Two reasons that matters: a scheduled run can only fire
+// hourly (the platform minimum), so a 09:30 failure could sit for most of an hour before anything
+// looks at it; and scheduled runs burn the daily routine allowance even when nothing is wrong.
+//
+// ONLY severity 'error' fires. That is the case where the run STOPPED and nothing was ordered —
+// the one worth interrupting for. 'review' means the order already went through (a data problem to
+// correct later) and 'info' is a notification, so waking a session for either would spend a run to
+// do nothing, and risk it acting where it should not.
+//
+// Fire-and-forget by design: purchasing must never fail because a notification failed. Unset env
+// vars make it a silent no-op, so nothing breaks before the routine exists.
+async function fireTriageRoutine({ supplier, step, message, context, severity, errorId }) {
+  const url = process.env.TRIAGE_ROUTINE_URL, token = process.env.TRIAGE_ROUTINE_TOKEN;
+  if (!url || !token) return;                 // not configured yet
+  if (severity !== 'error') return;
+  // The routine receives this wrapped as UNTRUSTED data, so its own prompt has to opt into acting
+  // on it. Give it the error id first: everything else it needs is already in the log behind that
+  // id, and the id is the thing it marks handled.
+  const text = [
+    `Purchasing failure logged as error id ${errorId == null ? '(unknown)' : errorId}.`,
+    `Supplier: ${supplier}`,
+    `Step: ${step}`,
+    `Severity: ${severity} (the run stopped — nothing was ordered)`,
+    `Message: ${message}`,
+    context ? `Context: ${JSON.stringify(context).slice(0, 4000)}` : null,
+  ].filter(Boolean).join('\n');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'anthropic-beta': 'experimental-cc-routine-2026-04-01',
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(15000),
+  });
+  const body = await res.text();
+  if (!res.ok) throw new Error(`routine fire HTTP ${res.status}: ${body.slice(0, 200)}`);
+  console.log(`[purchasing-error-log] triage routine fired for ${supplier}/${step}:`, body.slice(0, 200));
 }
 
 function transporter() {

@@ -9012,6 +9012,43 @@ app.get('/api/purchasing/error-log', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Is the triage routine wired up, and does firing it actually work? Without this the first proof
+// would be a real supplier failure, which is the worst moment to discover a bad token or a blocked
+// domain. GET reports configuration only; POST sends a clearly-labelled TEST fire.
+app.get('/api/purchasing/triage-fire-test', async (req, res) => {
+  res.json({
+    configured: !!(process.env.TRIAGE_ROUTINE_URL && process.env.TRIAGE_ROUTINE_TOKEN),
+    urlSet: !!process.env.TRIAGE_ROUTINE_URL,
+    tokenSet: !!process.env.TRIAGE_ROUTINE_TOKEN,
+    note: 'POST here to send a test fire. Only severity "error" fires in normal operation.',
+  });
+});
+app.post('/api/purchasing/triage-fire-test', express.json(), async (req, res) => {
+  if (!process.env.TRIAGE_ROUTINE_URL || !process.env.TRIAGE_ROUTINE_TOKEN) {
+    return res.status(503).json({ error: 'TRIAGE_ROUTINE_URL / TRIAGE_ROUTINE_TOKEN not set' });
+  }
+  try {
+    const r = await fetch(process.env.TRIAGE_ROUTINE_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.TRIAGE_ROUTINE_TOKEN}`,
+        'anthropic-beta': 'experimental-cc-routine-2026-04-01',
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: 'THIS IS A TEST FIRE, not a real failure. No supplier has failed and there is nothing to fix. '
+          + 'Confirm you can reach https://server-backend-1i47.onrender.com/api/purchasing/error-log?unhandled=1&sinceHours=36 '
+          + 'and report what the work queue contains. Do NOT change any code, do NOT push, and do NOT re-run any supplier.',
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+    const body = await r.text();
+    let parsed = null; try { parsed = JSON.parse(body); } catch { /* non-json */ }
+    res.status(r.ok ? 200 : 502).json({ ok: r.ok, status: r.status, response: parsed || body.slice(0, 500) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // What the scheduler currently knows: is a run in flight, and who has already claimed today.
 // A deploy is dangerous while a run is IN FLIGHT (the 2026-08-19 duplicate came from restarting
 // mid-run so the day-claim never saved). It is NOT dangerous for a supplier that has already
