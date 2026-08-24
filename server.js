@@ -9133,7 +9133,12 @@ app.get('/api/purchasing/force-run-safety', async (req, res) => {
     if (cartError) blockers.push(`could not read ${supplier}'s basket at the supplier (${cartError}) — cannot prove a half-finished run left nothing sitting in it`);
     else if (cart && !cart.readable) blockers.push(`${supplier}'s basket cannot be read here — ${cart.note}`);
     else if (cart && cart.occupied) blockers.push(`something is already sitting at ${supplier}: ${cart.note}`);
-    const reviewToday = errs.rows.filter((r) => r.severity === 'review');
+    // severity 'review' USUALLY means the order went through — but not always, and this used to
+    // treat it as proof. tagged-but-nothing-to-order is logged before the run decides whether to
+    // place at all, so on 2026-08-24 a PenCarrie run that placed NOTHING was refused a re-run on
+    // the grounds that "an order DID go through". A row that states placed:false is taken at its
+    // word; one that says nothing keeps the old, cautious reading.
+    const reviewToday = errs.rows.filter((r) => r.severity === 'review' && !(r.context && r.context.placed === false));
     if (reviewToday.length) blockers.push(`today's failure(s) include severity 'review', which means an order DID go through (rows ${reviewToday.map((r) => r.id).join(', ')})`);
     if (!errs.rows.length) blockers.push('no logged failure for this supplier in the last 20 hours — nothing to re-run for');
 

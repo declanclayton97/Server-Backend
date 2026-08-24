@@ -153,10 +153,19 @@ export async function ensureErrorTable(pool) {
 }
 
 // Persist an error AND email an alert. Used for every failure in the flow.
-export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error' } = {}) {
+// `placed` = did stock actually go to the supplier on this run? Until 2026-08-24 that was INFERRED
+// from severity ('review' meant "the order went through"), which held for every review site except
+// tagged-but-nothing-to-order — that one fires straight after the demand is valued, BEFORE the run
+// has even decided whether to place. So a PenCarrie run that placed nothing still emailed "The
+// order was placed", and force-run-safety refused a legitimate re-run on the same false reading.
+// Left as null where the caller doesn't say, so every existing site keeps its current wording.
+export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error', placed = null } = {}) {
   let errorId = null;
-  try { if (pool) { await ensureErrorTable(pool); const r = await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context, severity) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [supplier, step, message, context ? JSON.stringify(context) : null, severity]); errorId = r.rows[0] && r.rows[0].id; } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
-  try { await sendAlertEmail({ supplier, step, message, context, severity }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); }
+  // Recorded IN the context so the stored row carries the fact too — an email is read once, but
+  // force-run-safety and the triage routine read the row for the rest of the day.
+  const ctx = placed === null ? context : { ...(context || {}), placed };
+  try { if (pool) { await ensureErrorTable(pool); const r = await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context, severity) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [supplier, step, message, ctx ? JSON.stringify(ctx) : null, severity]); errorId = r.rows[0] && r.rows[0].id; } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
+  try { await sendAlertEmail({ supplier, step, message, context: ctx, severity, placed }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); }
   try { await fireTriageRoutine({ supplier, step, message, context, severity, errorId }); } catch (e) { console.error('[purchasing-error-log] triage fire failed:', e.message); }
 }
 
@@ -213,7 +222,7 @@ function transporter() {
 // They used to render identically — "⚠ … auto-purchase FAILED … Nothing further was placed on this
 // run" — so nine Helly Hansen price-heal escalations on 2026-08-19 read as nine failed runs when the
 // order had in fact been placed (HH 569124, £661). Never let a non-fatal alert claim a failure.
-async function sendAlertEmail({ supplier, step, message, context, severity = 'error' }) {
+async function sendAlertEmail({ supplier, step, message, context, severity = 'error', placed = null }) {
   if (!process.env.SMTP_PASS) return;
   const when = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
   const review = severity === 'review';
@@ -228,6 +237,8 @@ async function sendAlertEmail({ supplier, step, message, context, severity = 'er
     : `${supplier} auto-purchase failed`;
   const footer = info
     ? `<p><strong>Nothing is wrong and nothing needs doing.</strong> The supplier charged a different price to the one held in Brightpearl, so the cost (Launch/list 20) was corrected automatically and the PO re-priced to match. Told to you because every automatic cost change is worth seeing.</p>`
+    : review && placed === false
+    ? `<p><strong>Nothing was placed for these orders.</strong> This is flagged for a human to check in Brightpearl. Whether the run placed anything ELSE is a separate question — read the run's own alerts.</p>`
     : review
     ? `<p><strong>The order was placed.</strong> This is flagged for a human to correct in Brightpearl — nothing is blocked and the next scheduled run is unaffected.</p>`
     : `<p>Nothing further was placed on this run. Check Brightpearl + the ${supplier} portal, then it will retry on the next scheduled run.</p>`;
@@ -242,7 +253,7 @@ async function sendAlertEmail({ supplier, step, message, context, severity = 'er
     from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO,
     subject: info ? `ⓘ ${supplier} — cost price updated in Brightpearl` : `${mark} ${supplier} auto-purchase ${review ? 'review' : 'error'} — ${step}`,
     html,
-    text: `${supplier} ${info ? 'COST PRICE UPDATED (no action needed)' : review ? 'auto-purchase REVIEW (order was placed)' : 'auto-purchase ERROR (run stopped)'} at step "${step}": ${message}\n\n${context ? JSON.stringify(context, null, 2) : ''}`,
+    text: `${supplier} ${info ? 'COST PRICE UPDATED (no action needed)' : review ? `auto-purchase REVIEW (${placed === false ? 'nothing placed for these orders' : 'order was placed'})` : 'auto-purchase ERROR (run stopped)'} at step "${step}": ${message}\n\n${context ? JSON.stringify(context, null, 2) : ''}`,
   });
 }
 const escapeHtml = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -1643,7 +1654,10 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
         f.rows.slice(0, 12).map((r) => `      ${r.qty} × ${r.sku || '(no SKU)'}  ${r.name || ''}`).join('\n') +
         (f.rows.length > 12 ? `\n      …and ${f.rows.length - 12} more rows` : '')).join('\n\n');
       await logPurchasingError(pool, {
-        supplier: cfg.supplierKey, step: 'tagged-but-nothing-to-order', severity: 'review',
+        // placed:false — this fires straight after the demand is valued, BEFORE the run has decided
+        // whether to place anything, so it can never mean "the order went through". By definition
+        // these orders contributed nothing, so nothing was placed FOR THEM either way.
+        supplier: cfg.supplierKey, step: 'tagged-but-nothing-to-order', severity: 'review', placed: false,
         message: `${plan.tagFlags.length} order(s) are tagged for ${cfg.supplierKey} but contributed NOTHING to today's demand. `
           + `That usually means an item on them isn't recognised as a ${cfg.supplierKey} product — please check whether it should have been ordered.\n\n${detail}`,
         context: { supplier: cfg.supplierKey, orders: plan.tagFlags.map((f) => ({ soId: f.soId, tag: f.tag, reason: f.reason, rows: f.rows.length })) },
