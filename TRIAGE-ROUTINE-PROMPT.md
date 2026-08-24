@@ -97,11 +97,12 @@ THE GOAL IS THAT THE STOCK GETS ORDERED. A failure you diagnose but leave unplac
 
 FIRST: read PURCHASING-TRIAGE.md at the root of the Server-Backend repo. It is the authoritative runbook and overrides anything here. Follow it, including the hard limits.
 
-The three that matter most:
+The four that matter most:
 
-1. NEVER re-run a supplier unless GET /api/purchasing/force-run-safety?supplier=X returns safeToForceRun: true. It is read-only and checks whether an order already landed. Ordering twice cannot be undone by a revert — it has to be cancelled with the supplier by a person, and that has already happened once. Re-read it AFTER any deploy. If it says false, read the blockers and respect them.
+1. NEVER re-run a supplier unless GET /api/purchasing/force-run-safety?supplier=X returns safeToForceRun: true. It is read-only and checks whether an order already landed — in Brightpearl AND in the supplier's own basket. Ordering twice cannot be undone by a revert — it has to be cancelled with the supplier by a person, and that has already happened once. Re-read it AFTER any deploy. If it says false, read the blockers and respect them.
 2. NEVER push while a run is in flight. Run `node scripts/deploy-window.mjs --live` and obey the exit code (0 = clear, 1 = refuse). If refused because a run is in flight, wait a few minutes and retry.
 3. If the right fix is not clear, STOP. Leave the error unhandled and write up what you found. A wrong fix deployed unattended is worse than a supplier being down for a day.
+4. A `place:false` "rehearsal" is NOT read-only — /api/mascot-order, /api/chadwick-order and /api/performance-brands-order FILL the basket and stop short of submitting. If you run one, clear up afterwards with POST /api/purchasing/clear-supplier-basket {"supplier":"X"} and confirm it reads empty, or your own rehearsal will sit in the cart and block the re-run you are trying to make happen.
 
 STEPS:
 
@@ -118,9 +119,12 @@ If the failure is already marked handled, stop and say so; something else dealt 
 
 5. `node scripts/deploy-window.mjs --live`. If clear, try to push to main so Render deploys. If pushing to main is refused, push a claude/ branch and open a pull request instead — then say clearly in your report that the fix is NOT live and needs a merge. Never claim something is deployed when it is sitting on a branch.
 
-6. If it deployed: verify. Re-run your probe from step 3 to prove the fix is live. An unverified fix is not a fix.
+6. If it deployed: verify as far as the fix ALLOWS, and be precise about which of these you did.
+   • A resolution / code / price fix IS verifiable — re-run your read-only probe and show the line that used to fail now resolving. For Carhartt and Helly Hansen, POST /api/<supplier>-basket {lines, dryRun:true} resolves every line against the live portal and returns unresolved/aliased without creating anything.
+   • A cart / checkout / portal-shape fix is NOT verifiable before the real run. The rehearsal modes return the payload they WOULD post, which proves its shape and not that the portal accepts it. No environment rehearses a checkout without checking out. Say that plainly instead of implying a verification you did not do — the re-run in step 7 is itself the test.
+   Never report "verified" for the second kind.
 
-7. If it deployed and verified, GET THE ORDER PLACED. Call force-run-safety for that supplier. If safeToForceRun is true:
+7. GET THE ORDER PLACED. If you ran a basket-filling rehearsal in step 6, clear it first (POST /api/purchasing/clear-supplier-basket {"supplier":"X"}) and confirm it reads empty. Then call force-run-safety for that supplier. If safeToForceRun is true:
 POST https://server-backend-1i47.onrender.com/api/purchasing/supplier-scheduled-run  {"supplier":"X","force":true}
 force is required because the failed run already claimed the day, which is what stops the poller retrying by itself. Then confirm in Brightpearl that a PO for that supplier reached status Placed, and report the PO and order numbers.
 If safeToForceRun is false, do not re-run — say which blocker stopped you. The supplier's own run picks it up next morning.

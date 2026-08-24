@@ -98,10 +98,13 @@ person: what broke, what you changed, what will happen next.
 1. `GET /api/purchasing/error-log?unhandled=1`. Nothing? Stop, report nothing, don't invent work.
 2. Group by root cause first. Several suppliers failing at once is usually **one** bug — today's
    pattern is that a single resolver bug hits three portals. Fix the cause, not each symptom.
-3. Reproduce read-only before changing anything. Most adapters expose a probe
-   (`/api/<supplier>-basket`, `/api/purchasing/preview-live?supplier=X`,
-   `/api/purchasing/price-inspect?sku=X`). Confirm the failure is real and current — some errors are
-   already stale by the time they are read.
+3. Reproduce read-only before changing anything. Probes:
+   `/api/purchasing/preview-live?supplier=X`, `/api/purchasing/price-inspect?sku=X`,
+   `/api/<supplier>-resolve?sku=` (per-SKU resolution), `GET /api/<supplier>-basket` (reads only).
+   Confirm the failure is real and current — some errors are already stale by the time they are read.
+   ⚠️ **A `place:false` "rehearsal" is not read-only.** `/api/mascot-order`, `/api/chadwick-order`
+   and `/api/performance-brands-order` with `place:false` FILL the basket and stop short of
+   submitting. Useful, but see step 7 — you must clear up after one.
 4. Fix the cause. Keep the diff small and in the style of the surrounding code.
 5. **Check both code paths.** The most common self-inflicted bug in this codebase is fixing one of
    two places that do the same job: a preflight and a checkout, a verify and a reconcile. One such
@@ -110,8 +113,24 @@ person: what broke, what you changed, what will happen next.
 6. `node scripts/deploy-window.mjs --live` — if it exits 1, commit but **do not push**, and say so in
    the report. Do not push and hope. If it is blocked only by a run in flight, wait and retry; that
    clears in minutes.
-7. Push. Wait for the deploy, then re-run the read-only probe from step 3 to prove the fix is live.
-   An unverified fix is not a fix.
+7. Push, wait for the deploy, then prove the fix is live. **How far you can prove it depends on
+   what you fixed, and the two cases are not the same — do not claim the stronger one.**
+
+   **A resolution / code / price fix — verifiable.** Re-run the read-only probe from step 3 and show
+   the line that used to fail now resolving. For Carhartt and Helly Hansen, `POST
+   /api/<supplier>-basket { lines, dryRun: true }` resolves every line against the live portal and
+   returns `unresolved` / `aliased` without creating anything. Do this; it is cheap and conclusive.
+
+   **A cart / checkout / portal-shape fix — NOT verifiable before the real run.** The rehearsal
+   modes return the payload they *would* post, so they prove its shape, never that the portal
+   accepts it. There is no environment that rehearses a checkout without checking out. Say so
+   plainly rather than implying verification you did not do, and go to step 8 knowing the re-run
+   is itself the test.
+
+   If you used a basket-filling rehearsal, **clear up before re-running**:
+   `POST /api/purchasing/clear-supplier-basket { "supplier": "X" }` — it refuses while a run is in
+   flight, and reads the basket back to prove it is empty. Then re-read `force-run-safety`: your own
+   rehearsal will otherwise sit in the cart and block the run you are trying to make happen.
 8. **Get it ordered.** Call `GET /api/purchasing/force-run-safety?supplier=X`. If `safeToForceRun`
    is true, re-run that supplier:
 

@@ -9063,6 +9063,32 @@ app.get('/api/purchasing/run-state', async (req, res) => {
 // nothing; it gathers the evidence so a caller (or an unattended triage pass) cannot re-run on a
 // hunch. Ordering twice cannot be undone by a revert, so every check defaults to UNSAFE when it
 // cannot prove otherwise.
+// Empty a supplier's basket, but ONLY when no run is in flight. The rehearsal modes
+// (/api/mascot-order, /api/chadwick-order, /api/performance-brands-order with place:false) fill the
+// basket and stop short of submitting, so a fix rehearsed before a re-run leaves lines sitting
+// there — which then ride along into the real order, or trip the cart check and block the very run
+// that was meant to place it. Rehearse, clear, confirm empty, THEN force-run.
+// Clearing DURING a run would delete the cart that run is building, which is why this is here and
+// not called on Alt-Items directly. body: { supplier, reason }
+app.post('/api/purchasing/clear-supplier-basket', express.json(), async (req, res) => {
+  const supplier = String((req.body && req.body.supplier) || '').toUpperCase().trim();
+  if (!supplier) return res.status(400).json({ error: 'supplier required' });
+  if (purchasingSchedule.isRunInFlight()) {
+    return res.status(409).json({ error: 'a purchasing run is IN FLIGHT — clearing now would empty the basket that run is building', supplier });
+  }
+  try {
+    const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-cart-clear`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ supplier }), signal: AbortSignal.timeout(120000),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) return res.status(502).json({ error: `clear failed: HTTP ${r.status}`, supplier });
+    // Re-check in-flight AFTER the fact too: a poller could have started while the clear was running.
+    if (purchasingSchedule.isRunInFlight()) j.warning = 'a run STARTED while this clear was in progress — verify the basket before doing anything else';
+    res.json(j);
+  } catch (e) { res.status(500).json({ error: e.message, supplier }); }
+});
+
 app.get('/api/purchasing/force-run-safety', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   const supplier = String(req.query.supplier || '').toUpperCase();
