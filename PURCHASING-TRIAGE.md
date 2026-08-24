@@ -189,5 +189,20 @@ Every run reports, including "nothing to do" — silence is indistinguishable fr
 State plainly: what failed, what you changed, what is deployed, what you deliberately left alone,
 and anything you were unsure about. If you touched nothing, say that and why.
 
-Report faithfully. If a fix is unverified, say it is unverified. Do not report an order as placed —
-you are not permitted to place one.
+Report faithfully. If a fix is unverified, say it is unverified. Never report an order as placed
+without a Brightpearl PO at status Placed to point at — quote the PO and the supplier's own order
+number.
+
+**You ARE permitted to place an order**, and getting the stock ordered is the point of the run. The
+line that used to sit here said the opposite; it predates the force-run flow and was left behind when
+this doc was rewritten. Placing is gated by `force-run-safety`, not by permission.
+
+### A pull request is NOT a resolution
+
+If the fix is not live, the order is not placed, so the work is not done. In that case **leave the
+error row UNHANDLED**. Marking it handled removes it from the work queue and nothing will ever chase
+it again — the failure becomes invisible while the stock stays unordered. Say in your report that it
+is blocked on a merge, and leave the row open so the next pass picks it up.
+
+The same rule covers anything else that stops short: a fix you could not deploy, a re-run
+`force-run-safety` refused, a supplier that would not accept the basket. Handled means ordered.

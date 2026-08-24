@@ -117,7 +117,11 @@ If the failure is already marked handled, stop and say so; something else dealt 
 
 4. Fix the cause, not the symptom. If several suppliers failed together it is usually ONE bug. Small diffs, in the style of the surrounding code. CRITICAL: this codebase's most common self-inflicted bug is fixing ONE of two places that do the same job — a preflight and a checkout, a verify and a reconcile. One such half-fix deleted 25 vests from a live PO. Before committing, grep for the pattern you changed and confirm there is no second copy.
 
-5. `node scripts/deploy-window.mjs --live`. If clear, try to push to main so Render deploys. If pushing to main is refused, push a claude/ branch and open a pull request instead — then say clearly in your report that the fix is NOT live and needs a merge. Never claim something is deployed when it is sitting on a branch.
+5. `node scripts/deploy-window.mjs --live` — run it BARE and read its exit code ($? / errorlevel). NEVER pipe it: a pipe returns the exit status of the LAST command in the pipeline, so `... | head` reports 0 and a refusal reads as permission to deploy. If clear, PUSH DIRECTLY TO MAIN. Render deploys from main, and nothing you leave on a branch will ever reach a supplier.
+
+   YOU HAVE EXPLICIT PERMISSION TO PUSH TO MAIN on both Server-Backend and Alternate-Items. The owner has granted it for this routine specifically. Do not open a pull request as a matter of course and do not treat a default "work on a branch" habit as a reason not to push — an unmerged PR means the stock does not get ordered, which is a failed run, not a cautious one.
+
+   A pull request is the LAST resort, only if the push is genuinely rejected by the remote. If that happens: say plainly in your report that the fix is NOT live and needs a merge, and LEAVE THE ERROR ROW UNHANDLED (see step 8). Never claim something is deployed when it is sitting on a branch.
 
 6. If it deployed: verify as far as the fix ALLOWS, and be precise about which of these you did.
    • A resolution / code / price fix IS verifiable — re-run your read-only probe and show the line that used to fail now resolving. For Carhartt and Helly Hansen, POST /api/<supplier>-basket {lines, dryRun:true} resolves every line against the live portal and returns unresolved/aliased without creating anything.
@@ -133,6 +137,8 @@ If safeToForceRun is false, do not re-run — say which blocker stopped you. The
 POST https://server-backend-1i47.onrender.com/api/purchasing/error-log/<id>/handled
 body: {"by":"triage-routine","note":"<what broke, what you changed, whether it is live, whether it got ordered>"}
 The note is what the owner reads when back — write it for a person. Do not mark anything handled that you did not resolve; leaving it unhandled is the right outcome for something you could not fix.
+
+HANDLED MEANS ORDERED. Only mark a severity-'error' row handled once the stock is actually on order — a Brightpearl PO at status Placed, or an explicit force-run-safety blocker that makes ordering the wrong thing to do. Specifically DO NOT mark it handled when: the fix is sitting in an unmerged pull request, the deploy did not happen, the re-run was refused, or you fixed the code but never got to step 7. All of those leave the stock unordered, and marking them handled removes the row from the work queue so nothing ever chases it — the failure goes quiet while the demand sits there. An honest unhandled row is worth far more than a tidy queue.
 
 REPORT at the end: what failed, what you changed, whether it is deployed or waiting on a PR merge, whether the order was placed (with the PO/order number), and anything you were unsure about. Report faithfully — if something is unverified, say so. Never claim an order was placed without a Brightpearl PO at Placed to point at.
 
