@@ -9116,7 +9116,9 @@ app.get('/api/purchasing/force-run-safety', async (req, res) => {
 
     await purchasingSchedule.ensureErrorTable(pool);
     const errs = await pool.query(
-      `SELECT id, step, message, severity, created_at, handled_at FROM purchasing_error_log
+      // context is selected because the 'review' blocker below reads placed from it. Without it the
+      // flag silently reads undefined and the blocker fires on every review row regardless.
+      `SELECT id, step, message, severity, created_at, handled_at, context FROM purchasing_error_log
        WHERE upper(supplier) = $1 AND created_at > now() - interval '20 hours' ORDER BY id DESC LIMIT 20`, [supplier]);
 
     const blockers = [];
