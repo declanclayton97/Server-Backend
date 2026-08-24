@@ -121,8 +121,19 @@ export const SUPPLIERS = {
   // these 20, and that is luck rather than a guarantee.
   // NOTE: this fixes ORDERING only. The low-inventory report is fetched per supplier id, so these
   // products still replenish under Future Garments, not Uneek.
+  // The 14 "STANDARD HI VIS BOMBER JACKET (UC804 / HJ44 / HV11 / JK930)" products (19454-19467)
+  // are the SAME class and were missed for the same reason — the name deliberately carries FOUR
+  // suppliers' codes and no brand, so /uneek/i cannot see it. SO 481551 sat with 4 units of it
+  // outstanding while its HI VIS WAISTCOAT rows on the SAME order were ordered normally, because
+  // those 20 were claimed here and these 14 were not (user: "missed 3-4 times", 2026-08-24).
+  // Uneek PO 483614 was placed off that order on 20 Aug WITHOUT them — a stamped poField does not
+  // hide an order (it is counted, not skipped), so this was purely the detect.
+  // Safe because claimProductIds only controls VISIBILITY: the tag filter has already restricted
+  // this to UNEEK-tagged orders, and the demand maths still nets off stock/allocated/on-order, so
+  // a bomber sourced from one of the other three codes computes to zero rather than double-ordering.
   UNEEK:        { contactId: 322,   costList: 20, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || ''),
-    claimProductIds: [53344, 53345, 53346, 53347, 53348, 53349, 53350, 53351, 53352, 53353, 53354, 53355, 53356, 53357, 53358, 53359, 53360, 53361, 56975, 56976] },
+    claimProductIds: [53344, 53345, 53346, 53347, 53348, 53349, 53350, 53351, 53352, 53353, 53354, 53355, 53356, 53357, 53358, 53359, 53360, 53361, 56975, 56976,
+      19454, 19455, 19456, 19457, 19458, 19459, 19460, 19461, 19462, 19463, 19464, 19465, 19466, 19467] },
   'HELLY HANSEN': { contactId: 214, costList: 20, portalPriceIsPreDiscount: true, supplierDiscountPct: 0.42,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
   // Launch(20) IS populated for Mascot — the null here was a config gap, not missing data (sampled
   // from PO 476715: EAN 5711074495160 → list20 9.41, EAN 5711074486861 → 11.77). Without it, costs
