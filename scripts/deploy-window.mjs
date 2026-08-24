@@ -142,7 +142,12 @@ if (asJson) {
     console.log(`DO NOT DEPLOY — ${blocking.name} ${pad(blocking.h)}:${pad(blocking.m)}: ${blocking.why}`);
     console.log(clearAt === 'tomorrow' ? 'clear again tomorrow — every remaining window today is blocking' : `clear again at ${clearAt} UK (past every window after it)`);
   } else {
-    console.log('CLEAR TO DEPLOY' + (next ? ` — next window is ${next.supplier} at ${next.window} UK, in ${next.inMinutes} min` : ' — no further windows today'));
+    // result.next, NOT next: `next` is the raw poller ({ name, h, m, start }), and it is line 129
+    // that reshapes it to { supplier, window, inMinutes }. Reading those names off the raw object
+    // printed "next window is undefined at undefined UK, in undefined min" — on the one line that
+    // tells you how much runway you have before the next window, which is what you read to decide
+    // whether a deploy fits. The JSON was right the whole time, so this never showed up there.
+    console.log('CLEAR TO DEPLOY' + (result.next ? ` — next window is ${result.next.supplier} at ${result.next.window} UK, in ${result.next.inMinutes} min (deploy must finish inside ${result.next.inMinutes - BUFFER_BEFORE} min)` : ' — no further windows today'));
     console.log(result.afterDeploy);
   }
 }
