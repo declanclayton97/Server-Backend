@@ -9076,6 +9076,18 @@ app.get('/api/purchasing/force-run-safety', async (req, res) => {
     try { bp = await purchasingAuto.supplierPosToday(supplier); }
     catch (e) { bpError = e.message; }
 
+    // What is sitting at the SUPPLIER. Nothing above can see this: a checkout that died after the
+    // cart was filled leaves Brightpearl with no PO at Placed and logs no 'review' row, so every
+    // other check here says "nothing was ordered" while the supplier's basket still holds the lines.
+    // Re-running then adds them a second time. Reading it is read-only (Alt-Items /supplier-cart-state).
+    let cart = null, cartError = null;
+    try {
+      const r = await fetch(`${ALT_ITEMS_URL}/api/supplier-cart-state?supplier=${encodeURIComponent(supplier)}`, { signal: AbortSignal.timeout(60000) });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j || j.error) cartError = (j && j.error) || `HTTP ${r.status}`;
+      else cart = j;
+    } catch (e) { cartError = e.message; }
+
     await purchasingSchedule.ensureErrorTable(pool);
     const errs = await pool.query(
       `SELECT id, step, message, severity, created_at, handled_at FROM purchasing_error_log
@@ -9089,6 +9101,12 @@ app.get('/api/purchasing/force-run-safety', async (req, res) => {
       if (!bp.contactFilterApplied) blockers.push('the PO search returned no contactId column, so POs could not be attributed to this supplier — cannot prove anything');
       if (bp.placed.length) blockers.push(`Brightpearl already has ${bp.placed.length} PO(s) at Placed for this supplier today (${bp.placed.map((p) => p.poId).join(', ')}) — an order went out`);
     }
+    // Fail CLOSED on the basket: an unreadable cart is not an empty one. Sterling (a separate
+    // worker service) and Snickers (import-only, no read) are unreadable by design, so they will
+    // always land here — that is the honest answer, and it tells a person exactly what to check.
+    if (cartError) blockers.push(`could not read ${supplier}'s basket at the supplier (${cartError}) — cannot prove a half-finished run left nothing sitting in it`);
+    else if (cart && !cart.readable) blockers.push(`${supplier}'s basket cannot be read here — ${cart.note}`);
+    else if (cart && cart.occupied) blockers.push(`something is already sitting at ${supplier}: ${cart.note}`);
     const reviewToday = errs.rows.filter((r) => r.severity === 'review');
     if (reviewToday.length) blockers.push(`today's failure(s) include severity 'review', which means an order DID go through (rows ${reviewToday.map((r) => r.id).join(', ')})`);
     if (!errs.rows.length) blockers.push('no logged failure for this supplier in the last 20 hours — nothing to re-run for');
@@ -9104,10 +9122,12 @@ app.get('/api/purchasing/force-run-safety', async (req, res) => {
         posToday: bp ? bp.pos : null,
         placedToday: bp ? bp.placed : null,
         bpError,
+        supplierCart: cart,
+        cartError,
         recentErrors: errs.rows.map((r) => ({ id: r.id, step: r.step, severity: r.severity, handled: !!r.handled_at, at: r.created_at })),
       },
       ukNow: sched.uk,
-      reminder: 'safeToForceRun only means no evidence of an existing order was found. Re-read it after any deploy.',
+      reminder: 'safeToForceRun only means no evidence of an existing order was found — in Brightpearl AND in the supplier\'s own basket. Re-read it after any deploy.',
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
