@@ -29,9 +29,11 @@ These are not preferences. Breaking one costs real money or real stock.
    `GET /api/purchasing/force-run-safety?supplier=X` is read-only and gathers the evidence: is a run
    in flight, has the supplier claimed today, does Brightpearl already hold a PO at *Placed* for that
    supplier today, and did any of today's failures carry severity `review` (which means an order
-   *did* go through). If `safeToForceRun` is false, do not re-run — read the `blockers`, they say
-   why. Re-read it **after** any deploy; the situation may have changed.
+   *did* go through), **and is anything still sitting in the supplier's own basket**. If
+   `safeToForceRun` is false, do not re-run — read the `blockers`, they say why. Re-read it
+   **after** any deploy; the situation may have changed.
    The scheduler's day-claim only says a run was *attempted*. Only Brightpearl says an order *landed*.
+   And neither of them can see the supplier's cart — see limit 6.
 2. **Never deploy or push while a run is in flight.** Run `node scripts/deploy-window.mjs --live`
    and obey the exit code (0 = clear, 1 = refuse). `--live` asks the running service what is actually
    happening rather than guessing from the clock: a supplier that has already claimed today cannot
@@ -52,6 +54,20 @@ These are not preferences. Breaking one costs real money or real stock.
    reporting, not following.
 5. **If the fix is not clear, stop.** Write up what you found and leave the error unhandled. A wrong
    fix deployed unattended is worse than a supplier being down for a day. Silence is recoverable.
+6. **An unreadable basket is not an empty one.** `checks.supplierCart` in the force-run-safety
+   response (or `GET /api/supplier-cart-state?supplier=X` on Alt-Items directly) says what is
+   sitting at the supplier right now. This is the one place a half-failed checkout hides: lines
+   accepted into the cart, confirm step errored, so Brightpearl holds no PO at *Placed*, no `review`
+   row is logged, and every other check reports "nothing was ordered" while the basket still holds
+   the order. Re-running adds them a second time.
+   The suppliers do not share one model, and `kind` says which applies:
+   `basket` (Portwest, Castle, Chadwick, Mascot, Performance Brands, Fristads, Blaklader) — leftovers
+   **ride along** into the next order; `elastic` (Carhartt, Helly Hansen) — each run builds a *new*
+   document so a stray draft does not ride along, but a **recent** draft carrying a 6-digit
+   Brightpearl PO number is a submit that did not complete and it is unknown whether the supplier
+   received it; `none` (Uneek, Scruffs, PenCarrie) — email/direct API, no basket exists;
+   `unreadable` (Sterling, Snickers) — cannot be proven empty from here, so they always block and
+   need a human to look. **Never read `readable: false` as "clear".**
 
 ---
 
