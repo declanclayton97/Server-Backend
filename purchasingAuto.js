@@ -321,6 +321,31 @@ async function poFieldHasSupplierPo(value, sup, get) {
 // Aliases are for names that differ by more than punctuation; keep them EXPLICIT rather than
 // stripping a trailing "S", so SNICKERS can never quietly resolve to something else.
 const TAG_ALIASES = { CHADWICKS: 'CHADWICK' };
+// ── ALTERNATIVE SUPPLIERS INSIDE ONE TAG ─────────────────────────────────────
+// The two separators mean DIFFERENT things, and only "/" was ever handled:
+//   "/"  separates distinct requirements      — each must be ordered
+//   ","  separates ALTERNATIVES for the same items, FIRST LISTED = FIRST CHOICE
+// So "PENCARRIE, RALAWISE, PRESTIGE / BROOK TAVERNER" is {PenCarrie or Ralawise or Prestige}
+// AND {Brook Taverner}. tagsOf() splits only on "/", so the first token normalised to the whole
+// string "PENCARRIE, RALAWISE, PRESTIGE", which equals no supplier key — every match site did
+// `tagSupplier(t) === sup.key` and therefore SKIPPED the order entirely. Not a double-order: an
+// invisible NON-order, by every run, for as long as the tag had a comma in it. Same family as the
+// trailing-comma bug, but a whole group at a time. Found by the owner reading a live order,
+// 2026-08-24 — nothing in the system pointed at it.
+const tagAlternatives = (t) => String(t || '').split(',').map((x) => tagSupplier(x)).filter(Boolean);
+// Does this "/" group name the supplier anywhere among its alternatives?
+const groupHasSupplier = (t, key) => tagAlternatives(t).includes(key);
+// What the group becomes once `key` is dealt with.
+//   ordered:true  → the requirement is SATISFIED, so the whole group goes (the alternatives only
+//                   ever existed as fallbacks for these same items)
+//   ordered:false → we could not supply it (no stock), so drop ONLY us and leave the rest standing
+//                   for a human, since none of the alternatives are automated
+const settleGroup = (t, key, ordered) => {
+  if (!groupHasSupplier(t, key)) return t.trim();
+  if (ordered) return '';
+  const rest = tagAlternatives(t).filter((a) => a !== key);
+  return rest.join(', ');
+};
 const tagSupplier = (t) => {
   const base = String(t || '')
     .replace(/\s*\([^)]*\)\s*$/, '')
@@ -720,7 +745,7 @@ export async function compareDetectLive(supplierKey, { limitOrders = 0 } = {}) {
     await pause(120);
     const tag = cf.PCF_SUPPLIER;
     if (!tag || isLeaveNote(tag)) continue;
-    if (!tagsOf(tag).some((t) => tagSupplier(t) === sup.key)) continue;
+    if (!tagsOf(tag).some((t) => groupHasSupplier(t, sup.key))) continue;
     tagged.push({ id, tag });
     if (limitOrders && tagged.length >= limitOrders) break;
   }
@@ -824,7 +849,7 @@ export async function previewLive(supplierKey, orderIds) {
     if (tag) tagCounts[tag] = (tagCounts[tag] || 0) + 1;
     if (!tag) { skipped.noTag++; continue; }
     if (isLeaveNote(tag)) { skipped.leaveNote++; continue; }
-    if (!tagsOf(tag).some((t) => tagSupplier(t) === sup.key)) { skipped.otherSupplier++; continue; }
+    if (!tagsOf(tag).some((t) => groupHasSupplier(t, sup.key))) { skipped.otherSupplier++; continue; }
     // A stamped poField is NOT a reason to skip — the real demand read (gatherLiveDemand) counts
     // these, because a stamp only records a PRIOR PO while the tag surviving means there is still
     // something to order (residual demand from a partial or re-allocated order). This preview used
@@ -852,7 +877,7 @@ export async function previewLive(supplierKey, orderIds) {
     if (!order) { skipped.noMatchingRows++; continue; }
     let rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r) && detectOf(sup)(r.productName, r.productSku));
     const allTags = tagsOf(cand.tag);
-    if (!rows.length && allTags.length === 1 && tagSupplier(allTags[0]) === sup.key) {
+    if (!rows.length && allTags.length === 1 && groupHasSupplier(allTags[0], sup.key)) {
       rows = Object.values(order.orderRows).filter((r) => !isNoteRow(r));
     }
     if (!rows.length) { skipped.noMatchingRows++; continue; }
@@ -958,7 +983,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     await pause(120);
     const tag = cf.PCF_SUPPLIER;
     if (!tag || isLeaveNote(tag)) continue;
-    if (!tagsOf(tag).some((t) => tagSupplier(t) === supplierKey)) continue;
+    if (!tagsOf(tag).some((t) => groupHasSupplier(t, supplierKey))) continue;
     // Do NOT skip SOs already stamped with this supplier's poField. Still being TAGGED for the
     // supplier (checked just above; the finalize removes the tag once fully ordered) means it
     // still needs ordering — a stamp only records a prior PO. Skipping stamped SOs permanently
@@ -979,7 +1004,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // detector and their orders ARE single-supplier, so for them a sole tag = take every
     // orderable row. Shipping/misc/decoration lines are excluded either way.
     const allTags = tagsOf(tag);
-    const singleSupplier = allTags.length === 1 && tagSupplier(allTags[0]) === supplierKey;
+    const singleSupplier = allTags.length === 1 && groupHasSupplier(allTags[0], supplierKey);
     // Per-SO SKIP list (PCF_SKIPSKU): the user marks items NOT to auto-order on this SO (e.g. a
     // pair already ordered manually/elsewhere) — everything else still orders. A skip token
     // matches by exact SKU, a dash-part of the SKU, a SKU substring, or a whole word in the name
@@ -1051,7 +1076,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // Apply THIS supplier's parenthetical scope, if its note is a real instruction rather than an
     // annotation. Only bites when every term is recognised on the order AND at least one row
     // satisfies them all — otherwise the note is left alone and nothing is filtered.
-    const ourTag = allTags.find((t) => tagSupplier(t) === supplierKey);
+    const ourTag = allTags.find((t) => groupHasSupplier(t, supplierKey));
     const scope = parseTagScope(ourTag);
     let scopeCap = null;
     if (scope && scope.terms.length) {
@@ -1444,7 +1469,12 @@ const cleanItemName = (n) => (String(n || '').split(/\r?\n/).map((s) => s.trim()
 // SOs so they aren't picked up again. If the supplier was the only tag, the field
 // is cleared; optionally flip status to "Ordered Stock Awaiting Delivery" (22).
 // Dry-run unless { execute: true }.
-export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', poId = null, noteContactId = null, setOrderedStatus = false, linesByOrder = null, execute = false } = {}) { // eslint-disable-line prefer-const
+// supplied:false is the NO-STOCK path — we were asked for these items and could not provide them.
+// It drops only US from an alternatives group and leaves the rest standing, because none of the
+// alternatives are automated and a human has to take it from there. supplied:true (the default,
+// i.e. we ordered) clears the whole group, since the alternatives only existed as fallbacks for
+// the very items now on order.
+export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'FRISTADS', poId = null, noteContactId = null, setOrderedStatus = false, linesByOrder = null, supplied = true, execute = false } = {}) { // eslint-disable-line prefer-const
   // linesByOrder: { <soId>: ["<item name>", ...] } — when given, the SO note lists the
   // ordered item names (one per line) then "Ordered on PO:<poId>".
   const key = String(supplierKey).toUpperCase();
@@ -1478,7 +1508,10 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
   for (const id of orderIds) {
     const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
     const before = cf.PCF_SUPPLIER || '';
-    const remaining = tagsOf(before).filter((t) => tagSupplier(t) !== key);
+    // settleGroup, not an exact-token filter: a group like "PENCARRIE, RALAWISE, PRESTIGE" never
+    // equalled the key, so the old filter kept it verbatim and the tag never cleared — the mirror
+    // of the match-site bug above.
+    const remaining = tagsOf(before).map((t) => settleGroup(t, key, supplied)).filter(Boolean);
     // Read the order too, so a "PLEASE PUT TO PROOF REQUIRED ONCE ORDERED" row can route the
     // status to Proof Required instead of Ordered Stock. Non-fatal: if the read fails we fall
     // back to the normal ordered status rather than block the finalise.
