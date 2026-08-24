@@ -9178,8 +9178,19 @@ app.post('/api/purchasing/error-log/:id/handled', express.json(), async (req, re
     }
     const r = await pool.query(
       `UPDATE purchasing_error_log SET handled_at = now(), handled_by = $2, handled_note = $3 WHERE id = $1
-       RETURNING id, supplier, step, severity, handled_at, handled_by, handled_note`, [id, String(by), String(note)]);
+       RETURNING id, supplier, step, severity, message, created_at, handled_at, handled_by, handled_note`, [id, String(by), String(note)]);
     res.json({ ok: true, row: r.rows[0] });
+    // Close the loop by email. A failure already emails out via logPurchasingError; without this the
+    // resolution lived only in the error log, so the inbox showed problems and never their endings.
+    // AFTER res.json and swallowed exactly like the alert send in logPurchasingError: marking a row
+    // handled must never fail because SMTP did, or a triage pass would report failure having already
+    // committed the update, and the next pass would work an error that was actually resolved.
+    const row = r.rows[0];
+    purchasingSchedule.sendResolutionEmail({
+      id: row.id, supplier: row.supplier, step: row.step, severity: row.severity,
+      by: row.handled_by, note: row.handled_note, message: row.message,
+      loggedAt: row.created_at, handledAt: row.handled_at,
+    }).catch((e) => console.error('[purchasing-error-log] resolution email failed:', e.message));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

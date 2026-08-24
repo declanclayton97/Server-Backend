@@ -247,6 +247,50 @@ async function sendAlertEmail({ supplier, step, message, context, severity = 'er
 }
 const escapeHtml = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
+// The CLOSING half of the pair. sendAlertEmail says something broke; this says what was done about
+// it, and until now nothing did — a failure arrived by email and the resolution only existed in the
+// error log, where nobody looks unless they already know to. Sent whether the triage routine or a
+// person marked the row handled, so a quiet inbox genuinely means nothing is outstanding.
+//
+// The note is the whole point: the runbook already requires it to be written FOR A PERSON ("what
+// broke, what you changed, whether it is live, whether it got ordered"), so it is reproduced verbatim
+// rather than summarised — anything that rewrote it here would only lose detail.
+//
+// DELIBERATELY MAKES NO CLAIM ABOUT THE ORDER. Only the note knows whether stock was actually
+// placed, and a heading that guessed would repeat the 2026-08-19 mistake in the other direction:
+// nine escalations read as nine failed runs because the rendering asserted something the data did
+// not say. "Resolved" here means the row was closed, nothing more.
+export async function sendResolutionEmail({ id, supplier, step, severity = 'error', by = 'unknown', note = '', message = '', loggedAt = null, handledAt = null } = {}) {
+  if (!process.env.SMTP_PASS) return;
+  const fmt = (d) => (d ? new Date(d).toLocaleString('en-GB', { timeZone: 'Europe/London' }) : null);
+  const when = fmt(handledAt) || new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' });
+  // How long it sat. The reason the push trigger exists is that a scheduled routine could leave a
+  // 09:30 failure most of an hour, so the number that proves the push is working belongs in the mail.
+  let took = null;
+  if (loggedAt) {
+    const mins = Math.round((new Date(handledAt || Date.now()) - new Date(loggedAt)) / 60000);
+    if (Number.isFinite(mins) && mins >= 0) took = mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  }
+  const review = severity === 'review';
+  const html = `<p style="color:#2e7d32"><strong>✓ ${supplier} auto-purchase — resolved</strong> — ${when}</p>
+    <ul>
+      <li><strong>Error:</strong> #${id} at step "${step}"${review ? ' (review — the order had gone through)' : ''}</li>
+      <li><strong>Handled by:</strong> ${escapeHtml(by)}</li>
+      ${took ? `<li><strong>Open for:</strong> ${took}</li>` : ''}
+    </ul>
+    <p><strong>What was done</strong></p>
+    <pre style="background:#f5f5f5;padding:8px;border-radius:4px;white-space:pre-wrap">${escapeHtml(note)}</pre>
+    <p style="color:#666"><strong>Originally reported</strong></p>
+    <pre style="background:#fafafa;padding:8px;border-radius:4px;white-space:pre-wrap;color:#666">${escapeHtml(String(message).slice(0, 1500))}</pre>
+    <p style="color:#666">Read the note before assuming the stock was ordered — closing the row and placing the order are not the same thing, and some fixes deliberately leave the order for the next scheduled run.</p>`;
+  await transporter().sendMail({
+    from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO,
+    subject: `✓ ${supplier} auto-purchase resolved — ${step} (error #${id})`,
+    html,
+    text: `${supplier} auto-purchase RESOLVED — error #${id} at step "${step}", handled by ${by}${took ? ` after ${took}` : ''}.\n\nWHAT WAS DONE:\n${note}\n\nORIGINALLY REPORTED:\n${message}\n\nRead the note before assuming the stock was ordered.`,
+  });
+}
+
 // ── the full placement chain ─────────────────────────────────────────────────
 // fetch that turns network failures ("website down") + non-2xx into step-tagged errors.
 async function jfetch(step, url, opts) {
