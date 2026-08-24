@@ -770,7 +770,9 @@ export async function compareDetectLive(supplierKey, { limitOrders = 0 } = {}) {
     if (o) orders.push({ ...t, rows: Object.values(o.orderRows || {}).filter((r) => !isNonOrderableRow(r)) });
     await pause(120);
   }
-  const pids = [...new Set(orders.flatMap((o) => o.rows.map((r) => r.productId)).filter((p) => p && String(p) !== '1000'))];
+  // Sorted: BP 400s on an unordered id-set in the path (CMNC-006). This one has a per-id fallback
+  // below so it only ever cost time, not correctness — unlike the union in gatherLiveDemand.
+  const pids = [...new Set(orders.flatMap((o) => o.rows.map((r) => r.productId)).filter((p) => p && String(p) !== '1000'))].sort((a, b) => a - b);
   const supplierOf = {};
   for (const batch of chunk(pids, 100)) {
     try {
@@ -873,7 +875,8 @@ export async function previewLive(supplierKey, orderIds) {
 
   // 4. Full order for each candidate (id-set batches, per-order fallback) → rows.
   const orderById = {};
-  for (const c of chunk(candidates.map((x) => x.id), 60)) {
+  // Sorted for the same CMNC-006 reason; the catch falls back per order, so this was a cost not a bug.
+  for (const c of chunk(candidates.map((x) => x.id).sort((a, b) => a - b), 60)) {
     try {
       const arr = await liveGet(`/order-service/order/${c.join(',')}`) || [];
       for (const o of (Array.isArray(arr) ? arr : [arr])) orderById[String(o.id)] = o;
@@ -1063,8 +1066,15 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // product for every row the name detect missed, and brandId is on that same payload.
     const brandIds = new Set(((SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].brandIds) || []).map(String));
     if (contactId || brandIds.size) {
+      // SORTED ASCENDING — not cosmetic. Brightpearl REJECTS an unordered id-set in the path:
+      // GET /product-service/product/309055,309054,... → 400 CMNC-006 "The path element … is not
+      // in order." Row order is whatever the order happens to list, so this 400'd most of the time,
+      // and the catch below is deliberately silent ("additive only, never worse") — so the whole
+      // BP-attribution union quietly did NOTHING instead of degrading.
+      // That is why Uneek could not see its own UC804 bomber even though the product carries
+      // primarySupplierId 322, and why brandOwned never fired either (2026-08-24).
       const unknown = [...new Set(orderableRows.filter(([, r]) => !detect(r.productName, r.productSku))
-        .map(([, r]) => r.productId).filter((p) => p && String(p) !== '1000'))];
+        .map(([, r]) => r.productId).filter((p) => p && String(p) !== '1000'))].sort((a, b) => a - b);
       if (unknown.length) {
         try {
           const arr = await liveGet(`/product-service/product/${unknown.join(',')}`) || [];
