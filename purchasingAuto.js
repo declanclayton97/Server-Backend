@@ -1299,31 +1299,36 @@ async function writeDemandLog(pool, poId, supplierKey, demandAudit) {
 // which is the entire point: read it first and the low-inv report is still suppressed by the very
 // rows we are about to delete.
 const ADOPT_LOOKBACK_DAYS = 7;   // a Friday failure fixed on Monday is still the same PO
-// Only ever adopt a PO this automation raised and left behind. Guarded on ALL of:
-//   status 6 (Pending/draft — never a Placed one), the supplier's own contactId, and a reference
-//   still starting "Auto-PO". A human's hand-built draft for the same supplier does NOT match the
-//   reference test, so this can never empty someone's work in progress.
-async function findAdoptableDraftPo(contactId) {
-  const from = new Date(Date.now() - ADOPT_LOOKBACK_DAYS * 86400000).toISOString().slice(0, 10);
-  const search = await liveGet(`/order-service/order-search?orderTypeId=2&createdOn=${from}/&pageSize=500`);
-  const cols = ((search && search.metaData && search.metaData.columns) || []).map((c) => c.name);
-  const iId = cols.indexOf('orderId'), iStatus = cols.indexOf('orderStatusId'), iContact = cols.indexOf('contactId'), iCreated = cols.indexOf('createdOn');
-  // No contactId column would match every supplier's POs — refuse rather than guess whose PO it is.
-  if (iContact < 0 || iId < 0 || iStatus < 0) return { candidates: [], reason: 'PO search returned no contactId/status column' };
-  const rows = ((search && search.results) || [])
-    .filter((r) => String(r[iContact]) === String(contactId) && Number(r[iStatus]) === PENDING_PO_STATUS)
-    .map((r) => ({ poId: r[iId], createdOn: iCreated >= 0 ? r[iCreated] : null }))
-    .sort((a, b) => String(a.createdOn || '').localeCompare(String(b.createdOn || '')) || a.poId - b.poId);
-  const candidates = [];
-  for (const r of rows) {
-    const po = (await liveGet(`/order-service/order/${r.poId}`) || [])[0];
-    if (!po) continue;
-    const ref = String(po.reference || '');
-    if (!/^auto-po\b/i.test(ref)) continue;                        // not ours — leave it alone
-    candidates.push({ poId: r.poId, createdOn: r.createdOn, reference: ref, rowCount: Object.keys(po.rows || po.orderRows || {}).length });
-    await pause(120);
-  }
-  return { candidates };
+// Use the PO NUMBER THE FAILED ATTEMPT RECORDED — never a search for "some draft belonging to this
+// supplier". Every placeFn throws stepErr(..., { poId }), so the failure itself names the PO it
+// orphaned, and that is the only one we are entitled to reuse. Searching would eventually find a
+// draft that is not ours to touch: the 2026-08-25 Portwest PO had already been repurposed by hand
+// (user), and a scan would happily have emptied it.
+// Verified before it is used: it must still exist, still be status 6 (draft — never a Placed one),
+// still belong to THIS supplier's contactId, and still carry an "Auto-PO" reference. Any of those
+// failing means the PO has moved on and we create a fresh one instead.
+async function findRecordedFailedPo(pool, supplierKey, contactId) {
+  if (!pool) return null;
+  let poId = null;
+  try {
+    const r = await pool.query(
+      `SELECT context FROM purchasing_error_log
+        WHERE upper(supplier) = $1
+          AND created_at > now() - ($2 || ' days')::interval
+          AND context ? 'poId'
+        ORDER BY id DESC LIMIT 1`, [String(supplierKey).toUpperCase(), ADOPT_LOOKBACK_DAYS]);
+    poId = r.rows[0] && r.rows[0].context && Number(r.rows[0].context.poId);
+  } catch { return null; }                       // no log, no adoption — just make a new PO
+  if (!poId) return null;
+  const po = (await liveGet(`/order-service/order/${poId}`) || [])[0];
+  if (!po) return { poId, reject: 'PO no longer exists' };
+  const status = po.orderStatus && po.orderStatus.orderStatusId;
+  if (Number(status) !== PENDING_PO_STATUS) return { poId, reject: `PO is status ${status}, not a draft — leaving it alone` };
+  const supId = po.parties && po.parties.supplier && po.parties.supplier.contactId;
+  if (String(supId) !== String(contactId)) return { poId, reject: `PO belongs to contact ${supId}, not ${contactId}` };
+  const ref = String(po.reference || '');
+  if (!/^auto-po\b/i.test(ref)) return { poId, reject: `PO reference "${ref}" is not an Auto-PO — not ours to reuse` };
+  return { poId, reference: ref, rowCount: Object.keys(po.rows || po.orderRows || {}).length };
 }
 // Delete every row, then READ BACK. A PO that says it emptied and did not would be refilled on top
 // of its old rows and double the order — the one outcome worse than a duplicate PO.
@@ -1368,19 +1373,18 @@ export async function createComboPOLive(opts = {}) {
   let adopted = null;
   if (execute && !opts.fillExistingPoId && opts.reuseExistingPo !== false) {
     try {
-      const { candidates = [] } = await findAdoptableDraftPo(contactId);
-      if (candidates.length) {
-        // OLDEST first: that is the original failed run's PO, the one whose number is already
-        // stamped on the sales orders. Any others are logged, not silently left behind.
-        const pick = candidates[0];
-        const emptied = pick.rowCount ? await emptyPoRowsLive(pick.poId) : { ok: true, removed: 0, left: 0 };
+      const found = await findRecordedFailedPo(opts.logPool, supplierKey, contactId);
+      if (found && found.reject) {
+        adopted = { poId: found.poId, skipped: found.reject };       // recorded, but no longer ours to reuse
+      } else if (found) {
+        const emptied = found.rowCount ? await emptyPoRowsLive(found.poId) : { ok: true, removed: 0, left: 0, cleared: [] };
         if (emptied.ok) {
-          opts = { ...opts, fillExistingPoId: pick.poId };
-          adopted = { poId: pick.poId, reference: pick.reference, createdOn: pick.createdOn, rowsCleared: emptied.removed, cleared: emptied.cleared || [], alsoOpen: candidates.slice(1).map((c) => c.poId) };
+          opts = { ...opts, fillExistingPoId: found.poId };
+          adopted = { poId: found.poId, reference: found.reference, rowsCleared: emptied.removed, cleared: emptied.cleared || [] };
         } else {
           // Could not empty it — do NOT fill it on top of its old rows. Fall through and create a
           // new PO, which is the old behaviour: worse, but never a doubled order.
-          adopted = { poId: pick.poId, skipped: `could not empty (${emptied.left} row(s) left)` };
+          adopted = { poId: found.poId, skipped: `could not empty (${emptied.left} row(s) left)` };
         }
       }
     } catch (e) { adopted = { error: `adopt check failed: ${e.message}` }; }   // never block a run over this
