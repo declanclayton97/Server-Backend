@@ -1312,8 +1312,13 @@ async function findRecordedFailedPo(pool, supplierKey, contactId) {
   let poId = null;
   try {
     const r = await pool.query(
+      // severity 'error' ONLY — that is the case where the run STOPPED and orphaned its PO.
+      // A 'review' row carries a poId too but means the order WENT THROUGH: Fristads #28 is a
+      // price-check on PO 483776, which is Placed. Without this the newest such row would be the
+      // candidate and we would lean entirely on the status-6 check to save us.
       `SELECT context FROM purchasing_error_log
         WHERE upper(supplier) = $1
+          AND severity = 'error'
           AND created_at > now() - ($2 || ' days')::interval
           AND context ? 'poId'
         ORDER BY id DESC LIMIT 1`, [String(supplierKey).toUpperCase(), ADOPT_LOOKBACK_DAYS]);
