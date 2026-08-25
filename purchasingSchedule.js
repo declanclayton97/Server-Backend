@@ -605,11 +605,14 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
 // Drive the portal worker asynchronously: start a job, then poll until done/error.
 // A full order takes many minutes (WebForms postbacks per line), so we can't hold one
 // HTTP request open — the worker returns a jobId and we poll GET /job/:id.
-async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute }) {
+// opts is passed straight through to the supplier module. Blaklader needs it: its module does NOT
+// drive the checkout UI, it posts the order body Alt-Items already built from inside the logged-in
+// page, so it must be handed { body, cartId }.
+async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, opts = null }) {
   const headers = { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET };
   const start = await jfetch('checkout', `${STERLING_WORKER_URL}/place-order`, {
     method: 'POST', headers,
-    body: JSON.stringify({ supplier, ref: String(ref), lines, execute, async: true }),
+    body: JSON.stringify({ supplier, ref: String(ref), lines, execute, async: true, ...(opts ? { opts } : {}) }),
   });
   const jobId = start && start.jobId;
   if (!jobId) throw stepErr('checkout', `worker didn't start a job: ${JSON.stringify(start)}`);
@@ -1510,18 +1513,47 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   if (!orderLines.length) throw stepErr('cart', 'no orderable Blaklader lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
-  // Submit via the Blaklader order API (loads basket then POST /order/orders). place=live.
-  const r = await jfetch('checkout', `${altItemsUrl}/api/blaklader-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: live }) });
+  // STEP 1 — BASKET, via Alt-Items. This half always worked, and it is where multipack detection
+  // and the "verify what actually landed" check live: their cart accepts codes it cannot resolve
+  // and prunes them asynchronously, so an unverified basket is how you place a short order.
+  let basket = { ok: true, packWarns: [], packNotes: [] };
+  if (live) {
+    basket = await jfetch('cart', `${altItemsUrl}/api/blaklader-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, clearFirst: true }) });
+  }
   // A pack-size we could not verify stops the run with a message that names the SKU, rather than
   // ordering an unchecked multiple. That is the failure mode being fixed here, so it must not be
   // possible to sail past it.
-  const pw = (r.basket && r.basket.packWarns) || r.packWarns || [];
+  const pw = basket.packWarns || [];
   if (pw.length) throw stepErr('cart', `Blaklader pack size could not be verified on ${pw.length} line(s) — NOT ordered, PO#${poId} left for review: ${pw.map((w) => `${w.sku}: ${w.warn}`).join(' | ').slice(0, 300)}`, { poId, packWarns: pw });
-  if (!r.ok) throw stepErr('checkout', `Blaklader did not confirm the order: ${JSON.stringify(r.error || r.add || r).slice(0, 250)}`, { poId });
-  const orderNo = r.internalId || null;
+  // The DETAIL goes in the context, not the message. stepErr truncates its message at 250 chars, so
+  // both 2026-08-25 basket failures logged "...the basket does not match what was" and nothing that
+  // said WHICH line — the one fact needed to fix it. context is not truncated.
+  if (live && !basket.ok) {
+    throw stepErr('cart', `the Blaklader basket does not hold what was asked for — NOT ordering. PO#${poId} left for review.`,
+      { poId, missing: basket.missing || [], badSkus: basket.badSkus || [], cart: basket.cart ? { lines: basket.cart.lines, totalQty: basket.cart.totalQty } : null });
+  }
+
+  // STEP 2 — build the order body from a template order. Reads the basket for its cartId; writes nothing.
+  const prev = await jfetch('checkout', `${altItemsUrl}/api/blaklader-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: false }) });
+  if (!prev.body) throw stepErr('checkout', `couldn't build the Blaklader order body: ${JSON.stringify(prev).slice(0, 200)}`, { poId });
+
+  // STEP 3 — SUBMIT THROUGH THE PORTAL WORKER, never api.blaklader.com directly.
+  // The direct call cannot check out: POST /api/orders/send answers 403 "Cart with id <guid> is not
+  // allowed to be fetched" because the request carries no Blk._Auth storefront cookie
+  // (hasStorefrontAuth:false). The worker drives a real browser session that HAS that cookie and
+  // posts this exact body from inside the page, which is accepted — inspect on 2026-08-25 showed
+  // hasStorefrontAuth:true against the API's false, side by side.
+  // This wiring was the missing half of the 2026-08-24 worker build. Without it BOTH scheduled runs
+  // on 2026-08-25 failed at the 403 with nothing ordered, the triage bot re-ran into the same 403,
+  // and BLK-1926556 (GBP979) had to be placed by hand through this same worker.
+  const wr = live
+    ? await workerPlaceOrder({ supplier: 'BLAKLADER', ref: poId, lines: orderLines, opts: { body: prev.body, cartId: prev.cartId }, execute: true })
+    : { ok: true, orderNo: null, dryRun: true };
+  if (!wr.ok) throw stepErr('checkout', `Blaklader did not confirm the order: ${JSON.stringify(wr.error || wr).slice(0, 250)}`, { poId, worker: { status: wr.status || null, note: wr.note || null } });
+  const orderNo = wr.orderNo || wr.internalId || null;
   // packNotes records every line whose quantity was multiplied, so a 1-becomes-5 is visible in the
   // run report instead of only showing up on the invoice.
-  steps.checkout = { ok: true, orderNo, sent: r.sent, packMultiplied: (r.basket && r.basket.packNotes) || r.packNotes || [] };
+  steps.checkout = { ok: true, orderNo, via: 'portal-worker', packMultiplied: basket.packNotes || [] };
   // Only now, with the order actually placed. An aborted run leaves them pending for the next one —
   // marking them consumed any earlier would lose them silently, which is the failure this exists to
   // undo in the first place.
@@ -1537,7 +1569,7 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // "find" a 5x error on a line that reconciles perfectly, and healing it would destroy a correct
   // cost. packNotes already records exactly which lines were multiplied, so they are skipped.
   try {
-    const packed = new Set(((r.basket && r.basket.packNotes) || r.packNotes || []).map((p) => String(p.sku || p).toUpperCase()));
+    const packed = new Set((basket.packNotes || []).map((p) => String(p.sku || p).toUpperCase()));
     const inv = await jfetch('price-check', `${altItemsUrl}/api/blaklader-order-lines?internalId=${encodeURIComponent(orderNo || '')}`, { method: 'GET' });
     const theirs = new Map();
     for (const l of (inv.lines || [])) if (l.sku && Number(l.price) > 0) theirs.set(String(l.sku).toUpperCase(), Number(l.price));
