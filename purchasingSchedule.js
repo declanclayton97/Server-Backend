@@ -1069,7 +1069,19 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 
   // Drive the Hultafors worker (async job + poll). ref = PO id → the portal PO-number field.
   const wr = await workerPlaceOrder({ supplier: 'SNICKERS', ref: poId, lines, execute: live });
-  if (!wr || !wr.placed) throw stepErr('checkout', `Snickers worker did not confirm placement: ${JSON.stringify((wr && (wr.error || wr.statusText)) || wr).slice(0, 250)}`);
+  if (!wr || !wr.placed) {
+    // NAME THE LINES. Hultafors' CSV import drops what it will not accept and reports nothing, so
+    // the unit gate refuses with no clue which line caused it. On 2026-08-25 that meant £4,350 sat
+    // on their checkout page and the two culprits (a discontinued code and one sold in 20s) were
+    // found only by diffing the PO against the worker's cart by hand. The worker now returns
+    // missingLines; put it where a person and the triage pass will both see it.
+    const miss = (wr && wr.missingLines) || [];
+    const named = miss.map((m) => `${m.stockCode} (wanted ${m.wanted}${m.inCart ? `, only ${m.inCart} in cart` : ', not in basket'})`).join('; ');
+    throw stepErr('checkout',
+      `Snickers worker did not confirm placement${miss.length ? ` — ${miss.length} line(s) never reached the basket: ${named.slice(0, 160)}` : ''}: ${JSON.stringify((wr && (wr.error || wr.statusText)) || wr).slice(0, 200)}`,
+      // context is NOT truncated — the full list belongs here, with the counts that prove the gap.
+      { poId, missingLines: miss, expectedUnits: (wr && wr.expectedUnits) || null, cartUnits: (wr && wr.cart && wr.cart.qtySum) || null });
+  }
   const orderNo = wr.orderNo || null;
   steps.checkout = { placed: true, orderNo, poSet: wr.poSet || null };
 
