@@ -130,6 +130,11 @@ async function saveState(pool, { id = 1, workingDaysWaited, lastRunDate, result 
 // ── error log + alerts ───────────────────────────────────────────────────────
 // Tag an error with the step that raised it so the log/alert is specific.
 const stepErr = (step, message, context = null) => Object.assign(new Error(message), { step, ...(context ? { context } : {}) });
+// create-po specifically: if the PO shell was already created before the row/note/stamp write
+// that failed, e.poId names it — attach it to context so findRecordedFailedPo (the orphan-adoption
+// check in purchasingAuto.js) can find and empty it on retry instead of a force-run minting a
+// second PO alongside the first (which then sits uncounted as "on order" forever).
+const createPoErr = (e) => stepErr('create-po', `Brightpearl error building the PO: ${e.message}`, e.poId ? { poId: e.poId } : null);
 
 // Exported because server.js used to CREATE this table itself with its own column list, so a
 // column added here was missing over there depending on which ran first. One definition now.
@@ -372,7 +377,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs)
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'FRISTADS', execute: true, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -538,7 +543,7 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   // 1. combined PO (allocation-aware demand + low-inv + separator)
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'CASTLE', execute: true, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -666,7 +671,7 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   const steps = {};
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'STERLING', execute: true, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -727,7 +732,7 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   // 1. combined PO (SO demand + low-inv; stamps the SOs)
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'UNEEK', execute: true, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -765,7 +770,7 @@ async function placeScruffsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {})
   // 1. combined PO (SO demand + low-inv; stamps the SOs)
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'SCRUFFS', execute: true, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -803,7 +808,7 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   const steps = {};
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'PERFORMANCE BRANDS', execute: live, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -903,7 +908,7 @@ async function placeMascotOrder(pool, altItemsUrl, { padToThreshold = 0, live = 
   const steps = {};
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'MASCOT', execute: live, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -959,7 +964,7 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const steps = {};
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'CHADWICK', execute: live, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -1036,7 +1041,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const steps = {};
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -1244,7 +1249,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   }
   let po;
   try { po = await bp.createComboPOLive({ supplierKey, execute: live, padToThreshold, priceOverrides, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -1329,7 +1334,7 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   } else {
     let po;
     try { po = await bp.createComboPOLive({ supplierKey: 'PORTWEST', execute: true, padToThreshold, logPool: pool }); }
-    catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+    catch (e) { throw createPoErr(e); }
     if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
     poId = po.poId;
     soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -1425,7 +1430,7 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
   const steps = {};
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'PENCARRIE', execute: live, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -1509,7 +1514,7 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   const steps = {};
   let po;
   try { po = await bp.createComboPOLive({ supplierKey: 'BLAKLADER', execute: live, padToThreshold, logPool: pool }); }
-  catch (e) { throw stepErr('create-po', `Brightpearl error building the PO: ${e.message}`); }
+  catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];

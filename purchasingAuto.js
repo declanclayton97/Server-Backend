@@ -1560,24 +1560,29 @@ export async function createComboPOLive(opts = {}) {
     try { await addRow(l.productId, l.qty, l.cost, undefined, l.taxCode); }
     catch (e) { if (/ORDC-023|bundle/i.test(e.message || '')) skippedBundles.push({ sku: l.sku, name: l.name, productId: l.productId, qty: l.qty, from }); else throw e; }
   };
-  for (const l of soLines) await tryRow(l, 'SO');
-  if (lowLines.length) {
-    await addRow(1000, 1, 0, '=====LOW INV====');         // separator note row (net 0 → no tax) — only when there IS low-inv
-    for (const l of lowLines) await tryRow(l, 'low-inv');
-  }
+  // From here on the PO shell already exists in Brightpearl — a throw below must still name it,
+  // or a later retry can't find and empty this orphan (see findRecordedFailedPo) and mints a
+  // second PO alongside it instead.
+  try {
+    for (const l of soLines) await tryRow(l, 'SO');
+    if (lowLines.length) {
+      await addRow(1000, 1, 0, '=====LOW INV====');       // separator note row (net 0 → no tax) — only when there IS low-inv
+      for (const l of lowLines) await tryRow(l, 'low-inv');
+    }
 
-  // note (SO#nnn render as clickable links)
-  const nl = [`Auto-PO for ${supplierKey}.`];
-  if (soLines.length) { nl.push('Order demand from:'); for (const c of contributors) nl.push(`  SO#${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')); }
-  if (lowLines.length) { nl.push('Low-inventory replenishment:'); for (const l of lowLines) nl.push(`  ${l.sku} x${l.qty}`); }
-  if (skippedBundles.length) { nl.push('⚠ SKIPPED — bundles (cannot add to a PO; order the components manually):'); for (const b of skippedBundles) nl.push(`  ${b.sku || b.productId} x${b.qty} (${b.name || ''})`); }
-  const addedOn = new Date().toISOString().replace('Z', '+00:00');
-  await liveWrite('POST', `/order-service/order/${poId}/note`, { text: nl.join('\n'), addedOn, contactId, isPublic: false });
+    // note (SO#nnn render as clickable links)
+    const nl = [`Auto-PO for ${supplierKey}.`];
+    if (soLines.length) { nl.push('Order demand from:'); for (const c of contributors) nl.push(`  SO#${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')); }
+    if (lowLines.length) { nl.push('Low-inventory replenishment:'); for (const l of lowLines) nl.push(`  ${l.sku} x${l.qty}`); }
+    if (skippedBundles.length) { nl.push('⚠ SKIPPED — bundles (cannot add to a PO; order the components manually):'); for (const b of skippedBundles) nl.push(`  ${b.sku || b.productId} x${b.qty} (${b.name || ''})`); }
+    const addedOn = new Date().toISOString().replace('Z', '+00:00');
+    await liveWrite('POST', `/order-service/order/${poId}/note`, { text: nl.join('\n'), addedOn, contactId, isPublic: false });
 
-  // stamp the PO number onto each contributing SO (linkage + dedupe) — only if this
-  // supplier has a dedicated PO custom field. Otherwise the tag-clear on finalize is
-  // the sole re-pickup guard.
-  if (poField) for (const c of contributors) await stampPoAppend(c.id, poField, poId, (id) => liveGet(`/order-service/order/${id}/custom-field`), liveWrite);
+    // stamp the PO number onto each contributing SO (linkage + dedupe) — only if this
+    // supplier has a dedicated PO custom field. Otherwise the tag-clear on finalize is
+    // the sole re-pickup guard.
+    if (poField) for (const c of contributors) await stampPoAppend(c.id, poField, poId, (id) => liveGet(`/order-service/order/${id}/custom-field`), liveWrite);
+  } catch (e) { e.poId = poId; throw e; }
 
   // ONE ROW PER VARIANT. The same product/colour/size demanded by several sales orders lands as
   // several rows, which makes booking the delivery in a matching exercise — the goods arrive as one
