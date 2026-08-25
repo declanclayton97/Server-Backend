@@ -1016,6 +1016,14 @@ const SNICKERS_SUPPLIER_CONTACT = 331;
 // Extend without a deploy via SNICKERS_PACK_MULTIPLES='{"97600400000":10}'.
 const SNICKERS_PACK_MULTIPLES = {
   '97600400000': 10,   // Snickers 9760 ID badge holder — 10-pack only (user, 2026-08-17; found when order 0004116942 refused over this one £2.66 line)
+  '20031-091': 20,     // Hellberg Helium AF/AS safety glasses — 20-pack only (user, 2026-08-25)
+  // Same failure as the badge holder, eight days later, and it cost a whole run: PO 484528 asked
+  // for ONE pair, Hultafors silently dropped the line on CSV import, and the worker's unit gate
+  // then refused to place 128 units against an expected 130 — GBP4,350 of stock stuck on their
+  // checkout page over a GBP4.71 line. Nothing names the dropped SKU from our side; it was found by
+  // diffing the PO against the worker's cart.
+  // The DROP IS SILENT, so every pack-only code has to be listed here before it bites. Extend
+  // without a deploy via SNICKERS_PACK_MULTIPLES='{"<code>":<n>}' on Render.
 };
 function snickersPackMultiples() {
   let env = {};
