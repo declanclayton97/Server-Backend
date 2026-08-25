@@ -2820,9 +2820,29 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
   res.json({ accepted: true, days });
 });
 
+// Kill-switch: set URGENT_POLL_ENABLED=false on Render to stop the urgent
+// scanner (no boot seed, no 5-min interval). STALE_POLL_ENABLED=false does the
+// same for the 30-min stale scan; they are separate because the stale pass is
+// the more expensive of the two and is usually the one worth parking first.
+// Both poll Brightpearl on a timer, so this is how you stop burning BP quota
+// without a code change — flip the var in Render and restart, flip it back to
+// resume. The table init still runs either way, so every user-driven endpoint
+// (Mark Complete, the manual rescan) keeps working while the timers are off.
+// Same pattern and same reason as ORDER_PIPELINE_ENABLED below.
+function isUrgentPollEnabled() {
+  return String(process.env.URGENT_POLL_ENABLED ?? 'true').toLowerCase() !== 'false';
+}
+function isStalePollEnabled() {
+  return String(process.env.STALE_POLL_ENABLED ?? 'true').toLowerCase() !== 'false';
+}
+
 // Boot the urgent orders system
 (async () => {
   await initializeUrgentOrdersTable();
+  if (!isUrgentPollEnabled() && !isStalePollEnabled()) {
+    console.log('⏸️  Urgent AND stale pollers DISABLED (URGENT_POLL_ENABLED=false, STALE_POLL_ENABLED=false). No background BP scans will run.');
+    return;
+  }
   if (useDatabase && BRIGHTPEARL_API_TOKEN) {
     // Adaptive seed window: scan only the gap since we last polled. Keeps
     // frequent redeploys cheap (seconds, not minutes) while still falling
@@ -2845,24 +2865,32 @@ app.post('/api/urgent-orders/rescan', async (req, res) => {
     } catch (err) {
       console.warn('[urgent-poll] could not determine last check, doing full 7-day seed:', err.message);
     }
-    console.log(`[urgent-poll] boot seed window: ${new Date(sinceMs).toISOString()} → now (${seedLabel})`);
-    pollUrgentOrders({ sinceMs, label: seedLabel })
-      .catch((err) => console.error('Initial urgent seed failed:', err.message));
-    // Recurring poll every 5 minutes — covers any update in the last 15 min window
-    setInterval(() => {
-      pollUrgentOrders().catch((err) => console.error('Urgent poll failed:', err.message));
-    }, 5 * 60 * 1000);
-    console.log('✅ Urgent orders poller scheduled (every 5 min)');
+    if (isUrgentPollEnabled()) {
+      console.log(`[urgent-poll] boot seed window: ${new Date(sinceMs).toISOString()} → now (${seedLabel})`);
+      pollUrgentOrders({ sinceMs, label: seedLabel })
+        .catch((err) => console.error('Initial urgent seed failed:', err.message));
+      // Recurring poll every 5 minutes — covers any update in the last 15 min window
+      setInterval(() => {
+        pollUrgentOrders().catch((err) => console.error('Urgent poll failed:', err.message));
+      }, 5 * 60 * 1000);
+      console.log('✅ Urgent orders poller scheduled (every 5 min)');
+    } else {
+      console.log('⏸️  Urgent orders poller DISABLED via URGENT_POLL_ENABLED=false — no boot seed, no 5-min scan. Existing rows stay put and the manual rescan still works.');
+    }
 
     // Stale-orders poller every 30 minutes — staggered 90 sec after the
     // urgent seed scan so they don't compete for BP rate budget at boot
-    setTimeout(() => {
-      pollStaleOrders().catch((err) => console.error('Initial stale poll failed:', err.message));
-    }, 90 * 1000);
-    setInterval(() => {
-      pollStaleOrders().catch((err) => console.error('Stale poll failed:', err.message));
-    }, 30 * 60 * 1000);
-    console.log('✅ Stale orders poller scheduled (every 30 min, first run +90s)');
+    if (isStalePollEnabled()) {
+      setTimeout(() => {
+        pollStaleOrders().catch((err) => console.error('Initial stale poll failed:', err.message));
+      }, 90 * 1000);
+      setInterval(() => {
+        pollStaleOrders().catch((err) => console.error('Stale poll failed:', err.message));
+      }, 30 * 60 * 1000);
+      console.log('✅ Stale orders poller scheduled (every 30 min, first run +90s)');
+    } else {
+      console.log('⏸️  Stale orders poller DISABLED via STALE_POLL_ENABLED=false — no 30-min scan.');
+    }
   }
 })();
 
