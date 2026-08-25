@@ -167,17 +167,14 @@ async function main() {
       const undated = list.filter((x) => x.days == null);
       const recent = list.filter((x) => x.days != null && x.days < STUCK_DAYS);
       if (stuck.length) {
-        flag(sup, `${stuck.length} order(s) waiting ${STUCK_DAYS}+ days`, `${stuck.sort((a, b) => b.days - a.days).slice(0, 6).map((x) => `SO ${x.soId} (${x.days}d, "${x.tag}")`).join('; ')} — still on Stock needs ordering with ${sup} as first choice. Either it is not being seen by the demand scan, or it never reaches the threshold.`);
+        flag(sup, `${stuck.length} order(s) untouched for ${STUCK_DAYS}+ days`, `${stuck.sort((a, b) => b.days - a.days).slice(0, 6).map((x) => `SO ${x.soId} (idle ${x.days}d, "${x.tag}")`).join('; ')} — still on Stock needs ordering with ${sup} as first choice and nothing has touched them. Either the demand scan cannot see them, or they never reach the threshold.`);
       }
-      // No PCF_DATESEEN means no scan has ever stamped it — worth seeing, but the field is absent
-      // on plenty of older orders, so it is not evidence on its own.
-      if (undated.length) note(sup, `${undated.length} order(s) with no DATESEEN`, `${undated.slice(0, 6).map((x) => `SO ${x.soId} ("${x.tag}")`).join('; ')} — no demand scan has stamped a date on these.`);
+      if (undated.length) note(sup, `${undated.length} order(s) with no updatedOn`, `${undated.slice(0, 6).map((x) => `SO ${x.soId}`).join(', ')} — could not age these.`);
       // Deliberately NOT one note per supplier. Eight lines of "normal" pushed the genuine flags
       // off the top of the first run; a report nobody finishes reading is a report nobody reads.
       if (recent.length) accumulating.push(`${sup} ${recent.length}`);
     }
     if (accumulating.length) note('-', 'demand accumulating under threshold (normal)', accumulating.join(', '));
-    if (lo.manual.length) note('-', `${lo.manual.length} order(s) for suppliers we do NOT automate`, `${lo.manual.slice(0, 5).map((x) => `SO ${x.soId} "${x.tag}"`).join('; ')} — these need a human and will sit here by design.`);
     if (lo.untagged.length) note('-', `${lo.untagged.length} order(s) on Stock needs ordering with NO supplier tag`, `${lo.untagged.slice(0, 8).join(', ')} — nothing can order these until someone tags them.`);
   }
 
@@ -211,7 +208,10 @@ main().then((code) => process.exit(code)).catch((e) => { console.error('watch-ru
 // ~£6,000 that way and nothing anywhere said a word; SO 482630 sat tagged UNEEK for days.
 // This is the end-of-day sweep for exactly that.
 const DEMAND_STATUS = 23;                 // "Stock needs ordering"
-const STUCK_DAYS = Number(process.env.WATCH_STUCK_DAYS || 3);
+// 2 days, not 3: every automated supplier polls at least once a day, so two days means the order
+// has sat through a FULL run of all of them and should have been ordered at some point (user,
+// 2026-08-25). Tighter than that would catch demand still accumulating toward a carriage threshold.
+const STUCK_DAYS = Number(process.env.WATCH_STUCK_DAYS || 2);
 // Suppliers with a scheduled poller — the ones that SHOULD clear their own demand.
 const AUTOMATED = ['FRISTADS', 'CARHARTT', 'HELLY HANSEN', 'SNICKERS', 'UNEEK', 'CASTLE', 'STERLING',
   'PORTWEST', 'PENCARRIE', 'BLAKLADER', 'MASCOT', 'SCRUFFS', 'PERFORMANCE BRANDS', 'CHADWICK'];
@@ -237,22 +237,33 @@ async function leftovers() {
   const s = await bp(`/order-service/order-search?orderTypeId=1&orderStatusId=${DEMAND_STATUS}&pageSize=500`);
   const cols = ((s.metaData && s.metaData.columns) || []).map((c) => c.name);
   const i = (n) => cols.indexOf(n);
-  const rows = (s.results || []).map((r) => ({ soId: r[i('orderId')] }));
+  // updatedOn is the ONLY honest "waiting since" signal here.
+  //   createdOn is wrong: an old sales order can have only just been confirmed.
+  //   PCF_DATESEEN is ALSO wrong, which cost this check its first version — it is stamped earlier
+  //   and says nothing about when the order entered Stock-needs-ordering. Aging by it flagged
+  //   EIGHT orders as 4-11 days stuck when every one had been touched that day or the day before
+  //   (SO 482228 "11 days" had been updated 40 minutes earlier). SO 482164 was the giveaway: seen
+  //   14 Aug, but only just moved to SNO (user, 2026-08-25).
+  // An order still on SNO that nothing has touched for days is genuinely sitting. One that was
+  // updated today is being worked, whatever any date field says.
+  const rows = (s.results || []).map((r) => ({
+    soId: r[i('orderId')],
+    updated: String(r[i('updatedOn')] || ''),
+    idleDays: r[i('updatedOn')] ? Math.floor((Date.now() - new Date(r[i('updatedOn')]).getTime()) / 86400000) : null,
+  }));
   const bySupplier = {};
   const untagged = [], manual = [];
   for (const r of rows) {
     let cf = {};
     try { cf = await bp(`/order-service/order/${r.soId}/custom-field`) || {}; } catch { continue; }
     const tag = String(cf.PCF_SUPPLIER || '').trim();
-    // DATESEEN is when a demand scan first counted it. NOT createdOn — an old sales order can have
-    // only just been confirmed, so creation date says nothing about how long demand has waited.
-    // It is absent on plenty of orders, so "no date" is its own bucket, never assumed to be recent.
-    const seen = cf.PCF_DATESEEN ? String(cf.PCF_DATESEEN).slice(0, 10) : null;
-    const days = seen ? Math.floor((Date.now() - new Date(seen).getTime()) / 86400000) : null;
     if (!tag) { untagged.push(r.soId); continue; }
     const owed = owedBy(tag);
+    // Suppliers we do not automate are LEFT ALONE — not flagged, not listed. They sit here by
+    // design and nothing in this repo is going to order them (user, 2026-08-25). The only two
+    // orders genuinely idle 3+ days on the day this was written were both of exactly that kind.
     if (!owed.length) { manual.push({ soId: r.soId, tag }); continue; }
-    for (const sup of owed) (bySupplier[sup] = bySupplier[sup] || []).push({ soId: r.soId, tag, seen, days });
+    for (const sup of owed) (bySupplier[sup] = bySupplier[sup] || []).push({ soId: r.soId, tag, days: r.idleDays, updated: r.updated });
   }
   return { bySupplier, untagged, manual, total: rows.length };
 }
