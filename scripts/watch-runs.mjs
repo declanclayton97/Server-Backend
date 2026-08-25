@@ -154,6 +154,33 @@ async function main() {
   const placedSuppliers = new Set(pos.filter((x) => PLACED_STATES.has(x.status)).map((x) => x.supplier));
   out.placed = [...placedSuppliers];
 
+  // ── leftovers: demand an automated supplier owns but has not cleared ───────
+  // Split two ways, because they mean opposite things. Under-threshold demand accumulating for a
+  // day or two is the system working as designed (PenCarrie sat at £74 against a £175 threshold
+  // today). Demand sitting for days is the silent failure this check exists for.
+  let lo = null; const accumulating = [];
+  try { lo = await leftovers(); } catch (e) { note('-', 'leftovers check failed', e.message); }
+  if (lo) {
+    out.leftovers = lo;
+    for (const [sup, list] of Object.entries(lo.bySupplier).sort()) {
+      const stuck = list.filter((x) => x.days != null && x.days >= STUCK_DAYS);
+      const undated = list.filter((x) => x.days == null);
+      const recent = list.filter((x) => x.days != null && x.days < STUCK_DAYS);
+      if (stuck.length) {
+        flag(sup, `${stuck.length} order(s) waiting ${STUCK_DAYS}+ days`, `${stuck.sort((a, b) => b.days - a.days).slice(0, 6).map((x) => `SO ${x.soId} (${x.days}d, "${x.tag}")`).join('; ')} — still on Stock needs ordering with ${sup} as first choice. Either it is not being seen by the demand scan, or it never reaches the threshold.`);
+      }
+      // No PCF_DATESEEN means no scan has ever stamped it — worth seeing, but the field is absent
+      // on plenty of older orders, so it is not evidence on its own.
+      if (undated.length) note(sup, `${undated.length} order(s) with no DATESEEN`, `${undated.slice(0, 6).map((x) => `SO ${x.soId} ("${x.tag}")`).join('; ')} — no demand scan has stamped a date on these.`);
+      // Deliberately NOT one note per supplier. Eight lines of "normal" pushed the genuine flags
+      // off the top of the first run; a report nobody finishes reading is a report nobody reads.
+      if (recent.length) accumulating.push(`${sup} ${recent.length}`);
+    }
+    if (accumulating.length) note('-', 'demand accumulating under threshold (normal)', accumulating.join(', '));
+    if (lo.manual.length) note('-', `${lo.manual.length} order(s) for suppliers we do NOT automate`, `${lo.manual.slice(0, 5).map((x) => `SO ${x.soId} "${x.tag}"`).join('; ')} — these need a human and will sit here by design.`);
+    if (lo.untagged.length) note('-', `${lo.untagged.length} order(s) on Stock needs ordering with NO supplier tag`, `${lo.untagged.slice(0, 8).join(', ')} — nothing can order these until someone tags them.`);
+  }
+
   out.flags = flags; out.notes = notes;
   if (asJson) { console.log(JSON.stringify(out, null, 2)); return flags.length ? 1 : 0; }
 
@@ -177,3 +204,55 @@ async function main() {
 }
 
 main().then((code) => process.exit(code)).catch((e) => { console.error('watch-runs failed:', e.message); process.exit(2); });
+
+// ── LEFTOVERS: demand sitting on "Stock needs ordering" that an automated supplier owns ───────
+// The loudest failures log an error row. The EXPENSIVE ones are silent: an order tagged for a
+// supplier we automate that simply never gets ordered, day after day. The comma-group bug hid
+// ~£6,000 that way and nothing anywhere said a word; SO 482630 sat tagged UNEEK for days.
+// This is the end-of-day sweep for exactly that.
+const DEMAND_STATUS = 23;                 // "Stock needs ordering"
+const STUCK_DAYS = Number(process.env.WATCH_STUCK_DAYS || 3);
+// Suppliers with a scheduled poller — the ones that SHOULD clear their own demand.
+const AUTOMATED = ['FRISTADS', 'CARHARTT', 'HELLY HANSEN', 'SNICKERS', 'UNEEK', 'CASTLE', 'STERLING',
+  'PORTWEST', 'PENCARRIE', 'BLAKLADER', 'MASCOT', 'SCRUFFS', 'PERFORMANCE BRANDS', 'CHADWICK'];
+const keyOf = (s) => String(s || '').toUpperCase().replace(/\([^)]*\)/g, ' ').replace(/[^A-Z0-9]/g, '');
+const AUTO_KEYS = new Map(AUTOMATED.map((a) => [keyOf(a), a]));
+
+// Tag semantics, mirroring the live code: "/" separates DIFFERENT requirements, "," separates
+// ALTERNATIVES for the same items with the FIRST as first choice. So the supplier that owes this
+// order is the first alternative of each slash-group. Parenthetical notes ("(CHECKED)") are
+// annotations, not suppliers, and are stripped by keyOf.
+function owedBy(tag) {
+  const out = [];
+  for (const group of String(tag || '').split('/')) {
+    const alts = group.split(',').map((x) => x.trim()).filter(Boolean);
+    if (!alts.length) continue;
+    const first = AUTO_KEYS.get(keyOf(alts[0]));
+    if (first) out.push(first);
+  }
+  return [...new Set(out)];
+}
+
+async function leftovers() {
+  const s = await bp(`/order-service/order-search?orderTypeId=1&orderStatusId=${DEMAND_STATUS}&pageSize=500`);
+  const cols = ((s.metaData && s.metaData.columns) || []).map((c) => c.name);
+  const i = (n) => cols.indexOf(n);
+  const rows = (s.results || []).map((r) => ({ soId: r[i('orderId')] }));
+  const bySupplier = {};
+  const untagged = [], manual = [];
+  for (const r of rows) {
+    let cf = {};
+    try { cf = await bp(`/order-service/order/${r.soId}/custom-field`) || {}; } catch { continue; }
+    const tag = String(cf.PCF_SUPPLIER || '').trim();
+    // DATESEEN is when a demand scan first counted it. NOT createdOn — an old sales order can have
+    // only just been confirmed, so creation date says nothing about how long demand has waited.
+    // It is absent on plenty of orders, so "no date" is its own bucket, never assumed to be recent.
+    const seen = cf.PCF_DATESEEN ? String(cf.PCF_DATESEEN).slice(0, 10) : null;
+    const days = seen ? Math.floor((Date.now() - new Date(seen).getTime()) / 86400000) : null;
+    if (!tag) { untagged.push(r.soId); continue; }
+    const owed = owedBy(tag);
+    if (!owed.length) { manual.push({ soId: r.soId, tag }); continue; }
+    for (const sup of owed) (bySupplier[sup] = bySupplier[sup] || []).push({ soId: r.soId, tag, seen, days });
+  }
+  return { bySupplier, untagged, manual, total: rows.length };
+}
