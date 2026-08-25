@@ -1285,6 +1285,66 @@ async function writeDemandLog(pool, poId, supplierKey, demandAudit) {
   }
 }
 
+// ── ADOPT THE ORPHAN INSTEAD OF MINTING A SECOND PO ──────────────────────────
+// A run that fails AFTER the PO is created leaves a DRAFT holding the whole demand, and every
+// later run used to mint a NEW one. That is not just clutter:
+//   • the orphan's rows count as ON ORDER, so the low-inventory read comes back SHORT and the
+//     replacement PO silently drops replenishment lines. Blaklader's retry on 2026-08-25 came out
+//     three lines lighter than the original it duplicated — knee pads, knee protection pockets and
+//     Craftsman shorts — and nothing anywhere said so;
+//   • stampPoAppend APPENDS, so the sales orders end up carrying "484511 / 484521", one of which
+//     is dead.
+// So: find the orphan, EMPTY it, and refill the SAME number via the existing fillExistingPoId path
+// (which requires an empty PO — by then it is one). Emptying happens BEFORE the demand is read,
+// which is the entire point: read it first and the low-inv report is still suppressed by the very
+// rows we are about to delete.
+const ADOPT_LOOKBACK_DAYS = 7;   // a Friday failure fixed on Monday is still the same PO
+// Only ever adopt a PO this automation raised and left behind. Guarded on ALL of:
+//   status 6 (Pending/draft — never a Placed one), the supplier's own contactId, and a reference
+//   still starting "Auto-PO". A human's hand-built draft for the same supplier does NOT match the
+//   reference test, so this can never empty someone's work in progress.
+async function findAdoptableDraftPo(contactId) {
+  const from = new Date(Date.now() - ADOPT_LOOKBACK_DAYS * 86400000).toISOString().slice(0, 10);
+  const search = await liveGet(`/order-service/order-search?orderTypeId=2&createdOn=${from}/&pageSize=500`);
+  const cols = ((search && search.metaData && search.metaData.columns) || []).map((c) => c.name);
+  const iId = cols.indexOf('orderId'), iStatus = cols.indexOf('orderStatusId'), iContact = cols.indexOf('contactId'), iCreated = cols.indexOf('createdOn');
+  // No contactId column would match every supplier's POs — refuse rather than guess whose PO it is.
+  if (iContact < 0 || iId < 0 || iStatus < 0) return { candidates: [], reason: 'PO search returned no contactId/status column' };
+  const rows = ((search && search.results) || [])
+    .filter((r) => String(r[iContact]) === String(contactId) && Number(r[iStatus]) === PENDING_PO_STATUS)
+    .map((r) => ({ poId: r[iId], createdOn: iCreated >= 0 ? r[iCreated] : null }))
+    .sort((a, b) => String(a.createdOn || '').localeCompare(String(b.createdOn || '')) || a.poId - b.poId);
+  const candidates = [];
+  for (const r of rows) {
+    const po = (await liveGet(`/order-service/order/${r.poId}`) || [])[0];
+    if (!po) continue;
+    const ref = String(po.reference || '');
+    if (!/^auto-po\b/i.test(ref)) continue;                        // not ours — leave it alone
+    candidates.push({ poId: r.poId, createdOn: r.createdOn, reference: ref, rowCount: Object.keys(po.rows || po.orderRows || {}).length });
+    await pause(120);
+  }
+  return { candidates };
+}
+// Delete every row, then READ BACK. A PO that says it emptied and did not would be refilled on top
+// of its old rows and double the order — the one outcome worse than a duplicate PO.
+async function emptyPoRowsLive(poId) {
+  const po = (await liveGet(`/order-service/order/${poId}`) || [])[0];
+  if (!po) return { ok: false, reason: `PO ${poId} not found` };
+  const rows = Object.entries(po.rows || po.orderRows || {});
+  // Record WHAT was cleared, so the caller can prove every line came back in the new plan. BP's
+  // on-order figure is what suppressed the low-inv read in the first place; nothing guarantees it
+  // updates the instant a row is deleted, and a silent short order is exactly the failure being
+  // fixed here. Cheap to capture, and it turns an assumption into a check.
+  const cleared = rows.map(([, r]) => ({ sku: String(r.productSku || '').toUpperCase(), qty: Math.round(parseFloat((r.quantity && r.quantity.magnitude) || 0)) })).filter((x) => x.sku);
+  for (const [rowId] of rows) {
+    await liveWrite('DELETE', `/order-service/order/${poId}/row/${rowId}`);
+    await pause(120);
+  }
+  const after = (await liveGet(`/order-service/order/${poId}`) || [])[0];
+  const left = Object.keys((after && (after.rows || after.orderRows)) || {}).length;
+  return { ok: left === 0, poId, removed: rows.length, left, cleared };
+}
+
 export async function createComboPOLive(opts = {}) {
   const supplierKey = String(opts.supplierKey || 'FRISTADS').toUpperCase();
   const reg = SUPPLIERS[supplierKey] || {};                        // registry = single source of truth
@@ -1302,6 +1362,29 @@ export async function createComboPOLive(opts = {}) {
   // leave the normal quantities (carriage applies, no pointless over-order).
   const padToThreshold = Number(opts.padToThreshold) || 0;
   const padMaxPct = opts.padMaxPct != null ? Number(opts.padMaxPct) : 0.40;
+
+  // 0. ADOPT AN ORPHANED DRAFT PO before anything is read (see findAdoptableDraftPo). Only on a
+  // real run: a dry run must not write, and emptying is a write. reuseExistingPo:false opts out.
+  let adopted = null;
+  if (execute && !opts.fillExistingPoId && opts.reuseExistingPo !== false) {
+    try {
+      const { candidates = [] } = await findAdoptableDraftPo(contactId);
+      if (candidates.length) {
+        // OLDEST first: that is the original failed run's PO, the one whose number is already
+        // stamped on the sales orders. Any others are logged, not silently left behind.
+        const pick = candidates[0];
+        const emptied = pick.rowCount ? await emptyPoRowsLive(pick.poId) : { ok: true, removed: 0, left: 0 };
+        if (emptied.ok) {
+          opts = { ...opts, fillExistingPoId: pick.poId };
+          adopted = { poId: pick.poId, reference: pick.reference, createdOn: pick.createdOn, rowsCleared: emptied.removed, cleared: emptied.cleared || [], alsoOpen: candidates.slice(1).map((c) => c.poId) };
+        } else {
+          // Could not empty it — do NOT fill it on top of its old rows. Fall through and create a
+          // new PO, which is the old behaviour: worse, but never a doubled order.
+          adopted = { poId: pick.poId, skipped: `could not empty (${emptied.left} row(s) left)` };
+        }
+      }
+    } catch (e) { adopted = { error: `adopt check failed: ${e.message}` }; }   // never block a run over this
+  }
 
   // 1. SO-driven demand + per-SKU qty (for dedupe). hasBrandDetect = this is a hardcoded
   // brand-regex supplier (vs a dynamic/email supplier with a weak name-derived detector).
@@ -1409,6 +1492,16 @@ export async function createComboPOLive(opts = {}) {
   const plan = {
     supplierKey, contactId, priceListId, reference, warehouseId: WAREHOUSE_ID,
     fillExistingPoId: opts.fillExistingPoId || null,               // echoed so callers can confirm the option is wired
+    adoptedPo: adopted,                                             // which orphan draft was reused (and what was cleared out of it), or why not
+    // PROOF, not assumption: every SKU emptied out of the adopted PO should reappear in this plan.
+    // If one does not, BP's on-order figure had not caught up with the deletion and we are about to
+    // rebuild the PO SHORT — the precise failure this whole mechanism exists to stop (a Blaklader
+    // retry lost knee pads, knee protection pockets and Craftsman shorts that way on 2026-08-25).
+    // Reported rather than thrown: a short line is worth shouting about, but not worth blocking the
+    // rest of a legitimate order over.
+    adoptedLinesMissing: adopted && adopted.cleared && adopted.cleared.length
+      ? adopted.cleared.filter((c) => ![...soLines, ...lowLines].some((l) => String(l.sku || '').toUpperCase() === c.sku)).map((c) => c.sku)
+      : [],
     soLines, separator: '=====LOW INV====', lowLines, padInfo, includeLowInv,
     priceOverridesApplied,                                          // portal-price overrides applied to line costs (Elastic suppliers)
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
