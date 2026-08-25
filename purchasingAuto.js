@@ -205,7 +205,23 @@ export const SUPPLIERS = {
   // and none of the Portwest/Uneek/Snickers/Apache/TuffStuff/Fort/Blaklader/CT/AS0xx lines sharing
   // those orders. Shared brands (AWDis, Gildan, Regatta… also sold by Ralawise/BTC/Prestige) resolve
   // to PenCarrie here, which is what "(CHECKED)" is asserting.
+  // brandIds: the SAME 51-brand assertion as the regex below, by BP brand id instead of by how
+  // someone typed the product name. Needed because these names routinely carry the STYLE CODE and
+  // no brand at all: SO 483237's ten rows are "AM015 Heavyweight T-Shirt + CENTER CHEST SMALL …",
+  // every one of them brandId 216 (Anthem) — a brand already in the regex, which the regex can
+  // never see (user: "order 483237 needs to go with pencarrie", 2026-08-25).
+  // This is the case supplier attribution CANNOT cover: BP gives those products
+  // primarySupplierId 205 (Ralawise), and buying them from PenCarrie anyway is exactly what a
+  // "(CHECKED)" tag asserts. So brand is the right signal here and primarySupplierId is not.
+  // Ids resolved from BP's own /product-service/brand against the regex terms. Brand 74 is
+  // "Other" — a catch-all — and is deliberately EXCLUDED; claiming it would hand PenCarrie every
+  // unbranded product in the catalogue.
+  // Scope note: like the regex, this only ever applies to orders already tagged PENCARRIE, and it
+  // resolves shared brands (AWDis/Gildan/Regatta, also sold by Ralawise/BTC/Prestige) to PenCarrie
+  // — the same policy the regex has always had, now applied consistently instead of depending on
+  // whether the brand happens to appear in the name. Use a tag scope for the exceptions.
   'PENCARRIE':  { contactId: 204,   costList: 20, poField: null,
+    brandIds: [75, 77, 78, 80, 81, 82, 83, 84, 93, 96, 97, 98, 102, 110, 111, 116, 117, 119, 121, 125, 126, 133, 137, 147, 152, 153, 156, 157, 158, 160, 161, 163, 167, 171, 179, 185, 186, 199, 201, 202, 207, 214, 216, 220, 221, 225, 228, 242, 252, 264],
     detect: (n) => /\b(afd|anthem|awdis|babybugz|bagbase|beechfield|bella|brand\s*lab|canterbury|comfort\s*grip|craghoppers|denny'?s|ecologie|finden\s*hales|flexfit|front\s*row|fruit\s*of\s*the\s*loom|gildan|henbury|kariban|kimood|kustom\s*kit|larkwood|le\s*chef|mantis|mumbles|native\s*spirit|neoblue|premier|pro\s*rtx|proact|quadra|regatta|result|russell|so\s*denim|sol'?s|spiro|stormtech|tactical\s*threads|tee\s*jays|tombo|towel\s*city|warrior|westford\s*mill|yoko|yupoong)\b/i.test(n || '') },
 };
 
