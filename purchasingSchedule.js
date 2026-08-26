@@ -1578,6 +1578,20 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // This wiring was the missing half of the 2026-08-24 worker build. Without it BOTH scheduled runs
   // on 2026-08-25 failed at the 403 with nothing ordered, the triage bot re-ran into the same 403,
   // and BLK-1926556 (GBP979) had to be placed by hand through this same worker.
+  //
+  // 2026-08-26, PO 484833: a SEPARATE failure, at the cart step (api.blaklader.com POST /cart/carts
+  // 500 "Maximum length exceeded", every attempt 08:33-10:24 UK, 0/N lines every time). It cleared on
+  // its own — replaying the exact same 35-line create by hand at 10:35 UK succeeded twice — so no
+  // code fix went in for it; the theory (products array size / a stuck account-side draft) was never
+  // confirmed and does not need to be for this to be worth recording as "not ours, and not current
+  // any more" if it recurs.
+  // Getting past that step surfaced a THIRD failure, here at checkout: orders/send 500 "Internal
+  // Server Error" from inside the worker's browser session, twice in a row (10:39 and 10:44 UK),
+  // basket populated correctly both times, no PO placed either time. No further detail is available
+  // from this side — the worker's job record carries only that one line, and portal-order-worker's
+  // own logs are not reachable from here. Do not re-run a third time on the same guess; if it is
+  // still doing this, someone needs to read the worker's logs for that job id, or watch a checkout by
+  // hand.
   const wr = live
     ? await workerPlaceOrder({ supplier: 'BLAKLADER', ref: poId, lines: orderLines, opts: { body: prev.body, cartId: prev.cartId }, execute: true })
     : { ok: true, orderNo: null, dryRun: true };
