@@ -8747,6 +8747,42 @@ app.post('/api/purchasing/seed-test-order', async (req, res) => {
 // retry would have ordered 2 items and reported success).
 // Dry-run unless { execute: true }. Refuses anything but the statuses we actually use, so this
 // cannot be pointed at an arbitrary status by mistake.
+// EMPTY a PO's rows. Setting a PO to "Cancelled" does NOT release its stock: the rows still count
+// as ON ORDER, so a cancelled-but-populated PO goes on suppressing the low-inventory read and the
+// next PO comes out short — which is the whole problem orphan drafts cause (user, 2026-08-26).
+// A cancel is only real once the items are gone.
+//
+// remove-po-row-live cannot do it: it matches by SKU and refuses when two rows share one
+// ("refusing to guess which"). Orphans routinely have repeats — PO 484700 carried the same bomber
+// SKU on 6 of its 8 rows. This deletes by rowId and reads back to prove zero remain.
+//
+// GUARDED: PO only, and only a draft (6) or cancelled (62). It must never strip a PO that was
+// actually sent to a supplier.
+const EMPTIABLE_PO_STATUSES = { 6: 'Pending PO', 62: 'PO Cancelled' };
+app.post('/api/purchasing/empty-po-rows-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  const b = req.body || {};
+  const poId = Number(b.poId);
+  if (!poId) return res.status(400).json({ error: 'poId required' });
+  try {
+    const cur = (await purchasingAuto.bpLiveGet(`/order-service/order/${poId}`))[0] || {};
+    const statusId = cur.orderStatus && cur.orderStatus.orderStatusId;
+    const before = {
+      poId, type: cur.orderTypeCode, reference: cur.reference, statusId,
+      supplier: cur.parties && cur.parties.supplier && cur.parties.supplier.companyName,
+      net: cur.totalValue && cur.totalValue.net, rows: Object.keys(cur.orderRows || {}).length,
+    };
+    if (cur.orderTypeCode !== 'PO') return res.status(400).json({ error: `order ${poId} is a ${cur.orderTypeCode}, not a PO`, before });
+    if (!EMPTIABLE_PO_STATUSES[statusId]) {
+      return res.status(400).json({ error: `PO ${poId} is status ${statusId} — only ${Object.entries(EMPTIABLE_PO_STATUSES).map(([k, v]) => `${k} (${v})`).join(' or ')} may be emptied`, before });
+    }
+    if (b.execute !== true) return res.json({ dryRun: true, before, wouldRemove: before.rows });
+    const out = await purchasingAuto.emptyPoRowsLive(poId);
+    const after = (await purchasingAuto.bpLiveGet(`/order-service/order/${poId}`))[0] || {};
+    res.json({ done: out.ok, before, removed: out.removed, left: out.left, confirmedRows: Object.keys(after.orderRows || {}).length, cleared: out.cleared });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 const LIVE_STATUS_ALLOWED = { 62: 'PO Cancelled', 7: 'Placed with supplier', 6: 'Pending PO', 22: 'Ordered Stock', 23: 'Stock needs ordering' };
 app.post('/api/purchasing/set-order-status-live', express.json(), async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });

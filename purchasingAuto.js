@@ -1337,7 +1337,7 @@ async function findRecordedFailedPo(pool, supplierKey, contactId) {
 }
 // Delete every row, then READ BACK. A PO that says it emptied and did not would be refilled on top
 // of its old rows and double the order — the one outcome worse than a duplicate PO.
-async function emptyPoRowsLive(poId) {
+export async function emptyPoRowsLive(poId) {
   const po = (await liveGet(`/order-service/order/${poId}`) || [])[0];
   if (!po) return { ok: false, reason: `PO ${poId} not found` };
   const rows = Object.entries(po.rows || po.orderRows || {});
