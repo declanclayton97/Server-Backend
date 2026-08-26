@@ -1561,7 +1561,8 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
     // being dropped on purpose.
     throw stepErr('cart', `the Blaklader basket does not hold what was asked for — NOT ordering. PO#${poId} left for review.`,
       { poId, missing: basket.missing || [], badSkus: basket.badSkus || [], cart: basket.cart ? { lines: basket.cart.lines, totalQty: basket.cart.totalQty } : null,
-        cartId: basket.cartId || null, createStatus: basket.createStatus ?? null, addStatus: basket.addStatus ?? null });
+        cartId: basket.cartId || null, createStatus: basket.createStatus ?? null, addStatus: basket.addStatus ?? null,
+        createError: basket.createError || null, addError: basket.addError || null });
   }
 
   // STEP 2 — build the order body from a template order. Reads the basket for its cartId; writes nothing.
