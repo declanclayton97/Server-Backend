@@ -1554,8 +1554,14 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // both 2026-08-25 basket failures logged "...the basket does not match what was" and nothing that
   // said WHICH line — the one fact needed to fix it. context is not truncated.
   if (live && !basket.ok) {
+    // createStatus/addStatus/cartId were already computed by blakladerAddToBasket (it returns them)
+    // but never made it into this context, so every basket failure today read "0/N missing" with no
+    // way to tell "their API rejected the create/add call outright" from "it was accepted and is
+    // still populating" — the two have very different fixes. Both are cheap to include; neither was
+    // being dropped on purpose.
     throw stepErr('cart', `the Blaklader basket does not hold what was asked for — NOT ordering. PO#${poId} left for review.`,
-      { poId, missing: basket.missing || [], badSkus: basket.badSkus || [], cart: basket.cart ? { lines: basket.cart.lines, totalQty: basket.cart.totalQty } : null });
+      { poId, missing: basket.missing || [], badSkus: basket.badSkus || [], cart: basket.cart ? { lines: basket.cart.lines, totalQty: basket.cart.totalQty } : null,
+        cartId: basket.cartId || null, createStatus: basket.createStatus ?? null, addStatus: basket.addStatus ?? null });
   }
 
   // STEP 2 — build the order body from a template order. Reads the basket for its cartId; writes nothing.
