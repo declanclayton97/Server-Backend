@@ -1599,7 +1599,11 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   const orderNo = wr.orderNo || wr.internalId || null;
   // packNotes records every line whose quantity was multiplied, so a 1-becomes-5 is visible in the
   // run report instead of only showing up on the invoice.
-  steps.checkout = { ok: true, orderNo, via: 'portal-worker', packMultiplied: basket.packNotes || [] };
+  // repriced/supplierPrices come from the cart view the worker now does before submitting. The
+  // reprice is the only moment Blaklader's real prices are visible, and a run that did NOT reprice
+  // is the state that returned 500 all day on 2026-08-26 — so record both.
+  steps.checkout = { ok: true, orderNo, via: 'portal-worker', packMultiplied: basket.packNotes || [],
+    repriced: wr.repriced === true, cartPricesRead: ((wr.supplierPrices || []).length) || 0 };
   // Only now, with the order actually placed. An aborted run leaves them pending for the next one —
   // marking them consumed any earlier would lose them silently, which is the failure this exists to
   // undo in the first place.
