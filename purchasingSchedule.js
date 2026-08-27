@@ -23,6 +23,26 @@ const STERLING_WORKER_SECRET = process.env.STERLING_WORKER_SECRET || '';
 
 let running = false; // in-process guard against overlapping runs
 
+// The PO id of the run IN FLIGHT, so a failure that happens AFTER the PO exists can be adopted by
+// the next attempt instead of minting a second PO for the same demand. Until now only Blaklader's
+// checkout error carried a poId — every other supplier throws through jfetch(), which attaches no
+// context at all, so findRecordedFailedPo() had nothing to match on and the fixer built a NEW PO
+// every time. MASCOT 2026-08-27 is the case: PO 485126 failed at the basket, the retry raised
+// 485130, and the three sales-order lines then sat on both.
+//
+// Reset at the START of every run, so a stale id from an earlier run can never be attached to an
+// unrelated failure — adopting the WRONG PO is far worse than not adopting at all. Safe as module
+// state because `running` above permits only one run in this process at a time.
+let activePoId = null;
+
+// Every PO creation goes through here so the id is captured in ONE place rather than 13. Preview
+// calls (execute:false) come back created:false and are deliberately NOT recorded — there is no PO.
+async function createPo(opts) {
+  const po = await bp.createComboPOLive(opts);
+  if (po && po.created && po.poId) activePoId = po.poId;
+  return po;
+}
+
 // ── UK local time ────────────────────────────────────────────────────────────
 export function ukNow(d = new Date()) {
   const p = {};
@@ -376,7 +396,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   const steps = {};
   // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs)
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'FRISTADS', execute: true, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'FRISTADS', execute: true, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -542,7 +562,7 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   const steps = {};
   // 1. combined PO (allocation-aware demand + low-inv + separator)
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'CASTLE', execute: true, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'CASTLE', execute: true, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -670,7 +690,7 @@ async function pullSterlingOrderNo(poId) {
 async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   const steps = {};
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'STERLING', execute: true, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'STERLING', execute: true, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -731,7 +751,7 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   const steps = {};
   // 1. combined PO (SO demand + low-inv; stamps the SOs)
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'UNEEK', execute: true, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'UNEEK', execute: true, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -769,7 +789,7 @@ async function placeScruffsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {})
   const steps = {};
   // 1. combined PO (SO demand + low-inv; stamps the SOs)
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'SCRUFFS', execute: true, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'SCRUFFS', execute: true, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -807,7 +827,7 @@ const PERFORMANCE_BRANDS_SUPPLIER_CONTACT = 11611;
 async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const steps = {};
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'PERFORMANCE BRANDS', execute: live, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'PERFORMANCE BRANDS', execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -907,7 +927,7 @@ const MASCOT_SUPPLIER_CONTACT = 334;
 async function placeMascotOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const steps = {};
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'MASCOT', execute: live, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'MASCOT', execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -963,7 +983,7 @@ const CHADWICK_SUPPLIER_CONTACT = 42485;
 async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const steps = {};
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'CHADWICK', execute: live, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'CHADWICK', execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -1040,7 +1060,7 @@ function snickersPackMultiples() {
 async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const steps = {};
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -1220,7 +1240,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   let priceOverrides = null;
   if (live) {
     let preview;
-    try { preview = await bp.createComboPOLive({ supplierKey, execute: false }); }
+    try { preview = await createPo({ supplierKey, execute: false }); }
     catch (e) { throw stepErr('preflight', `couldn't value the demand: ${e.message}`); }
     // name/colour/size go with the line so the portal can fall back to style + colour NAME + size
     // when neither our SKU nor our EAN is in its sheet. 802211-001L aborted the whole Carhartt run
@@ -1271,7 +1291,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
     }
   }
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey, execute: live, padToThreshold, priceOverrides, logPool: pool }); }
+  try { po = await createPo({ supplierKey, execute: live, padToThreshold, priceOverrides, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -1356,7 +1376,7 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
     steps.po = { poId, reused: true, soIds };
   } else {
     let po;
-    try { po = await bp.createComboPOLive({ supplierKey: 'PORTWEST', execute: true, padToThreshold, logPool: pool }); }
+    try { po = await createPo({ supplierKey: 'PORTWEST', execute: true, padToThreshold, logPool: pool }); }
     catch (e) { throw createPoErr(e); }
     if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
     poId = po.poId;
@@ -1452,7 +1472,7 @@ const PENCARRIE_SUPPLIER_CONTACT = 204;
 async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, sandbox = false } = {}) {
   const steps = {};
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'PENCARRIE', execute: live, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'PENCARRIE', execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -1536,7 +1556,7 @@ const BLAKLADER_SUPPLIER_CONTACT = 323;
 async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const steps = {};
   let po;
-  try { po = await bp.createComboPOLive({ supplierKey: 'BLAKLADER', execute: live, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'BLAKLADER', execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -1731,6 +1751,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
   const threshold = cfg.threshold ?? THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier — `??` so a deliberate 0 (no minimum, e.g. Snickers) is honoured, not treated as "unset"
   if (running) return { skipped: 'a run is already in progress' };
   running = true;
+  activePoId = null;                    // never carry a PO id across runs
   const uk = ukNow();
   try {
     await ensureTable(pool);
@@ -1741,7 +1762,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
 
     // dry-run the combined PO to value the demand (net, ex-VAT)
     let plan;
-    try { plan = await bp.createComboPOLive({ supplierKey: cfg.supplierKey, execute: false }); }
+    try { plan = await createPo({ supplierKey: cfg.supplierKey, execute: false }); }
     catch (e) { throw stepErr('value-check', `couldn't value the demand (Brightpearl down or demand read failed): ${e.message}`); }
     if (plan.unresolvedSkus && plan.unresolvedSkus.length) throw stepErr('value-check', `low-inventory item codes don't match any Brightpearl product: ${plan.unresolvedSkus.join(', ')}`);
     const lines = [...(plan.soLines || []), ...(plan.lowLines || [])];
@@ -1815,7 +1836,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     const step = e.step || 'unknown';
     const report = { supplier: cfg.supplierKey, ran: uk.date, dryRun, step, error: e.message };
     // persist to the error log + email a specific alert (what step, what went wrong)
-    await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, ...(e.context || {}) } }).catch(() => {});
+    await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, ...(activePoId ? { poId: activePoId } : {}), ...(e.context || {}) } }).catch(() => {});
     if (!dryRun) { try { await saveState(pool, { id: cfg.stateId, workingDaysWaited: (await getState(pool, cfg.stateId)).working_days_waited, lastRunDate: uk.date, result: report }); } catch {} }
     return report;
   } finally { running = false; }
