@@ -1895,12 +1895,22 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
       let probe;
       try { probe = await runSupplierScheduled({ pool, altItemsUrl, supplier: key, dryRun: true, force: true }); }
       catch (e) { suppliers.push({ supplier: key, skipped: 'threshold re-check failed: ' + e.message }); continue; }
-      const wouldPlace = probe && typeof probe.decision === 'string' && probe.decision.indexOf('WOULD place') === 0;
+      // ONLY a genuine threshold recovery. "WOULD place" has three causes and they are not
+      // interchangeable: over-threshold is the one we want, while a day-3 trigger fires because the
+      // wait clock ran out and PADS or PAYS CARRIAGE on a small order. PERFORMANCE BRANDS proved it
+      // on the first live run - GBP 75.03 against a GBP 200 threshold, reported as "WOULD place" purely
+      // because the probe computed day 3. That placement belongs to its OWN window tomorrow, not to
+      // an evening sweep bringing it forward a day. reason is the exact discriminator.
+      const wouldPlace = probe && probe.reason === "over-threshold";
       if (!wouldPlace) {
         // NOT the same thing as "under threshold": a probe that never answered has told us nothing.
         // Reporting silence as a definite negative is what this sweep exists to stop happening.
         const answered = probe && typeof probe.decision === "string";
-        suppliers.push({ supplier: key, skipped: answered ? "still under threshold" : "threshold re-check gave no decision - NOT a negative", was: res.decision, now: (probe && probe.decision) || null, netValue: (probe && probe.netValue) != null ? probe.netValue : null, probeSkipped: (probe && probe.skipped) || null, probeError: (probe && probe.error) || null, probeStep: (probe && probe.step) || null });
+        const dayThree = answered && probe.decision.indexOf("WOULD place") === 0;   // would place, but only because the wait clock ran out
+        const why = !answered ? "threshold re-check gave no decision - NOT a negative"
+          : dayThree ? "would place only because its wait clock ran out - that belongs to its own window tomorrow, and would pad or pay carriage"
+          : "still under threshold";
+        suppliers.push({ supplier: key, skipped: why, was: res.decision, now: (probe && probe.decision) || null, netValue: (probe && probe.netValue) != null ? probe.netValue : null, probeSkipped: (probe && probe.skipped) || null, probeError: (probe && probe.error) || null, probeStep: (probe && probe.step) || null });
         continue;
       }
       if (!execute) {
