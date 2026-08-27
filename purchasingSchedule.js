@@ -1873,7 +1873,12 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
     catch (e) { suppliers.push({ supplier: key, skipped: 'state unreadable: ' + e.message }); continue; }
     if (!state.last_run_date || ukDateStr(state.last_run_date) !== uk.date) continue;   // never ran today
     const res = state.last_result || {};
-    if (!res.error || !res.step) continue;                                              // today's run did not fail
+    // Say WHY a supplier that DID run today is not being retried. A silent skip here is exactly how
+    // a supplier quietly buys nothing two days running with nobody seeing it.
+    if (!res.error || !res.step) {
+      suppliers.push({ supplier: key, skipped: "the run today recorded no failure", state: res.state || res.decision || null, placedPo: (res.placement && res.placement.poId) || null });
+      continue;
+    }
     if (!RETRY_SAFE_STEPS.has(String(res.step))) {
       suppliers.push({ supplier: key, skipped: 'step "' + res.step + '" reached, or may have reached, the supplier', step: res.step });
       continue;
