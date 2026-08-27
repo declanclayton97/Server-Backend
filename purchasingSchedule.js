@@ -1842,6 +1842,63 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
   } finally { running = false; }
 }
 
+
+// ── end-of-day retry of failures that never reached the supplier ─────────────
+// PLACING THE ORDER IS THE GOAL. A run that failed BEFORE it ever contacted the supplier bought
+// nothing, and the fix for it often lands within the hour — but TWO separate guards stop it ever
+// trying again that day: the day-claim (last_run_date), and the poller's own 30-minute window.
+//
+// HELLY HANSEN on 2026-08-27 is the case this exists for. It failed at 11:03 on a transient
+// Brightpearl blip, both fixes were deployed by 12:13, and it STILL bought nothing — its window
+// (11:00–11:29) had closed and the day was already claimed. £454.77 of orderable demand, over the
+// threshold and fully resolvable, simply waited for the next day.
+//
+// ONLY these steps are retried. Each provably happens BEFORE the PO exists and BEFORE any cart or
+// portal contact, so a retry cannot duplicate an order:
+const RETRY_SAFE_STEPS = new Set(['preflight', 'create-po', 'resolve']);
+// Everything from 'cart' onwards is deliberately EXCLUDED, even though some of those never place
+// either. A cart step leaves state on the SUPPLIER'S own system, and a 'checkout' failure may mean
+// an order that DID go through and whose confirmation we failed to read — Blaklader timed out after
+// 25 minutes on 2026-08-27 and the order had in fact been placed. Fail closed: an unrecognised or
+// later step is never retried, because a duplicate order is far worse than a late one.
+const _retriedToday = new Map();   // supplierKey → uk date, so the 30-minute sweep retries ONCE
+
+export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true } = {}) {
+  const uk = ukNow();
+  const suppliers = [];
+  for (const key of Object.keys(SCHEDULED_SUPPLIERS)) {
+    const cfg = SCHEDULED_SUPPLIERS[key];
+    let state;
+    try { state = await getState(pool, cfg.stateId); }
+    catch (e) { suppliers.push({ supplier: key, skipped: 'state unreadable: ' + e.message }); continue; }
+    if (!state.last_run_date || ukDateStr(state.last_run_date) !== uk.date) continue;   // never ran today
+    const res = state.last_result || {};
+    if (!res.error || !res.step) continue;                                              // today's run did not fail
+    if (!RETRY_SAFE_STEPS.has(String(res.step))) {
+      suppliers.push({ supplier: key, skipped: 'step "' + res.step + '" reached, or may have reached, the supplier', step: res.step });
+      continue;
+    }
+    if (_retriedToday.get(key) === uk.date) { suppliers.push({ supplier: key, skipped: 'already retried today' }); continue; }
+    if (!execute) { suppliers.push({ supplier: key, wouldRetry: true, step: res.step, error: String(res.error).slice(0, 140) }); continue; }
+    _retriedToday.set(key, uk.date);          // claim BEFORE running — same discipline as the day-claim
+    try {
+      const r = await runSupplierScheduled({ pool, altItemsUrl, supplier: key, force: true });
+      const poId = r && r.placement && r.placement.poId;
+      suppliers.push({ supplier: key, retried: true, afterStep: res.step, placed: !!poId, poId: poId || null, decision: (r && r.decision) || null, error: (r && r.error) || null });
+      await logPurchasingError(pool, {
+        supplier: key, step: 'retry-sweep', severity: poId ? 'info' : 'review',
+        message: poId
+          ? 'Retried after the "' + res.step + '" failure earlier today and PLACED (PO#' + poId + ').'
+          : 'Retried after the "' + res.step + '" failure earlier today and it did NOT place: ' + ((r && (r.error || r.decision)) || 'no result'),
+        context: { afterStep: res.step, retryOf: String(res.error).slice(0, 300), result: r || null },
+      }).catch(() => {});
+    } catch (e) {
+      suppliers.push({ supplier: key, retried: true, afterStep: res.step, placed: false, error: e.message });
+    }
+  }
+  return { ran: uk.date, ukTime: uk.weekday + ' ' + uk.hour + ':' + String(uk.minute).padStart(2, '0'), execute, suppliers };
+}
+
 // Back-compat wrapper — the 10:30 poller + existing /fristads-scheduled-run route call this.
 export async function runFristadsScheduled(opts = {}) { return runSupplierScheduled({ ...opts, supplier: 'FRISTADS' }); }
 

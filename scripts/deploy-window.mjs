@@ -58,6 +58,7 @@ const POLLERS = [
   { name: 'Portwest', h: 15, m: 0, days: 'Mon-Fri' },
   { name: 'PenCarrie', h: 15, m: 40, days: 'Mon-Fri' },
   { name: 'Uneek', h: 16, m: 0, days: 'Mon-Fri' },
+  { name: 'Retry sweep', h: 17, m: 0, days: 'Mon-Fri' },   // re-runs suppliers whose failure never reached them
 ];
 const runsToday = (p) => (p.days === 'Mon/Wed/Fri' ? ['Mon', 'Wed', 'Fri'] : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']).includes(day);
 const mins = hh * 60 + mm;

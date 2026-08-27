@@ -9507,6 +9507,39 @@ if (process.env.MASCOT_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Mascot auto-purchase poller scheduled (weekdays 11:30 UK, £250 threshold)');
 } else { console.log('⏸️  Mascot auto-purchase poller DISABLED (MASCOT_SCHEDULE_ENABLED=false)'); }
 
+// ── End-of-day RETRY SWEEP (weekdays 17:00–17:29 UK) ─────────────────────────
+// Placing the order is the goal. A supplier whose run died BEFORE it ever reached the supplier
+// bought nothing that day, and the fix often lands within the hour — but the day-claim plus each
+// poller's own 30-minute window mean nothing tries again. HELLY HANSEN 2026-08-27: failed 11:03,
+// fixed by 12:13, still bought nothing, because its window had closed and the day was claimed.
+//
+// 17:00 is safe by construction: the last supplier window is Uneek at 16:00, and deploy-window.mjs
+// treats a window as busy until 15 minutes after it closes (16:45). Keep those two in step.
+// Only pre-supplier failures are retried — see RETRY_SAFE_STEPS in purchasingSchedule.js.
+if (process.env.RETRY_SWEEP_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 17 && uk.minute < 30)) return;               // 17:00–17:29 window
+      purchasingSchedule.retrySafeFailuresToday({ pool, altItemsUrl: ALT_ITEMS_URL, execute: true })
+        .then((r) => { if ((r.suppliers || []).some((s) => s.retried)) console.log('[retry-sweep]', JSON.stringify(r).slice(0, 500)); })
+        .catch((e) => console.error('[retry-sweep] error:', e.message));
+    } catch (e) { console.error('[retry-sweep] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ End-of-day retry sweep scheduled (weekdays 17:00 UK — pre-supplier failures only)');
+} else { console.log('⏸️  End-of-day retry sweep DISABLED (RETRY_SWEEP_ENABLED=false)'); }
+
+// Manual trigger / dry run for the sweep. { execute: true } actually retries; default reports only.
+app.post('/api/purchasing/retry-sweep', express.json(), async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available (schedule state)' });
+  try {
+    const b = req.body || {};
+    res.json(await purchasingSchedule.retrySafeFailuresToday({ pool, altItemsUrl: ALT_ITEMS_URL, execute: b.execute === true }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 
 async function sendOutOfStockEmail(supplier, lines, to) {
   const recipient = to || OOS_EMAIL_TO;
