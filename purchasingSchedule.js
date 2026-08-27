@@ -1174,12 +1174,26 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 // the preflight then passes, the PO gets created, and the checkout — sending bare SKUs — refuses on
 // the very line the preflight just resolved. PO 483861 was orphaned exactly that way on 2026-08-21.
 // Costs one batched product read at most, and only for lines that actually need it.
+// This enrichment is NOT merely additive, despite what the catch below used to claim. For a legacy
+// TB-coded product with no EAN, style + colour + size is the ONLY way the portal can resolve the
+// line, so a failure here does not degrade gracefully — it makes a stocked item look DISCONTINUED
+// and aborts the entire run before any PO exists. HELLY HANSEN 2026-08-27: one transient Brightpearl
+// failure on an EIGHT-id call (an 80-character URL) blocked all 8 lines and £492 of demand, and the
+// resulting error told the reader to go fix aliases that were never broken.
+//
+// So: retry, and RECORD the failure, so the caller can tell "the supplier does not stock this"
+// apart from "we could not look it up". Those are opposite conclusions and they looked identical.
 async function withVariantDetail(lines) {
   const need = lines.filter((l) => !l.colour || !l.size).map((l) => l.productId).filter(Boolean);
   if (!need.length) return lines;
+  const ids = [...new Set(need)].sort((a, b) => a - b);    // Brightpearl 400s on an unsorted id set
+  let arr = null, lastErr = null;
+  for (let attempt = 0; attempt < 3 && arr == null; attempt++) {
+    try { arr = await bp.bpLiveGet(`/product-service/product/${ids.join(',')}`) || []; }
+    catch (e) { lastErr = e; if (attempt < 2) await new Promise((r) => setTimeout(r, 1200 * (attempt + 1))); }
+  }
+  if (arr == null) { lines.enrichFailed = (lastErr && lastErr.message) || 'unknown'; return lines; }
   try {
-    const ids = [...new Set(need)].sort((a, b) => a - b);   // Brightpearl 400s on an unsorted id set
-    const arr = await bp.bpLiveGet(`/product-service/product/${ids.join(',')}`) || [];
     const byId = {};
     for (const p of (Array.isArray(arr) ? arr : [arr])) {
       if (!p || p.id == null) continue;
@@ -1218,7 +1232,16 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
     await withVariantDetail(preLines);
     if (preLines.length) {
       const dry = await jfetch('preflight', `${altItemsUrl}${basketPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: preLines, dryRun: true }) });
-      if (dry.unresolved && dry.unresolved.length) throw stepErr('preflight', `${supplierKey} lines not on the portal (PO NOT created): ${dry.unresolved.join(', ')} — fix the resolver/aliases first`);
+      // An unresolved line means one of two OPPOSITE things, and saying the wrong one sends whoever
+      // reads this — person or triage bot — off to fix data that is not broken. If the variant
+      // lookup failed we never had colour/size to match on, so the miss is very likely a false
+      // negative and the right move is to RETRY, not to touch an alias.
+      if (dry.unresolved && dry.unresolved.length) {
+        const why = preLines.enrichFailed
+          ? ` — but the Brightpearl variant lookup FAILED (${preLines.enrichFailed}), so colour/size were missing and these are probably FALSE NEGATIVES. Re-run before changing any alias or SKU.`
+          : ' — fix the resolver/aliases first';
+        throw stepErr('preflight', `${supplierKey} lines not on the portal (PO NOT created): ${dry.unresolved.join(', ')}${why}`, { enrichFailed: preLines.enrichFailed || null, unresolved: dry.unresolved });
+      }
       // A line rescued by the style+colour-name+size fallback is REPORTED, not silently accepted:
       // it means our SKU or EAN disagrees with the supplier sheet and should be corrected at
       // source, or the alias quietly carries a wrong mapping forever.
