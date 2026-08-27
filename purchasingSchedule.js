@@ -469,7 +469,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
         const ours = new Map(); // article → { qty, net, rows[] }
         for (const l of ourLines) {
           const art = artOf(l.sku);
-          if (!art || !(l.cost > 0) || !(l.qty > 0)) continue;
+          if (!art || !(l.qty > 0)) continue;                     // a £0 cost is a MISSING cost, not a reason to skip — see the heal note below
           const o = ours.get(art) || { qty: 0, net: 0, rows: [] };
           o.qty += l.qty; o.net += l.cost * l.qty; o.rows.push(l);
           ours.set(art, o);
@@ -1628,7 +1628,7 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
       const k = String(l.sku).toUpperCase();
       if (packed.has(k) || l.rawQty) continue;                 // multipack or carry-forward — not comparable per unit
       const now = theirs.get(k);
-      if (now == null || !(l.cost > 0)) continue;
+      if (now == null) continue;                               // NOT `l.cost > 0` — a £0 cost is the worst error there is, not an absent one
       if (Math.abs(now - l.cost) > 0.005) changes.push({ sku: l.sku, was: l.cost, now });
     }
     steps.priceCheck = { compared: theirs.size, skippedPacks: packed.size, differences: changes.length };
