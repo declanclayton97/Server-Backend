@@ -1897,7 +1897,10 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
       catch (e) { suppliers.push({ supplier: key, skipped: 'threshold re-check failed: ' + e.message }); continue; }
       const wouldPlace = probe && typeof probe.decision === 'string' && probe.decision.indexOf('WOULD place') === 0;
       if (!wouldPlace) {
-        suppliers.push({ supplier: key, skipped: 'still under threshold', was: res.decision, now: (probe && probe.decision) || null, netValue: (probe && probe.netValue) || null });
+        // NOT the same thing as "under threshold": a probe that never answered has told us nothing.
+        // Reporting silence as a definite negative is what this sweep exists to stop happening.
+        const answered = probe && typeof probe.decision === "string";
+        suppliers.push({ supplier: key, skipped: answered ? "still under threshold" : "threshold re-check gave no decision - NOT a negative", was: res.decision, now: (probe && probe.decision) || null, netValue: (probe && probe.netValue) != null ? probe.netValue : null, probeSkipped: (probe && probe.skipped) || null, probeError: (probe && probe.error) || null, probeStep: (probe && probe.step) || null });
         continue;
       }
       if (!execute) {
