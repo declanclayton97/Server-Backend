@@ -1873,19 +1873,67 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
     catch (e) { suppliers.push({ supplier: key, skipped: 'state unreadable: ' + e.message }); continue; }
     if (!state.last_run_date || ukDateStr(state.last_run_date) !== uk.date) continue;   // never ran today
     const res = state.last_result || {};
-    // Say WHY a supplier that DID run today is not being retried. A silent skip here is exactly how
-    // a supplier quietly buys nothing two days running with nobody seeing it.
+    const already = _retriedToday.get(key) === uk.date;
+
+    // CASE 1 - today's run WAITED under the free-carriage threshold.
+    // It made no PO and never contacted the supplier, so re-evaluating is exactly as safe as
+    // retrying a pre-supplier failure - and worth it, because the threshold is judged on a single
+    // instant. HELLY HANSEN read 288.31 at its 11:30 window and 454.77 the same evening: over the
+    // line, free carriage, and idle until the next day for want of a second look.
     if (!res.error || !res.step) {
-      suppliers.push({ supplier: key, skipped: "the run today recorded no failure", state: res.state || res.decision || null, placedPo: (res.placement && res.placement.poId) || null });
+      const waiting = typeof res.decision === 'string' && res.decision.indexOf('waiting') === 0;
+      if (!waiting) {
+        suppliers.push({ supplier: key, skipped: 'the run today recorded no failure', state: res.state || res.decision || null, placedPo: (res.placement && res.placement.poId) || null });
+        continue;
+      }
+      if (already) { suppliers.push({ supplier: key, skipped: 'already swept today' }); continue; }
+      // DRY-RUN FIRST, and escalate only when it says it WOULD place. A real run that came in under
+      // threshold would record another wait DAY, and burning wait days early brings forward the
+      // day-3 forced placement - which places a small order AND pays carriage, the opposite of what
+      // the threshold exists for. The dry run writes nothing (the day-claim and saveState are both
+      // guarded by !dryRun), so this costs only a read.
+      let probe;
+      try { probe = await runSupplierScheduled({ pool, altItemsUrl, supplier: key, dryRun: true, force: true }); }
+      catch (e) { suppliers.push({ supplier: key, skipped: 'threshold re-check failed: ' + e.message }); continue; }
+      const wouldPlace = probe && typeof probe.decision === 'string' && probe.decision.indexOf('WOULD place') === 0;
+      if (!wouldPlace) {
+        suppliers.push({ supplier: key, skipped: 'still under threshold', was: res.decision, now: (probe && probe.decision) || null, netValue: (probe && probe.netValue) || null });
+        continue;
+      }
+      if (!execute) {
+        suppliers.push({ supplier: key, wouldRetry: true, why: 'waited at its window, now over threshold', was: res.decision, now: probe.decision, netValue: probe.netValue });
+        continue;
+      }
+      _retriedToday.set(key, uk.date);
+      const waitedBefore = state.working_days_waited;
+      let r = null, err = null;
+      try { r = await runSupplierScheduled({ pool, altItemsUrl, supplier: key, force: true }); }
+      catch (e) { err = e.message; }
+      const poId = r && r.placement && r.placement.poId;
+      // Demand can move between the probe and the run. If it did not place after all, put the wait
+      // counter back exactly as it was, so a sweep can NEVER consume one of the three wait days.
+      if (!poId) {
+        await saveState(pool, { id: cfg.stateId, workingDaysWaited: waitedBefore, lastRunDate: uk.date, result: r || res }).catch(() => {});
+      }
+      suppliers.push({ supplier: key, reevaluated: true, placed: !!poId, poId: poId || null, was: res.decision, decision: (r && r.decision) || null, error: err || (r && r.error) || null, waitDaysRestored: !poId });
+      await logPurchasingError(pool, {
+        supplier: key, step: 'retry-sweep', severity: poId ? 'info' : 'review',
+        message: poId
+          ? 'Waited at its window (' + res.decision + ') but was over the threshold by the evening - re-ran and PLACED (PO#' + poId + ').'
+          : 'Waited at its window and looked over-threshold at the sweep, but the re-run did not place: ' + (err || (r && r.decision) || 'no result') + '. Wait counter restored.',
+        context: { was: res.decision, probe: (probe && probe.decision) || null, result: r || null },
+      }).catch(() => {});
       continue;
     }
+
+    // CASE 2 - today's run FAILED before it ever reached the supplier.
     if (!RETRY_SAFE_STEPS.has(String(res.step))) {
       suppliers.push({ supplier: key, skipped: 'step "' + res.step + '" reached, or may have reached, the supplier', step: res.step });
       continue;
     }
-    if (_retriedToday.get(key) === uk.date) { suppliers.push({ supplier: key, skipped: 'already retried today' }); continue; }
+    if (already) { suppliers.push({ supplier: key, skipped: 'already swept today' }); continue; }
     if (!execute) { suppliers.push({ supplier: key, wouldRetry: true, step: res.step, error: String(res.error).slice(0, 140) }); continue; }
-    _retriedToday.set(key, uk.date);          // claim BEFORE running — same discipline as the day-claim
+    _retriedToday.set(key, uk.date);          // claim BEFORE running - same discipline as the day-claim
     try {
       const r = await runSupplierScheduled({ pool, altItemsUrl, supplier: key, force: true });
       const poId = r && r.placement && r.placement.poId;
