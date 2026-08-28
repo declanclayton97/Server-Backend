@@ -1944,6 +1944,27 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
       suppliers.push({ supplier: key, skipped: 'step "' + res.step + '" reached, or may have reached, the supplier', step: res.step });
       continue;
     }
+    // Someone may have dealt with it BY HAND between the failure and the sweep. That is exactly what
+    // happened to STERLING on 2026-08-28: the run failed at "resolve" on one line missing from the
+    // product-data file, the order was then placed manually against PO 485458, and a blind retry
+    // would have minted a fresh draft for the single line that still cannot resolve. If the PO the
+    // failure recorded is no longer a DRAFT, the failure has been settled — skip it.
+    let settledPo = null;
+    try {
+      const q = await pool.query(
+        "SELECT context FROM purchasing_error_log WHERE upper(supplier) = $1 AND severity = 'error' AND context ? 'poId' ORDER BY id DESC LIMIT 1",
+        [String(key).toUpperCase()]);
+      const failedPo = q.rows[0] && q.rows[0].context && Number(q.rows[0].context.poId);
+      if (failedPo) {
+        const po = (await bp.bpLiveGet('/order-service/order/' + failedPo) || [])[0];
+        const st = po && po.orderStatus && Number(po.orderStatus.orderStatusId);
+        if (st && st !== 6) settledPo = { poId: failedPo, statusId: st };
+      }
+    } catch (e) { /* cannot tell -> fall through and retry, the guards below still apply */ }
+    if (settledPo) {
+      suppliers.push({ supplier: key, skipped: 'the PO its failure recorded is no longer a draft - already dealt with', poId: settledPo.poId, statusId: settledPo.statusId, step: res.step });
+      continue;
+    }
     if (already) { suppliers.push({ supplier: key, skipped: 'already swept today' }); continue; }
     if (!execute) { suppliers.push({ supplier: key, wouldRetry: true, step: res.step, error: String(res.error).slice(0, 140) }); continue; }
     _retriedToday.set(key, uk.date);          // claim BEFORE running - same discipline as the day-claim
