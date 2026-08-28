@@ -1,0 +1,11 @@
+{
+  "_comment": "Entries MISSING from Sterling's product-data workbook, verified against their own site before being added. The ingest merges these AFTER building from the workbook, so they survive a re-ingest. Remove an entry once Sterling ship a file that contains it.",
+  "5055160080800": {
+    "search": "Albany",
+    "colour": "Grey/Black",
+    "size": "L31W30",
+    "sku": "Albany L31W30",
+    "brand": "DeWalt",
+    "_why": "Dewalt Albany Slim Work Trousers, 30 Waist / 31 Leg. Absent from the 2026-01-08 workbook (0 occurrences; the sizes either side are present), which blocked the whole Sterling run on 2026-08-28. Size L31W30 confirmed on sterling.famlive.net via a worker dry-run: matchedSize 30, ready true."
+  }
+}

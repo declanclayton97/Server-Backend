@@ -38,5 +38,23 @@ for (const [sn, hasHeader, c] of sheets) {
     map[bc] = { search: name, colour, size: clean(r[c.size]), sku: clean(r[c.sku]), brand: clean(r[c.brand]) };
   }
 }
+// MERGE THE OVERRIDES LAST. Sterling's workbook is not complete: 5055160080800 (Dewalt Albany
+// Slim, 30 Waist / 31 Leg) appears ZERO times in the 2026-01-08 file while the sizes either side
+// of it are present, and that one gap stopped the whole Sterling run on 2026-08-28. Rebuilding
+// from a newer workbook must not silently drop a hand-verified entry, so overrides are applied
+// after the sheets and win. Each carries a _why saying how it was verified; keys starting with _
+// are comments and are skipped. Delete an entry once Sterling ship a file that contains it.
+const OVERRIDES = new URL('../sterlingProductsOverrides.json', import.meta.url);
+let overrode = 0;
+try {
+  const ov = JSON.parse(fs.readFileSync(OVERRIDES, 'utf8'));
+  for (const [k, v] of Object.entries(ov)) {
+    if (k.startsWith('_')) continue;
+    const { _why, ...entry } = v;
+    map[k] = entry; overrode++;
+  }
+} catch (e) { console.warn('no overrides applied:', e.message); }
+
 fs.writeFileSync(OUT, JSON.stringify(map));
+if (overrode) console.log(`  + ${overrode} override(s) from sterlingProductsOverrides.json`);
 console.log(`sterlingProducts.json: ${Object.keys(map).length} EANs -> ${OUT.pathname}`);
