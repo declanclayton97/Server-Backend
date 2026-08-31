@@ -1635,6 +1635,19 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // own logs are not reachable from here. Do not re-run a third time on the same guess; if it is
   // still doing this, someone needs to read the worker's logs for that job id, or watch a checkout by
   // hand.
+  // RECURRED 2026-08-31, error id 98, PO 485844, job job_mtgzdarfws9f62 — same "orders/send 500"
+  // signature, basket held 29 lines / 67 units per force-run-safety, so checkout got as far as
+  // populating the basket again. NEW THIS TIME: the worker's job record carried a screenshot (it
+  // hadn't before), taken on the checkout page mid-failure — step "1. CART", "TOTAL: £0", no order
+  // rows visible. That reads as the browser session's OWN cart being empty, distinct from the
+  // API-owned cart (cartId in opts) force-run-safety confirms is populated — consistent with the
+  // cart-ownership split already established above for the direct 403 (server-to-server auth
+  // creates one cart, the storefront session another). If the worker checks out in its own session
+  // instead of loading the passed cartId, it would be submitting an empty order and get exactly this
+  // 500. Not confirmed, and not fixable from this repo: the browser automation is portal-order-worker,
+  // a separate service whose logs and code are not reachable from here. Left unhandled again — do
+  // not re-run on this guess. The basket this attempt left occupied is the real order, not a stray
+  // rehearsal; let it ride along rather than clearing it, until a human has looked at the worker.
   const wr = live
     ? await workerPlaceOrder({ supplier: 'BLAKLADER', ref: poId, lines: orderLines, opts: { body: prev.body, cartId: prev.cartId }, execute: true })
     : { ok: true, orderNo: null, dryRun: true };
