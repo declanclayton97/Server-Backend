@@ -644,9 +644,30 @@ async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, op
   const deadline = Date.now() + 25 * 60 * 1000;      // orders can be long; generous ceiling
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 12000));
-    const j = await jfetch('checkout', `${STERLING_WORKER_URL}/job/${jobId}`, { headers });
-    if (j.status === 'done') return j;               // carries ok/placed/orderNo/results/…
-    if (j.status === 'error') throw stepErr('checkout', `worker job errored: ${j.error}`);
+    // Poll the job WITHOUT jfetch's generic `.error` short-circuit. A job that FINISHED but did not
+    // place carries its error string ALONGSIDE the evidence — expectedUnits, cart, importSteps and
+    // missingLines — and jfetch throws on the string, discarding all of it.
+    //
+    // That is exactly what blinded us on SNICKERS 2026-08-31. placeSnickersOrder already names the
+    // dropped lines and puts missingLines/expectedUnits/cartUnits in the error context, deliberately
+    // untruncated, so a person and the triage pass can both act on it — but that code is UNREACHABLE
+    // while this poll throws first. All anyone ever saw was "not ready to place" and {poId, dryRun,
+    // ukTime}, and by the time it was read the worker had expired the job, so the evidence was gone
+    // twice over. Every caller already handles a returned not-ok job, so hand it back and let them.
+    // Only a transport or HTTP failure is an error HERE.
+    let j = null;
+    try {
+      const res = await fetch(`${STERLING_WORKER_URL}/job/${jobId}`, { headers });
+      const text = await res.text();
+      try { j = text ? JSON.parse(text) : null; } catch { j = null; }
+      if (!res.ok) throw stepErr('checkout', `HTTP ${res.status} polling worker job ${jobId}: ${String(text).slice(0, 200)}`, { jobId });
+    } catch (e) {
+      if (e.step) throw e;                       // already a step error - keep it
+      throw stepErr('checkout', `can't reach worker job ${jobId}: ${e.message}`, { jobId });
+    }
+    if (!j) throw stepErr('checkout', `worker job ${jobId} returned no JSON`, { jobId });
+    if (j.status === 'done') return j;            // ok OR not-ok - the caller inspects it
+    if (j.status === 'error') throw stepErr('checkout', `worker job errored: ${j.error}`, { jobId, job: j });
   }
   throw stepErr('checkout', `worker job ${jobId} timed out (still running after 25 min)`);
 }
