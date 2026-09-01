@@ -2021,7 +2021,7 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
       }
       suppliers.push({ supplier: key, reevaluated: true, placed: !!poId, poId: poId || null, was: res.decision, decision: (r && r.decision) || null, error: err || (r && r.error) || null, waitDaysRestored: !poId });
       await logPurchasingError(pool, {
-        supplier: key, step: 'retry-sweep', severity: poId ? 'info' : 'review',
+        supplier: key, step: 'retry-sweep', severity: poId ? 'info' : 'review', placed: !!poId,
         message: poId
           ? 'Waited at its window (' + res.decision + ') but was over the threshold by the evening - re-ran and PLACED (PO#' + poId + ').'
           : 'Waited at its window and looked over-threshold at the sweep, but the re-run did not place: ' + (err || (r && r.decision) || 'no result') + '. Wait counter restored.',
@@ -2064,7 +2064,7 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
       const poId = r && r.placement && r.placement.poId;
       suppliers.push({ supplier: key, retried: true, afterStep: res.step, placed: !!poId, poId: poId || null, decision: (r && r.decision) || null, error: (r && r.error) || null });
       await logPurchasingError(pool, {
-        supplier: key, step: 'retry-sweep', severity: poId ? 'info' : 'review',
+        supplier: key, step: 'retry-sweep', severity: poId ? 'info' : 'review', placed: !!poId,
         message: poId
           ? 'Retried after the "' + res.step + '" failure earlier today and PLACED (PO#' + poId + ').'
           : 'Retried after the "' + res.step + '" failure earlier today and it did NOT place: ' + ((r && (r.error || r.decision)) || 'no result'),
