@@ -167,7 +167,16 @@ async function main() {
       const undated = list.filter((x) => x.days == null);
       const recent = list.filter((x) => x.days != null && x.days < STUCK_DAYS);
       if (stuck.length) {
-        flag(sup, `${stuck.length} order(s) untouched for ${STUCK_DAYS}+ days`, `${stuck.sort((a, b) => b.days - a.days).slice(0, 6).map((x) => `SO ${x.soId} (idle ${x.days}d, "${x.tag}")`).join('; ')} — still on Stock needs ordering with ${sup} as first choice and nothing has touched them. Either the demand scan cannot see them, or they never reach the threshold.`);
+        // Say WHICH of the three causes it is, or say nothing. A flag that fires for three days
+        // running on a healthy order teaches people to skim the flag list, and skimming the flag
+        // list is the one failure this whole report exists to prevent.
+        const { stranded, covered } = await classifyStuck(sup, stuck);
+        if (stranded.length) {
+          flag(sup, `${stranded.length} order(s) untouched for ${STUCK_DAYS}+ days`, `${stranded.sort((a, b) => b.days - a.days).slice(0, 6).map((x) => `SO ${x.soId} (idle ${x.days}d, "${x.tag}" — ${x.why})`).join("; ")} — still on Stock needs ordering with ${sup} as first choice, and NOT already covered by stock or goods in transit.`);
+        }
+        if (covered.length) {
+          note(sup, `${covered.length} idle order(s), already covered`, `${covered.map((x) => `SO ${x.soId} (idle ${x.days}d — ${x.why})`).join("; ")} — the demand scan is right to order nothing. These are waiting on a DELIVERY, not on a purchase.`);
+        }
       }
       if (undated.length) note(sup, `${undated.length} order(s) with no updatedOn`, `${undated.slice(0, 6).map((x) => `SO ${x.soId}`).join(', ')} — could not age these.`);
       // Deliberately NOT one note per supplier. Eight lines of "normal" pushed the genuine flags
@@ -233,6 +242,55 @@ function owedBy(tag) {
   return [...new Set(out)];
 }
 
+// Why has this order sat untouched? There are THREE causes, and the flag used to offer two.
+//
+// SO 485530 was reported "untouched for 3+ days" on every sweep for three days. Neither offered
+// cause was true: the demand scan sees it fine (preview-live lists it, 3 lines / 4 units) and
+// Snickers cleared its threshold three times over. The real cause is the third one — every one of
+// its Snickers lines is already in stock or in transit, so the stock-netting step correctly orders
+// nothing and the order sits on "Stock needs ordering" waiting for a DELIVERY, not for a purchase.
+//
+// Scope matters more than it looks. A first cut checked every stock row on the order and called
+// 485530 stranded because T181YBRXL was short — a T-shirt Snickers does not sell. Judging a
+// supplier by another supplier's lines keeps exactly the false flag this is meant to kill, so the
+// lines come from preview-live, which is per-supplier and is the same filter the run itself uses.
+// preview-live is explicitly read-only and writes nothing.
+//
+// Errs toward flagging: an unreadable preview or a missing availability record counts as NOT
+// covered. A missed real fault is far worse than one noisy line.
+async function classifyStuck(sup, stuck) {
+  const stranded = [], covered = [];
+  let pv = null, pvErr = null;
+  try { pv = await get(`/api/purchasing/preview-live?supplier=${encodeURIComponent(sup)}`, 180000); }
+  catch (e) { pvErr = e.message; }
+  if (!pv || !Array.isArray(pv.orders)) {
+    for (const x of stuck) stranded.push({ ...x, why: `could not read the demand preview${pvErr ? ` (${pvErr})` : ''}` });
+    return { stranded, covered };
+  }
+  const avail = new Map();
+  for (const x of stuck) {
+    const o = pv.orders.find((y) => y.orderId === x.soId);
+    if (!o) { stranded.push({ ...x, why: 'the demand scan does not pick it up at all' }); continue; }
+    const short = [];
+    for (const l of o.lines || []) {
+      const want = Math.round(Number(l.qty || 0));
+      if (!(want > 0)) continue;
+      let have = avail.get(l.productId);
+      if (have === undefined) {
+        try {
+          const av = await bp(`/warehouse-service/product-availability/${l.productId}`);
+          const t = (av && av[l.productId] && av[l.productId].total) || null;
+          have = t ? Number(t.inStock || 0) + Number(t.inTransit || 0) : null;
+        } catch { have = null; }
+        avail.set(l.productId, have);
+      }
+      if (have == null || have < want) short.push(`${l.sku} needs ${want}, has ${have == null ? '?' : have}`);
+    }
+    if (short.length) stranded.push({ ...x, why: `in the demand pool but short — ${short.slice(0, 3).join('; ')}` });
+    else covered.push({ ...x, why: `${(o.lines || []).length} ${sup} line(s), all in stock or in transit` });
+  }
+  return { stranded, covered };
+}
 async function leftovers() {
   const s = await bp(`/order-service/order-search?orderTypeId=1&orderStatusId=${DEMAND_STATUS}&pageSize=500`);
   const cols = ((s.metaData && s.metaData.columns) || []).map((c) => c.name);
