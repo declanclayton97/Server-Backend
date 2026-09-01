@@ -1574,6 +1574,38 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
 // internalId + finalise. SKUs are exact Blåkläder part numbers (no resolver/reconcile). Contact
 // 323. ⚠️ The submit body is NOT yet validated against a real order — only run once confirmed.
 const BLAKLADER_SUPPLIER_CONTACT = 323;
+// ── did it actually land? ─────────────────────────────────────────────────────
+// An AMBIGUOUS worker failure — a 25-minute timeout, a dropped connection — does NOT mean the order
+// was not placed. BLK-1932804 on 2026-08-31 is the case that proves it: the order went in at 12:55,
+// the worker then hung, the backend gave up at 13:18, and PO 485844 sat Pending with all five sales
+// orders still tagged, primed to buy the same £1,465.28 again at 09:30 the next morning. It had
+// already happened once (BLK-1929470, 08-27). Both times a human had to notice and reconcile by hand.
+//
+// Blaklader stamp OUR PO number onto the order (metadata.OrderNumber), so their own order list is
+// the authority — not our guess about what the worker meant. Read it back before failing.
+// NEVER retry on an ambiguous result: that is how one live order becomes two.
+async function blakladerOrderForPo(altItemsUrl, poId, { scan = 8 } = {}) {
+  const want = String(poId);
+  let seen = [];
+  try {
+    // The endpoint answers a miss with 404 + the recent internalIds on the body, which is the only
+    // way to enumerate; a raw fetch keeps that body where jfetch would throw it away.
+    const r = await fetch(`${altItemsUrl}/api/blaklader-order-lines?internalId=__LOOKUP__&scan=${scan}`);
+    const j = await r.json().catch(() => null);
+    seen = (j && Array.isArray(j.seen) && j.seen) || [];
+  } catch { return null; }
+  for (const id of seen.slice(0, scan)) {
+    try {
+      const r2 = await fetch(`${altItemsUrl}/api/blaklader-order-lines?internalId=${encodeURIComponent(id)}&scan=${scan}`);
+      const o = await r2.json().catch(() => null);
+      if (o && String(o.orderNumber || '') === want) {
+        return { internalId: o.internalId, orderNumber: o.orderNumber, created: o.created,
+          lineCount: o.lineCount, units: o.units, total: o.totalAmount, linesNet: o.linesNet };
+      }
+    } catch { /* try the next one — a single unreadable order proves nothing */ }
+  }
+  return null;
+}
 async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const steps = {};
   let po;
@@ -1669,10 +1701,35 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // a separate service whose logs and code are not reachable from here. Left unhandled again — do
   // not re-run on this guess. The basket this attempt left occupied is the real order, not a stray
   // rehearsal; let it ride along rather than clearing it, until a human has looked at the worker.
-  const wr = live
-    ? await workerPlaceOrder({ supplier: 'BLAKLADER', ref: poId, lines: orderLines, opts: { body: prev.body, cartId: prev.cartId }, execute: true })
-    : { ok: true, orderNo: null, dryRun: true };
-  if (!wr.ok) throw stepErr('checkout', `Blaklader did not confirm the order: ${JSON.stringify(wr.error || wr).slice(0, 250)}`, { poId, worker: { status: wr.status || null, note: wr.note || null } });
+  let wr;
+  if (!live) wr = { ok: true, orderNo: null, dryRun: true };
+  else {
+    let failure = null;
+    try {
+      wr = await workerPlaceOrder({ supplier: 'BLAKLADER', ref: poId, lines: orderLines, opts: { body: prev.body, cartId: prev.cartId }, execute: true });
+      if (!wr || !wr.ok) failure = new Error(`Blaklader did not confirm the order: ${JSON.stringify((wr && (wr.error || wr)) || wr).slice(0, 250)}`);
+    } catch (e) { wr = null; failure = e; }
+    if (failure) {
+      // ASK BLAKLADER, not ourselves. A timeout or a dropped connection says nothing about whether
+      // the order landed, and guessing wrong in the optimistic direction loses an order while
+      // guessing wrong in the pessimistic direction BUYS IT TWICE. Their list is the only authority.
+      const landed = await blakladerOrderForPo(altItemsUrl, poId).catch(() => null);
+      if (!landed) {
+        throw stepErr('checkout', failure.message, { poId,
+          worker: { status: (wr && wr.status) || null, note: (wr && wr.note) || null },
+          repriced: !!(wr && wr.repriced), cartPricesRead: ((wr && wr.supplierPrices) || []).length || 0,
+          cartView: (wr && wr.cartView) || (failure && failure.cartView) || null,
+          checkedSupplierOrderList: true });
+      }
+      steps.recovered = { workerError: String(failure.message).slice(0, 200), foundOrder: landed.internalId, via: 'blaklader order list' };
+      await logPurchasingError(pool, {
+        supplier: 'BLAKLADER', step: 'checkout-recovered', severity: 'review',
+        message: `The worker failed ("${String(failure.message).slice(0, 120)}") but the order IS at Blaklader as ${landed.internalId} (${landed.units} units, £${landed.total}). Marked placed from THEIR order list — re-running would have bought it twice.`,
+        context: { poId, landed, workerError: String(failure.message).slice(0, 400) },
+      }).catch(() => {});
+      wr = { ok: true, orderNo: landed.internalId, internalId: landed.internalId, recovered: true };
+    }
+  }
   const orderNo = wr.orderNo || wr.internalId || null;
   // packNotes records every line whose quantity was multiplied, so a 1-becomes-5 is visible in the
   // run report instead of only showing up on the invoice.
