@@ -8977,7 +8977,7 @@ app.post('/api/purchasing/supplier-scheduled-run', express.json(), async (req, r
   if (!pool) return res.status(503).json({ error: 'DB not available (schedule state)' });
   try {
     const b = { ...req.query, ...(req.body || {}) };
-    res.json(await purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: b.supplier || 'FRISTADS', dryRun: b.dryRun === '1' || b.dryRun === true, force: b.force === '1' || b.force === true, forcePlace: b.forcePlace === '1' || b.forcePlace === true }));
+    res.json(await purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: b.supplier || 'FRISTADS', dryRun: b.dryRun === '1' || b.dryRun === true, force: b.force === '1' || b.force === true, forcePlace: b.forcePlace === '1' || b.forcePlace === true, excludeSkus: Array.isArray(b.excludeSkus) ? b.excludeSkus : String(b.excludeSkus || '').split(',').map((x) => x.trim()).filter(Boolean) }));
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

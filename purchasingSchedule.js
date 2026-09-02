@@ -1111,6 +1111,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const bySku = new Map();
   for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
     if (String(l.productId) === '1000' || !l.sku) continue;
+    if (excl.has(String(l.sku).toUpperCase())) continue;
     const k = String(l.sku).toUpperCase();
     bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty));
   }
@@ -1267,7 +1268,14 @@ async function withVariantDetail(lines) {
   } catch { /* additive only — without it we simply fall back to the old behaviour */ }
   return lines;
 }
-async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, basketPath, padToThreshold = 0, live = true } = {}) {
+async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, basketPath, padToThreshold = 0, live = true, excludeSkus = [] } = {}) {
+  // excludeSkus: lines the supplier genuinely cannot sell us (discontinued colour, dead code).
+  // They come off BOTH the portal basket AND the PO — unlike the Portwest equivalent, which
+  // leaves them on the PO on purpose for manual handling. Leaving them on here would tell
+  // Brightpearl three discontinued garments are ON ORDER when nothing was bought, which is
+  // exactly the state SO 484193 is stuck in: "Ordered Stock Awaiting Delivery" for an Apache
+  // trouser with no stock, no PO and nothing left in demand asking for it.
+  const excl = new Set((excludeSkus || []).map((x) => String(x).trim().toUpperCase()).filter(Boolean));
   const steps = {};
   // Pre-flight (only on a real run): value the demand + confirm the portal resolves EVERY line
   // BEFORE creating the BP PO, so a resolution miss can't leave an orphan PO. (The PO is created
@@ -1284,7 +1292,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
     // on 2026-08-21 for exactly that: it is style SC4223M in Black/L, in the sheet with 5,718
     // available, but our SKU carries a legacy code and our EAN appears nowhere in the sheet.
     const preLines = [...(preview.soLines || []), ...(preview.lowLines || [])]
-      .filter((l) => String(l.productId) !== '1000' && l.sku)
+      .filter((l) => String(l.productId) !== '1000' && l.sku && !excl.has(String(l.sku).toUpperCase()))
       .map((l) => ({ sku: l.sku, qty: l.qty, name: l.name, colour: l.colour, size: l.size, productId: l.productId }));
     await withVariantDetail(preLines);
     if (preLines.length) {
@@ -1337,6 +1345,18 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [], priceOverridesApplied: po.priceOverridesApplied || [] };
 
+  // Take the excluded SKUs off the PO before anything is built from it. The basket below is
+  // derived from these same rows, so removing them here keeps BP and the supplier order
+  // identical — no line on the PO that was never bought.
+  if (excl.size) {
+    steps.excluded = [];
+    for (const sku of excl) {
+      try {
+        const r = await bp.removePoRowLive({ poId, sku, execute: live });
+        steps.excluded.push({ sku, removed: !!(r && (r.removed || r.ok)) });
+      } catch (e) { steps.excluded.push({ sku, error: e.message }); }
+    }
+  }
   // Order lines = the PO's SKUs (skip the =====LOW INV==== separator), summed per SKU.
   const bySku = new Map();
   for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
@@ -1890,7 +1910,7 @@ export async function schedulerState(pool) {
 }
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
-export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false, forcePlace = false } = {}) {
+export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false, forcePlace = false, excludeSkus = [] } = {}) {
   const cfg = SCHEDULED_SUPPLIERS[String(supplier).toUpperCase()];
   if (!cfg) return { error: `unknown scheduled supplier ${supplier}` };
   const threshold = cfg.threshold ?? THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier — `??` so a deliberate 0 (no minimum, e.g. Snickers) is honoured, not treated as "unset"
@@ -1968,7 +1988,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
         // visible (no run report, demand still queued) instead of DUPLICATED and invisible.
         // A deliberate re-run is still possible with force:true.
         await saveState(pool, { id: cfg.stateId, workingDaysWaited: 0, lastRunDate: uk.date, result: { supplier: cfg.supplierKey, ran: uk.date, claimedAt: `${uk.hour}:${String(uk.minute).padStart(2, '0')}`, state: 'placing — day claimed before contacting the supplier' } }).catch(() => {});
-        placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo });
+        placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo, excludeSkus });
         decision = `placed — ${reason}`; newWaitDays = 0;
       }
     }
