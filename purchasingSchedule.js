@@ -744,7 +744,23 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
 
   // drive the headless worker (async job + poll) to place the order on the shop
   const wr = await workerPlaceOrder({ ref: poId, lines, execute: true });
-  if (!wr || !wr.placed) throw stepErr('checkout', `Sterling worker did not confirm placement: ${JSON.stringify((wr && (wr.results || wr.error)) || wr)}`);
+  // WHY it failed, before WHAT was in the basket. `wr.results` is the (large) per-line add log, so
+  // `wr.results || wr.error` always picked it and every field that explains a failure — was the
+  // confirm button still there, what did the page say, did the delivery address and customer ref
+  // land — was discarded at the one moment it mattered. Two Sterling runs on 1 and 2 Sept failed
+  // identically at confirm and taught us nothing: error #118 and #120 are 4kB of "ok":true adds.
+  // Diagnostics FIRST because the log truncates, and the lines array is long enough to push them
+  // out of every view that reads it.
+  if (!wr || !wr.placed) {
+    const why = wr ? {
+      stillOnConfirm: wr.stillOnConfirm, confirmText: wr.confirmText, url: wr.url,
+      delAddr: wr.delAddr, refSet: wr.refSet, cartCount: wr.cartCount,
+      added: wr.added, expected: wr.expected, units: wr.units, ready: wr.ready,
+      orderNo: wr.orderNo, cleared: wr.cleared, error: wr.error,
+      hasScreenshot: !!wr.screenshot, results: wr.results,
+    } : wr;
+    throw stepErr('checkout', `Sterling worker did not confirm placement: ${JSON.stringify(why)}`);
+  }
   let orderNo = wr.orderNo || null;
   if (!orderNo) { try { orderNo = await pullSterlingOrderNo(poId); } catch { /* leave null → Placed-<poId> marker */ } }
   steps.checkout = { placed: true, orderNo, orderNoSource: wr.orderNo ? 'place' : (orderNo ? 'order-status' : 'none'), cartCount: wr.cartCount, added: wr.added };
