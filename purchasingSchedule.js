@@ -1828,6 +1828,35 @@ const SCHEDULED_SUPPLIERS = {
 // the caller reason from those instead of from the clock.
 export const isRunInFlight = () => running;
 
+// Display-only window times, so a dashboard can say "runs at 10:30" without scraping server.js.
+// THE AUTHORITY IS THE POLLERS in server.js (each one tests uk.hour/uk.minute itself) — this map
+// only describes them. If a poller time changes, change it here too or the page will lie.
+// Carhartt runs Mon/Wed/Fri only; Chadwick has no poller at all and is manual.
+// Supplier contactIds, so a PO can be attributed to a supplier without guessing at its reference
+// (a PLACED PO no longer says "Auto-PO X" — it carries the supplier's own order number).
+// Verified against real POs on 2026-09-02.
+const SUPPLIER_CONTACT = {
+  FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
+  CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
+  SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485,
+};
+const WINDOW_DISPLAY = {
+  BLAKLADER: { at: '09:30' },
+  SNICKERS: { at: '10:00' },
+  FRISTADS: { at: '10:30' },
+  'HELLY HANSEN': { at: '11:00' },
+  MASCOT: { at: '11:30' },
+  CASTLE: { at: '12:00' },
+  STERLING: { at: '13:00' },
+  CARHARTT: { at: '13:30', days: ['Mon', 'Wed', 'Fri'] },
+  SCRUFFS: { at: '14:00' },
+  'PERFORMANCE BRANDS': { at: '14:30' },
+  PORTWEST: { at: '15:00' },
+  PENCARRIE: { at: '15:40' },
+  UNEEK: { at: '16:00' },
+  CHADWICK: { at: null, note: 'no poller — manual trigger only' },
+};
+
 export async function schedulerState(pool) {
   const uk = ukNow();
   const suppliers = [];
@@ -1835,12 +1864,21 @@ export async function schedulerState(pool) {
     let st = null;
     try { st = await getState(pool, cfg.stateId); } catch { /* a missing row is not fatal here */ }
     const lastRunDate = st && st.last_run_date ? ukDateStr(st.last_run_date) : null;
+    const waited = st && st.working_days_waited != null ? Number(st.working_days_waited) : null;
     suppliers.push({
       supplier: key,
       stateId: cfg.stateId,
       lastRunDate,
       claimedToday: lastRunDate === uk.date,
       thresholdNet: cfg.threshold,
+      // Why a supplier bought nothing is the question people actually ask, and it was only ever
+      // answerable by re-running a dry run (which takes the run lock). These three make it readable.
+      workingDaysWaited: waited,
+      maxWaitDays: MAX_WAIT_WORKING_DAYS,
+      willForceNextRun: waited != null ? waited + 1 >= MAX_WAIT_WORKING_DAYS : null,
+      lastResult: (st && st.last_result) || null,
+      window: WINDOW_DISPLAY[key] || null,
+      contactId: SUPPLIER_CONTACT[key] || null,
     });
   }
   return {
