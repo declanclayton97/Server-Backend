@@ -1526,6 +1526,32 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
 // (PenCarrie auto-creates back orders for shortfalls their end). No basket/checkout/reconcile.
 // `sandbox` forces the test gateway. Simplest placeFn of the lot. Contact 204.
 const PENCARRIE_SUPPLIER_CONTACT = 204;
+// ── did it actually land? ──────────────────────────────────────────────────
+// Same failure class as Blaklader (see below): pcautoorder has no separate ack-then-confirm step,
+// so a lost/timed-out response on OUR side says nothing about whether PenCarrie received and
+// processed it — reproduced live 2026-09-02 on PO 486420 (error #139/140): checkout logged "fetch
+// failed" three times, then a same-day retry got "Order ID (TUWO_TW486420) already exists" straight
+// from PenCarrie, proving an earlier attempt HAD landed and only the response was lost. Ask
+// PenCarrie's own order list before failing — never re-submit on an ambiguous result. ref = TW<poId>
+// is what we send as custref, so it's also what identifies our order in pclist. Read-only.
+async function pencarrieOrderForPo(altItemsUrl, poId) {
+  const want = `TW${poId}`;
+  try {
+    const r = await fetch(`${altItemsUrl}/api/debug/pencarrie?fn=pclist&full=1`);
+    const j = await r.json().catch(() => null);
+    const raw = String((j && j.raw) || '');
+    for (const m of raw.matchAll(/<order\b([^>]*)\/>/gi)) {
+      const a = m[1];
+      const at = (n) => (a.match(new RegExp(`${n}=['"]([^'"]*)['"]`, 'i')) || [])[1];
+      if (at('custref') === want) {
+        return { gateway: (j && j.gateway) || null, ordno: at('ordno') || null, ordcode: at('ordcode') || null,
+          net: Number(at('net') || 0), vat: Number(at('vat') || 0), lineCount: Number(at('line_count') || 0),
+          ordstat: at('ordstat') || null, created: at('created') || null };
+      }
+    }
+  } catch { return null; }
+  return null;
+}
 async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, sandbox = false } = {}) {
   const steps = {};
   let po;
@@ -1550,9 +1576,27 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // Submit pcautoorder (LIVE gateway unless sandbox). The route resolves each line → prodcode and
   // REFUSES (ok:false + unresolved[]) if any line can't be mapped — so we never place a short order.
   // ref = TW<poId>; parkorder=2 processes for picking; assumebo=1 auto-back-orders shortfalls.
-  const r = await jfetch('checkout', `${altItemsUrl}/api/pencarrie-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, reference: `TW${poId}`, parkorder: 2, assumebo: 1, resolve: true, sandbox: !!sandbox }) });
-  if (r.unresolved && r.unresolved.length) throw stepErr('resolve', `${r.unresolved.length} PenCarrie line(s) couldn't be mapped to a prodcode — NOT placing. PO#${poId} left for review. e.g. ${r.unresolved.slice(0, 6).map((u) => u.sku).join(', ')}`, { poId, unresolved: r.unresolved });
-  if (!r.ok) throw stepErr('checkout', `PenCarrie did not confirm the order: ${JSON.stringify(r.result || r.error || r.rawSnippet || r).slice(0, 250)}`, { poId });
+  let r, checkoutFailure = null;
+  try {
+    r = await jfetch('checkout', `${altItemsUrl}/api/pencarrie-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, reference: `TW${poId}`, parkorder: 2, assumebo: 1, resolve: true, sandbox: !!sandbox }) });
+  } catch (e) { checkoutFailure = e; }
+  if (r && r.unresolved && r.unresolved.length) throw stepErr('resolve', `${r.unresolved.length} PenCarrie line(s) couldn't be mapped to a prodcode — NOT placing. PO#${poId} left for review. e.g. ${r.unresolved.slice(0, 6).map((u) => u.sku).join(', ')}`, { poId, unresolved: r.unresolved });
+  if (checkoutFailure || !r || !r.ok) {
+    // ASK PENCARRIE, not ourselves — see pencarrieOrderForPo above. Never retry on this: that is
+    // exactly how one live order becomes two.
+    const landed = !sandbox ? await pencarrieOrderForPo(altItemsUrl, poId).catch(() => null) : null;
+    if (!landed) {
+      const msg = checkoutFailure ? checkoutFailure.message : `PenCarrie did not confirm the order: ${JSON.stringify((r && (r.result || r.error || r.rawSnippet)) || r).slice(0, 250)}`;
+      throw stepErr('checkout', msg, { poId, checkedSupplierOrderList: true });
+    }
+    steps.recovered = { via: 'pencarrie order list', foundOrder: landed.ordcode, ordno: landed.ordno };
+    await logPurchasingError(pool, {
+      supplier: 'PENCARRIE', step: 'checkout-recovered', severity: 'review',
+      message: `The checkout call didn't confirm ("${String(checkoutFailure ? checkoutFailure.message : 'not ok').slice(0, 120)}") but the order IS at PenCarrie as ${landed.ordcode} (${landed.lineCount} lines, £${landed.net}). Marked placed from THEIR order list — re-running would have bought it twice.`,
+      context: { poId, landed, checkoutFailure: checkoutFailure ? String(checkoutFailure.message).slice(0, 400) : null },
+    }).catch(() => {});
+    r = { ok: true, gateway: landed.gateway, ordercode: landed.ordcode, ordno: landed.ordno, custorderno: null, lines: [], recovered: true };
+  }
   // 🔴 GATEWAY GUARD — Alternate-Items DEFAULTS to the sandbox gateway when neither PENCARRIE_ENV
   // nor PENCARRIE_GATEWAY is set, and a sandbox order answers exactly like a real one: ok:true,
   // sent:true, an ordercode, every line "confirmed". Without this check a scheduled run would place
