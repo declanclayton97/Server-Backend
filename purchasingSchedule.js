@@ -329,10 +329,52 @@ export async function sendResolutionEmail({ id, supplier, step, severity = 'erro
 
 // ── the full placement chain ─────────────────────────────────────────────────
 // fetch that turns network failures ("website down") + non-2xx into step-tagged errors.
+// Supplier calls are SLOW. PenCarrie's order build alone measured 170s for PO 486420's 45 lines
+// before the gateway submit, because resolving a line can pull the 217MB product feed.
+//
+// Node's built-in fetch enforces undici's own 300s headersTimeout, and an AbortSignal does NOT
+// raise it — so a long order died at five minutes no matter what timeout we asked for. Worse, the
+// catch below reported that as "can't reach (website/network down?)", which is a LIE about a
+// supplier that answered perfectly well: on 2026-09-02 PenCarrie was called four times, every call
+// reported the site as down, Alt-Items was healthy throughout (44ms on resolve, gateway 200), and
+// the order HAD been placed on one of them — found only because PenCarrie's own duplicate guard
+// refused the fifth with "Order ID (TUWO_TW486420) already exists".
+//
+// A custom dispatcher is the only way to lift the ceiling. Guarded: if undici cannot be imported
+// the call still works on the default stack — a missing module must never stop the service booting.
+const SUPPLIER_HTTP_TIMEOUT_MS = Number(process.env.SUPPLIER_HTTP_TIMEOUT_MS || 900000); // 15 min
+let _dispatcher; let _dispatcherTried = false;
+async function longDispatcher() {
+  if (_dispatcherTried) return _dispatcher;
+  _dispatcherTried = true;
+  try {
+    const { Agent } = await import('undici');
+    _dispatcher = new Agent({ headersTimeout: SUPPLIER_HTTP_TIMEOUT_MS, bodyTimeout: SUPPLIER_HTTP_TIMEOUT_MS });
+  } catch { _dispatcher = null; }                    // not installed → default 300s, still honest below
+  return _dispatcher;
+}
+
 async function jfetch(step, url, opts) {
   let res;
-  try { res = await fetch(url, opts); }
-  catch (e) { throw stepErr(step, `can't reach ${url} (website/network down?): ${e.message}`); }
+  const t0 = Date.now();
+  const dispatcher = await longDispatcher();
+  try { res = await fetch(url, dispatcher ? { ...opts, dispatcher } : opts); }
+  catch (e) {
+    const secs = Math.round((Date.now() - t0) / 1000);
+    const msg = String((e && e.message) || e);
+    const cause = String((e && e.cause && e.cause.code) || '');
+    const timedOut = /timeout|aborted|UND_ERR_(HEADERS|BODY)_TIMEOUT/i.test(msg + ' ' + cause) || secs >= 280;
+    // A timeout is NOT evidence the order failed. The request may have completed at the supplier
+    // after we stopped listening. Saying "website down" here sends whoever reads it to check the
+    // wrong thing and invites a retry that double-orders.
+    if (timedOut) {
+      throw stepErr(step, `NO ANSWER from ${url} after ${secs}s — this is NOT proof the order failed. `
+        + `The request may have COMPLETED at the supplier after we stopped waiting. `
+        + `CHECK THE SUPPLIER'S OWN ORDER LIST before retrying: a retry can order it twice. `
+        + `(${msg}${cause ? ` / ${cause}` : ''})`);
+    }
+    throw stepErr(step, `can't reach ${url} after ${secs}s (website/network down?): ${msg}`);
+  }
   const text = await res.text();
   let j = null; try { j = text ? JSON.parse(text) : null; } catch { /* non-json */ }
   if (!res.ok) throw stepErr(step, `HTTP ${res.status} from ${url}: ${(j ? JSON.stringify(j) : text).slice(0, 250)}`);
