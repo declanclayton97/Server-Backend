@@ -1111,7 +1111,6 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const bySku = new Map();
   for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
     if (String(l.productId) === '1000' || !l.sku) continue;
-    if (excl.has(String(l.sku).toUpperCase())) continue;
     const k = String(l.sku).toUpperCase();
     bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty));
   }
@@ -1361,6 +1360,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   const bySku = new Map();
   for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
     if (String(l.productId) === '1000' || !l.sku) continue;
+    if (excl.has(String(l.sku).toUpperCase())) continue;   // dropped: never reaches the basket
     const k = String(l.sku).toUpperCase();
     const cur = bySku.get(k) || { qty: 0, name: l.name, productId: l.productId, colour: l.colour, size: l.size };
     cur.qty += Math.round(l.qty);
