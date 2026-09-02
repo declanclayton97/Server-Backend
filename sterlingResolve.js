@@ -54,7 +54,7 @@ export const isNonSterlingOrderable = (sku) => /^(OPPR|MISC|SHIP|CARR|DELIV)/i.t
 // Aliased here rather than as 33 per-EAN overrides: one wrong search term, one correction, and a
 // re-ingest cannot undo it. NAVY (APINDNAV) is deliberately NOT aliased — it has not been verified
 // against the site, and guessing a search term is how the wrong garment gets ordered.
-const SEARCH_ALIAS = { APINDBLACK: 'APINDBLK' };
+const SEARCH_ALIAS = { APINDBLACK: 'APINDBLK', APINDNAV: 'APINDNAVY' };
 const aliasSearch = (s) => SEARCH_ALIAS[String(s || '').trim().toUpperCase()] || s;
 
 export async function resolveSterlingLine({ sku, productId }) {
