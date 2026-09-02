@@ -42,13 +42,28 @@ async function barcodeFor(productId) {
 // orderables (personalisation, misc/shipping) — skip, don't treat as unresolved.
 export const isNonSterlingOrderable = (sku) => /^(OPPR|MISC|SHIP|CARR|DELIV)/i.test(String(sku || ''));
 
+// Sterling's workbook can carry a `search` value their own SITE does not recognise. The workbook
+// lists every Apache Industry cargo trouser as APINDBLACK, but the shop only finds APINDBLK —
+// verified side by side with a worker dry-run on 2026-09-02:
+//     FOUND     search="APINDBLK"   size L33W38 -> matchedSize 38
+//     NOT FOUND search="APINDBLACK" size L33W38 -> qty short: basket +0, wanted 1
+// 33 black variants carry the bad term. The cost of one of them (141383, EAN 5055338400317) was a
+// line that quietly never reached an order while SO 484193 was flipped to "Ordered Stock Awaiting
+// Delivery" — the customer waiting on a trouser nothing had bought.
+//
+// Aliased here rather than as 33 per-EAN overrides: one wrong search term, one correction, and a
+// re-ingest cannot undo it. NAVY (APINDNAV) is deliberately NOT aliased — it has not been verified
+// against the site, and guessing a search term is how the wrong garment gets ordered.
+const SEARCH_ALIAS = { APINDBLACK: 'APINDBLK' };
+const aliasSearch = (s) => SEARCH_ALIAS[String(s || '').trim().toUpperCase()] || s;
+
 export async function resolveSterlingLine({ sku, productId }) {
   let ean = /^\d{8,}$/.test(String(sku || '')) ? String(sku) : null;
   if (!ean && productId) ean = await barcodeFor(productId);
   ean = ean ? String(ean).replace(/\D/g, '') : null;
   const e = ean ? PRODUCTS[ean] : null;
   if (!e) return { resolved: false, sku, ean, reason: 'not in Sterling product data' };
-  const out = { resolved: true, ean, search: e.search, colour: e.colour, size: e.size, brand: e.brand };
+  const out = { resolved: true, ean, search: aliasSearch(e.search), colour: e.colour, size: e.size, brand: e.brand };
   // For leg×waist trousers, attach the leg's ordinal (row) among the style's legs + total
   // legs, so the worker can target the exact (leg-row, waist-column) cell and verify the
   // grid's row count matches — refusing to guess if the catalogue/grid drift.
