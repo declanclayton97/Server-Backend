@@ -8602,6 +8602,7 @@ app.get('/api/purchasing/price-approvals', async (req, res) => {
     }
 
     const out = [];
+    const suspect = [];
     let alreadyCorrect = 0;
     for (const x of pending) {
       const pid = skuToPid.get(x.sku.toUpperCase()) || null;
@@ -8609,6 +8610,26 @@ app.get('/api/purchasing/price-approvals', async (req, res) => {
       const cur = (() => { const pl = lists.find((l) => l.priceListId === COST_LIST); return pl && pl.quantityPrice && pl.quantityPrice['1'] != null ? Number(pl.quantityPrice['1']) : null; })();
       // already at what the supplier charged — fixed here, by price-heal, or by hand. Drop it.
       if (cur != null && Math.abs(cur - x.charged) < 0.005) { alreadyCorrect++; continue; }
+
+      // Helly Hansen and Carhartt quote LIST on the portal and take the discount off as one lump
+      // row at invoice, so a "charged" figure scraped before that was handled is not what we paid.
+      // Nine HH lines sat here reading £8.70 vs £15.00 — every one of them exactly our cost over
+      // 0.58, i.e. the 42% discount. Approving them would have raised cost 72% on stock bought at
+      // the right price. So if taking the supplier's discount off the charged figure lands on what
+      // Brightpearl already holds, our cost is RIGHT and the log entry is the stale one.
+      const reg = (purchasingAuto.SUPPLIERS && purchasingAuto.SUPPLIERS[x.supplier]) || null;
+      const disc = reg && reg.portalPriceIsPreDiscount ? Number(reg.supplierDiscountPct) || 0 : 0;
+      if (disc > 0 && cur != null) {
+        const netOfDisc = x.charged * (1 - disc);
+        if (Math.abs(netOfDisc - cur) <= Math.max(0.02, cur * 0.01)) {
+          suspect.push({
+            supplier: x.supplier, sku: x.sku, productId: pid, current: cur, charged: x.charged,
+            errorId: x.errorId, poId: x.poId, at: x.at,
+            why: `£${x.charged.toFixed(2)} less ${Math.round(disc * 100)}% is £${netOfDisc.toFixed(2)}, which is what Brightpearl already holds — so this is a pre-discount list price, not what was paid. Our cost looks right.`,
+          });
+          continue;
+        }
+      }
       // a supplier can price from its OWN cost list; a Launch-only write leaves that one stale
       const other = lists.filter((l) => l.priceListId !== COST_LIST && l.priceListId !== 3 && l.priceListId !== 13
                                         && l.quantityPrice && l.quantityPrice['1'] != null)
@@ -8630,6 +8651,7 @@ app.get('/api/purchasing/price-approvals', async (req, res) => {
       writeEnabled: process.env.HEAL_LIVE_ENABLED === 'true',
       pending: out,
       totals: { count: out.length, costDelta: +out.reduce((a, x) => a + (x.diff || 0), 0).toFixed(2) },
+      suspect,
       alreadyCorrect, autoHealed: parsed.applied.size,
       kept: keptOut.map((x) => ({ supplier: x.supplier, sku: x.sku, charged: x.charged })),
       unparsed: parsed.unparsed,
