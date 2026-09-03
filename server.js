@@ -8442,6 +8442,254 @@ app.post('/api/purchasing/product-price-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+/* ---------------- price approvals ----------------
+   The price-check step has always logged what a supplier CHARGED against Brightpearl's cost, but
+   acting on it was a manual job: read the log, work out the SKU, write the price, hope none were
+   missed. These two endpoints turn that log into a decision list — GET derives what is outstanding,
+   POST applies what was approved.
+
+   Four things the parser has to get right, each of which cost real time when it was done by hand:
+    · a "price-heal-applied" row means that SKU was ALREADY corrected on the same run. Listing it
+      again made 68 fixed SKUs look outstanding and produced a wrong total.
+    · the "article NNNNNN ours £X vs theirs £Y (spans SKU, SKU, ... — size not pinned)" form has no
+      SKU of its own. Read naively the article code itself looks like a SKU (114137, 131144), then
+      matches no product and the change is silently dropped. So the article form is expanded to the
+      SKUs it names, and cut out of the message before the per-SKU pattern runs.
+    · a SKU is resolved from the ROWS OF THE PO THE ERROR CAME FROM, not by price. Matching on the
+      price alone pulls in coincidences: pid 80751 (Fristads knee pads, 124292-896-999) also sits at
+      £7.95 and would have been repriced as if it were a t-shirt.
+    · the list is filtered against the CURRENT cost, so anything already sitting at the charged
+      price falls off by itself. That is what empties the list — not a handled flag — so applying a
+      price by any route (here, price-heal, or by hand in Brightpearl) clears it.
+   "Keep ours" has to be recorded, or a line Dec has already judged reappears on every load and the
+   list never reaches empty. Hence purchasing_price_decision. */
+
+async function ensurePriceDecisionTable() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_price_decision (
+    id serial PRIMARY KEY,
+    supplier text NOT NULL,
+    sku text NOT NULL,
+    charged numeric,
+    was numeric,
+    decision text NOT NULL,
+    error_id integer,
+    decided_at timestamptz NOT NULL DEFAULT now(),
+    decided_by text,
+    note text
+  )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS purchasing_price_decision_sku
+                    ON purchasing_price_decision (upper(sku))`);
+}
+
+// Read-merge-write a cost price: re-send every currently-populated list so none get cleared, then
+// override the target one. Same shape as /product-price-live, kept in one place so the approvals
+// route and the single-product route cannot drift apart.
+async function writeCostPrice(productId, cost, costList) {
+  const readAll = async () => { const r = await bpLive('GET', `/product-service/product-price/${productId}`); return (r[0] && r[0].priceLists) || []; };
+  const valOf = (lists, id) => { const pl = lists.find((x) => x.priceListId === id); return pl && pl.quantityPrice ? (pl.quantityPrice['1'] ?? null) : null; };
+  const populated = (lists) => lists.filter((pl) => pl.quantityPrice && pl.quantityPrice['1'] != null);
+  const before = await readAll();
+  let seen = false;
+  const body = populated(before).map((pl) => {
+    if (pl.priceListId === costList) seen = true;
+    return { priceListId: pl.priceListId, quantityPrice: { '1': String(pl.priceListId === costList ? cost : pl.quantityPrice['1']) } };
+  });
+  if (!seen) body.push({ priceListId: costList, quantityPrice: { '1': String(cost) } });
+  await bpLive('PUT', `/product-service/product-price/${productId}/price-list`, { priceLists: body });
+  const after = await readAll();
+  return { before: valOf(before, costList), after: valOf(after, costList), ok: Number(valOf(after, costList)) === Number(cost) };
+}
+
+const PRICE_ARTICLE_RE = /article\s+(\d{4,8})\s+ours £([\d.]+) vs theirs £([\d.]+)\s*\(spans ([^)]*?)(?:—|-)\s*size not pinned\)/gi;
+const PRICE_PAIR_RE = /([A-Z0-9_\-.\/]{5,})\s+ours £([\d.]+) vs theirs £([\d.]+)/g;
+const PRICE_ONE_RE = /^([A-Z0-9_\-.\/]+):\s*supplier charges £([\d.]+) but BP cost \(list (\d+)\) is £([\d.]+)/i;
+const PRICE_APPLIED_RE = /([A-Z0-9_\-.\/]{5,}) £([\d.]+) (?:→|->) £([\d.]+)/g;
+
+// Pull the outstanding cost changes out of the raw log rows. No BP calls, no DB writes — pure
+// parsing, so it is cheap to reason about and safe to call from anywhere.
+function parsePriceRows(rows) {
+  const applied = new Set();
+  const items = new Map();          // supplier|SKU -> item (latest wins)
+  const unparsed = [];
+  for (const r of rows) {
+    const step = String(r.step || '');
+    const sup = String(r.supplier || '').toUpperCase();
+    let msg = String(r.message || '');
+    if (/price-heal-applied/.test(step)) {
+      for (const m of msg.matchAll(PRICE_APPLIED_RE)) applied.add(sup + '|' + m[1].toUpperCase());
+      continue;
+    }
+    if (!/price/i.test(step)) continue;
+    const poId = (r.context && (r.context.poId || r.context.po)) || null;
+    const add = (sku, was, charged) => {
+      if (!Number.isFinite(was) || !Number.isFinite(charged)) return;
+      items.set(sup + '|' + String(sku).toUpperCase(), {
+        supplier: sup, sku: String(sku), was, charged, errorId: r.id, poId,
+        step, at: r.created_at, handled: !!r.handled_at,
+      });
+    };
+    const one = msg.match(PRICE_ONE_RE);
+    if (one) { add(one[1], parseFloat(one[4]), parseFloat(one[2])); continue; }
+    let any = false;
+    // articles FIRST, then cut them out: "article 114137 ours £7.95" also satisfies the per-SKU
+    // pattern, and would otherwise land as a SKU called "114137" that no product has.
+    for (const m of [...msg.matchAll(PRICE_ARTICLE_RE)]) {
+      any = true;
+      const spans = m[4].split(',').map((s) => s.trim()).filter(Boolean);
+      for (const sku of new Set(spans)) add(sku, parseFloat(m[2]), parseFloat(m[3]));
+      msg = msg.replace(m[0], ' ');
+    }
+    for (const m of msg.matchAll(PRICE_PAIR_RE)) { any = true; add(m[1], parseFloat(m[2]), parseFloat(m[3])); }
+    if (!any && !r.handled_at) unparsed.push({ id: r.id, supplier: sup, step, at: r.created_at, message: msg.slice(0, 200) });
+  }
+  return { items: [...items.values()], applied, unparsed };
+}
+
+app.get('/api/purchasing/price-approvals', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  const days = Math.min(120, Math.max(1, parseInt(req.query.days, 10) || 21));
+  try {
+    await ensurePriceDecisionTable();
+    const log = await pool.query(
+      `SELECT id, created_at, supplier, step, message, context, severity, handled_at
+         FROM purchasing_error_log
+        WHERE created_at > now() - ($1 || ' days')::interval
+        ORDER BY id ASC`, [String(days)]);
+    const parsed = parsePriceRows(log.rows);
+
+    const dec = await pool.query('SELECT upper(supplier) AS supplier, upper(sku) AS sku, decision, charged, decided_at, decided_by FROM purchasing_price_decision');
+    const kept = new Map();
+    for (const d of dec.rows) if (d.decision === 'kept') kept.set(d.supplier + '|' + d.sku, d);
+
+    // still outstanding on the face of the log
+    let pending = parsed.items.filter((x) => !x.handled)
+      .filter((x) => !parsed.applied.has(x.supplier + '|' + x.sku.toUpperCase()));
+    const keptOut = pending.filter((x) => kept.has(x.supplier + '|' + x.sku.toUpperCase()));
+    if (req.query.includeKept !== '1') pending = pending.filter((x) => !kept.has(x.supplier + '|' + x.sku.toUpperCase()));
+    pending = pending.slice(0, 200);
+
+    // resolve productId from the PO the error came from — the actual ordered line, not a guess
+    const skuToPid = new Map();
+    for (const poId of new Set(pending.map((x) => x.poId).filter(Boolean))) {
+      try {
+        const [o] = await bpLive('GET', `/order-service/order/${poId}`);
+        for (const row of Object.values((o && o.orderRows) || {})) {
+          if (row.productSku && row.productId && String(row.productId) !== '1000') skuToPid.set(String(row.productSku).toUpperCase(), Number(row.productId));
+        }
+      } catch (e) { /* PO gone or unreadable — fall through to the SKU search */ }
+    }
+    for (const x of pending) {
+      const k = x.sku.toUpperCase();
+      if (skuToPid.has(k)) continue;
+      try {
+        const s = await bpLive('GET', `/product-service/product-search?SKU=${encodeURIComponent(x.sku)}`);
+        const cols = ((s.metaData && s.metaData.columns) || []).map((c) => c.name);
+        const hits = s.results || [];
+        if (hits.length === 1) skuToPid.set(k, Number(hits[0][cols.indexOf('productId')]));
+        else x.resolveNote = hits.length ? `${hits.length} products share this SKU` : 'no product with this SKU';
+      } catch (e) { x.resolveNote = 'lookup failed: ' + e.message; }
+    }
+
+    // current prices, batched. ids MUST be ascending or BP 400s with CMNC-006.
+    const pids = [...new Set([...skuToPid.values()])].sort((a, b) => a - b);
+    const priceOf = new Map();
+    for (let i = 0; i < pids.length; i += 25) {
+      const chunk = pids.slice(i, i + 25);
+      try {
+        const arr = await bpLive('GET', `/product-service/product-price/${chunk.join(',')}`) || [];
+        for (const p of arr) priceOf.set(Number(p.productId), (p.priceLists || []));
+      } catch (e) { /* leave unknown; reported per item below */ }
+    }
+
+    const out = [];
+    let alreadyCorrect = 0;
+    for (const x of pending) {
+      const pid = skuToPid.get(x.sku.toUpperCase()) || null;
+      const lists = pid != null ? (priceOf.get(pid) || []) : [];
+      const cur = (() => { const pl = lists.find((l) => l.priceListId === COST_LIST); return pl && pl.quantityPrice && pl.quantityPrice['1'] != null ? Number(pl.quantityPrice['1']) : null; })();
+      // already at what the supplier charged — fixed here, by price-heal, or by hand. Drop it.
+      if (cur != null && Math.abs(cur - x.charged) < 0.005) { alreadyCorrect++; continue; }
+      // a supplier can price from its OWN cost list; a Launch-only write leaves that one stale
+      const other = lists.filter((l) => l.priceListId !== COST_LIST && l.priceListId !== 3 && l.priceListId !== 13
+                                        && l.quantityPrice && l.quantityPrice['1'] != null)
+        .map((l) => ({ list: l.priceListId, value: Number(l.quantityPrice['1']) }))
+        .filter((l) => l.value > 0 && Math.abs(l.value - x.charged) > 0.01);
+      out.push({
+        supplier: x.supplier, sku: x.sku, productId: pid,
+        current: cur, loggedWas: x.was, charged: x.charged,
+        diff: cur != null ? +(x.charged - cur).toFixed(2) : +(x.charged - x.was).toFixed(2),
+        pct: cur ? +(((x.charged - cur) / cur) * 100).toFixed(1) : null,
+        errorId: x.errorId, poId: x.poId, at: x.at, step: x.step,
+        resolveNote: x.resolveNote || null, otherLists: other,
+        canApply: pid != null,
+      });
+    }
+    out.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+    res.json({
+      costList: COST_LIST, days,
+      writeEnabled: process.env.HEAL_LIVE_ENABLED === 'true',
+      pending: out,
+      totals: { count: out.length, costDelta: +out.reduce((a, x) => a + (x.diff || 0), 0).toFixed(2) },
+      alreadyCorrect, autoHealed: parsed.applied.size,
+      kept: keptOut.map((x) => ({ supplier: x.supplier, sku: x.sku, charged: x.charged })),
+      unparsed: parsed.unparsed,
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// Apply or dismiss approved cost changes. decision:'apply' writes what the supplier charged;
+// decision:'keep' writes nothing and records that Dec judged our cost right, so the line stops
+// coming back. Every write is read back before it is called done.
+app.post('/api/purchasing/price-approvals/apply', express.json(), async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  // This route CHANGES cost prices, so unlike the read side it can take a shared secret. The hub's
+  // password box is client-side only — a door, not a lock — and every other purchasing route here
+  // is unauthenticated. Setting PURCHASING_HUB_SECRET to the hub password makes the same password
+  // Dec already types into the page an actual server-side check. Left unset it behaves as before,
+  // so nothing breaks by not setting it; it just is not protected.
+  const secret = process.env.PURCHASING_HUB_SECRET;
+  if (secret && String(req.get('x-hub-secret') || '') !== String(secret)) {
+    return res.status(401).json({ error: 'bad or missing x-hub-secret' });
+  }
+  const { items, decision = 'apply', by = 'hub', note = null, priceListId } = req.body || {};
+  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items required' });
+  if (items.length > 100) return res.status(400).json({ error: 'too many items in one call (max 100)' });
+  if (!['apply', 'keep'].includes(decision)) return res.status(400).json({ error: "decision must be 'apply' or 'keep'" });
+  if (decision === 'apply' && process.env.HEAL_LIVE_ENABLED !== 'true') {
+    return res.status(503).json({ error: 'live price writes disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  }
+  const costList = priceListId != null && priceListId !== '' ? Number(priceListId) : COST_LIST;
+  if (!Number.isFinite(costList) || costList <= 0) return res.status(400).json({ error: 'priceListId must be a positive number' });
+  try {
+    await ensurePriceDecisionTable();
+    const results = [];
+    for (const it of items) {
+      const sku = String((it && it.sku) || '').trim();
+      const supplier = String((it && it.supplier) || '').toUpperCase();
+      const cost = Number(it && it.cost);
+      if (!sku || !supplier) { results.push({ sku, supplier, ok: false, error: 'sku and supplier required' }); continue; }
+      if (decision === 'keep') {
+        await pool.query('INSERT INTO purchasing_price_decision (supplier, sku, charged, decision, error_id, decided_by, note) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [supplier, sku, Number.isFinite(cost) ? cost : null, 'kept', it.errorId || null, String(by), note]);
+        results.push({ sku, supplier, ok: true, decision: 'kept' });
+        continue;
+      }
+      const pid = Number(it && it.productId);
+      if (!Number.isFinite(pid) || pid <= 0) { results.push({ sku, supplier, ok: false, error: 'productId required to write a price' }); continue; }
+      if (!Number.isFinite(cost) || cost <= 0) { results.push({ sku, supplier, ok: false, error: 'cost must be a positive number' }); continue; }
+      try {
+        const w = await writeCostPrice(pid, cost.toFixed(2), costList);
+        if (w.ok) {
+          await pool.query('INSERT INTO purchasing_price_decision (supplier, sku, charged, was, decision, error_id, decided_by, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+            [supplier, sku, cost, w.before, 'applied', it.errorId || null, String(by), note]);
+        }
+        results.push({ sku, supplier, productId: pid, ok: w.ok, before: w.before, after: w.after, wanted: cost, list: costList });
+      } catch (e) { results.push({ sku, supplier, productId: pid, ok: false, error: e.message }); }
+    }
+    res.json({ decision, costList, applied: results.filter((r) => r.ok).length, of: items.length, results });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // READ-ONLY dry-run: build the cost/RRP change plan for a style. Matches each BP
 // variant (by colour+size) to its Pencarrie SKU, computes cost + RRP, and returns
 // current-vs-new for cost (list 20) and RRP (list 13). NO writes. ?style=GD01[&full=1][&limit=]
