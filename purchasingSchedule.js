@@ -2126,69 +2126,18 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
     const res = state.last_result || {};
     const already = _retriedToday.get(key) === uk.date;
 
-    // CASE 1 - today's run WAITED under the free-carriage threshold.
-    // It made no PO and never contacted the supplier, so re-evaluating is exactly as safe as
-    // retrying a pre-supplier failure - and worth it, because the threshold is judged on a single
-    // instant. HELLY HANSEN read 288.31 at its 11:30 window and 454.77 the same evening: over the
-    // line, free carriage, and idle until the next day for want of a second look.
-    if (!res.error || !res.step) {
-      const waiting = typeof res.decision === 'string' && res.decision.indexOf('waiting') === 0;
-      if (!waiting) {
-        suppliers.push({ supplier: key, skipped: 'the run today recorded no failure', state: res.state || res.decision || null, placedPo: (res.placement && res.placement.poId) || null });
-        continue;
-      }
-      if (already) { suppliers.push({ supplier: key, skipped: 'already swept today' }); continue; }
-      // DRY-RUN FIRST, and escalate only when it says it WOULD place. A real run that came in under
-      // threshold would record another wait DAY, and burning wait days early brings forward the
-      // day-3 forced placement - which places a small order AND pays carriage, the opposite of what
-      // the threshold exists for. The dry run writes nothing (the day-claim and saveState are both
-      // guarded by !dryRun), so this costs only a read.
-      let probe;
-      try { probe = await runSupplierScheduled({ pool, altItemsUrl, supplier: key, dryRun: true, force: true }); }
-      catch (e) { suppliers.push({ supplier: key, skipped: 'threshold re-check failed: ' + e.message }); continue; }
-      // ONLY a genuine threshold recovery. "WOULD place" has three causes and they are not
-      // interchangeable: over-threshold is the one we want, while a day-3 trigger fires because the
-      // wait clock ran out and PADS or PAYS CARRIAGE on a small order. PERFORMANCE BRANDS proved it
-      // on the first live run - GBP 75.03 against a GBP 200 threshold, reported as "WOULD place" purely
-      // because the probe computed day 3. That placement belongs to its OWN window tomorrow, not to
-      // an evening sweep bringing it forward a day. reason is the exact discriminator.
-      const wouldPlace = probe && probe.reason === "over-threshold";
-      if (!wouldPlace) {
-        // NOT the same thing as "under threshold": a probe that never answered has told us nothing.
-        // Reporting silence as a definite negative is what this sweep exists to stop happening.
-        const answered = probe && typeof probe.decision === "string";
-        const dayThree = answered && probe.decision.indexOf("WOULD place") === 0;   // would place, but only because the wait clock ran out
-        const why = !answered ? "threshold re-check gave no decision - NOT a negative"
-          : dayThree ? "would place only because its wait clock ran out - that belongs to its own window tomorrow, and would pad or pay carriage"
-          : "still under threshold";
-        suppliers.push({ supplier: key, skipped: why, was: res.decision, now: (probe && probe.decision) || null, netValue: (probe && probe.netValue) != null ? probe.netValue : null, probeSkipped: (probe && probe.skipped) || null, probeError: (probe && probe.error) || null, probeStep: (probe && probe.step) || null });
-        continue;
-      }
-      if (!execute) {
-        suppliers.push({ supplier: key, wouldRetry: true, why: 'waited at its window, now over threshold', was: res.decision, now: probe.decision, netValue: probe.netValue });
-        continue;
-      }
-      _retriedToday.set(key, uk.date);
-      const waitedBefore = state.working_days_waited;
-      let r = null, err = null;
-      try { r = await runSupplierScheduled({ pool, altItemsUrl, supplier: key, force: true }); }
-      catch (e) { err = e.message; }
-      const poId = r && r.placement && r.placement.poId;
-      // Demand can move between the probe and the run. If it did not place after all, put the wait
-      // counter back exactly as it was, so a sweep can NEVER consume one of the three wait days.
-      if (!poId) {
-        await saveState(pool, { id: cfg.stateId, workingDaysWaited: waitedBefore, lastRunDate: uk.date, result: r || res }).catch(() => {});
-      }
-      suppliers.push({ supplier: key, reevaluated: true, placed: !!poId, poId: poId || null, was: res.decision, decision: (r && r.decision) || null, error: err || (r && r.error) || null, waitDaysRestored: !poId });
-      await logPurchasingError(pool, {
-        supplier: key, step: 'retry-sweep', severity: poId ? 'info' : 'review', placed: !!poId,
-        message: poId
-          ? 'Waited at its window (' + res.decision + ') but was over the threshold by the evening - re-ran and PLACED (PO#' + poId + ').'
-          : 'Waited at its window and looked over-threshold at the sweep, but the re-run did not place: ' + (err || (r && r.decision) || 'no result') + '. Wait counter restored.',
-        context: { was: res.decision, probe: (probe && probe.decision) || null, result: r || null },
-      }).catch(() => {});
-      continue;
-    }
+    // NO threshold re-evaluation here. A run that WAITED under the free-carriage threshold is
+    // working as designed, and the sweep used to re-run it in the evening if the value had since
+    // crossed the line. That was never what this was for, and on 2026-09-02 it did real damage:
+    //   CASTLE  held at day 1 of 3 (GBP 93.35 < 150) and the sweep placed GBP 388.86 (PO 486453),
+    //           an order Castle had deliberately held for free carriage.
+    //   MASCOT  held at day 1 of 3 (GBP 242.15 < 250); the sweep re-ran it and SAP answered
+    //           IsDuplicateRequest:true, leaving PO 486454 Pending. Mascot is the two-stage SAP
+    //           commit where a failed Release leaves an INVISIBLE draft — the one supplier that
+    //           must never be retried on a guess.
+    // The wait is a deliberate business decision, not a failure to recover from. This sweep exists
+    // ONLY to retry runs that FAILED before reaching the supplier and had no window left to fix in
+    // (user, 2026-09-03).
 
     // CASE 2 - today's run FAILED before it ever reached the supplier.
     if (!RETRY_SAFE_STEPS.has(String(res.step))) {
