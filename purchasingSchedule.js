@@ -1136,6 +1136,181 @@ function snickersPackMultiples() {
   for (const [k, v] of Object.entries(env)) { const n = Number(v); if (n > 1) out[String(k).toUpperCase()] = n; }
   return out;
 }
+/* ── Discontinued lines ───────────────────────────────────────────────────────
+   A discontinued code cannot be bought at any price, on any run, ever. Left alone it does the
+   maximum damage for the minimum cause: Hultafors' CSV import drops it in silence, the unit gate
+   then refuses the WHOLE order, and PO 486870 sat holding 98 lines and £6,399 net over one £74.70
+   trouser. Retrying achieves nothing, so the run must deal with it rather than stall behind it.
+
+   What happens when the supplier's own portal says a line is discontinued:
+     · the PO row is removed          — it is never arriving, and a row left on a placed PO counts
+                                        as ON ORDER, which both overstates stock and suppresses the
+                                        re-order that would otherwise replace it
+     · sales@ is emailed              — a customer is usually waiting on it, and only a person can
+                                        decide between a substitute size, a different product or a
+                                        refund. The email carries the sales orders that want it and
+                                        any sibling sizes still in stock, so that decision is quick
+     · the supplier tag is settled    — via finalizeSupplierTagsLive with supplied:false, which
+                                        removes only THIS supplier from the tag. An alternatives
+                                        group ("PENCARRIE, RALAWISE") correctly falls back to the
+                                        other one; a sole supplier clears, so the order stops being
+                                        re-tried daily for something that will never come
+     · the SKU is remembered          — so the next run excludes it BEFORE staging instead of
+                                        rediscovering it by failing again
+
+   The customer's SALES-ORDER line is deliberately NOT touched. Only the purchase-order row is
+   removed. Deleting what a customer asked for, automatically, on the strength of a supplier feed,
+   is not a decision this code gets to make — that is what the email is for. */
+
+async function ensureDiscontinuedTable(pool) {
+  if (!pool) return false;
+  await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_discontinued (
+    id serial PRIMARY KEY,
+    supplier text NOT NULL,
+    sku text NOT NULL,
+    product_name text,
+    detected_at timestamptz NOT NULL DEFAULT now(),
+    po_id integer,
+    status text,
+    note text
+  )`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS purchasing_discontinued_key
+                    ON purchasing_discontinued (upper(supplier), upper(sku))`);
+  return true;
+}
+
+// SKUs already proven dead for this supplier — excluded before the basket is built.
+async function knownDiscontinued(pool, supplierKey) {
+  try {
+    if (!(await ensureDiscontinuedTable(pool))) return new Set();
+    const r = await pool.query('SELECT upper(sku) AS sku FROM purchasing_discontinued WHERE upper(supplier) = $1', [String(supplierKey).toUpperCase()]);
+    return new Set(r.rows.map((x) => x.sku));
+  } catch { return new Set(); }
+}
+
+async function recordDiscontinued(pool, supplierKey, { sku, productName, poId, status, note }) {
+  try {
+    if (!(await ensureDiscontinuedTable(pool))) return;
+    await pool.query(
+      `INSERT INTO purchasing_discontinued (supplier, sku, product_name, po_id, status, note)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (upper(supplier), upper(sku)) DO UPDATE SET detected_at = now(), status = EXCLUDED.status`,
+      [String(supplierKey).toUpperCase(), String(sku), productName || null, poId || null, status || 'Discontinued', note || null]);
+  } catch (e) { console.error('[discontinued] record failed:', e.message); }
+}
+
+// Sibling sizes of the same style+colour that ARE still available — the single most useful thing
+// to put in front of whoever has to ring the customer. Numeric sizes only: our SKU carries the
+// real size for those, while a lettered garment carries a size CODE the portal does not use, so
+// there is nothing reliable to step through. Best-effort throughout — it decorates the email, it
+// never gates anything.
+async function snickersAlternativeSizes(altItemsUrl, sku) {
+  const d = String(sku || '').replace(/[^0-9]/g, '');
+  if (d.length < 9) return [];
+  const size = Number(d.slice(8));
+  if (!Number.isFinite(size) || size <= 0) return [];
+  const out = [];
+  for (const delta of [-6, -4, -2, 2, 4, 6]) {
+    const s = size + delta;
+    if (s <= 0) continue;
+    try {
+      const u = `${altItemsUrl}/api/supplier-stock?supplier=SNICKERS&code=${d.slice(0, 4)}&colour=${d.slice(4, 8)}&size=${s}&live=1`;
+      const j = await (await fetch(u, { signal: AbortSignal.timeout(60000) })).json();
+      if (j && j.found === true && !/discontinued/i.test(j.status || '') && Number(j.avail) > 0) {
+        out.push({ size: String(s), avail: Number(j.avail) });
+      }
+    } catch { /* one probe failing is not worth failing the email over */ }
+  }
+  return out;
+}
+
+async function emailDiscontinued({ supplierKey, poId, items }) {
+  const to = process.env.DISCONTINUED_EMAIL_TO || 'sales@tuffshop.co.uk';
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const block = items.map((it) => {
+    const orders = (it.orders || []).length
+      ? `<p style="margin:6px 0"><b>Wanted by:</b> ${it.orders.map((o) => `order <b>#${esc(o.id)}</b>${o.ref ? ` (${esc(o.ref)})` : ''} &times;${o.qty}`).join(', ')}</p>`
+      : '<p style="margin:6px 0;color:#666">Not on any sales order — this was a low-inventory top-up, so no customer is waiting.</p>';
+    const alts = (it.alternatives || []).length
+      ? `<p style="margin:6px 0"><b>Still available in this colour:</b> ${it.alternatives.map((a) => `size ${esc(a.size)} (${a.avail} in stock)`).join(', ')}</p>`
+      : '<p style="margin:6px 0;color:#666">No alternative size found automatically — worth checking the portal.</p>';
+    return `<div style="border-left:3px solid #b91c1c;padding:8px 12px;margin:12px 0;background:#fef2f2">
+      <p style="margin:0 0 4px"><b>${esc(it.name || it.sku)}</b></p>
+      <p style="margin:0 0 6px;font-family:monospace">${esc(it.sku)}</p>
+      ${orders}${alts}
+      <p style="margin:6px 0;color:#666;font-size:12px">Removed from PO ${esc(poId)} so it no longer reads as on order. The sales-order line has NOT been touched.</p>
+    </div>`;
+  }).join('');
+  const html = `<div style="font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:680px">
+    <h2 style="margin:0 0 4px">${esc(supplierKey)} — discontinued item${items.length > 1 ? 's' : ''}</h2>
+    <p style="color:#555;margin:0 0 12px">${supplierKey} confirm the following can no longer be ordered in this size/colour. The rest of PO ${esc(poId)} went through as normal.</p>
+    ${block}
+    <p style="font-size:12px;color:#888;margin-top:16px">Someone needs to decide on a substitute, a different product, or a refund, and let the customer know. Detected automatically from the supplier's own stock data.</p>
+  </div>`;
+  const subject = `${supplierKey} discontinued: ${items.map((i) => i.sku).join(', ').slice(0, 80)}`;
+  await transporter().sendMail({ from: `"Tuffshop Purchasing" <${to}>`, to, subject, html });
+  return to;
+}
+
+// Remove the dead rows, settle the tags, tell sales, remember the SKUs. Returns what it did.
+// Every step is independently best-effort: the point is that the ORDER proceeds, so a failure to
+// e.g. send the email must not turn a recoverable run back into a stalled one. Whatever fails is
+// reported in the return value and in the review log.
+async function handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, dead, po }) {
+  const done = { removedRows: [], tagsSettled: [], emailed: null, recorded: [], problems: [] };
+  const soLines = [...((po && po.soLines) || [])];
+  const items = [];
+
+  for (const d of dead) {
+    const sku = String(d.sku).toUpperCase();
+    const wanting = soLines.filter((l) => String(l.sku || '').toUpperCase() === sku && l.order);
+    const name = (soLines.find((l) => String(l.sku || '').toUpperCase() === sku) || {}).name || d.name || null;
+    items.push({
+      sku: d.sku, name, status: d.status || 'Discontinued',
+      orders: wanting.map((l) => ({ id: l.order, ref: l.orderRef || null, qty: Math.round(Number(l.qty) || 0) })),
+      alternatives: String(supplierKey).toUpperCase() === 'SNICKERS' ? await snickersAlternativeSizes(altItemsUrl, d.sku) : [],
+    });
+    // 1. the PO row — it is never arriving
+    try {
+      const r = await bp.removePoRowLive({ poId, sku: d.sku, execute: true });
+      done.removedRows.push({ sku: d.sku, ok: !!(r && (r.removed || r.ok)) });
+    } catch (e) { done.problems.push(`remove PO row ${d.sku}: ${e.message}`); }
+    await recordDiscontinued(pool, supplierKey, { sku: d.sku, productName: name, poId, status: d.status || 'Discontinued' });
+    done.recorded.push(d.sku);
+  }
+
+  // 2. tags — ONLY for orders left with nothing else to get from this supplier. An order that
+  // still has a live line from them must keep its tag, or that line stops being ordered; the
+  // normal finalise clears those when the PO places.
+  const deadSet = new Set(dead.map((d) => String(d.sku).toUpperCase()));
+  const strandedOrders = [];
+  for (const id of new Set(soLines.filter((l) => l.order).map((l) => l.order))) {
+    const mine = soLines.filter((l) => l.order === id);
+    if (!mine.some((l) => deadSet.has(String(l.sku || '').toUpperCase()))) continue;
+    const alive = mine.filter((l) => !deadSet.has(String(l.sku || '').toUpperCase()));
+    if (!alive.length) strandedOrders.push(id);
+  }
+  if (strandedOrders.length) {
+    try {
+      // supplied:false — this supplier did NOT supply it. settleGroup then drops only this
+      // supplier from the tag, so "PENCARRIE, RALAWISE" falls back to RALAWISE and a sole
+      // supplier clears outright. Status is deliberately left alone: nothing was ordered for
+      // these, so moving them to "Ordered Stock Awaiting Delivery" would be a lie.
+      const r = await bp.finalizeSupplierTagsLive({
+        orderIds: strandedOrders, supplierKey, poId, supplied: false, setOrderedStatus: false, execute: true,
+      });
+      done.tagsSettled = (r && r.results) ? r.results.map((x) => x.id || x) : strandedOrders;
+    } catch (e) { done.problems.push(`settle tags ${strandedOrders.join(',')}: ${e.message}`); }
+  }
+
+  // 3. tell sales — a customer is usually waiting and only a person can decide what to do
+  try { done.emailed = await emailDiscontinued({ supplierKey, poId, items }); }
+  catch (e) { done.problems.push(`email sales: ${e.message}`); }
+
+  done.items = items;
+  return done;
+}
+
 // WHY did Hultafors refuse a line? The CSV import drops what it will not accept and says nothing,
 // so "1 line never reached the basket" has always been where the trail went cold and a person had
 // to log into the portal. The portal WILL answer per variant, so ask it.
@@ -1187,29 +1362,86 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     const k = String(l.sku).toUpperCase();
     bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty));
   }
-  // Excluded from the BASKET only. The PO row is deliberately left alone: it is the record of what
-  // the sales order still wants, and removing it would hide a customer line that nobody has dealt
-  // with yet. It does mean the row reads as on-order until someone resolves it, which is the
-  // trade-off — visible and wrong beats invisible and wrong.
+  // Codes already proven discontinued are dropped BEFORE the basket is built, so a dead line is
+  // rediscovered by failing exactly once and never again.
+  for (const sku of await knownDiscontinued(pool, 'SNICKERS')) excl.add(sku);
+  // Excluded from the BASKET only. The PO row is left alone HERE, because at this point a manual
+  // exclusion is just "don't buy it today" and the row is still the record of what a sales order
+  // wants. A row is only removed when the supplier CONFIRMS the code is dead — see
+  // handleDiscontinuedLines, where the email that tells someone about it goes out too.
   const excluded = [...excl].filter((sku) => bySku.delete(sku));
   if (excluded.length) steps.excluded = excluded;
   const packs = snickersPackMultiples();
-  const packApplied = [];
-  const lines = [...bySku.entries()].map(([stockCode, qty]) => {
-    const p = Number(packs[stockCode]);
-    if (p > 1 && qty % p !== 0) {
-      const q = Math.ceil(qty / p) * p;
-      packApplied.push({ sku: stockCode, demand: qty, ordered: q, packOf: p });
-      return { stockCode, qty: q };
-    }
-    return { stockCode, qty };
-  });
+  let packApplied = [];
+  const buildLines = () => {
+    packApplied = [];
+    return [...bySku.entries()].map(([stockCode, qty]) => {
+      const p = Number(packs[stockCode]);
+      if (p > 1 && qty % p !== 0) {
+        const q = Math.ceil(qty / p) * p;
+        packApplied.push({ sku: stockCode, demand: qty, ordered: q, packOf: p });
+        return { stockCode, qty: q };
+      }
+      return { stockCode, qty };
+    });
+  };
+  let lines = buildLines();
   if (!lines.length) throw stepErr('resolve', 'no orderable Snickers lines');
   if (packApplied.length) steps.packRounding = packApplied;
   steps.resolve = { lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0) };
 
   // Drive the Hultafors worker (async job + poll). ref = PO id → the portal PO-number field.
-  const wr = await workerPlaceOrder({ supplier: 'SNICKERS', ref: poId, lines, execute: live });
+  let wr = await workerPlaceOrder({ supplier: 'SNICKERS', ref: poId, lines, execute: live });
+
+  // ONE retry, and only when the supplier itself says every refused line is discontinued. Safe to
+  // repeat because the worker did NOT place: it stages the basket, clears it on re-import, and the
+  // failure we are recovering from is by definition "nothing was submitted". Anything else — a
+  // pack quantity, an unreadable cart, a genuine outage — falls through to the error below rather
+  // than being retried on a guess.
+  if ((!wr || !wr.placed) && (wr && (wr.missingLines || []).length)) {
+    const dead = [];
+    for (const m of (wr.missingLines || []).slice(0, 8)) {
+      const st = await snickersLineStatus(altItemsUrl, m.stockCode);
+      if (st && /discontinued/i.test(st.status || '')) dead.push({ sku: m.stockCode, status: st.status });
+    }
+    if (dead.length && dead.length === (wr.missingLines || []).length) {
+      // If the cleanup itself falls over, do NOT retry the placement: the PO may be half-tidied and
+      // guessing past that is how a wrong order gets sent. Record it and fall through to the normal
+      // missing-lines error, which still names the code and says it is discontinued.
+      let handled;
+      try {
+        handled = await handleDiscontinuedLines({ pool, altItemsUrl, supplierKey: 'SNICKERS', poId, dead, po });
+      } catch (e) {
+        steps.discontinuedError = e.message;
+        await logPurchasingError(pool, {
+          supplier: 'SNICKERS', step: 'discontinued', severity: 'error',
+          message: `Found ${dead.length} discontinued line(s) on PO ${poId} (${dead.map((d) => d.sku).join(', ')}) but could not clean them up: ${e.message}. NOTHING was placed and nothing was emailed — this needs doing by hand.`,
+          context: { poId, dead },
+        }).catch(() => {});
+        handled = null;
+      }
+      if (!handled) throw stepErr('checkout', `Snickers lines are discontinued (${dead.map((d) => d.sku).join(', ')}) but the automatic cleanup failed: ${steps.discontinuedError}`, { poId, dead });
+      steps.discontinued = handled;
+      await logPurchasingError(pool, {
+        supplier: 'SNICKERS', step: 'discontinued', severity: 'review',
+        message: `${dead.length} line(s) discontinued at Snickers and removed from PO ${poId}: `
+          + handled.items.map((it) => `${it.sku}${it.orders.length ? ` (wanted by ${it.orders.map((o) => '#' + o.id).join(', ')})` : ' (low-inventory only)'}`
+            + (it.alternatives.length ? ` — still available: ${it.alternatives.map((a) => 'size ' + a.size).join(', ')}` : '')).join('; ')
+          + `. ${handled.emailed ? `sales@ notified (${handled.emailed}).` : 'EMAIL FAILED — nobody has been told.'}`
+          + (handled.tagsSettled.length ? ` Tag cleared on ${handled.tagsSettled.length} order(s) with nothing else to come from Snickers.` : '')
+          + ' The rest of the order was placed. The sales-order lines were NOT touched — someone still has to agree a substitute or a refund with the customer.'
+          + (handled.problems.length ? ` PROBLEMS: ${handled.problems.join('; ')}` : ''),
+        context: { poId, dead, handled },
+      }).catch(() => {});
+      for (const d of dead) bySku.delete(String(d.sku).toUpperCase());
+      lines = buildLines();
+      if (!lines.length) throw stepErr('resolve', 'every Snickers line was discontinued — nothing left to order');
+      steps.resolve = { lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0), afterDiscontinued: true };
+      if (packApplied.length) steps.packRounding = packApplied;
+      wr = await workerPlaceOrder({ supplier: 'SNICKERS', ref: poId, lines, execute: live });
+    }
+  }
+
   if (!wr || !wr.placed) {
     // NAME THE LINES. Hultafors' CSV import drops what it will not accept and reports nothing, so
     // the unit gate refuses with no clue which line caused it. On 2026-08-25 that meant £4,350 sat
