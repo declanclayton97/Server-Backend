@@ -6537,11 +6537,13 @@ app.post('/api/jig/generate', async (req, res) => {
     if (t.vector_required && !uploadIsVector) {
       return res.status(422).json({ error: `'${itemKey}' needs a vector .eps logo` });
     }
-    // The white substrate box (item-sized) belongs on single-item jigs
-    // (notepad/coaster/mug) but NOT the pen bed, whose "page" is the whole jig.
-    const isPenBed = t.grid && t.grid.kind === 'pen';
+    // Page-sized white box on EVERY jig, the pen bed included. It is the only
+    // object spanning the full page, so without it the artwork's extents are
+    // just the logos and the bed sizes/positions the job off those instead of
+    // the real 710x510 jig. White is no ink, so it registers the page without
+    // printing anything.
     const eps = uploadIsVector
-      ? tileVectorEps({ vectorBuffer: fileBuffer, pageWmm, pageHmm, placements, logoAdjust, drawBackground: !isPenBed })
+      ? tileVectorEps({ vectorBuffer: fileBuffer, pageWmm, pageHmm, placements, logoAdjust })
       : await generateJigEps({ logoBuffer: fileBuffer, pageWmm, pageHmm, placements });
     res.setHeader('Content-Type', 'application/postscript');
     res.setHeader('Content-Disposition', `attachment; filename="jig-${itemKey}.eps"`);

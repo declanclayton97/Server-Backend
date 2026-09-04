@@ -193,8 +193,13 @@ export function tileVectorEps({ vectorBuffer, pageWmm, pageHmm, placements, logo
   // White substrate box the size of the page — the item's printable area, so
   // the operator/printer can see the item size (white = no ink, just the
   // registration of the item, e.g. A5 notepad, coaster). Matches the raster
-  // path (generateJigEps). Skipped for the pen jig (drawBackground=false): its
-  // page is the whole 710×510 bed, not a single white item.
+  // path (generateJigEps).
+  //
+  // The pen bed needs this too, even though its "page" is the whole 710×510 jig
+  // rather than one white item: it is the only object spanning the full page, so
+  // without it the file's drawn extents are just the tiled logos and the bed
+  // sizes the job off those. drawBackground is kept as an escape hatch but
+  // nothing passes false any more.
   if (drawBackground) {
     out += `gsave 1 1 1 setrgbcolor 0 0 ${pageWpt.toFixed(3)} ${pageHpt.toFixed(3)} rectfill grestore\n`;
   }
