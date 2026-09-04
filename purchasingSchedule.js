@@ -1253,8 +1253,25 @@ async function emailDiscontinued({ supplierKey, poId, items }) {
     <p style="font-size:12px;color:#888;margin-top:16px">Someone needs to decide on a substitute, a different product, or a refund, and let the customer know. Detected automatically from the supplier's own stock data.</p>
   </div>`;
   const subject = `${supplierKey} discontinued: ${items.map((i) => i.sku).join(', ').slice(0, 80)}`;
-  await transporter().sendMail({ from: `"Tuffshop Purchasing" <${to}>`, to, subject, html });
-  return to;
+  // FROM must be noreply@, not the recipient. The first live run sent from sales@ TO sales@ —
+  // SMTP2GO accepted it without complaint and nothing ever arrived. Every alert that demonstrably
+  // lands uses this sender, so this one does too.
+  //
+  // And report what the SMTP server actually said. Returning `to` on the strength of "sendMail did
+  // not throw" is not evidence of anything: it produced a log line reading "sales@ notified" for a
+  // mail that was never delivered, which is worse than no claim at all.
+  const info = await transporter().sendMail({
+    from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to, subject, html,
+    text: `${supplierKey} — discontinued: ${items.map((i) => `${i.sku}${i.orders.length ? ` (wanted by ${i.orders.map((o) => '#' + o.id).join(', ')})` : ''}`).join('; ')}. `
+      + `Removed from PO ${poId}; the rest of the order was placed. The sales-order line has NOT been touched — a substitute or refund needs agreeing with the customer.`,
+  });
+  return {
+    to,
+    accepted: (info && info.accepted) || [],
+    rejected: (info && info.rejected) || [],
+    messageId: (info && info.messageId) || null,
+    response: (info && info.response) || null,
+  };
 }
 
 // Remove the dead rows, settle the tags, tell sales, remember the SKUs. Returns what it did.
@@ -1440,7 +1457,11 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
         message: `${dead.length} line(s) discontinued at Snickers and removed from PO ${poId}: `
           + handled.items.map((it) => `${it.sku}${it.orders.length ? ` (wanted by ${it.orders.map((o) => '#' + o.id).join(', ')})` : ' (low-inventory only)'}`
             + (it.alternatives.length ? ` — still available: ${it.alternatives.map((a) => 'size ' + a.size).join(', ')}` : '')).join('; ')
-          + `. ${handled.emailed ? `sales@ notified (${handled.emailed}).` : 'EMAIL FAILED — nobody has been told.'}`
+          + `. ${(handled.emailed && (handled.emailed.accepted || []).length)
+              ? `sales@ notified — accepted for delivery to ${handled.emailed.accepted.join(', ')} (${handled.emailed.response || 'no SMTP detail'}).`
+              : handled.emailed
+                ? `EMAIL NOT DELIVERED — the server accepted the connection but no recipient: rejected ${JSON.stringify((handled.emailed.rejected) || [])}. NOBODY HAS BEEN TOLD.`
+                : 'EMAIL FAILED — nobody has been told.'}`
           + (handled.tagsSettled.length ? ` Tag cleared on ${handled.tagsSettled.length} order(s) with nothing else to come from Snickers.` : '')
           + ' The rest of the order was placed. The sales-order lines were NOT touched — someone still has to agree a substitute or a refund with the customer.'
           + (handled.problems.length ? ` PROBLEMS: ${handled.problems.join('; ')}` : ''),
@@ -1574,13 +1595,32 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
       // Tag still clears — there genuinely is nothing further to get from Snickers for these, and
       // leaving it set would re-order the good lines tomorrow. setOrderedStatus:false so the status
       // is ours to choose, not 22.
-      steps.finalizePartial = await bp.finalizeSupplierTagsLive({ orderIds: partIds, supplierKey: 'SNICKERS', poId, noteContactId: SNICKERS_SUPPLIER_CONTACT, setOrderedStatus: false, linesByOrder, execute: live });
+      // The finalise note lists what was ordered for each SO, and linesByOrder was built BEFORE the
+      // discontinued line was pulled — so it cheerfully wrote "32235804046 x1 Ordered on PO#486870"
+      // directly above the note saying that exact line is discontinued and was NOT ordered. Strip
+      // the dead SKUs first: a note that contradicts itself is worse than no note, because someone
+      // reads the first one and stops.
+      const deadSkus = new Set(((steps.discontinued && steps.discontinued.affectedOrders) || []).length
+        ? Object.values((steps.discontinued && steps.discontinued.deadByOrder) || {}).flat().map((d) => String(d.sku).toUpperCase())
+        : []);
+      const linesByOrderClean = {};
+      for (const [oid, items] of Object.entries(linesByOrder || {})) {
+        linesByOrderClean[oid] = (items || []).filter((it) => !deadSkus.has(String(it && it.sku || '').toUpperCase()));
+      }
+      steps.finalizePartial = await bp.finalizeSupplierTagsLive({ orderIds: partIds, supplierKey: 'SNICKERS', poId, noteContactId: SNICKERS_SUPPLIER_CONTACT, setOrderedStatus: false, linesByOrder: linesByOrderClean, execute: live });
       const parked = [];
       for (const id of partIds) {
         const deadHere = ((steps.discontinued && steps.discontinued.deadByOrder) || {})[id] || [];
         const what = deadHere.map((d) => `${d.sku}${d.qty > 1 ? ` x${d.qty}` : ''}${d.name ? ` (${d.name})` : ''}`).join(', ');
         try {
-          if (live) await bp.addOrderNoteLive(id, `DISCONTINUED at Snickers — NOT ordered and cannot be: ${what}. Everything else on this order was ordered on PO#${poId}. sales@ have been emailed. This order is on "Order Confirmation Sent" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, SNICKERS_SUPPLIER_CONTACT);
+          // Say what actually happened to the email. The first live run wrote "sales@ have been
+          // emailed" onto a customer's order for a mail that never arrived — a false reassurance
+          // sitting exactly where someone would rely on it.
+          const em = (steps.discontinued && steps.discontinued.emailed) || null;
+          const emailLine = em && (em.accepted || []).length
+            ? `sales@ have been emailed (${em.accepted.join(', ')}).`
+            : 'THE EMAIL TO sales@ DID NOT SEND — this note is the only record, so tell them.';
+          if (live) await bp.addOrderNoteLive(id, `DISCONTINUED at Snickers — NOT ordered and cannot be: ${what}. Everything else on this order was ordered on PO#${poId}. ${emailLine} This order is on "Order Confirmation Sent" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, SNICKERS_SUPPLIER_CONTACT);
           if (live) await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS);
           parked.push({ id, status: DISCONTINUED_PARK_STATUS, dead: deadHere.map((d) => d.sku) });
         } catch (e) { parked.push({ id, error: e.message }); }
