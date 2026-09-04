@@ -1136,8 +1136,39 @@ function snickersPackMultiples() {
   for (const [k, v] of Object.entries(env)) { const n = Number(v); if (n > 1) out[String(k).toUpperCase()] = n; }
   return out;
 }
-async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+// WHY did Hultafors refuse a line? The CSV import drops what it will not accept and says nothing,
+// so "1 line never reached the basket" has always been where the trail went cold and a person had
+// to log into the portal. The portal WILL answer per variant, so ask it.
+//
+// Our Snickers SKU is style(4) + colour(4) + size, and the portal wants those three separately.
+// snickersParams() on the Alternate-Items side needs a size LABEL to do this; from a bare SKU the
+// trailing digits are the size once leading zeros are dropped ("046" → "46"), which is the same
+// split that route already uses for style and colour.
+//
+// Best-effort by design: if the derivation is wrong the lookup simply finds nothing and the error
+// reads exactly as it does today. It can add an answer, never remove one.
+async function snickersLineStatus(altItemsUrl, sku) {
+  const digits = String(sku || '').replace(/[^0-9]/g, '');
+  if (digits.length < 9) return null;
+  const size = String(Number(digits.slice(8)) || digits.slice(8));
+  const url = `${altItemsUrl}/api/supplier-stock?supplier=SNICKERS`
+    + `&code=${digits.slice(0, 4)}&colour=${digits.slice(4, 8)}&size=${encodeURIComponent(size)}&live=1`;
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(120000) });
+    const j = await r.json();
+    if (!j || j.found !== true) return null;
+    return { status: j.status || null, avail: j.avail == null ? null : Number(j.avail), barcode: j.barcode || null, size };
+  } catch { return null; }
+}
+
+async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [] } = {}) {
   const steps = {};
+  // excludeSkus: lines Hultafors genuinely cannot sell us — a discontinued code is the usual one.
+  // Kept OFF the basket so one dead line cannot strand the whole order (486870 held £6,399 of 98
+  // lines over a single £74.70 trouser). It is an explicit instruction, never automatic: a
+  // discontinued line a CUSTOMER ordered still needs a human, and dropping it quietly would leave
+  // that sales order unfulfillable while looking like a clean run.
+  const excl = new Set((excludeSkus || []).map((x) => String(x).trim().toUpperCase()).filter(Boolean));
   let po;
   try { po = await createPo({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
@@ -1156,6 +1187,12 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     const k = String(l.sku).toUpperCase();
     bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty));
   }
+  // Excluded from the BASKET only. The PO row is deliberately left alone: it is the record of what
+  // the sales order still wants, and removing it would hide a customer line that nobody has dealt
+  // with yet. It does mean the row reads as on-order until someone resolves it, which is the
+  // trade-off — visible and wrong beats invisible and wrong.
+  const excluded = [...excl].filter((sku) => bySku.delete(sku));
+  if (excluded.length) steps.excluded = excluded;
   const packs = snickersPackMultiples();
   const packApplied = [];
   const lines = [...bySku.entries()].map(([stockCode, qty]) => {
@@ -1180,11 +1217,31 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     // found only by diffing the PO against the worker's cart by hand. The worker now returns
     // missingLines; put it where a person and the triage pass will both see it.
     const miss = (wr && wr.missingLines) || [];
-    const named = miss.map((m) => `${m.stockCode} (wanted ${m.wanted}${m.inCart ? `, only ${m.inCart} in cart` : ', not in basket'})`).join('; ');
+    // ASK THE PORTAL WHY. Naming the line was the previous fix and it stopped the hand-diffing, but
+    // it still left "32235804046 (wanted 1, not in basket)" — true, and no use without a reason.
+    // The portal knows: that code is DISCONTINUED, which no amount of retrying will change.
+    const why = new Map();
+    for (const m of miss.slice(0, 8)) {
+      const st = await snickersLineStatus(altItemsUrl, m.stockCode);
+      if (st) why.set(String(m.stockCode).toUpperCase(), st);
+    }
+    const reason = (m) => {
+      const st = why.get(String(m.stockCode).toUpperCase());
+      if (!st) return '';
+      if (/discontinued/i.test(st.status || '')) return ' — DISCONTINUED at Snickers, it will never be orderable';
+      if (st.avail === 0) return ' — out of stock at Snickers';
+      if (st.avail > 0) return ` — Snickers show ${st.avail} in stock, so the import refused it for another reason (pack quantity?)`;
+      return st.status ? ` — Snickers status "${st.status}"` : '';
+    };
+    const named = miss.map((m) => `${m.stockCode} (wanted ${m.wanted}${m.inCart ? `, only ${m.inCart} in cart` : ', not in basket'})${reason(m)}`).join('; ');
+    const dead = miss.filter((m) => /discontinued/i.test((why.get(String(m.stockCode).toUpperCase()) || {}).status || ''));
     throw stepErr('checkout',
-      `Snickers worker did not confirm placement${miss.length ? ` — ${miss.length} line(s) never reached the basket: ${named.slice(0, 160)}` : ''}: ${JSON.stringify((wr && (wr.error || wr.statusText)) || wr).slice(0, 200)}`,
+      `Snickers worker did not confirm placement${miss.length ? ` — ${miss.length} line(s) never reached the basket: ${named.slice(0, 420)}` : ''}`
+      + (dead.length ? `. Nothing else is wrong with this order: re-run excluding ${dead.map((d) => d.stockCode).join(', ')} to place the rest, and sort those line(s) separately — a discontinued code cannot be bought at any size.` : '')
+      + `: ${JSON.stringify((wr && (wr.error || wr.statusText)) || wr).slice(0, 200)}`,
       // context is NOT truncated — the full list belongs here, with the counts that prove the gap.
-      { poId, missingLines: miss, expectedUnits: (wr && wr.expectedUnits) || null, cartUnits: (wr && wr.cart && wr.cart.qtySum) || null });
+      { poId, missingLines: miss, lineStatus: Object.fromEntries(why), discontinued: dead.map((d) => d.stockCode),
+        expectedUnits: (wr && wr.expectedUnits) || null, cartUnits: (wr && wr.cart && wr.cart.qtySum) || null });
   }
   const orderNo = wr.orderNo || null;
   steps.checkout = { placed: true, orderNo, poSet: wr.poSet || null };
