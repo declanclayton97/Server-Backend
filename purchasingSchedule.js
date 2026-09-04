@@ -13,6 +13,11 @@ import * as bp from './purchasingAuto.js';
 import { updateOrderReference, emailOrderDocument } from './bpWebSession.js';
 
 const THRESHOLD_NET = Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300); // £ ex-VAT
+// Where an order goes when part of it turned out to be discontinued. NOT 22 ("Ordered Stock
+// Awaiting Delivery") — that would claim the whole order is on its way. 60 is "Order Confirmation
+// Sent", which the low inventory report excludes from Open SO (with 1 and 18), so parking here also
+// stops anything re-ordering behind it while a person decides on a substitute or a refund.
+const DISCONTINUED_PARK_STATUS = Number(process.env.DISCONTINUED_PARK_STATUS_ID || 60);
 const MAX_WAIT_WORKING_DAYS = 3;
 const NOTIFY_TO = process.env.PURCHASING_SCHEDULE_EMAIL || 'dec@tuffshop.co.uk';
 const FRISTADS_SUPPLIER_CONTACT = 37419;
@@ -1284,11 +1289,19 @@ async function handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, d
   // normal finalise clears those when the PO places.
   const deadSet = new Set(dead.map((d) => String(d.sku).toUpperCase()));
   const strandedOrders = [];
+  const affectedOrders = [];          // every order carrying a dead line, whether or not it has others
   for (const id of new Set(soLines.filter((l) => l.order).map((l) => l.order))) {
     const mine = soLines.filter((l) => l.order === id);
     if (!mine.some((l) => deadSet.has(String(l.sku || '').toUpperCase()))) continue;
+    affectedOrders.push(id);
     const alive = mine.filter((l) => !deadSet.has(String(l.sku || '').toUpperCase()));
     if (!alive.length) strandedOrders.push(id);
+  }
+  done.affectedOrders = affectedOrders;
+  done.deadByOrder = {};
+  for (const id of affectedOrders) {
+    done.deadByOrder[id] = soLines.filter((l) => l.order === id && deadSet.has(String(l.sku || '').toUpperCase()))
+      .map((l) => ({ sku: l.sku, qty: Math.round(Number(l.qty) || 0), name: l.name || null }));
   }
   if (strandedOrders.length) {
     try {
@@ -1545,7 +1558,36 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   steps.link = { reference: ref, refWritten, orderNo, status: 7 };
 
   // SO: note ("… Ordered on PO#<id>") + status → Ordered Stock Awaiting Delivery + clear tag.
-  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'SNICKERS', poId, noteContactId: SNICKERS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  // An order that lost a line to a discontinued code must NOT be finalised as if everything was
+  // bought. Its in-stock items ARE ordered — that half is normal — but sending it to "Ordered Stock
+  // Awaiting Delivery" would say the whole order is on its way, and that is how SO 484193 sat
+  // looking complete for a trouser that reached no PO until a customer chased it. Those orders go
+  // to "Order Confirmation Sent" (60) instead: it parks them off the ordering flow (the low
+  // inventory report excludes 1/18/60 from Open SO, so nothing re-orders behind it) and leaves them
+  // visibly unfinished for whoever picks up the email to sales.
+  const hitByDiscontinued = new Set(((steps.discontinued && steps.discontinued.affectedOrders) || []).map(Number));
+  const cleanIds = soIds.filter((id) => !hitByDiscontinued.has(Number(id)));
+  const partIds = soIds.filter((id) => hitByDiscontinued.has(Number(id)));
+  if (cleanIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: cleanIds, supplierKey: 'SNICKERS', poId, noteContactId: SNICKERS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  if (partIds.length) {
+    try {
+      // Tag still clears — there genuinely is nothing further to get from Snickers for these, and
+      // leaving it set would re-order the good lines tomorrow. setOrderedStatus:false so the status
+      // is ours to choose, not 22.
+      steps.finalizePartial = await bp.finalizeSupplierTagsLive({ orderIds: partIds, supplierKey: 'SNICKERS', poId, noteContactId: SNICKERS_SUPPLIER_CONTACT, setOrderedStatus: false, linesByOrder, execute: live });
+      const parked = [];
+      for (const id of partIds) {
+        const deadHere = ((steps.discontinued && steps.discontinued.deadByOrder) || {})[id] || [];
+        const what = deadHere.map((d) => `${d.sku}${d.qty > 1 ? ` x${d.qty}` : ''}${d.name ? ` (${d.name})` : ''}`).join(', ');
+        try {
+          if (live) await bp.addOrderNoteLive(id, `DISCONTINUED at Snickers — NOT ordered and cannot be: ${what}. Everything else on this order was ordered on PO#${poId}. sales@ have been emailed. This order is on "Order Confirmation Sent" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, SNICKERS_SUPPLIER_CONTACT);
+          if (live) await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS);
+          parked.push({ id, status: DISCONTINUED_PARK_STATUS, dead: deadHere.map((d) => d.sku) });
+        } catch (e) { parked.push({ id, error: e.message }); }
+      }
+      steps.parkedForDiscontinued = parked;
+    } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising the discontinued-affected SOs failed: ${e.message}`); }
+  }
   // heal BP costs from what Hultafors actually charges (lineGaps = their unit price vs our cost)
   await healPrices(steps, { supplierKey: 'SNICKERS', poId, changes: lineGaps.map((g) => ({ sku: g.sku, was: g.ours, now: g.theirs })), pool });
   return { poId, orderNo, steps };
