@@ -7785,6 +7785,18 @@ app.post('/api/purchasing/email-po-preview', express.json(), async (req, res) =>
 // considered is recorded at PO-creation time with its ordered/allocated/fulfilled/on-order/
 // in-stock → to-order figures. Query by PO (?po=), SKU (?sku=), or recent days (?days=).
 //   to-order = ordered − allocated − fulfilled − on-order  (in-stock is NOT subtracted)
+// Re-send a discontinued notice whose email never arrived. As far as purchasing goes this is
+// read-only: it re-sends the message the run already computed, from the stored log row. Nothing is
+// re-detected, re-ordered or re-placed. body: { errorId }
+app.post('/api/purchasing/discontinued-resend', express.json(), async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  const errorId = (req.body && req.body.errorId) || req.query.errorId;
+  if (!errorId) return res.status(400).json({ error: 'errorId required (the "discontinued" row in the error log)' });
+  try {
+    res.json(await purchasingSchedule.resendDiscontinuedNotice({ pool, errorId }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get('/api/purchasing/demand-log', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   try {

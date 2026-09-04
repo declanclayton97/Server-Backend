@@ -1341,6 +1341,38 @@ async function handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, d
   return done;
 }
 
+// Re-send a discontinued notice that did not reach anyone.
+//
+// The mail can fail for reasons that have nothing to do with the detection — the first live one was
+// sent from sales@ to sales@ and vanished — and when it does, the only record is a note on the
+// sales order that nobody is watching. A customer is waiting at the other end of this, so there has
+// to be a way to send it again without re-running the purchase.
+//
+// It rebuilds the message from the ORIGINAL log row rather than from anything passed in, so what
+// goes out is exactly what the run computed: same SKUs, same sales orders, same alternative sizes.
+// Nothing is re-detected and nothing is re-ordered.
+export async function resendDiscontinuedNotice({ pool, errorId }) {
+  if (!pool) throw new Error('DB not available');
+  const r = await pool.query(
+    `SELECT id, supplier, step, message, context, created_at
+       FROM purchasing_error_log WHERE id = $1`, [Number(errorId)]);
+  const row = r.rows[0];
+  if (!row) throw new Error(`no error-log row ${errorId}`);
+  if (String(row.step) !== 'discontinued') throw new Error(`row ${errorId} is step "${row.step}", not "discontinued"`);
+  const ctx = row.context || {};
+  const handled = ctx.handled || {};
+  const items = handled.items || [];
+  if (!items.length) throw new Error(`row ${errorId} recorded no items to notify about`);
+  const sent = await emailDiscontinued({ supplierKey: row.supplier, poId: ctx.poId, items });
+  return {
+    errorId: Number(errorId), supplier: row.supplier, poId: ctx.poId,
+    skus: items.map((i) => i.sku),
+    originallyLoggedAt: row.created_at,
+    sent,
+    delivered: (sent.accepted || []).length > 0,
+  };
+}
+
 // WHY did Hultafors refuse a line? The CSV import drops what it will not accept and says nothing,
 // so "1 line never reached the basket" has always been where the trail went cold and a person had
 // to log into the portal. The portal WILL answer per variant, so ask it.
