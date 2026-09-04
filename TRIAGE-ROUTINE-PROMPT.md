@@ -22,7 +22,14 @@ At [claude.ai/code/routines](https://claude.ai/code/routines) → **New routine*
 - **Name**: Purchasing triage
 - **Prompt**: the block at the bottom of this file
 - **Model**: Opus
-- **Repositories**: `declanclayton97/Server-Backend` and `declanclayton97/Alternate-Items`
+- **Repositories**: `declanclayton97/Server-Backend`, `declanclayton97/Alternate-Items` and
+  `declanclayton97/Sterling-Worker`
+
+  The worker is in scope because that is where the portal automation lives: over half of all
+  failures are checkout/cart errors on the four worker-driven suppliers (Blaklader, Snickers,
+  Sterling, Performance Brands), and without the repo the routine can diagnose them and then stop.
+  It is also where the guards that stop a WRONG order live, so read hard limit 7 in
+  PURCHASING-TRIAGE.md before changing anything in it.
 
 ### 2. Fix the network access — it will not work without this
 
@@ -117,9 +124,11 @@ If the failure is already marked handled, stop and say so; something else dealt 
 
 4. Fix the cause, not the symptom. If several suppliers failed together it is usually ONE bug. Small diffs, in the style of the surrounding code. CRITICAL: this codebase's most common self-inflicted bug is fixing ONE of two places that do the same job — a preflight and a checkout, a verify and a reconcile. One such half-fix deleted 25 vests from a live PO. Before committing, grep for the pattern you changed and confirm there is no second copy.
 
+4b. IN Sterling-Worker, NEVER WEAKEN A BASKET OR PLACEMENT CHECK. That repo holds the portal automation and the guards that stop a wrong order in the same files: ready = added === expected, the cart-count diff, the requested-vs-cart comparison, the terms/PO verification before submit. When a guard refuses, fix WHAT IT IS REPORTING, not the guard. "added 9, expected 10" means one line did not go in — go and find that line. Relaxing the comparison would have sent a nine-line order to Sterling on 2026-09-04 instead of refusing one. A run that REFUSES TO PLACE is a safe failure and is never the thing to suppress. place() is the only code that actually submits an order, so treat a change touching it like pressing the button by hand.
+
 5. `node scripts/deploy-window.mjs --live` — run it BARE and read its exit code ($? / errorlevel). NEVER pipe it: a pipe returns the exit status of the LAST command in the pipeline, so `... | head` reports 0 and a refusal reads as permission to deploy. If clear, PUSH DIRECTLY TO MAIN. Render deploys from main, and nothing you leave on a branch will ever reach a supplier.
 
-   YOU HAVE EXPLICIT PERMISSION TO PUSH TO MAIN on both Server-Backend and Alternate-Items. The owner has granted it for this routine specifically. Do not open a pull request as a matter of course and do not treat a default "work on a branch" habit as a reason not to push — an unmerged PR means the stock does not get ordered, which is a failed run, not a cautious one.
+   YOU HAVE EXPLICIT PERMISSION TO PUSH TO MAIN on Server-Backend, Alternate-Items and Sterling-Worker. The owner has granted it for this routine specifically. Do not open a pull request as a matter of course and do not treat a default "work on a branch" habit as a reason not to push — an unmerged PR means the stock does not get ordered, which is a failed run, not a cautious one.
 
    A pull request is the LAST resort, only if the push is genuinely rejected by the remote. If that happens: say plainly in your report that the fix is NOT live and needs a merge, and LEAVE THE ERROR ROW UNHANDLED (see step 8). Never claim something is deployed when it is sitting on a branch.
 

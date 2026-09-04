@@ -68,6 +68,23 @@ These are not preferences. Breaking one costs real money or real stock.
    received it; `none` (Uneek, Scruffs, PenCarrie) — email/direct API, no basket exists;
    `unreadable` (Sterling, Snickers) — cannot be proven empty from here, so they always block and
    need a human to look. **Never read `readable: false` as "clear".**
+7. **In the worker repo, never weaken a basket or placement check.** `Sterling-Worker` is different
+   from the other two repos in kind, not just in name: it is where the portal automation lives AND
+   where the guards that stop a wrong order live — `ready = added === expected`, the cart-count
+   diff, the requested-vs-cart comparison, the terms/PO verification before submit. More than half
+   of all failures land here, which is exactly why it is in scope; it is also why the tempting fix
+   is the wrong one.
+   When a guard refuses, **fix what it is reporting, not the guard.** `added 9, expected 10` means
+   one line did not go in — find that line. Relaxing the comparison would have sent a nine-line
+   order to Sterling on 2026-09-04 instead of refusing one; the refusal cost a day, the "fix" would
+   have cost an order nobody could reconcile. Same principle as limit 3's *fix the comparison,
+   never the cart*, applied to the basket.
+   Two things follow from that. A run that **refuses to place is a safe failure** — never treat it
+   as the thing to suppress. And `place()` is the only code in the estate that actually submits, so
+   a change touching it needs the same care as pressing the button by hand: `stage`/dry-run modes
+   prove the shape of the payload, never that the portal accepted it.
+   A worker deploy restarts live portal sessions, so `deploy-window.mjs` governs it exactly as it
+   governs the backend.
 
 ---
 
