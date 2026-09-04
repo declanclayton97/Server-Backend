@@ -51,6 +51,7 @@ const POLLERS = [
   { name: 'Helly Hansen', h: 11, m: 0, days: 'Mon-Fri' },
   { name: 'Mascot', h: 11, m: 30, days: 'Mon-Fri' },
   { name: 'Castle', h: 12, m: 0, days: 'Mon-Fri' },
+  { name: 'Chadwick', h: 12, m: 30, days: 'Mon-Fri' },
   { name: 'Sterling', h: 13, m: 0, days: 'Mon-Fri' },
   { name: 'Carhartt', h: 13, m: 30, days: 'Mon/Wed/Fri' },
   { name: 'Scruffs', h: 14, m: 0, days: 'Mon-Fri' },

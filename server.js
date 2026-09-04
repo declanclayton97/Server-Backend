@@ -9721,6 +9721,34 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   }, 5 * 60 * 1000);
   console.log('✅ Blaklader auto-purchase poller scheduled (weekdays 09:30 UK, £300 carriage-paid threshold)');
 } else { console.log('⏸️  Blaklader auto-purchase poller DISABLED (BLAKLADER_SCHEDULE_ENABLED=false)'); }
+
+// Chadwick auto-purchase poller — weekdays 12:30 UK. Two POSTs to portal.chadwicktextiles.co.uk
+// (wcp-ordupload then wcp-cartorder), whose response body IS the order number; no spreadsheet and
+// no browser worker, so it is one of the quicker suppliers. Free carriage @ £300 ex-VAT, state row
+// id 14.
+//
+// 12:30 is the gap between Castle (12:00) and Sterling (13:00) — the only free half-hour left in
+// the middle of the day. scripts/deploy-window.mjs has been given the same slot, so a deploy now
+// refuses inside it; without that a restart mid-run is exactly what duplicated the Fristads order
+// on 2026-08-19.
+//
+// Matching is on brandId 213, not the product name: every Chadwick product is named "CT <style>"
+// but the name detect misses roughly 60 of them, and the brand is a field on the record.
+if (process.env.CHADWICK_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 12 && uk.minute >= 30)) return; // 12:30–12:59 window
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'CHADWICK' })
+        .then((r) => { if (!r.skipped) console.log('[chadwick-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[chadwick-schedule] error:', e.message));
+    } catch (e) { console.error('[chadwick-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Chadwick auto-purchase poller scheduled (weekdays 12:30 UK, £300 carriage-paid threshold)');
+} else { console.log('⏸️  Chadwick auto-purchase poller DISABLED (CHADWICK_SCHEDULE_ENABLED=false)'); }
+
 // Scruffs auto-purchase poller — weekdays 14:00 UK. Email supplier: Brightpearl builds the PO and
 // emails its own PDF to salesorders@scruffs.com, so there is no portal step to fail. Carriage
 // minimum £100 ex-VAT, state row id 11. 14:00–14:29 is a clear slot — nothing else runs in hour 14.

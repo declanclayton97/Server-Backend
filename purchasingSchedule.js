@@ -2247,7 +2247,7 @@ const SCHEDULED_SUPPLIERS = {
   SCRUFFS: { supplierKey: 'SCRUFFS', stateId: 11, placeFn: placeScruffsOrder, threshold: Number(process.env.SCRUFFS_FREESHIP_THRESHOLD || 100) }, // email supplier (salesorders@scruffs.com), BP emails its own PO PDF; carriage minimum £100 ex-VAT — a £90 order was seen carrying carriage
   'PERFORMANCE BRANDS': { supplierKey: 'PERFORMANCE BRANDS', stateId: 12, placeFn: placePerformanceBrandsOrder, threshold: Number(process.env.PERFORMANCE_BRANDS_FREESHIP_THRESHOLD || 200) }, // WooCommerce trade shop; free delivery @ £200 ex-VAT (user), else £7.00 flat. Needs PERFORMANCE_BRANDS_USER/PASS on Alt-Items
   MASCOT: { supplierKey: 'MASCOT', stateId: 13, placeFn: placeMascotOrder, threshold: Number(process.env.MASCOT_FREESHIP_THRESHOLD || 250) }, // b2b.mascot.dk two-stage SAP commit (CreateOrder then ReleaseOrder); free carriage @ £250 ex-VAT. Basket shows LIST price (~1.695x our cost) — never threshold-test on it
-  CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). NO POLLER YET — runnable only via /api/purchasing/supplier-scheduled-run until a slot is agreed
+  CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:30 UK — the slot between Castle (12:00) and Sterling (13:00)
 };
 
 // ── what the scheduler currently knows ───────────────────────────────────────
@@ -2268,7 +2268,7 @@ export const isRunInFlight = () => running;
 // Display-only window times, so a dashboard can say "runs at 10:30" without scraping server.js.
 // THE AUTHORITY IS THE POLLERS in server.js (each one tests uk.hour/uk.minute itself) — this map
 // only describes them. If a poller time changes, change it here too or the page will lie.
-// Carhartt runs Mon/Wed/Fri only; Chadwick has no poller at all and is manual.
+// Carhartt runs Mon/Wed/Fri only; everything else is every weekday.
 // Supplier contactIds, so a PO can be attributed to a supplier without guessing at its reference
 // (a PLACED PO no longer says "Auto-PO X" — it carries the supplier's own order number).
 // Verified against real POs on 2026-09-02.
@@ -2291,7 +2291,7 @@ const WINDOW_DISPLAY = {
   PORTWEST: { at: '15:00' },
   PENCARRIE: { at: '15:40' },
   UNEEK: { at: '16:00' },
-  CHADWICK: { at: null, note: 'no poller — manual trigger only' },
+  CHADWICK: { at: '12:30' },
 };
 
 export async function schedulerState(pool) {
