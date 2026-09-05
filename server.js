@@ -22,6 +22,10 @@ import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalida
 import * as purchasingAuto from './purchasingAuto.js';
 import * as purchasingSchedule from './purchasingSchedule.js';
 import { convertDesignToPng } from './wilcomClient.js';
+import {
+  QUOTE_CHASE_CONFIG, QUOTE_ACTIONS, QUOTE_CANCEL_REASONS,
+  decideAction, buildChaseEmail, buildResponseEmail, buildHandoverEmail, buildBpNote,
+} from './quoteChase.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
 import { printJobsFromRows, extractLogoUrls, extractPrintedGarments } from './printLines.js';
@@ -12435,6 +12439,419 @@ if (pool) {
 if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
   setTimeout(() => refreshPrintQueueFromFilter().catch((e) => console.error('[print-queue] boot filter refresh failed:', e.message)), 60 * 1000);
   setInterval(() => refreshPrintQueueFromFilter().catch((e) => console.error('[print-queue] filter refresh failed:', e.message)), 10 * 60 * 1000);
+}
+
+// ── Quote chase ───────────────────────────────────────────────────
+// Chases a customer three times about a quote sitting in "Quote sent", then
+// hands the job to the salesperson who raised it. Scheduling, wording and the
+// stage machine live in quoteChase.js (pure + tested); this owns the polling,
+// the database, the sending and the customer-facing response page.
+//
+// Env:
+//   QUOTE_CHASE_ENABLED   "true" to poll at all              (default off)
+//   QUOTE_CHASE_DRY_RUN   "false" to actually send           (default ON — logs only)
+//   QUOTE_CHASE_STATUS_ID "Quote sent" status id             (default 18)
+//   QUOTE_CHASE_SENDER    From: address                      (default noreply@tuffshop.co.uk)
+//   PUBLIC_BASE_URL       origin used in the customer links  (default the Render host)
+//
+// The first poll SEEDS every quote already in the status as `seeded = true` and
+// never chases it. There were 126 of them at build time, 71 over a month old and
+// the oldest 646 days — emailing that backlog would do real damage. Only quotes
+// that enter the status after go-live get the sequence.
+const QUOTE_CHASE_STATUS_ID = parseInt(process.env.QUOTE_CHASE_STATUS_ID || '18', 10);
+const QUOTE_CHASE_SENDER = process.env.QUOTE_CHASE_SENDER || 'noreply@tuffshop.co.uk';
+const quoteChaseDryRun = () => process.env.QUOTE_CHASE_DRY_RUN !== 'false';
+const quotePublicBase = () =>
+  (process.env.PUBLIC_BASE_URL || 'https://server-backend-1i47.onrender.com').replace(/\/+$/, '');
+
+async function initializeQuoteChaseTable() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS quote_chase (
+        order_id BIGINT PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
+        entered_status_at TIMESTAMPTZ NOT NULL,
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        seeded BOOLEAN NOT NULL DEFAULT FALSE,
+        customer_name TEXT,
+        company_name TEXT,
+        customer_email TEXT,
+        net_value NUMERIC(12,2),
+        reference TEXT,
+        salesperson_id BIGINT,
+        salesperson_name TEXT,
+        salesperson_email TEXT,
+        stage INTEGER NOT NULL DEFAULT 0,
+        last_chase_at TIMESTAMPTZ,
+        handover_at TIMESTAMPTZ,
+        responded_at TIMESTAMPTZ,
+        response_action TEXT,
+        response_reason TEXT,
+        response_note TEXT,
+        still_quote_sent BOOLEAN NOT NULL DEFAULT TRUE,
+        last_checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_quote_chase_open
+        ON quote_chase(still_quote_sent, seeded, responded_at);
+    `);
+    console.log('✅ quote_chase table initialized');
+  } catch (err) {
+    console.error('❌ Error initializing quote_chase table:', err.message);
+  }
+}
+
+// Staff contact -> name + email, cached for the life of the process. The
+// salesperson is createdById: staffOwnerContactId is 0 on every quote on this
+// account, so it cannot be used.
+const quoteStaffCache = new Map();
+async function resolveSalesperson(contactId) {
+  if (!contactId) return { name: '', email: '' };
+  if (quoteStaffCache.has(contactId)) return quoteStaffCache.get(contactId);
+  let out = { name: '', email: '' };
+  try {
+    const resp = await bpLive('GET', `/contact-service/contact/${contactId}`);
+    const c = Array.isArray(resp) ? resp[0] : resp;
+    if (c) {
+      out = {
+        name: [c.firstName, c.lastName].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(),
+        email: ((((c.communication || {}).emails || {}).PRI) || {}).email || '',
+      };
+    }
+  } catch (e) { console.error('[quote-chase] contact lookup failed:', e.message); }
+  quoteStaffCache.set(contactId, out);
+  return out;
+}
+
+// When the order actually entered "Quote sent". Brightpearl writes a note for
+// every status change carrying the new status id, which is exact — updatedOn
+// moves on any edit and would restart the clock every time someone touches the
+// order. Falls back to updatedOn if no such note exists.
+async function quoteEnteredStatusAt(order) {
+  try {
+    const notes = await bpLive('GET', `/order-service/order/${order.id}/note`);
+    const hits = (notes || []).filter((n) => n.orderStatusId === QUOTE_CHASE_STATUS_ID && n.addedOn);
+    if (hits.length) return new Date(hits[hits.length - 1].addedOn);
+  } catch (e) { /* fall through */ }
+  return new Date(order.updatedOn || order.createdOn || Date.now());
+}
+
+async function bpQuoteSentOrderIds() {
+  const ids = [];
+  let firstResult = 1;
+  while (true) {
+    const resp = await bpLive('GET',
+      `/order-service/order-search?orderTypeId=1&orderStatusId=${QUOTE_CHASE_STATUS_ID}` +
+      `&pageSize=500&firstResult=${firstResult}`);
+    const md = resp.metaData;
+    const ix = {};
+    md.columns.forEach((c, i) => { ix[c.name] = i; });
+    const results = resp.results || [];
+    results.forEach((r) => ids.push(r[ix.orderId]));
+    const available = md.resultsAvailable || 0;
+    const last = md.lastResult || (firstResult + results.length - 1);
+    if (!results.length || last >= available) break;
+    firstResult = last + 1;
+  }
+  return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+function quoteResponseUrl(token) {
+  return `${quotePublicBase()}/quote/${token}?e=1`;
+}
+
+async function sendQuoteMail({ to, replyTo, subject, html, text }) {
+  if (quoteChaseDryRun()) {
+    console.log(`[quote-chase] DRY RUN — would email ${to} (reply-to ${replyTo || '-'}): ${subject}`);
+    return { dryRun: true };
+  }
+  if (!process.env.SMTP_PASS) {
+    console.error('[quote-chase] SMTP_PASS not configured, cannot send');
+    return { skipped: true };
+  }
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_SERVER || 'mail-eu.smtp2go.com',
+    port: parseInt(process.env.SMTP_PORT || '2525'),
+    secure: false,
+    auth: { user: process.env.SMTP_USERNAME || 'tuffshop.co.uk', pass: process.env.SMTP_PASS },
+  });
+  await transporter.sendMail({
+    from: `"Tuff Workwear" <${QUOTE_CHASE_SENDER}>`,
+    to,
+    ...(replyTo ? { replyTo } : {}),
+    subject, html, ...(text ? { text } : {}),
+  });
+  return { sent: true };
+}
+
+const quoteRowToView = (r) => ({
+  orderId: Number(r.order_id),
+  customerName: r.customer_name || '',
+  companyName: r.company_name || '',
+  customerEmail: r.customer_email || '',
+  netValue: Number(r.net_value || 0),
+  reference: r.reference || '',
+  salespersonName: r.salesperson_name || '',
+  salespersonEmail: r.salesperson_email || '',
+  enteredStatusAt: r.entered_status_at,
+});
+
+async function pollQuoteChase() {
+  if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+  if (process.env.QUOTE_CHASE_ENABLED !== 'true') return;
+
+  const now = new Date();
+  const liveIds = await bpQuoteSentOrderIds();
+
+  // Anything we were tracking that has left the status is settled — stop chasing.
+  await pool.query(
+    `UPDATE quote_chase SET still_quote_sent = FALSE, last_checked_at = NOW()
+      WHERE still_quote_sent = TRUE AND NOT (order_id = ANY($1::bigint[]))`,
+    [liveIds.length ? liveIds : [0]]
+  );
+
+  const known = await pool.query(`SELECT order_id FROM quote_chase`);
+  const knownSet = new Set(known.rows.map((r) => Number(r.order_id)));
+  const isFirstRun = knownSet.size === 0;
+  const newIds = liveIds.filter((id) => !knownSet.has(id));
+
+  // Insert anything new. On the very first run every open quote is the pre-existing
+  // backlog, so it goes in seeded and is never emailed.
+  if (newIds.length) {
+    const batch = 200;
+    for (let i = 0; i < newIds.length; i += batch) {
+      const slice = newIds.slice(i, i + batch);
+      const orders = await bpLive('GET', `/order-service/order/${slice.join(',')}`) || [];
+      for (const o of orders) {
+        const cust = (o.parties && o.parties.customer) || {};
+        const sp = await resolveSalesperson(o.createdById);
+        const enteredAt = await quoteEnteredStatusAt(o);
+        await pool.query(
+          `INSERT INTO quote_chase
+             (order_id, token, entered_status_at, seeded, customer_name, company_name,
+              customer_email, net_value, reference, salesperson_id, salesperson_name, salesperson_email)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+           ON CONFLICT (order_id) DO NOTHING`,
+          [o.id, crypto.randomUUID(), enteredAt, isFirstRun,
+           cust.contactName || cust.addressFullName || '', cust.companyName || '',
+           cust.email || '', parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
+           o.reference || '', o.createdById || null, sp.name, sp.email]
+        );
+      }
+    }
+    console.log(`[quote-chase] tracked ${newIds.length} new quote(s)${isFirstRun ? ' — SEEDED as backlog, will not be chased' : ''}`);
+  }
+
+  if (isFirstRun) return;   // never act on the seeding run
+
+  const open = await pool.query(
+    `SELECT * FROM quote_chase
+      WHERE still_quote_sent = TRUE AND seeded = FALSE AND responded_at IS NULL
+        AND stage <= $1`,
+    [QUOTE_CHASE_CONFIG.stageWorkingDays.length]
+  );
+
+  for (const r of open.rows) {
+    const decision = decideAction({
+      enteredStatusAt: r.entered_status_at,
+      stage: r.stage,
+      responded: !!r.responded_at,
+      seeded: r.seeded,
+      customerEmail: r.customer_email,
+      stillQuoteSent: r.still_quote_sent,
+    }, now);
+    if (decision.action === 'none') continue;
+
+    const view = quoteRowToView(r);
+    try {
+      if (decision.action === 'chase') {
+        const mail = buildChaseEmail(view, decision.stage, quoteResponseUrl(r.token));
+        await sendQuoteMail({
+          to: r.customer_email, replyTo: r.salesperson_email || undefined,
+          subject: mail.subject, html: mail.html, text: mail.text,
+        });
+        await pool.query(
+          `UPDATE quote_chase SET stage = $2, last_chase_at = NOW(), last_checked_at = NOW() WHERE order_id = $1`,
+          [r.order_id, decision.stage]
+        );
+        if (!quoteChaseDryRun()) {
+          await postBpOrderNote(r.order_id, buildBpNote('chase', { stage: decision.stage, to: r.customer_email }));
+        }
+        console.log(`[quote-chase] chase ${decision.stage} for SO${r.order_id}`);
+      } else if (decision.action === 'handover') {
+        const mail = buildHandoverEmail(view);
+        const to = r.salesperson_email || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
+        await sendQuoteMail({ to, subject: mail.subject, html: mail.html });
+        await pool.query(
+          `UPDATE quote_chase SET stage = $2, handover_at = NOW(), last_checked_at = NOW() WHERE order_id = $1`,
+          [r.order_id, QUOTE_CHASE_CONFIG.stageWorkingDays.length + 1]
+        );
+        if (!quoteChaseDryRun()) {
+          await postBpOrderNote(r.order_id, buildBpNote('handover', { salespersonName: r.salesperson_name }));
+        }
+        console.log(`[quote-chase] handover for SO${r.order_id} -> ${to}`);
+      }
+    } catch (e) {
+      console.error(`[quote-chase] SO${r.order_id} failed:`, e.message);
+    }
+  }
+}
+
+// ---- Customer-facing response page ----
+// A plain GET so it works from any email client. `action` pre-selects the button
+// they pressed; cancel then asks for a reason, which is optional.
+app.get('/quote/:token', async (req, res) => {
+  if (!useDatabase) return res.status(503).send('Not configured');
+  try {
+    const q = await pool.query(`SELECT * FROM quote_chase WHERE token = $1`, [req.params.token]);
+    if (q.rowCount === 0) {
+      return res.status(404).send(quotePage('Link not recognised',
+        '<p>This link is not valid. Please reply to the email instead.</p>'));
+    }
+    const r = q.rows[0];
+    const action = String(req.query.action || '');
+    if (r.responded_at && !action) return res.send(quoteThanksPage(r));
+    return res.send(quoteFormPage(r, action));
+  } catch (e) {
+    console.error('[quote-chase] response page failed:', e.message);
+    res.status(500).send('Something went wrong.');
+  }
+});
+
+app.post('/api/quote-chase/respond', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const { token, action, reason, note } = req.body || {};
+    if (!token || !action) return res.status(400).json({ error: 'token and action required' });
+    if (!QUOTE_ACTIONS.some((a) => a.key === action)) return res.status(400).json({ error: 'unknown action' });
+    if (reason && !QUOTE_CANCEL_REASONS.some((x) => x.key === reason)) return res.status(400).json({ error: 'unknown reason' });
+
+    const q = await pool.query(`SELECT * FROM quote_chase WHERE token = $1`, [token]);
+    if (q.rowCount === 0) return res.status(404).json({ error: 'not found' });
+    const r = q.rows[0];
+
+    const cleanNote = String(note || '').slice(0, 2000);
+    await pool.query(
+      `UPDATE quote_chase
+          SET responded_at = NOW(), response_action = $2, response_reason = $3, response_note = $4,
+              last_checked_at = NOW()
+        WHERE order_id = $1`,
+      [r.order_id, action, reason || null, cleanNote || null]
+    );
+
+    const view = quoteRowToView(r);
+    const detail = { action, reason: reason || '', note: cleanNote, stage: r.stage };
+    const mail = buildResponseEmail(view, detail);
+    const to = r.salesperson_email || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
+    await sendQuoteMail({ to, replyTo: r.customer_email || undefined, subject: mail.subject, html: mail.html });
+    if (!quoteChaseDryRun()) await postBpOrderNote(r.order_id, buildBpNote('response', detail));
+
+    console.log(`[quote-chase] SO${r.order_id} answered "${action}"${reason ? ' / ' + reason : ''} -> ${to}`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[quote-chase] respond failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Dashboard feed: everything currently in "Quote sent", backlog included so the
+// quotes deliberately not being chased are still visible to work manually.
+app.get('/api/quote-chase/list', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const q = await pool.query(
+      `SELECT * FROM quote_chase WHERE still_quote_sent = TRUE ORDER BY entered_status_at DESC`
+    );
+    res.json({
+      dryRun: quoteChaseDryRun(),
+      enabled: process.env.QUOTE_CHASE_ENABLED === 'true',
+      quotes: q.rows.map((r) => ({
+        ...quoteRowToView(r),
+        seeded: r.seeded,
+        stage: r.stage,
+        lastChaseAt: r.last_chase_at,
+        handoverAt: r.handover_at,
+        respondedAt: r.responded_at,
+        responseAction: r.response_action,
+        responseReason: r.response_reason,
+        responseNote: r.response_note,
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const quoteEsc = (s) => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+function quotePage(title, body) {
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${quoteEsc(title)}</title></head>
+<body style="margin:0;background:#f4f6f8;font-family:Arial,sans-serif;color:#333;">
+  <div style="max-width:560px;margin:40px auto;background:#fff;border-radius:8px;padding:28px 30px;box-shadow:0 1px 4px rgba(0,0,0,.08);">
+    <h2 style="margin-top:0;color:#0073e6;">${quoteEsc(title)}</h2>
+    ${body}
+  </div></body></html>`;
+}
+
+function quoteThanksPage(r) {
+  return quotePage('Thank you',
+    `<p>We have your answer and ${quoteEsc(r.salesperson_name || 'your account manager')} has been told.</p>
+     <p style="color:#777;font-size:13px;">Quote SO${r.order_id}. If that was a mistake, just reply to the email.</p>`);
+}
+
+function quoteFormPage(r, preselect) {
+  const actions = QUOTE_ACTIONS.map((a) => `
+    <label style="display:block;margin:8px 0;padding:12px 14px;border:2px solid ${a.key === preselect ? '#0073e6' : '#ddd'};border-radius:6px;cursor:pointer;">
+      <input type="radio" name="action" value="${a.key}" ${a.key === preselect ? 'checked' : ''} style="margin-right:8px;">
+      ${quoteEsc(a.label)}</label>`).join('');
+  const reasons = QUOTE_CANCEL_REASONS.map((x) => `
+    <label style="display:block;margin:5px 0;"><input type="radio" name="reason" value="${x.key}" style="margin-right:8px;">${quoteEsc(x.label)}</label>`).join('');
+
+  return quotePage(`Quote SO${r.order_id}`, `
+    <form id="f">
+      <p>How would you like to proceed?</p>
+      ${actions}
+      <div id="reasons" style="display:${preselect === 'cancel' ? 'block' : 'none'};margin:14px 0;padding:14px;background:#fafafa;border-radius:6px;">
+        <div style="font-weight:bold;margin-bottom:6px;">If you don&#39;t mind saying why <span style="font-weight:normal;color:#777;">(optional)</span></div>
+        ${reasons}
+      </div>
+      <div style="margin:14px 0;">
+        <div style="font-weight:bold;margin-bottom:6px;">Anything else? <span style="font-weight:normal;color:#777;">(optional)</span></div>
+        <textarea name="note" rows="3" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:6px;font-family:inherit;"></textarea>
+      </div>
+      <button type="submit" style="background:#0073e6;color:#fff;border:0;padding:13px 22px;border-radius:6px;font-size:15px;font-weight:bold;cursor:pointer;">Send</button>
+      <p id="err" style="color:#c0392b;display:none;">Sorry, that did not save. Please reply to the email instead.</p>
+    </form>
+    <script>
+      var f=document.getElementById('f');
+      f.addEventListener('change',function(){
+        var a=f.querySelector('input[name=action]:checked');
+        document.getElementById('reasons').style.display=(a&&a.value==='cancel')?'block':'none';
+      });
+      f.addEventListener('submit',function(ev){
+        ev.preventDefault();
+        var a=f.querySelector('input[name=action]:checked');
+        if(!a){return;}
+        var rs=f.querySelector('input[name=reason]:checked');
+        fetch('/api/quote-chase/respond',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({token:${JSON.stringify(r.token)},action:a.value,
+            reason:(a.value==='cancel'&&rs)?rs.value:null,note:f.note.value})})
+          .then(function(res){ if(!res.ok) throw new Error(); location.href=location.pathname; })
+          .catch(function(){ document.getElementById('err').style.display='block'; });
+      });
+    </script>`);
+}
+
+initializeQuoteChaseTable();
+if (process.env.QUOTE_CHASE_ENABLED === 'true' && BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
+  setTimeout(() => pollQuoteChase().catch((e) => console.error('Initial quote-chase run failed:', e.message)), 4 * 60 * 1000);
+  setInterval(() => pollQuoteChase().catch((e) => console.error('Quote-chase poll failed:', e.message)), 30 * 60 * 1000);
+  console.log(`✅ Quote-chase poller scheduled (every 30 min, first run +4min). Dry-run ${quoteChaseDryRun() ? 'ON' : 'OFF'}.`);
+} else {
+  console.log('ℹ️  Quote-chase poller idle (set QUOTE_CHASE_ENABLED=true to start).');
 }
 
 app.listen(PORT, () => {
