@@ -283,13 +283,29 @@ export function buildChaseEmail(quotes, stage, urlFor) {
          ${button(url(first), "cancel", "Cancel the quote", "#8a8a8a")}
        </p>`;
 
+  // Trust signals. A styled button to an unfamiliar domain is exactly what a
+  // phishing email looks like, so the message has to prove it is genuine before
+  // asking anyone to click: who it is from, why they are getting it, which quote
+  // it concerns and who raised it — all things an attacker would not know. The
+  // reply route is offered as an equal option so nobody has to click at all.
+  const sentOn = String(first.enteredStatusAt || "").slice(0, 10);
+  const why = `You are receiving this because ${esc(first.salespersonName || "our sales team")} sent you
+     ${many ? `${list.length} quotes` : `quote SO${first.orderId}`}${sentOn ? ` on ${esc(sentOn)}` : ""}.`;
+
   const html = `
   <div style="font-family:Arial,sans-serif;max-width:600px;color:#333;">
     <p>${hi}</p>
     <p>${opener}</p>
     ${body}
     <p style="font-size:13px;color:#777;">Or just reply to this email and it will go straight to
-      ${esc(first.salespersonName || "your account manager")}.</p>
+      ${esc(first.salespersonName || "your account manager")} — you do not have to click anything.</p>
+    <hr style="border:0;border-top:1px solid #e3e6ea;margin:22px 0 12px;">
+    <p style="font-size:11px;color:#999;line-height:1.5;margin:0;">
+      ${why}<br>
+      Sent by <strong>Tuff Workwear Ltd</strong>, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG ·
+      0113 2887713 · <a href="mailto:sales@tuffshop.co.uk" style="color:#999;">sales@tuffshop.co.uk</a><br>
+      Not expecting this? Reply and tell us and we will stop.
+    </p>
   </div>`;
 
   const text = `${hi}
@@ -306,7 +322,13 @@ Let us know how you would like to proceed:
   Please call me: ${url(first)}&action=call_back
   Cancel:         ${url(first)}&action=cancel`}
 
-Or reply to this email and it will reach ${first.salespersonName || "your account manager"}.`;
+Or reply to this email and it will reach ${first.salespersonName || "your account manager"} —
+you do not have to click anything.
+
+--
+${why.replace(/<[^>]*>/g, "")}
+Tuff Workwear Ltd, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG
+0113 2887713 · sales@tuffshop.co.uk`;
 
   return { subject, html, text };
 }

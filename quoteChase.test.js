@@ -210,5 +210,16 @@ assertEq("a good refresh is accepted", setBankHolidays(["2030-01-01"]), true);
 assertTrue("the new list applies", isBankHoliday(at("2030-01-01T10:00:00")));
 assertEq("and replaces the old one", isBankHoliday(at("2026-12-25T10:00:00")), false);
 
+// ── the email has to prove it is not phishing ──────────────────
+// A styled button pointing at an unfamiliar domain is what a scam looks like, so
+// the message carries things an attacker would not know.
+const trust = buildChaseEmail([quote], 1, () => url);
+assertTrue("says who raised it and when", trust.html.includes("Helen Jackson") && trust.html.includes("2026-08-24"));
+assertTrue("names the quote in the why-line", trust.html.includes("quote SO484347"));
+assertTrue("carries a real postal address", trust.html.includes("Aberford Road"));
+assertTrue("offers replying instead of clicking", trust.html.includes("do not have to click anything"));
+assertTrue("plain-text part carries it too", trust.text.includes("Aberford Road"));
+assertEq("no stray html in the plain-text footer", /<[a-z/]/i.test(trust.text), false);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
