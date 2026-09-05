@@ -12459,6 +12459,19 @@ if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
 // never chases it. There were 126 of them at build time, 71 over a month old and
 // the oldest 646 days — emailing that backlog would do real damage. Only quotes
 // that enter the status after go-live get the sequence.
+// Sportswear is run as a separate operation with its own follow-up, so quotes
+// raised by those two are neither chased nor shown here. Keyed on contact id,
+// not name: names are not unique and get edited.
+//   6433   Keith Taylor  (17 open quotes, mostly Tuff Sportswear)
+//   124562 Daniel Ford   (10 open quotes, all Tuff Sportswear)
+// Note this is a PERSON rule, not a channel one — it also drops the occasional
+// non-sportswear quote either of them raises. Switch to filtering on the
+// Tuff Sportswear channel if that turns out to matter.
+const QUOTE_CHASE_EXCLUDED_STAFF = String(process.env.QUOTE_CHASE_EXCLUDE_STAFF_IDS || '6433,124562')
+  .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
+// Postgres needs a non-empty array for = ANY(); 0 is never a real contact id.
+const quoteExcludedStaffParam = () => (QUOTE_CHASE_EXCLUDED_STAFF.length ? QUOTE_CHASE_EXCLUDED_STAFF : [0]);
+
 const QUOTE_CHASE_STATUS_ID = parseInt(process.env.QUOTE_CHASE_STATUS_ID || '18', 10);
 const QUOTE_CHASE_SENDER = process.env.QUOTE_CHASE_SENDER || 'noreply@tuffshop.co.uk';
 const quoteChaseDryRun = () => process.env.QUOTE_CHASE_DRY_RUN !== 'false';
@@ -12649,6 +12662,7 @@ async function pollQuoteChase() {
       const slice = newIds.slice(i, i + batch);
       const orders = await bpLive('GET', `/order-service/order/${slice.join(',')}`) || [];
       for (const o of orders) {
+        if (QUOTE_CHASE_EXCLUDED_STAFF.includes(o.createdById)) continue;   // sportswear, handled separately
         const cust = (o.parties && o.parties.customer) || {};
         const sp = await resolveSalesperson(o.createdById);
         const enteredAt = await quoteEnteredStatusAt(o);
@@ -12673,8 +12687,9 @@ async function pollQuoteChase() {
   const open = await pool.query(
     `SELECT * FROM quote_chase
       WHERE still_quote_sent = TRUE AND seeded = FALSE AND responded_at IS NULL
-        AND stopped_at IS NULL AND stage <= $1`,
-    [QUOTE_CHASE_CONFIG.stageWorkingDays.length]
+        AND stopped_at IS NULL AND stage <= $1
+        AND NOT (COALESCE(salesperson_id, 0) = ANY($2::bigint[]))`,
+    [QUOTE_CHASE_CONFIG.stageWorkingDays.length, quoteExcludedStaffParam()]
   );
 
   // One email per CUSTOMER, not per quote. Whoever holds several open quotes
@@ -12838,7 +12853,11 @@ app.get('/api/quote-chase/list', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
   try {
     const q = await pool.query(
-      `SELECT * FROM quote_chase WHERE still_quote_sent = TRUE ORDER BY entered_status_at DESC`
+      `SELECT * FROM quote_chase
+        WHERE still_quote_sent = TRUE
+          AND NOT (COALESCE(salesperson_id, 0) = ANY($1::bigint[]))
+        ORDER BY entered_status_at DESC`,
+      [quoteExcludedStaffParam()]
     );
 
     // Nothing tracked yet means the poller has never run. Showing an empty table
@@ -12857,6 +12876,7 @@ app.get('/api/quote-chase/list', async (req, res) => {
       }
       const quotes = [];
       for (const o of orders) {
+        if (QUOTE_CHASE_EXCLUDED_STAFF.includes(o.createdById)) continue;   // sportswear, handled separately
         const cust = (o.parties && o.parties.customer) || {};
         const sp = await resolveSalesperson(o.createdById);   // cached, ~10 distinct staff
         quotes.push({
