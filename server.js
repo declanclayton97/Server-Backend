@@ -12459,18 +12459,18 @@ if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
 // never chases it. There were 126 of them at build time, 71 over a month old and
 // the oldest 646 days — emailing that backlog would do real damage. Only quotes
 // that enter the status after go-live get the sequence.
-// Sportswear is run as a separate operation with its own follow-up, so quotes
-// raised by those two are neither chased nor shown here. Keyed on contact id,
-// not name: names are not unique and get edited.
-//   6433   Keith Taylor  (17 open quotes, mostly Tuff Sportswear)
-//   124562 Daniel Ford   (10 open quotes, all Tuff Sportswear)
-// Note this is a PERSON rule, not a channel one — it also drops the occasional
-// non-sportswear quote either of them raises. Switch to filtering on the
-// Tuff Sportswear channel if that turns out to matter.
-const QUOTE_CHASE_EXCLUDED_STAFF = String(process.env.QUOTE_CHASE_EXCLUDE_STAFF_IDS || '6433,124562')
+// Sportswear runs as a separate operation with its own follow-up, so its quotes
+// are neither chased nor shown here.
+//   18 Tuff Sportswear · 27 Tuff Sportswear - Hunslet · 30 Tuff Sportswear - Sandal
+// On the channel rather than the salesperson: it keeps the odd non-sportswear
+// quote a sportswear rep raises inside the chase (Keith Taylor had one on
+// Telephone Sales worth £3,150), and it catches sportswear quotes whoever raises
+// them, which a per-person list would miss as soon as the team changes.
+const QUOTE_CHASE_EXCLUDED_CHANNELS = String(process.env.QUOTE_CHASE_EXCLUDE_CHANNEL_IDS || '18,27,30')
   .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
-// Postgres needs a non-empty array for = ANY(); 0 is never a real contact id.
-const quoteExcludedStaffParam = () => (QUOTE_CHASE_EXCLUDED_STAFF.length ? QUOTE_CHASE_EXCLUDED_STAFF : [0]);
+// Postgres needs a non-empty array for = ANY(); 0 is never a real channel id.
+const quoteExcludedChannelsParam = () => (QUOTE_CHASE_EXCLUDED_CHANNELS.length ? QUOTE_CHASE_EXCLUDED_CHANNELS : [0]);
+const quoteChannelOf = (o) => (o && o.assignment && o.assignment.current && o.assignment.current.channelId) || 0;
 
 const QUOTE_CHASE_STATUS_ID = parseInt(process.env.QUOTE_CHASE_STATUS_ID || '18', 10);
 const QUOTE_CHASE_SENDER = process.env.QUOTE_CHASE_SENDER || 'noreply@tuffshop.co.uk';
@@ -12533,6 +12533,8 @@ async function initializeQuoteChaseTable() {
     await pool.query(`
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_at TIMESTAMPTZ;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_by TEXT;
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_id BIGINT;
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_name TEXT;
     `);
     console.log('✅ quote_chase table initialized');
   } catch (err) {
@@ -12543,6 +12545,20 @@ async function initializeQuoteChaseTable() {
 // Staff contact -> name + email, cached for the life of the process. The
 // salesperson is createdById: staffOwnerContactId is 0 on every quote on this
 // account, so it cannot be used.
+// Channel id -> name, fetched once per process. Only used to label rows on the
+// dashboard; the exclusion itself matches on id, so a failed lookup here cannot
+// let a sportswear quote through.
+let quoteChannelNames = null;
+async function quoteChannelMap() {
+  if (quoteChannelNames) return quoteChannelNames;
+  const map = {};
+  try {
+    for (const c of (await bpLive('GET', '/product-service/channel')) || []) map[c.id] = c.name;
+  } catch (e) { console.error('[quote-chase] channel lookup failed:', e.message); }
+  quoteChannelNames = map;
+  return map;
+}
+
 const quoteStaffCache = new Map();
 async function resolveSalesperson(contactId) {
   if (!contactId) return { name: '', email: '' };
@@ -12640,6 +12656,7 @@ async function pollQuoteChase() {
   if (process.env.QUOTE_CHASE_ENABLED !== 'true') return;
 
   const now = new Date();
+  const channels = await quoteChannelMap();
   const liveIds = await bpQuoteSentOrderIds();
 
   // Anything we were tracking that has left the status is settled — stop chasing.
@@ -12662,20 +12679,22 @@ async function pollQuoteChase() {
       const slice = newIds.slice(i, i + batch);
       const orders = await bpLive('GET', `/order-service/order/${slice.join(',')}`) || [];
       for (const o of orders) {
-        if (QUOTE_CHASE_EXCLUDED_STAFF.includes(o.createdById)) continue;   // sportswear, handled separately
+        if (QUOTE_CHASE_EXCLUDED_CHANNELS.includes(quoteChannelOf(o))) continue;   // sportswear, handled separately
         const cust = (o.parties && o.parties.customer) || {};
         const sp = await resolveSalesperson(o.createdById);
         const enteredAt = await quoteEnteredStatusAt(o);
         await pool.query(
           `INSERT INTO quote_chase
              (order_id, token, entered_status_at, seeded, customer_name, company_name,
-              customer_email, net_value, reference, salesperson_id, salesperson_name, salesperson_email)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+              customer_email, net_value, reference, salesperson_id, salesperson_name, salesperson_email,
+              channel_id, channel_name)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
            ON CONFLICT (order_id) DO NOTHING`,
           [o.id, crypto.randomUUID(), enteredAt, isFirstRun,
            cust.contactName || cust.addressFullName || '', cust.companyName || '',
            cust.email || '', parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
-           o.reference || '', o.createdById || null, sp.name, sp.email]
+           o.reference || '', o.createdById || null, sp.name, sp.email,
+           quoteChannelOf(o) || null, channels[quoteChannelOf(o)] || null]
         );
       }
     }
@@ -12688,8 +12707,8 @@ async function pollQuoteChase() {
     `SELECT * FROM quote_chase
       WHERE still_quote_sent = TRUE AND seeded = FALSE AND responded_at IS NULL
         AND stopped_at IS NULL AND stage <= $1
-        AND NOT (COALESCE(salesperson_id, 0) = ANY($2::bigint[]))`,
-    [QUOTE_CHASE_CONFIG.stageWorkingDays.length, quoteExcludedStaffParam()]
+        AND NOT (COALESCE(channel_id, 0) = ANY($2::bigint[]))`,
+    [QUOTE_CHASE_CONFIG.stageWorkingDays.length, quoteExcludedChannelsParam()]
   );
 
   // One email per CUSTOMER, not per quote. Whoever holds several open quotes
@@ -12855,9 +12874,9 @@ app.get('/api/quote-chase/list', async (req, res) => {
     const q = await pool.query(
       `SELECT * FROM quote_chase
         WHERE still_quote_sent = TRUE
-          AND NOT (COALESCE(salesperson_id, 0) = ANY($1::bigint[]))
+          AND NOT (COALESCE(channel_id, 0) = ANY($1::bigint[]))
         ORDER BY entered_status_at DESC`,
-      [quoteExcludedStaffParam()]
+      [quoteExcludedChannelsParam()]
     );
 
     // Nothing tracked yet means the poller has never run. Showing an empty table
@@ -12876,7 +12895,7 @@ app.get('/api/quote-chase/list', async (req, res) => {
       }
       const quotes = [];
       for (const o of orders) {
-        if (QUOTE_CHASE_EXCLUDED_STAFF.includes(o.createdById)) continue;   // sportswear, handled separately
+        if (QUOTE_CHASE_EXCLUDED_CHANNELS.includes(quoteChannelOf(o))) continue;   // sportswear, handled separately
         const cust = (o.parties && o.parties.customer) || {};
         const sp = await resolveSalesperson(o.createdById);   // cached, ~10 distinct staff
         quotes.push({
