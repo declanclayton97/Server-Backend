@@ -40,16 +40,62 @@ export const QUOTE_ACTIONS = [
   { key: "call_back",  label: "Please call me" },
 ];
 
+// England & Wales bank holidays, from https://www.gov.uk/bank-holidays.json.
+// Without these a quote sent on 23 December gets chased on Christmas Day.
+//
+// This is the fallback list only — server.js refreshes it from gov.uk at boot
+// via setBankHolidays(), so it stays correct without anyone editing this file.
+// It matters that the baseline is here too: if that fetch fails the maths still
+// skips the holidays rather than silently reverting to weekends-only.
+const DEFAULT_BANK_HOLIDAYS = [
+  // 2026
+  "2026-01-01", "2026-04-03", "2026-04-06", "2026-05-04", "2026-05-25", "2026-08-31", "2026-12-25", "2026-12-28",
+  // 2027
+  "2027-01-01", "2027-03-26", "2027-03-29", "2027-05-03", "2027-05-31", "2027-08-30", "2027-12-27", "2027-12-28",
+  // 2028
+  "2028-01-03", "2028-04-14", "2028-04-17", "2028-05-01", "2028-05-29", "2028-08-28", "2028-12-25", "2028-12-26",
+];
+
+let bankHolidays = new Set(DEFAULT_BANK_HOLIDAYS);
+
+// Replace the set, e.g. with a fresh pull from gov.uk. Ignores anything that is
+// not a YYYY-MM-DD string, and refuses an empty list — a failed or malformed
+// fetch must not quietly turn holiday handling off.
+export function setBankHolidays(dates) {
+  const clean = (dates || []).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d)));
+  if (!clean.length) return false;
+  bankHolidays = new Set(clean);
+  return true;
+}
+
+// Local date as YYYY-MM-DD. Not toISOString(), which converts to UTC and would
+// call 00:30 on 26 December the 25th during BST.
+function localDay(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+export function isBankHoliday(d) {
+  return bankHolidays.has(localDay(d));
+}
+
+export function listBankHolidays() {
+  return [...bankHolidays].sort();
+}
+
 const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;
+const isNonWorking = (d) => isWeekend(d) || isBankHoliday(d);
 
 // Advance `n` whole working days from `from`, keeping the time of day. Counting
 // starts at the NEXT day: 1 working day after Friday 16:00 is Monday 16:00.
 export function addWorkingDays(from, n) {
   const d = new Date(from.getTime());
   let left = n;
+  let guard = 0;
   while (left > 0) {
     d.setDate(d.getDate() + 1);
-    if (!isWeekend(d)) left--;
+    if (!isNonWorking(d)) left--;
+    // A malformed holiday set could otherwise spin forever.
+    if (++guard > 400) break;
   }
   return d;
 }
@@ -60,14 +106,15 @@ export function addWorkingDays(from, n) {
 export function clampToSendWindow(when, cfg = QUOTE_CHASE_CONFIG) {
   const { startHour, endHour } = cfg.sendWindow;
   const d = new Date(when.getTime());
-  if (!isWeekend(d) && d.getHours() >= startHour && d.getHours() < endHour) return d;
-  if (!isWeekend(d) && d.getHours() < startHour) {
+  if (!isNonWorking(d) && d.getHours() >= startHour && d.getHours() < endHour) return d;
+  if (!isNonWorking(d) && d.getHours() < startHour) {
     d.setHours(startHour, 0, 0, 0);
     return d;
   }
+  let guard = 0;
   do {
     d.setDate(d.getDate() + 1);
-  } while (isWeekend(d));
+  } while (isNonWorking(d) && ++guard <= 400);
   d.setHours(startHour, 0, 0, 0);
   return d;
 }

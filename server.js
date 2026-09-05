@@ -24,7 +24,7 @@ import * as purchasingSchedule from './purchasingSchedule.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import {
   QUOTE_CHASE_CONFIG, QUOTE_ACTIONS, QUOTE_CANCEL_REASONS,
-  decideAction, groupQuotesForChase, quotesToAdvance,
+  decideAction, groupQuotesForChase, quotesToAdvance, setBankHolidays,
   buildChaseEmail, buildResponseEmail, buildHandoverEmail, buildBpNote,
 } from './quoteChase.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
@@ -12465,6 +12465,25 @@ const quoteChaseDryRun = () => process.env.QUOTE_CHASE_DRY_RUN !== 'false';
 const quotePublicBase = () =>
   (process.env.PUBLIC_BASE_URL || 'https://server-backend-1i47.onrender.com').replace(/\/+$/, '');
 
+// Refresh the bank-holiday list from gov.uk so nobody has to remember to extend
+// the hardcoded one. Best-effort: on any failure the baked-in list stands, and
+// setBankHolidays refuses an empty or malformed set, so a bad response cannot
+// quietly reduce the schedule to weekends-only.
+async function refreshBankHolidays() {
+  try {
+    const r = await fetch('https://www.gov.uk/bank-holidays.json', { signal: AbortSignal.timeout(15000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    const events = ((j['england-and-wales'] || {}).events || []).map((e) => e.date);
+    const ok = setBankHolidays(events);
+    console.log(ok
+      ? `✅ Bank holidays refreshed from gov.uk (${events.length} dates to ${events[events.length - 1]})`
+      : 'ℹ️  gov.uk returned no usable bank holidays — keeping the built-in list');
+  } catch (e) {
+    console.log(`ℹ️  Bank-holiday refresh failed (${e.message}) — keeping the built-in list`);
+  }
+}
+
 async function initializeQuoteChaseTable() {
   if (!useDatabase) return;
   try {
@@ -12951,6 +12970,8 @@ function quoteFormPage(r, preselect) {
 }
 
 initializeQuoteChaseTable();
+refreshBankHolidays();
+setInterval(() => refreshBankHolidays(), 7 * 24 * 60 * 60 * 1000);
 if (process.env.QUOTE_CHASE_ENABLED === 'true' && BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
   setTimeout(() => pollQuoteChase().catch((e) => console.error('Initial quote-chase run failed:', e.message)), 4 * 60 * 1000);
   setInterval(() => pollQuoteChase().catch((e) => console.error('Quote-chase poll failed:', e.message)), 30 * 60 * 1000);

@@ -2,6 +2,9 @@
 // Run with:  node quoteChase.test.js
 
 import {
+  isBankHoliday,
+  setBankHolidays,
+  listBankHolidays,
   buildHandoverEmail,
   groupQuotesForChase,
   quotesToAdvance,
@@ -172,6 +175,40 @@ assertEq("single quote subject names the order", one.subject, "Did you get our q
 const ho = buildHandoverEmail(qs);
 assertEq("one handover for the customer", ho.subject, "No reply after 3 chases — 2 quotes · Sally Sanderson");
 assertTrue("handover totals the value", ho.html.includes("£350.50"));
+
+// ── bank holidays ──────────────────────────────────────────────
+// The case that prompted this: a quote sent just before Christmas must not be
+// chased on Christmas Day. In 2026 Christmas Day is a Friday and Boxing Day is
+// observed on Monday the 28th, so a chase due on the 24th has to step over the
+// 25th, the weekend and the 28th, landing on Tuesday the 29th.
+assertTrue("Christmas Day is a holiday", isBankHoliday(at("2026-12-25T10:00:00")));
+assertTrue("Boxing Day observed Mon 28th", isBankHoliday(at("2026-12-28T10:00:00")));
+assertEq("a normal Tuesday is not", isBankHoliday(at("2026-12-29T10:00:00")), false);
+
+assertEq("Wed 23 Dec + 1 working day",
+  show(addWorkingDays(at("2026-12-23T10:00:00"), 1)), "Thu 2026-12-24 10:00");
+assertEq("Thu 24 Dec + 1 steps over Christmas, the weekend and Boxing Day",
+  show(addWorkingDays(at("2026-12-24T10:00:00"), 1)), "Tue 2026-12-29 10:00");
+assertEq("the full run for a quote sent Thu 24 Dec",
+  [1, 2, 3, 4].map((n) => show(dueAtForStage("2026-12-24T10:00:00", n))),
+  ["Tue 2026-12-29 10:00", "Wed 2026-12-30 10:00", "Thu 2026-12-31 10:00", "Mon 2027-01-04 10:00"]);
+
+// New Year 2027 falls on a Friday, so the 31st rolls to Monday the 4th.
+assertEq("New Year skipped", show(addWorkingDays(at("2026-12-31T10:00:00"), 1)), "Mon 2027-01-04 10:00");
+// Good Friday 3 Apr and Easter Monday 6 Apr 2026.
+assertEq("Easter weekend skipped", show(addWorkingDays(at("2026-04-02T10:00:00"), 1)), "Tue 2026-04-07 10:00");
+
+// A holiday landing inside the send window still moves to the next working day.
+assertEq("send window respects holidays",
+  show(clampToSendWindow(at("2026-12-25T11:00:00"))), "Tue 2026-12-29 09:00");
+
+// The gov.uk refresh must never be able to turn holiday handling off.
+assertEq("empty list refused", setBankHolidays([]), false);
+assertEq("junk refused", setBankHolidays(["not-a-date", null]), false);
+assertTrue("still knows Christmas after a bad refresh", isBankHoliday(at("2026-12-25T10:00:00")));
+assertEq("a good refresh is accepted", setBankHolidays(["2030-01-01"]), true);
+assertTrue("the new list applies", isBankHoliday(at("2030-01-01T10:00:00")));
+assertEq("and replaces the old one", isBankHoliday(at("2026-12-25T10:00:00")), false);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
