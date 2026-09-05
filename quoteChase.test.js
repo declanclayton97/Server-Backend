@@ -2,6 +2,9 @@
 // Run with:  node quoteChase.test.js
 
 import {
+  buildHandoverEmail,
+  groupQuotesForChase,
+  quotesToAdvance,
   addWorkingDays,
   clampToSendWindow,
   dueAtForStage,
@@ -109,6 +112,66 @@ assertEq("response note",
 assertEq("singular chase in note",
   buildBpNote("response", { action: "go_ahead", stage: 1 }),
   'Quote chase: customer replied "Go ahead with the quote" (after 1 chase)');
+
+
+// ── grouping: one email per CUSTOMER, not per quote ────────────
+// The real case that forced this: 11 customers had several open quotes and one
+// had seven, which without grouping is 7 emails per stage and 21 in total.
+const seven = Array.from({length:7},(_,i)=>({ orderId:100+i, customerEmail:"accounts@baumhaus.co.uk",
+  stage:0, enteredStatusAt:"2026-09-01T10:0"+i+":00" }));
+const mixed = seven.concat([
+  { orderId:200, customerEmail:"solo@x.co", stage:0, enteredStatusAt:"2026-09-02T10:00:00" },
+  { orderId:201, customerEmail:"ACCOUNTS@Baumhaus.co.uk", stage:0, enteredStatusAt:"2026-08-28T10:00:00" },
+]);
+const g = groupQuotesForChase(mixed);
+assertEq("groups by customer", g.length, 2);
+const baum = g.find(x=>x.key==="accounts@baumhaus.co.uk");
+assertEq("email match is case-insensitive", baum.quotes.length, 8);
+assertEq("one email would cover all 8", baum.quotes.length, 8);
+assertEq("driver is the oldest at the lowest stage", baum.driver.orderId, 201);
+assertEq("quotes listed oldest first", baum.quotes[0].orderId, 201);
+
+// A quote with no email must not be lumped in with other no-email quotes.
+const noEmail = groupQuotesForChase([
+  { orderId:5, customerEmail:"", stage:0, enteredStatusAt:"2026-09-01T10:00:00" },
+  { orderId:6, customerEmail:null, stage:0, enteredStatusAt:"2026-09-01T10:00:00" },
+]);
+assertEq("no-email quotes stay separate", noEmail.length, 2);
+
+// A quote already further along rides in the email but is not chased again.
+const grp = groupQuotesForChase([
+  { orderId:1, customerEmail:"a@b.co", stage:3, enteredStatusAt:"2026-09-01T10:00:00" },
+  { orderId:2, customerEmail:"a@b.co", stage:0, enteredStatusAt:"2026-09-02T10:00:00" },
+])[0];
+assertEq("least-chased quote drives the group", grp.driver.orderId, 2);
+assertEq("only the behind quote advances", quotesToAdvance(grp,1).map(q=>q.orderId), [2]);
+assertEq("stage 3 quote is never regressed", quotesToAdvance(grp,1).some(q=>q.orderId===1), false);
+
+// ── stopped by hand ────────────────────────────────────────────
+assertEq("stopped stops the sequence",
+  decideAction({ ...base, stopped: true }, at("2026-12-01T10:00:00")).reason, "stopped manually");
+
+// ── multi-quote email ──────────────────────────────────────────
+const qs = [
+  { orderId:301, customerName:"Sally Sanderson", netValue:100, reference:"PO-1", salespersonName:"Helen Jackson", customerEmail:"s@x.co" },
+  { orderId:302, customerName:"Sally Sanderson", netValue:250.5, salespersonName:"Helen Jackson", customerEmail:"s@x.co" },
+];
+const multi = buildChaseEmail(qs, 1, function(q){ return "https://x.co/quote/tok"+q.orderId+"?e=1"; });
+assertEq("subject counts the quotes", multi.subject, "Did you get our 2 quotes?");
+assertTrue("lists both quotes", multi.html.includes("SO301") && multi.html.includes("SO302"));
+assertTrue("a distinct link per quote", multi.html.includes("tok301") && multi.html.includes("tok302"));
+assertEq("no 4-button block when there are several", multi.html.includes("Go ahead with the quote"), false);
+assertTrue("text part lists both", multi.text.includes("SO301") && multi.text.includes("SO302"));
+
+// A single quote still gets the four inline buttons.
+const one = buildChaseEmail([qs[0]], 1, function(){ return "https://x.co/quote/tok?e=1"; });
+assertTrue("single quote keeps the buttons", one.html.includes("Go ahead with the quote"));
+assertEq("single quote subject names the order", one.subject, "Did you get our quote? — SO301");
+
+// Handover covers the customer, not each quote.
+const ho = buildHandoverEmail(qs);
+assertEq("one handover for the customer", ho.subject, "No reply after 3 chases — 2 quotes · Sally Sanderson");
+assertTrue("handover totals the value", ho.html.includes("£350.50"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

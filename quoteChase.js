@@ -105,6 +105,12 @@ export function decideAction(row, now, cfg = QUOTE_CHASE_CONFIG) {
   // the ball in the salesperson's court, so chasing on would be nagging.
   if (row.responded) return { action: "none", reason: "customer responded" };
 
+  // Stopped by hand from the dashboard. Customers reply to the email far more
+  // often than they click, and those replies go to the salesperson, not to us —
+  // without a way to say "I've dealt with this" we would keep chasing someone who
+  // already answered.
+  if (row.stopped) return { action: "none", reason: "stopped manually" };
+
   if (!row.customerEmail) return { action: "none", reason: "no customer email" };
 
   const stage = Number(row.stage) || 0;
@@ -117,6 +123,47 @@ export function decideAction(row, now, cfg = QUOTE_CHASE_CONFIG) {
   return next > cfg.stageWorkingDays.length
     ? { action: "handover", dueAt }
     : { action: "chase", stage: next, dueAt };
+}
+
+/**
+ * Bundle open quotes into one chase per CUSTOMER.
+ *
+ * A customer with several open quotes must not get one email per quote: at build
+ * time 11 customers had more than one open, and one had seven — which would have
+ * been 7 emails at 24h, 7 more at 48h and 7 more at 72h. That reads as spam and
+ * puts the sending domain at risk.
+ *
+ * Each group is driven by its least-chased quote (ties broken by the oldest), so
+ * a newly added quote pulls its customer back into the sequence rather than being
+ * silently skipped. Quotes already further along are carried in the same email
+ * but never regressed — see applyStage below.
+ *
+ * Returns [{ key, quotes[], driver }], quotes ordered oldest first.
+ */
+export function groupQuotesForChase(rows) {
+  const groups = new Map();
+  for (const r of rows || []) {
+    // No email means no chase; fall back to the order id so such a quote forms
+    // its own group and decideAction can report why it is being skipped.
+    const key = String(r.customerEmail || "").trim().toLowerCase() || `order:${r.orderId}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  return [...groups.entries()].map(([key, quotes]) => {
+    quotes.sort((a, b) => new Date(a.enteredStatusAt) - new Date(b.enteredStatusAt));
+    const driver = quotes.slice().sort((a, b) =>
+      (Number(a.stage) || 0) - (Number(b.stage) || 0) ||
+      new Date(a.enteredStatusAt) - new Date(b.enteredStatusAt)
+    )[0];
+    return { key, quotes, driver };
+  });
+}
+
+// Which quotes in a group should move to `stage` — only those behind it. A quote
+// already on chase 3 stays on 3 when it rides along in a customer's chase-1
+// email, otherwise it would be chased all over again.
+export function quotesToAdvance(group, stage) {
+  return group.quotes.filter((q) => (Number(q.stage) || 0) < stage);
 }
 
 // ---- Email bodies -----------------------------------------------------------
@@ -134,56 +181,85 @@ function firstNameOf(quote) {
 // The customer-facing chase. Wording escalates gently across the three sends —
 // the first assumes it was missed, the last says it is the final one, so a
 // customer who ignores all three is not surprised when a salesperson rings.
-export function buildChaseEmail(quote, stage, responseUrl) {
-  const hi = firstNameOf(quote) ? `Hi ${esc(firstNameOf(quote))},` : "Hi,";
-  const ref = `SO${quote.orderId}`;
-  const opener = stage === 1
-    ? `We sent you a quote and wanted to check it reached you.`
-    : stage === 2
-      ? `Just following up on the quote we sent — we have not heard back yet.`
-      : `This is our last reminder about the quote below.`;
-  const subject = stage === 1
-    ? `Did you get our quote? — ${ref}`
-    : `Following up on your quote — ${ref}`;
+// `quotes` is everything open for ONE customer — one email covers the lot.
+// `urlFor(quote)` returns that quote's own response link, so each quote is still
+// answered individually (a customer may want one and not another).
+//
+// One quote gets the four buttons inline. Several get a list with a link each:
+// seven quotes times four buttons is 28 buttons and unusable.
+export function buildChaseEmail(quotes, stage, urlFor) {
+  const list = Array.isArray(quotes) ? quotes : [quotes];
+  const first = list[0] || {};
+  const many = list.length > 1;
+  const url = typeof urlFor === "function" ? urlFor : () => String(urlFor);
 
-  const button = (action, label, bg) => `
-    <a href="${esc(responseUrl)}&action=${action}"
+  const hi = firstNameOf(first) ? `Hi ${esc(firstNameOf(first))},` : "Hi,";
+  const noun = many ? `${list.length} quotes` : `a quote`;
+  const opener = stage === 1
+    ? `We sent you ${noun} and wanted to check ${many ? "they" : "it"} reached you.`
+    : stage === 2
+      ? `Just following up on the ${many ? "quotes" : "quote"} we sent — we have not heard back yet.`
+      : `This is our last reminder about the ${many ? "quotes" : "quote"} below.`;
+  const subject = many
+    ? (stage === 1 ? `Did you get our ${list.length} quotes?` : `Following up on your ${list.length} quotes`)
+    : (stage === 1 ? `Did you get our quote? — SO${first.orderId}` : `Following up on your quote — SO${first.orderId}`);
+
+  const button = (u, action, label, bg) => `
+    <a href="${esc(u)}&action=${action}"
        style="display:inline-block;margin:4px 6px 4px 0;padding:11px 18px;border-radius:5px;
               background:${bg};color:#fff;text-decoration:none;font-weight:bold;font-size:14px;">${label}</a>`;
+
+  const body = many
+    ? `<table style="border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;">
+         ${list.map((q) => `
+         <tr>
+           <td style="padding:9px 10px 9px 0;border-bottom:1px solid #eee;">
+             <strong>SO${q.orderId}</strong>${q.reference ? `<br><span style="color:#777;font-size:12px;">${esc(q.reference)}</span>` : ""}
+           </td>
+           <td style="padding:9px 10px;border-bottom:1px solid #eee;white-space:nowrap;">${gbp(q.netValue)} + VAT</td>
+           <td style="padding:9px 0;border-bottom:1px solid #eee;text-align:right;">
+             <a href="${esc(url(q))}" style="display:inline-block;padding:8px 15px;border-radius:5px;background:#0073e6;color:#fff;text-decoration:none;font-weight:bold;font-size:13px;">Reply about this one</a>
+           </td>
+         </tr>`).join("")}
+       </table>
+       <p>Tell us how you would like to proceed with each one — or just reply to this email.</p>`
+    : `<table style="border-collapse:collapse;margin:14px 0;font-size:14px;">
+         <tr><td style="padding:4px 12px 4px 0;color:#777;">Quote</td><td style="padding:4px 0;font-weight:bold;">SO${first.orderId}</td></tr>
+         ${first.reference ? `<tr><td style="padding:4px 12px 4px 0;color:#777;">Reference</td><td style="padding:4px 0;">${esc(first.reference)}</td></tr>` : ""}
+         <tr><td style="padding:4px 12px 4px 0;color:#777;">Total</td><td style="padding:4px 0;font-weight:bold;">${gbp(first.netValue)} + VAT</td></tr>
+       </table>
+       <p>Let us know how you would like to proceed:</p>
+       <p style="margin:16px 0;">
+         ${button(url(first), "go_ahead", "Go ahead with the quote", "#1e7b34")}
+         ${button(url(first), "more_time", "I need more time", "#0073e6")}<br>
+         ${button(url(first), "call_back", "Please call me", "#b07000")}
+         ${button(url(first), "cancel", "Cancel the quote", "#8a8a8a")}
+       </p>`;
 
   const html = `
   <div style="font-family:Arial,sans-serif;max-width:600px;color:#333;">
     <p>${hi}</p>
     <p>${opener}</p>
-    <table style="border-collapse:collapse;margin:14px 0;font-size:14px;">
-      <tr><td style="padding:4px 12px 4px 0;color:#777;">Quote</td><td style="padding:4px 0;font-weight:bold;">${ref}</td></tr>
-      ${quote.reference ? `<tr><td style="padding:4px 12px 4px 0;color:#777;">Reference</td><td style="padding:4px 0;">${esc(quote.reference)}</td></tr>` : ""}
-      <tr><td style="padding:4px 12px 4px 0;color:#777;">Total</td><td style="padding:4px 0;font-weight:bold;">${gbp(quote.netValue)} + VAT</td></tr>
-    </table>
-    <p>Let us know how you would like to proceed:</p>
-    <p style="margin:16px 0;">
-      ${button("go_ahead", "Go ahead with the quote", "#1e7b34")}
-      ${button("more_time", "I need more time", "#0073e6")}<br>
-      ${button("call_back", "Please call me", "#b07000")}
-      ${button("cancel", "Cancel the quote", "#8a8a8a")}
-    </p>
+    ${body}
     <p style="font-size:13px;color:#777;">Or just reply to this email and it will go straight to
-      ${esc(quote.salespersonName || "your account manager")}.</p>
+      ${esc(first.salespersonName || "your account manager")}.</p>
   </div>`;
 
   const text = `${hi}
 
 ${opener}
 
-Quote ${ref}${quote.reference ? ` (${quote.reference})` : ""} — ${gbp(quote.netValue)} + VAT
+${many
+    ? list.map((q) => `  SO${q.orderId}${q.reference ? ` (${q.reference})` : ""} — ${gbp(q.netValue)} + VAT\n    ${url(q)}`).join("\n")
+    : `Quote SO${first.orderId}${first.reference ? ` (${first.reference})` : ""} — ${gbp(first.netValue)} + VAT
 
 Let us know how you would like to proceed:
-  Go ahead:      ${responseUrl}&action=go_ahead
-  Need more time:${responseUrl}&action=more_time
-  Please call me:${responseUrl}&action=call_back
-  Cancel:        ${responseUrl}&action=cancel
+  Go ahead:       ${url(first)}&action=go_ahead
+  Need more time: ${url(first)}&action=more_time
+  Please call me: ${url(first)}&action=call_back
+  Cancel:         ${url(first)}&action=cancel`}
 
-Or reply to this email and it will reach ${quote.salespersonName || "your account manager"}.`;
+Or reply to this email and it will reach ${first.salespersonName || "your account manager"}.`;
 
   return { subject, html, text };
 }
@@ -217,20 +293,37 @@ export function buildResponseEmail(quote, response) {
   return { subject, html };
 }
 
-// Sent to the salesperson when all three chases went unanswered.
-export function buildHandoverEmail(quote) {
-  const subject = `No reply after 3 chases — SO${quote.orderId} ${quote.customerName ? "· " + quote.customerName : ""}`.trim();
+// Sent to the salesperson when all three chases went unanswered. Takes the whole
+// customer group, so one customer produces one handover, not one per quote.
+export function buildHandoverEmail(quotes) {
+  const list = Array.isArray(quotes) ? quotes : [quotes];
+  const first = list[0] || {};
+  const many = list.length > 1;
+  const total = list.reduce((s, q) => s + (Number(q.netValue) || 0), 0);
+  const subject = many
+    ? `No reply after 3 chases — ${list.length} quotes · ${first.customerName || ""}`.trim()
+    : `No reply after 3 chases — SO${first.orderId} ${first.customerName ? "· " + first.customerName : ""}`.trim();
+
+  const rows = list.map((q) => `
+      <tr>
+        <td style="padding:6px 12px 6px 0;border-bottom:1px solid #eee;"><strong>SO${q.orderId}</strong>
+          ${q.reference ? `<br><span style="color:#777;font-size:12px;">${esc(q.reference)}</span>` : ""}</td>
+        <td style="padding:6px 12px;border-bottom:1px solid #eee;white-space:nowrap;">${gbp(q.netValue)}</td>
+        <td style="padding:6px 0;border-bottom:1px solid #eee;color:#777;">sent ${esc(String(q.enteredStatusAt || "").slice(0, 10))}</td>
+      </tr>`).join("");
+
   const html = `
   <div style="font-family:Arial,sans-serif;max-width:640px;color:#333;">
     <h2 style="color:#b07000;border-bottom:2px solid #b07000;padding-bottom:8px;">Over to you</h2>
-    <p>${esc(quote.customerName || "This customer")} has not answered any of the three chases on this quote.
-       It is still sitting in <strong>Quote sent</strong>.</p>
-    <table style="border-collapse:collapse;font-size:14px;margin:12px 0;">
-      <tr><td style="padding:5px 14px 5px 0;color:#777;">Quote</td><td style="padding:5px 0;font-weight:bold;">SO${quote.orderId}</td></tr>
-      <tr><td style="padding:5px 14px 5px 0;color:#777;">Customer</td><td style="padding:5px 0;">${esc(quote.customerName)}${quote.companyName ? " · " + esc(quote.companyName) : ""}</td></tr>
-      ${quote.customerEmail ? `<tr><td style="padding:5px 14px 5px 0;color:#777;">Email</td><td style="padding:5px 0;">${esc(quote.customerEmail)}</td></tr>` : ""}
-      <tr><td style="padding:5px 14px 5px 0;color:#777;">Value</td><td style="padding:5px 0;">${gbp(quote.netValue)} + VAT</td></tr>
-      <tr><td style="padding:5px 14px 5px 0;color:#777;">Quote sent</td><td style="padding:5px 0;">${esc(String(quote.enteredStatusAt || "").slice(0, 10))}</td></tr>
+    <p>${esc(first.customerName || "This customer")} has not answered any of the three chases on
+       ${many ? `these ${list.length} quotes` : "this quote"}. Still sitting in <strong>Quote sent</strong>.</p>
+    <p style="font-size:14px;">
+      ${esc(first.customerName)}${first.companyName ? " · " + esc(first.companyName) : ""}
+      ${first.customerEmail ? `<br><a href="mailto:${esc(first.customerEmail)}">${esc(first.customerEmail)}</a>` : ""}
+    </p>
+    <table style="border-collapse:collapse;font-size:14px;margin:12px 0;">${rows}
+      ${many ? `<tr><td style="padding:8px 12px 8px 0;font-weight:bold;">Total</td>
+        <td style="padding:8px 12px;font-weight:bold;">${gbp(total)}</td><td></td></tr>` : ""}
     </table>
     <p>Worth a phone call.</p>
   </div>`;

@@ -24,7 +24,8 @@ import * as purchasingSchedule from './purchasingSchedule.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import {
   QUOTE_CHASE_CONFIG, QUOTE_ACTIONS, QUOTE_CANCEL_REASONS,
-  decideAction, buildChaseEmail, buildResponseEmail, buildHandoverEmail, buildBpNote,
+  decideAction, groupQuotesForChase, quotesToAdvance,
+  buildChaseEmail, buildResponseEmail, buildHandoverEmail, buildBpNote,
 } from './quoteChase.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -12495,6 +12496,12 @@ async function initializeQuoteChaseTable() {
       CREATE INDEX IF NOT EXISTS idx_quote_chase_open
         ON quote_chase(still_quote_sent, seeded, responded_at);
     `);
+    // Added after the table shipped, so CREATE TABLE IF NOT EXISTS alone would
+    // not bring it to an existing deployment.
+    await pool.query(`
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_at TIMESTAMPTZ;
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_by TEXT;
+    `);
     console.log('✅ quote_chase table initialized');
   } catch (err) {
     console.error('❌ Error initializing quote_chase table:', err.message);
@@ -12647,52 +12654,72 @@ async function pollQuoteChase() {
   const open = await pool.query(
     `SELECT * FROM quote_chase
       WHERE still_quote_sent = TRUE AND seeded = FALSE AND responded_at IS NULL
-        AND stage <= $1`,
+        AND stopped_at IS NULL AND stage <= $1`,
     [QUOTE_CHASE_CONFIG.stageWorkingDays.length]
   );
 
-  for (const r of open.rows) {
+  // One email per CUSTOMER, not per quote. Whoever holds several open quotes
+  // would otherwise get one email each, every stage.
+  const groups = groupQuotesForChase(open.rows.map((r) => ({
+    ...quoteRowToView(r),
+    stage: r.stage,
+    row: r,
+  })));
+
+  for (const group of groups) {
+    const driver = group.driver;
     const decision = decideAction({
-      enteredStatusAt: r.entered_status_at,
-      stage: r.stage,
-      responded: !!r.responded_at,
-      seeded: r.seeded,
-      customerEmail: r.customer_email,
-      stillQuoteSent: r.still_quote_sent,
+      enteredStatusAt: driver.enteredStatusAt,
+      stage: driver.stage,
+      responded: !!driver.row.responded_at,
+      stopped: !!driver.row.stopped_at,
+      seeded: driver.row.seeded,
+      customerEmail: driver.customerEmail,
+      stillQuoteSent: driver.row.still_quote_sent,
     }, now);
     if (decision.action === 'none') continue;
 
-    const view = quoteRowToView(r);
+    const ids = group.quotes.map((q) => q.orderId);
     try {
       if (decision.action === 'chase') {
-        const mail = buildChaseEmail(view, decision.stage, quoteResponseUrl(r.token));
+        // Quotes already further along ride in the same email but keep their
+        // stage — bumping them back would chase them a second time.
+        const advancing = quotesToAdvance(group, decision.stage).map((q) => q.orderId);
+        const mail = buildChaseEmail(group.quotes, decision.stage,
+          (q) => quoteResponseUrl(q.row.token));
         await sendQuoteMail({
-          to: r.customer_email, replyTo: r.salesperson_email || undefined,
+          to: driver.customerEmail, replyTo: driver.salespersonEmail || undefined,
           subject: mail.subject, html: mail.html, text: mail.text,
         });
         await pool.query(
-          `UPDATE quote_chase SET stage = $2, last_chase_at = NOW(), last_checked_at = NOW() WHERE order_id = $1`,
-          [r.order_id, decision.stage]
+          `UPDATE quote_chase SET stage = $2, last_chase_at = NOW(), last_checked_at = NOW()
+            WHERE order_id = ANY($1::bigint[])`,
+          [advancing.length ? advancing : [0], decision.stage]
         );
         if (!quoteChaseDryRun()) {
-          await postBpOrderNote(r.order_id, buildBpNote('chase', { stage: decision.stage, to: r.customer_email }));
+          for (const id of advancing) {
+            await postBpOrderNote(id, buildBpNote('chase', { stage: decision.stage, to: driver.customerEmail }));
+          }
         }
-        console.log(`[quote-chase] chase ${decision.stage} for SO${r.order_id}`);
+        console.log(`[quote-chase] chase ${decision.stage} to ${driver.customerEmail} covering SO${ids.join(', SO')}`);
       } else if (decision.action === 'handover') {
-        const mail = buildHandoverEmail(view);
-        const to = r.salesperson_email || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
+        const mail = buildHandoverEmail(group.quotes);
+        const to = driver.salespersonEmail || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
         await sendQuoteMail({ to, subject: mail.subject, html: mail.html });
         await pool.query(
-          `UPDATE quote_chase SET stage = $2, handover_at = NOW(), last_checked_at = NOW() WHERE order_id = $1`,
-          [r.order_id, QUOTE_CHASE_CONFIG.stageWorkingDays.length + 1]
+          `UPDATE quote_chase SET stage = $2, handover_at = NOW(), last_checked_at = NOW()
+            WHERE order_id = ANY($1::bigint[])`,
+          [ids, QUOTE_CHASE_CONFIG.stageWorkingDays.length + 1]
         );
         if (!quoteChaseDryRun()) {
-          await postBpOrderNote(r.order_id, buildBpNote('handover', { salespersonName: r.salesperson_name }));
+          for (const id of ids) {
+            await postBpOrderNote(id, buildBpNote('handover', { salespersonName: driver.salespersonName }));
+          }
         }
-        console.log(`[quote-chase] handover for SO${r.order_id} -> ${to}`);
+        console.log(`[quote-chase] handover to ${to} covering SO${ids.join(', SO')}`);
       }
     } catch (e) {
-      console.error(`[quote-chase] SO${r.order_id} failed:`, e.message);
+      console.error(`[quote-chase] group ${group.key} failed:`, e.message);
     }
   }
 }
@@ -12754,6 +12781,38 @@ app.post('/api/quote-chase/respond', async (req, res) => {
   }
 });
 
+// Stop chasing one quote by hand.
+//
+// Customers reply to the email far more often than they click a button, and
+// those replies go to the salesperson's inbox — nothing tells this system. Left
+// alone it would keep chasing someone who already answered, which is worse than
+// not chasing at all. `stopped_at` is deliberately separate from `responded_at`
+// so a manual stop never pollutes the "why do we lose quotes" reporting.
+app.post('/api/quote-chase/stop', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const { orderId, by, resume } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: 'orderId required' });
+    const r = await pool.query(
+      resume
+        ? `UPDATE quote_chase SET stopped_at = NULL, stopped_by = NULL, last_checked_at = NOW()
+            WHERE order_id = $1 RETURNING order_id`
+        : `UPDATE quote_chase SET stopped_at = NOW(), stopped_by = $2, last_checked_at = NOW()
+            WHERE order_id = $1 RETURNING order_id`,
+      resume ? [orderId] : [orderId, String(by || '').slice(0, 120) || null]
+    );
+    if (r.rowCount === 0) {
+      // Only tracked quotes can be stopped — a live-read row has no chase to stop.
+      return res.status(404).json({ error: 'not tracked yet — nothing is chasing this quote' });
+    }
+    console.log(`[quote-chase] SO${orderId} ${resume ? 'resumed' : 'stopped'}${by ? ' by ' + by : ''}`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[quote-chase] stop failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Dashboard feed: everything currently in "Quote sent", backlog included so the
 // quotes deliberately not being chased are still visible to work manually.
 app.get('/api/quote-chase/list', async (req, res) => {
@@ -12791,7 +12850,7 @@ app.get('/api/quote-chase/list', async (req, res) => {
           salespersonName: sp.name,
           salespersonEmail: sp.email,
           enteredStatusAt: o.updatedOn || o.createdOn,
-          seeded: true, stage: 0,
+          seeded: true, stage: 0, stoppedAt: null, stoppedBy: null,
           lastChaseAt: null, handoverAt: null, respondedAt: null,
           responseAction: null, responseReason: null, responseNote: null,
         });
@@ -12812,6 +12871,8 @@ app.get('/api/quote-chase/list', async (req, res) => {
       quotes: q.rows.map((r) => ({
         ...quoteRowToView(r),
         seeded: r.seeded,
+        stoppedAt: r.stopped_at,
+        stoppedBy: r.stopped_by,
         stage: r.stage,
         lastChaseAt: r.last_chase_at,
         handoverAt: r.handover_at,
