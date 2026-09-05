@@ -12762,9 +12762,53 @@ app.get('/api/quote-chase/list', async (req, res) => {
     const q = await pool.query(
       `SELECT * FROM quote_chase WHERE still_quote_sent = TRUE ORDER BY entered_status_at DESC`
     );
+
+    // Nothing tracked yet means the poller has never run. Showing an empty table
+    // then would be wrong — the quotes exist, we just are not chasing them — so
+    // read the status straight from Brightpearl instead. This keeps the "what is
+    // on Quote Sent" view useful before the chase engine is ever switched on.
+    //
+    // Deliberately does NOT resolve each order's true status-entry time: that is
+    // one note lookup per order (126+ calls) and far too slow for a page load.
+    // updatedOn is close enough for an age column and is flagged as such.
+    if (q.rowCount === 0 && BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
+      const ids = await bpQuoteSentOrderIds();
+      const orders = [];
+      for (let i = 0; i < ids.length; i += 200) {
+        orders.push(...(await bpLive('GET', `/order-service/order/${ids.slice(i, i + 200).join(',')}`) || []));
+      }
+      const quotes = [];
+      for (const o of orders) {
+        const cust = (o.parties && o.parties.customer) || {};
+        const sp = await resolveSalesperson(o.createdById);   // cached, ~10 distinct staff
+        quotes.push({
+          orderId: o.id,
+          customerName: cust.contactName || cust.addressFullName || '',
+          companyName: cust.companyName || '',
+          customerEmail: cust.email || '',
+          netValue: parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
+          reference: o.reference || '',
+          salespersonName: sp.name,
+          salespersonEmail: sp.email,
+          enteredStatusAt: o.updatedOn || o.createdOn,
+          seeded: true, stage: 0,
+          lastChaseAt: null, handoverAt: null, respondedAt: null,
+          responseAction: null, responseReason: null, responseNote: null,
+        });
+      }
+      quotes.sort((a, b) => new Date(b.enteredStatusAt) - new Date(a.enteredStatusAt));
+      return res.json({
+        dryRun: quoteChaseDryRun(),
+        enabled: process.env.QUOTE_CHASE_ENABLED === 'true',
+        source: 'live',
+        quotes,
+      });
+    }
+
     res.json({
       dryRun: quoteChaseDryRun(),
       enabled: process.env.QUOTE_CHASE_ENABLED === 'true',
+      source: 'tracked',
       quotes: q.rows.map((r) => ({
         ...quoteRowToView(r),
         seeded: r.seeded,
