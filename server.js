@@ -9739,6 +9739,46 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Blaklader auto-purchase poller scheduled (weekdays 09:30 UK, £300 carriage-paid threshold)');
 } else { console.log('⏸️  Blaklader auto-purchase poller DISABLED (BLAKLADER_SCHEDULE_ENABLED=false)'); }
 
+// Tags that name a supplier we automate but never reach it. READ-ONLY — it reports, it never edits
+// a tag: a tag is somebody's instruction about what to buy, and rewriting one on a guess is how the
+// wrong thing gets ordered.
+app.get('/api/purchasing/tag-audit', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try { res.json(await purchasingAuto.auditSupplierTags()); }
+  catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// Run it once a day and LOG what it finds, because the whole point is that this failure is silent.
+// 17:30 is after the retry sweep and clear of every supplier window, so it cannot compete for the
+// run lock. severity 'review': nothing failed and no order is stuck — but orders are being missed,
+// which is worth an alert rather than a line in a report nobody opens.
+if (process.env.TAG_AUDIT_ENABLED !== 'false') {
+  let lastTagAudit = null;
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 17 && uk.minute >= 30)) return;
+      if (lastTagAudit === uk.date) return;                 // once a day, not once every tick
+      lastTagAudit = uk.date;
+      purchasingAuto.auditSupplierTags()
+        .then(async (r) => {
+          if (!r.problems.length) { console.log('[tag-audit] all supplier tags resolve'); return; }
+          await purchasingSchedule.logPurchasingError(pool, {
+            supplier: r.suppliersAffected[0] || 'PURCHASING', step: 'tag-unmatched', severity: 'review',
+            message: `${r.problems.length} order(s) carry a supplier tag that will never be picked up, so nothing is ordered and nothing fails. `
+              + `Affects ${r.suppliersAffected.join(', ')}. `
+              + r.problems.slice(0, 12).map((p) => `#${p.orderId} "${p.tag}" (misses ${p.missed.map((m) => m.means).join('/')})`).join('; '),
+            context: { checked: r.checked, problems: r.problems.slice(0, 40), suppliersAffected: r.suppliersAffected },
+          }).catch(() => {});
+        })
+        .catch((e) => console.error('[tag-audit] failed:', e.message));
+    } catch (e) { console.error('[tag-audit] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Supplier-tag audit scheduled (weekdays 17:30 UK)');
+} else { console.log('⏸️  Supplier-tag audit DISABLED (TAG_AUDIT_ENABLED=false)'); }
+
 // Chadwick auto-purchase poller — weekdays 12:30 UK. Two POSTs to portal.chadwicktextiles.co.uk
 // (wcp-ordupload then wcp-cartorder), whose response body IS the order number; no spreadsheet and
 // no browser worker, so it is one of the quicker suppliers. Free carriage @ £300 ex-VAT, state row

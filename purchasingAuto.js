@@ -225,6 +225,64 @@ export const SUPPLIERS = {
     detect: (n) => /\b(afd|anthem|awdis|babybugz|bagbase|beechfield|bella|brand\s*lab|canterbury|comfort\s*grip|craghoppers|denny'?s|ecologie|finden\s*hales|flexfit|front\s*row|fruit\s*of\s*the\s*loom|gildan|henbury|kariban|kimood|kustom\s*kit|larkwood|le\s*chef|mantis|mumbles|native\s*spirit|neoblue|premier|pro\s*rtx|proact|quadra|regatta|result|russell|so\s*denim|sol'?s|spiro|stormtech|tactical\s*threads|tee\s*jays|tombo|towel\s*city|warrior|westford\s*mill|yoko|yupoong)\b/i.test(n || '') },
 };
 
+// ── GUARD: tags that name a supplier we automate but do not resolve to it ─────
+// The failure this catches is SILENT. There is no error, no log row and no failed run — the order
+// simply never enters the demand pool, so nothing is ordered and nothing complains. It was found
+// only because someone asked why Castle had missed three specific orders.
+//
+// Deliberately narrow, so it can be trusted rather than ignored: it fires ONLY when a tag group
+// contains the supplier's own name yet does not resolve to its key. A tag naming a supplier we do
+// not automate (Surridge, Vigilant, Supertouch) is normal and says nothing here.
+//
+// Three shapes it catches, each seen in the live data on 2026-09-04:
+//   "CASTLE CLOTHING"                     the company's real name, no alias    → fixable by alias
+//   "UNEEK SUPERTOUCH CASTLE PORTWEST"    no separators, four suppliers in one → needs the record fixed
+//   "PENCARRIE (03822, JC012 ONLY)"       a bracketed list whose commas split  → needs the record fixed
+// Only the first can be fixed in code, which is exactly why the other two need reporting.
+const _SUPPLIER_NAME_HINTS = {
+  CASTLE: /castle/i, PORTWEST: /portwest/i, UNEEK: /uneek/i, PENCARRIE: /pencarrie/i,
+  CHADWICK: /chadwick/i, CARHARTT: /carhartt/i, MASCOT: /mascot/i, SCRUFFS: /scruffs/i,
+  BLAKLADER: /bl[aå]kl[aä]der/i, SNICKERS: /snickers/i, FRISTADS: /fristads/i,
+  'HELLY HANSEN': /helly/i, STERLING: /sterling/i, 'PERFORMANCE BRANDS': /performance\s*brands/i,
+};
+export function tagFailsToMatch(rawTag) {
+  const out = [];
+  for (const group of tagsOf(rawTag)) {
+    const tokens = tagAlternatives(group);
+    for (const [key, re] of Object.entries(_SUPPLIER_NAME_HINTS)) {
+      if (!re.test(group) || tokens.includes(key)) continue;
+      out.push({ group, means: key, parsedAs: tokens });
+    }
+  }
+  return out;
+}
+
+// Every order in the demand status whose tag names an automated supplier it will never reach.
+// READ-ONLY: it reports, it never edits a tag. A tag is somebody's instruction about what to buy,
+// and rewriting one on a guess is how the wrong thing gets ordered.
+export async function auditSupplierTags() {
+  const statusId = Number(process.env.PURCHASING_DEMAND_STATUS_ID || 23);
+  const s = await liveGet(`/order-service/order-search?orderTypeId=1&orderStatusId=${statusId}&pageSize=500`);
+  const cols = ((s.metaData || {}).columns || []).map((c) => c.name);
+  const ix = cols.indexOf('orderId');
+  const ids = ix < 0 ? [] : (s.results || []).map((r) => Number(r[ix])).filter(Boolean);
+  const problems = [];
+  for (const id of ids) {
+    let cf = {};
+    try { cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {}; } catch { continue; }
+    const raw = cf.PCF_SUPPLIER == null ? '' : String(cf.PCF_SUPPLIER);
+    if (!raw) continue;
+    const bad = tagFailsToMatch(raw);
+    if (bad.length) problems.push({ orderId: id, tag: raw, missed: bad });
+    await pause(60);
+  }
+  return {
+    checked: ids.length,
+    problems,
+    suppliersAffected: [...new Set(problems.flatMap((p) => p.missed.map((m) => m.means)))].sort(),
+  };
+}
+
 // ---- low-level API with throttle back-off ----
 async function api(method, path, body, attempt = 0) {
   const opts = { method, headers: HEADERS() };
@@ -347,7 +405,20 @@ async function poFieldHasSupplierPo(value, sup, get) {
 // nothing pointed at the comma. Trailing punctuation and doubled spaces are now normalised too.
 // Aliases are for names that differ by more than punctuation; keep them EXPLICIT rather than
 // stripping a trailing "S", so SNICKERS can never quietly resolve to something else.
-const TAG_ALIASES = { CHADWICKS: 'CHADWICK' };
+// A tag that NAMES a supplier we automate but does not MATCH its key is invisible: the order is
+// simply never picked up, with no error and nothing in the log. SO 486436 ("CASTLE CLOTHING") and
+// 486741 ("portwest / castle clothing") sat through every Castle run untouched until they were
+// found by hand on 2026-09-04 — the tag says Castle, the key is CASTLE, and the two never met.
+// These are the company's real names, so people will keep typing them; an alias fixes the class
+// rather than the two records. tagsFailingToMatch() below reports whatever these still miss.
+const TAG_ALIASES = {
+  CHADWICKS: 'CHADWICK',
+  'CHADWICK TEXTILES': 'CHADWICK',
+  'CASTLE CLOTHING': 'CASTLE',
+  'PORTWEST CLOTHING': 'PORTWEST',
+  'HELLY HANSEN WORKWEAR': 'HELLY HANSEN',
+  'SNICKERS WORKWEAR': 'SNICKERS',
+};
 // ── ALTERNATIVE SUPPLIERS INSIDE ONE TAG ─────────────────────────────────────
 // The two separators mean DIFFERENT things, and only "/" was ever handled:
 //   "/"  separates distinct requirements      — each must be ordered

@@ -935,10 +935,56 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   if (!orderLines.length) throw stepErr('cart', 'no orderable Performance Brands lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
-  const r = await jfetch('checkout', `${altItemsUrl}/api/performance-brands-order`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: live }),
-  });
+  // RESOLVE HERE, ADD IN THE BROWSER. The old path posted everything to
+  // /api/performance-brands-order, which resolved AND added over plain HTTP — and the adding half
+  // stopped working: on 2026-09-02 it reported "basket has 0 line(s), expected 3" and nothing was
+  // ordered. Their grid is a WooCommerce plugin that builds the add-to-cart request in JavaScript,
+  // so a server-side POST can look accepted and put nothing in the basket. Order 24821 (£307.50)
+  // went through the browser worker by hand on 2026-09-03; this wires the scheduled run onto that
+  // same proven route.
+  //
+  // The RESOLVER is untouched and still Alt-Items' — it is healthy, it knows the style/colour/size
+  // rules and the Brightpearl-internal SKUs like 191339, and the worker deliberately does not
+  // resolve anything. Only the add-to-basket step moves.
+  const resolved = [], failedLines = [];
+  for (const l of orderLines) {
+    let rr = null;
+    try {
+      rr = await jfetch('resolve', `${altItemsUrl}/api/performance-brands-resolve?sku=${encodeURIComponent(l.sku)}&name=${encodeURIComponent(l.name || '')}`, {});
+    } catch (e) { rr = { ok: false, sku: l.sku, reason: `resolve call failed: ${e.message}` }; }
+    if (rr && rr.ok && rr.url && rr.pid) resolved.push({ ...l, url: rr.url, pid: rr.pid, sitePrice: rr.price, maxQty: rr.maxQty });
+    else failedLines.push({ sku: l.sku, reason: (rr && rr.reason) || 'could not resolve', outOfStock: !!(rr && rr.outOfStock), lowInv: !!l.lowInv });
+  }
+  steps.resolve = { asked: orderLines.length, resolved: resolved.length, failed: failedLines.length };
+
+  // A LOW-INVENTORY line that cannot be ordered is dropped rather than aborting the run; a line a
+  // CUSTOMER is waiting for stops it. Same rule the old path applied, kept deliberately.
+  const droppedLowInv = failedLines.filter((f) => f.lowInv).map((f) => ({ sku: f.sku, reason: f.reason, qty: (orderLines.find((l) => l.sku === f.sku) || {}).qty }));
+  const blocking = failedLines.filter((f) => !f.lowInv);
+  const r = { failed: blocking, droppedLowInv, ok: false, priceWarns: [] };
+
+  if (!blocking.length) {
+    if (!resolved.length) throw stepErr('resolve', `no Performance Brands lines could be resolved — PO#${poId} left for review`, { poId, failed: failedLines });
+    const wr = await workerPlaceOrder({
+      supplier: 'PERFORMANCE BRANDS', ref: poId, execute: live,
+      lines: resolved.map((l) => ({ sku: l.sku, url: l.url, pid: l.pid, qty: l.qty })),
+    });
+    // The worker verifies the basket against what it was asked for and refuses a short one, so a
+    // not-ok result here means nothing was submitted — never a maybe.
+    if (!wr || !wr.placed) {
+      const miss = (wr && wr.results ? wr.results.filter((x) => !x.ok) : []);
+      throw stepErr('checkout', `Performance Brands worker did not confirm placement`
+        + (miss.length ? ` — ${miss.length} line(s) refused: ${miss.map((x) => `${x.sku}: ${x.reason || '?'}`).join('; ').slice(0, 300)}` : '')
+        + `: ${JSON.stringify({ added: wr && wr.added, expected: wr && wr.expected, cartCount: wr && wr.cartCount, units: wr && wr.units, wantUnits: wr && wr.wantUnits, ready: wr && wr.ready, error: wr && wr.error }).slice(0, 250)}`,
+        { poId, results: (wr && wr.results) || null, added: wr && wr.added, expected: wr && wr.expected });
+    }
+    r.ok = true; r.orderNo = wr.orderNo || null; r.total = wr.total ?? null;
+    // the site price came back from the RESOLVE step, so a stale cost is still visible without the
+    // old endpoint doing the comparison
+    r.priceWarns = resolved
+      .filter((l) => Number(l.sitePrice) > 0 && Number(l.cost) > 0 && Math.abs(Number(l.sitePrice) - Number(l.cost)) > 0.02)
+      .map((l) => ({ sku: l.sku, bpCost: Number(l.cost), sitePrice: Number(l.sitePrice) }));
+  }
 
   // A line we could not resolve stops the run naming the SKU and the reason, rather than quietly
   // ordering a short basket. Out-of-stock is called out separately because this site offers NO
