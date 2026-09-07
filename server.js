@@ -51,7 +51,11 @@ if (useDatabase) {
       rejectUnauthorized: false
     },
     keepAlive: true,               // keep sockets warm so Render doesn't drop idle ones
-    idleTimeoutMillis: 30000,      // close idle clients ourselves before the DB does
+    // 10s, not 30. Render's network reaps idle sockets on its own schedule, and every socket it
+    // reaps before we do surfaces as an "idle client error" below. Closing ours sooner means we
+    // usually win that race, so the churn largely stops being visible. Reconnecting costs a few ms
+    // against a database answering in ~100ms, which is a trade worth making for a quiet log.
+    idleTimeoutMillis: 10000,
     connectionTimeoutMillis: 10000,
     max: 10,
   });
@@ -59,8 +63,23 @@ if (useDatabase) {
   // background (Render idle timeout, DB restart, network blip) is emitted as an
   // uncaught exception and crashes the process. This handler lets the pool quietly
   // discard the dead client and carry on — the next query gets a fresh connection.
+  //
+  // It logs a RATE, not a line per event. "Connection terminated unexpectedly" is the normal
+  // consequence of Render reaping an idle socket, so one line per occurrence reads like a fault
+  // that is spreading when nothing is wrong at all — queries keep succeeding, because the pool
+  // hands out a fresh connection. Reporting "Nth in the last 5 min" makes the ordinary background
+  // churn compact and, more usefully, makes a real problem legible: a jump from a handful an hour
+  // to hundreds is a signal, and one line per event hides exactly that.
+  let poolErrs = 0, poolWindowStart = Date.now(), poolLastLogged = 0;
   pool.on('error', (err) => {
-    console.warn('[pg pool] idle client error (recovered):', err?.message || err);
+    const now = Date.now();
+    if (now - poolWindowStart > 5 * 60 * 1000) { poolErrs = 0; poolWindowStart = now; poolLastLogged = 0; }
+    poolErrs++;
+    // First in the window, then at most once a minute — enough to see a storm, not enough to be one.
+    if (poolErrs === 1 || now - poolLastLogged > 60 * 1000) {
+      poolLastLogged = now;
+      console.warn(`[pg pool] dropped an idle connection and recovered (${poolErrs} in the last ${Math.max(1, Math.round((now - poolWindowStart) / 60000))} min; queries unaffected):`, err?.message || err);
+    }
   });
   console.log('📊 Using PostgreSQL database for DocuSign logs');
 } else {
