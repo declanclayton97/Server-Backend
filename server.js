@@ -9811,12 +9811,16 @@ if (process.env.V12_SCHEDULE_ENABLED !== 'false') {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
       if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
-      if (!(uk.hour === 12 && uk.minute >= 20 && uk.minute < 40)) return; // 12:20–12:39, before Chadwick
+      // 12:20-12:29. This used to run to :39, straight through BUCKLER's entire window, so V12
+      // taking the lock at :30 or :35 used up both of Buckler's only two chances — which is exactly
+      // why Buckler never ran on its first day (2026-09-07, lastRun=never, no error logged
+      // anywhere, because a supplier that never gets the lock has nothing to report).
+      if (!(uk.hour === 12 && uk.minute >= 20 && uk.minute < 30)) return; // 12:20–12:29
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'V12' })
         .then((r) => { if (!r.skipped) console.log('[v12-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[v12-schedule] error:', e.message));
     } catch (e) { console.error('[v12-schedule] poller error:', e.message); }
-  }, 5 * 60 * 1000);
+  }, 60 * 1000);
   console.log('✅ V12 auto-purchase poller scheduled (weekdays 12:20 UK, £200 free-carriage threshold)');
 } else { console.log('⏸️  V12 auto-purchase poller DISABLED (V12_SCHEDULE_ENABLED=false)'); }
 
@@ -9835,7 +9839,7 @@ if (process.env.BUCKLER_SCHEDULE_ENABLED !== 'false') {
         .then((r) => { if (!r.skipped) console.log('[buckler-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[buckler-schedule] error:', e.message));
     } catch (e) { console.error('[buckler-schedule] poller error:', e.message); }
-  }, 5 * 60 * 1000);
+  }, 60 * 1000);
   console.log('✅ Buckler Boots auto-purchase poller scheduled (weekdays 12:30 UK)');
 } else { console.log('⏸️  Buckler Boots auto-purchase poller DISABLED (BUCKLER_SCHEDULE_ENABLED=false)'); }
 
@@ -9862,7 +9866,7 @@ if (process.env.CHADWICK_SCHEDULE_ENABLED !== 'false') {
         .then((r) => { if (!r.skipped) console.log('[chadwick-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[chadwick-schedule] error:', e.message));
     } catch (e) { console.error('[chadwick-schedule] poller error:', e.message); }
-  }, 5 * 60 * 1000);
+  }, 60 * 1000);
   console.log('✅ Chadwick auto-purchase poller scheduled (weekdays 12:40 UK, £300 carriage-paid threshold)');
 } else { console.log('⏸️  Chadwick auto-purchase poller DISABLED (CHADWICK_SCHEDULE_ENABLED=false)'); }
 
