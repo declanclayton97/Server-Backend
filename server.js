@@ -9799,6 +9799,25 @@ if (process.env.V12_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ V12 auto-purchase poller scheduled (weekdays 12:20 UK, £200 free-carriage threshold)');
 } else { console.log('⏸️  V12 auto-purchase poller DISABLED (V12_SCHEDULE_ENABLED=false)'); }
 
+// Buckler Boots auto-purchase poller — weekdays 12:30 UK. Email supplier: Brightpearl emails its own
+// PO PDF to orders@bucklerboots.com, so there is no portal step that can fail. State row id 16.
+// Email suppliers finish in well under ten minutes, which is why V12 (12:20), Buckler (12:30) and
+// Chadwick (12:40) sit that close together; the run lock serialises them if one overruns.
+if (process.env.BUCKLER_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 12 && uk.minute >= 30 && uk.minute < 40)) return; // 12:30–12:39, before Chadwick
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'BUCKLER' })
+        .then((r) => { if (!r.skipped) console.log('[buckler-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[buckler-schedule] error:', e.message));
+    } catch (e) { console.error('[buckler-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ Buckler Boots auto-purchase poller scheduled (weekdays 12:30 UK)');
+} else { console.log('⏸️  Buckler Boots auto-purchase poller DISABLED (BUCKLER_SCHEDULE_ENABLED=false)'); }
+
 // Chadwick auto-purchase poller — weekdays 12:40 UK. Two POSTs to portal.chadwicktextiles.co.uk
 // (wcp-ordupload then wcp-cartorder), whose response body IS the order number; no spreadsheet and
 // no browser worker, so it is one of the quicker suppliers. Free carriage @ £300 ex-VAT, state row

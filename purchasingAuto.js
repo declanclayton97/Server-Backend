@@ -173,6 +173,10 @@ export const SUPPLIERS = {
   // 624 products, every one brand 279 ("V12") and named "V12 Footwear <style> …", so brand is the
   // reliable signal and the name detect is a safety net rather than the primary route.
   // Free carriage at £200 ex-VAT, £6.95 ex-VAT below it (owner, 2026-09-07).
+  // Buckler Boots — email supplier, 641 products, all brand 149. PCF_BUCKPO is their own PO-number
+  // field and already in use on orders raised by hand, so the automation writes the same one rather
+  // than the shared PCF_STOCKPO.
+  BUCKLER: { contactId: 8981, costList: 20, poField: 'PCF_BUCKPO', lowInvSupplierId: 8981, brandIds: [149], detect: (n) => /buckler|buckbootz/i.test(n || '') },
   V12: { contactId: 92811, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 92811, brandIds: [279], detect: (n) => /\bv\s*12\b/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
