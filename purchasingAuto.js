@@ -1395,7 +1395,7 @@ const ADOPT_LOOKBACK_DAYS = 7;   // a Friday failure fixed on Monday is still th
 // Verified before it is used: it must still exist, still be status 6 (draft — never a Placed one),
 // still belong to THIS supplier's contactId, and still carry an "Auto-PO" reference. Any of those
 // failing means the PO has moved on and we create a fresh one instead.
-async function findRecordedFailedPo(pool, supplierKey, contactId) {
+async function findRecordedFailedPo(pool, supplierKey, contactId, lineMode = null) {
   if (!pool) return null;
   let poId = null;
   try {
@@ -1404,12 +1404,18 @@ async function findRecordedFailedPo(pool, supplierKey, contactId) {
       // A 'review' row carries a poId too but means the order WENT THROUGH: Fristads #28 is a
       // price-check on PO 483776, which is Placed. Without this the newest such row would be the
       // candidate and we would lean entirely on the status-6 check to save us.
+      // lineMode scopes this to the SAME HALF of a split supplier. Blaklader and Snickers each run
+      // twice a day — customer orders early, reorder late — and both log under the one supplier
+      // name, so an unscoped match lets the reorder run adopt the customer run's orphaned draft and
+      // empty it. Rows written before this existed carry no lineMode and still match, which keeps
+      // adoption working for every unsplit supplier and for anything logged earlier.
       `SELECT context FROM purchasing_error_log
         WHERE upper(supplier) = $1
           AND severity = 'error'
           AND created_at > now() - ($2 || ' days')::interval
           AND context ? 'poId'
-        ORDER BY id DESC LIMIT 1`, [String(supplierKey).toUpperCase(), ADOPT_LOOKBACK_DAYS]);
+          AND ($3::text IS NULL OR context->>'lineMode' IS NULL OR context->>'lineMode' = $3)
+        ORDER BY id DESC LIMIT 1`, [String(supplierKey).toUpperCase(), ADOPT_LOOKBACK_DAYS, lineMode || null]);
     poId = r.rows[0] && r.rows[0].context && Number(r.rows[0].context.poId);
   } catch { return null; }                       // no log, no adoption — just make a new PO
   if (!poId) return null;
@@ -1466,7 +1472,12 @@ export async function createComboPOLive(opts = {}) {
   let adopted = null;
   if (execute && !opts.fillExistingPoId && opts.reuseExistingPo !== false) {
     try {
-      const found = await findRecordedFailedPo(opts.logPool, supplierKey, contactId);
+      // Read the mode off opts, NOT off the includeSalesOrders/includeLowInv consts — those are
+      // declared further down (sections 1 and 2) and this block runs first, so touching them here
+      // is a temporal-dead-zone ReferenceError on every single PO creation, split or not.
+      const adoptMode = opts.lineMode
+        || (opts.includeSalesOrders === false ? 'low' : opts.includeLowInv === false ? 'so' : null);
+      const found = await findRecordedFailedPo(opts.logPool, supplierKey, contactId, adoptMode);
       if (found && found.reject) {
         adopted = { poId: found.poId, skipped: found.reject };       // recorded, but no longer ours to reuse
       } else if (found) {
@@ -1485,12 +1496,28 @@ export async function createComboPOLive(opts = {}) {
 
   // 1. SO-driven demand + per-SKU qty (for dedupe). hasBrandDetect = this is a hardcoded
   // brand-regex supplier (vs a dynamic/email supplier with a weak name-derived detector).
+  //
+  // includeSalesOrders=false is the mirror of includeLowInv=false: order ONLY the reorder and
+  // leave customer demand alone. It exists so a supplier can be split into two runs a day —
+  // customer orders early, replenishment late — instead of one combined PO.
+  //
+  // THE DEDUPE STILL HOLDS, by a different route. When both halves are on one PO, low-inv qty is
+  // reduced by soQtyBySku below. Split apart, that map is empty — but fetchLowInventory computes
+  // Minimum + Open SO - On PO - On hand, and the morning PO is ON ORDER by the time the reorder
+  // runs, so the same units cancel there instead. If the morning run did NOT place, nothing is on
+  // order and the reorder covers the full need, which is also right.
+  const includeSalesOrders = opts.includeSalesOrders !== false;
   const hasBrandDetect = !!(opts.detect || reg.detect);
-  const { contributors, demandAudit, tagFlags } = await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect,
-    // REGISTRY contactId only. `contactId` above falls back to 37419 (Fristads) for a supplier that
-    // is not in the registry, and unioning on that would pull Fristads products into a dynamically
-    // resolved supplier's demand. No registry entry, no supplier-owned union — name matching only.
-    contactId: (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].contactId) || null });
+  const { contributors, demandAudit, tagFlags } = includeSalesOrders
+    ? await gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect,
+      // REGISTRY contactId only. `contactId` above falls back to 37419 (Fristads) for a supplier that
+      // is not in the registry, and unioning on that would pull Fristads products into a dynamically
+      // resolved supplier's demand. No registry entry, no supplier-owned union — name matching only.
+      contactId: (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].contactId) || null })
+    // tagFlags MUST stay an array — callers do .length and .map on it, and the
+    // "tagged but contributed nothing" alert would misfire or throw on an object. There is nothing
+    // to flag here anyway: a reorder-only run never looks at tags, so it cannot judge them.
+    : { contributors: [], demandAudit: { skipped: 'reorder-only run — sales-order demand not gathered' }, tagFlags: [] };
   const soLines = []; const soQtyBySku = {};
   for (const c of contributors) for (const l of c.lines) {
     const cost = await costOfLive(l.productId, priceListId, l.itemCost);
@@ -1599,7 +1626,7 @@ export async function createComboPOLive(opts = {}) {
     adoptedLinesMissing: adopted && adopted.cleared && adopted.cleared.length
       ? adopted.cleared.filter((c) => ![...soLines, ...lowLines].some((l) => String(l.sku || '').toUpperCase() === c.sku)).map((c) => c.sku)
       : [],
-    soLines, separator: '=====LOW INV====', lowLines, padInfo, includeLowInv,
+    soLines, separator: '=====LOW INV====', lowLines, padInfo, includeLowInv, includeSalesOrders,
     priceOverridesApplied,                                          // portal-price overrides applied to line costs (Elastic suppliers)
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),

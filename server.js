@@ -9758,6 +9758,44 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   console.log('✅ Blaklader auto-purchase poller scheduled (weekdays 09:30 UK, £300 carriage-paid threshold)');
 } else { console.log('⏸️  Blaklader auto-purchase poller DISABLED (BLAKLADER_SCHEDULE_ENABLED=false)'); }
 
+// ── The REORDER halves: Blaklader 16:20, Snickers 16:40 (owner, 2026-09-07) ──────────────────
+// The 09:30 and 10:00 runs now order customer demand only; these two order the replenishment.
+// Late on purpose — by this point the day's orders are already on a PO, so lowInventory's
+// "Minimum + Open SO - On PO - On hand" sees them as on order and does not buy the same units
+// twice. That subtraction is what replaces the same-PO dedupe the combined run relied on.
+//
+// They share the supplier's own kill switch: turning BLAKLADER_SCHEDULE_ENABLED off stops both
+// halves, which is what anyone reaching for it would expect.
+if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 16 && uk.minute >= 20 && uk.minute < 40)) return; // 16:20–16:39, before Snickers' reorder
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'BLAKLADER_LOW' })
+        .then((r) => { if (!r.skipped) console.log('[blaklader-reorder]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[blaklader-reorder] error:', e.message));
+    } catch (e) { console.error('[blaklader-reorder] poller error:', e.message); }
+  }, 60 * 1000);
+  console.log('✅ Blaklader REORDER poller scheduled (weekdays 16:20 UK, low-inventory only)');
+}
+
+if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 16 && uk.minute >= 40)) return; // 16:40–16:59
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'SNICKERS_LOW' })
+        .then((r) => { if (!r.skipped) console.log('[snickers-reorder]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[snickers-reorder] error:', e.message));
+    } catch (e) { console.error('[snickers-reorder] poller error:', e.message); }
+  }, 60 * 1000);
+  console.log('✅ Snickers REORDER poller scheduled (weekdays 16:40 UK, low-inventory only)');
+}
+
 // Tags that name a supplier we automate but never reach it. READ-ONLY — it reports, it never edits
 // a tag: a tag is somebody's instruction about what to buy, and rewriting one on a guess is how the
 // wrong thing gets ordered.

@@ -1657,7 +1657,7 @@ async function snickersLineStatus(altItemsUrl, sku) {
   } catch { return null; }
 }
 
-async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [] } = {}) {
+async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [], includeSalesOrders = true, includeLowInv = true } = {}) {
   const steps = {};
   // excludeSkus: lines Hultafors genuinely cannot sell us — a discontinued code is the usual one.
   // Kept OFF the basket so one dead line cannot strand the whole order (486870 held £6,399 of 98
@@ -1666,7 +1666,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // that sales order unfulfillable while looking like a clean run.
   const excl = new Set((excludeSkus || []).map((x) => String(x).trim().toUpperCase()).filter(Boolean));
   let po;
-  try { po = await createPo({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool, includeSalesOrders, includeLowInv }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -2390,10 +2390,10 @@ async function blakladerOrderForPo(altItemsUrl, poId, { scan = 8 } = {}) {
   }
   return null;
 }
-async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, includeSalesOrders = true, includeLowInv = true } = {}) {
   const steps = {};
   let po;
-  try { po = await createPo({ supplierKey: 'BLAKLADER', execute: live, padToThreshold, logPool: pool }); }
+  try { po = await createPo({ supplierKey: 'BLAKLADER', execute: live, padToThreshold, logPool: pool, includeSalesOrders, includeLowInv }); }
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
@@ -2587,13 +2587,26 @@ const SCHEDULED_SUPPLIERS = {
   FRISTADS: { supplierKey: 'FRISTADS', stateId: 1, placeFn: placeFristadsOrder, threshold: Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300) },
   CARHARTT: { supplierKey: 'CARHARTT', stateId: 6, placeFn: placeCarharttOrder, threshold: Number(process.env.CARHARTT_FREESHIP_THRESHOLD || 300) }, // Elastic Suite; also gated on Alt-Items by CARHARTT_PLACE_ENABLED
   'HELLY HANSEN': { supplierKey: 'HELLY HANSEN', stateId: 7, placeFn: placeHellyHansenOrder, threshold: Number(process.env.HELLYHANSEN_FREESHIP_THRESHOLD || 300) }, // Elastic Suite; gated on Alt-Items by HELLYHANSEN_PLACE_ENABLED
-  SNICKERS: { supplierKey: 'SNICKERS', stateId: 5, placeFn: placeSnickersOrder, threshold: Number(process.env.SNICKERS_FREESHIP_THRESHOLD || 300) }, // Hultafors portal worker; £300 ex-VAT failsafe (rarely hit — high volume) so tiny orders accumulate instead of placing daily. Real Snickers carriage terms are "?" on the supplier sheet — confirm
+  // SNICKERS and BLAKLADER are SPLIT into two runs a day (owner, 2026-09-07).
+  //
+  // lineMode 'so' orders customer demand only, early; 'low' orders the reorder only, late. The
+  // point is that the two have different urgency and different economics, and one combined PO gave
+  // them the same treatment: a small reorder total could hold up customer stock under the
+  // free-carriage threshold, while customer demand carrying the order over that line meant tiny
+  // reorders shipped immediately whether they were worth shipping or not. Split, each half is
+  // judged on its own — customers first thing, replenishment when it earns its carriage.
+  //
+  // Each half needs its OWN stateId: the day-claim is per state row, so sharing one would mean the
+  // morning run claimed the day and the afternoon never fired.
+  SNICKERS: { supplierKey: 'SNICKERS', stateId: 5, placeFn: placeSnickersOrder, threshold: Number(process.env.SNICKERS_FREESHIP_THRESHOLD || 300), lineMode: 'so' }, // Hultafors portal worker; £300 ex-VAT failsafe (rarely hit — high volume) so tiny orders accumulate instead of placing daily. Real Snickers carriage terms are "?" on the supplier sheet — confirm
+  SNICKERS_LOW: { supplierKey: 'SNICKERS', stateId: 18, placeFn: placeSnickersOrder, threshold: Number(process.env.SNICKERS_FREESHIP_THRESHOLD || 300), lineMode: 'low' }, // reorder half, 16:40
   UNEEK: { supplierKey: 'UNEEK', stateId: 3, placeFn: placeUneekOrder, threshold: Number(process.env.UNEEK_FREESHIP_THRESHOLD || 100) }, // email supplier, free carriage @ £100 ex-VAT, no min order
   CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder, threshold: Number(process.env.CASTLE_FREESHIP_THRESHOLD || 150) }, // Castle free carriage @ £150 ex-VAT
   STERLING: { supplierKey: 'STERLING', stateId: 4, placeFn: placeSterlingOrder, threshold: Number(process.env.STERLING_FREESHIP_THRESHOLD || 150) },
   PORTWEST: { supplierKey: 'PORTWEST', stateId: 8, placeFn: placePortwestOrder, threshold: Number(process.env.PORTWEST_FREESHIP_THRESHOLD || 150) }, // portwest.com CSV upload + checkout_summary; free carriage @ £150 ex-VAT (else £7.50)
   PENCARRIE: { supplierKey: 'PENCARRIE', stateId: 9, placeFn: placePencarrieOrder, threshold: Number(process.env.PENCARRIE_FREESHIP_THRESHOLD || 175) }, // official pcautoorder XML API (parkorder=2); carriage paid @ £175 ex-VAT, else £8.70 (BRANDS_supplier_list_NEW_2025.xlsx "Supplier Info", 2026-08-17 — was a £150 guess)
-  BLAKLADER: { supplierKey: 'BLAKLADER', stateId: 10, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300) }, // api.blaklader.com order API (POST /order/orders); carriage paid @ £300 ex-VAT, else £13.00 (same sheet — was a £150 guess); submit body still needs first-order validation
+  BLAKLADER: { supplierKey: 'BLAKLADER', stateId: 10, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300), lineMode: 'so' }, // api.blaklader.com order API (POST /order/orders); carriage paid @ £300 ex-VAT, else £13.00 (same sheet — was a £150 guess); submit body still needs first-order validation
+  BLAKLADER_LOW: { supplierKey: 'BLAKLADER', stateId: 17, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300), lineMode: 'low' }, // reorder half, 16:20
   SCRUFFS: { supplierKey: 'SCRUFFS', stateId: 11, placeFn: placeScruffsOrder, threshold: Number(process.env.SCRUFFS_FREESHIP_THRESHOLD || 100) }, // email supplier (salesorders@scruffs.com), BP emails its own PO PDF; carriage minimum £100 ex-VAT — a £90 order was seen carrying carriage
   'PERFORMANCE BRANDS': { supplierKey: 'PERFORMANCE BRANDS', stateId: 12, placeFn: placePerformanceBrandsOrder, threshold: Number(process.env.PERFORMANCE_BRANDS_FREESHIP_THRESHOLD || 200) }, // WooCommerce trade shop; free delivery @ £200 ex-VAT (user), else £7.00 flat. Needs PERFORMANCE_BRANDS_USER/PASS on Alt-Items
   MASCOT: { supplierKey: 'MASCOT', stateId: 13, placeFn: placeMascotOrder, threshold: Number(process.env.MASCOT_FREESHIP_THRESHOLD || 250) }, // b2b.mascot.dk two-stage SAP commit (CreateOrder then ReleaseOrder); free carriage @ £250 ex-VAT. Basket shows LIST price (~1.695x our cost) — never threshold-test on it
@@ -2646,6 +2659,11 @@ const WINDOW_DISPLAY = {
   V12: { at: '12:20' },
   BUCKLER: { at: '12:30' },
   CHADWICK: { at: '12:40' },
+  // The reorder halves of the split suppliers. Deliberately last in the day: replenishment is not
+  // customer-urgent, and by running after every other window they see the day's orders already on
+  // the PO, so the reorder is calculated against what has actually been bought.
+  BLAKLADER_LOW: { at: '16:20' },
+  SNICKERS_LOW: { at: '16:40' },
 };
 
 export async function schedulerState(pool) {
@@ -2697,8 +2715,13 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     }
 
     // dry-run the combined PO to value the demand (net, ex-VAT)
+    // The value-check MUST see the same half the placement will order. Valuing the combined demand
+    // for a reorder-only run would threshold-test it against money that run is never going to
+    // spend, so it would place — or wait — on a figure that does not exist.
+    const lineMode = cfg.lineMode || 'both';
+    const splitOpts = { includeSalesOrders: lineMode !== 'low', includeLowInv: lineMode !== 'so' };
     let plan;
-    try { plan = await createPo({ supplierKey: cfg.supplierKey, execute: false }); }
+    try { plan = await createPo({ supplierKey: cfg.supplierKey, execute: false, ...splitOpts }); }
     catch (e) { throw stepErr('value-check', `couldn't value the demand (Brightpearl down or demand read failed): ${e.message}`); }
     if (plan.unresolvedSkus && plan.unresolvedSkus.length) throw stepErr('value-check', `low-inventory item codes don't match any Brightpearl product: ${plan.unresolvedSkus.join(', ')}`);
     const lines = [...(plan.soLines || []), ...(plan.lowLines || [])];
@@ -2759,8 +2782,9 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
         // visible (no run report, demand still queued) instead of DUPLICATED and invisible.
         // A deliberate re-run is still possible with force:true.
         await saveState(pool, { id: cfg.stateId, workingDaysWaited: 0, lastRunDate: uk.date, result: { supplier: cfg.supplierKey, ran: uk.date, claimedAt: `${uk.hour}:${String(uk.minute).padStart(2, '0')}`, state: 'placing — day claimed before contacting the supplier' } }).catch(() => {});
-        placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo, excludeSkus });
-        decision = `placed — ${reason}`; newWaitDays = 0;
+        placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo, excludeSkus, ...splitOpts });
+        decision = `placed — ${reason}` + (lineMode === 'so' ? ' (customer orders)' : lineMode === 'low' ? ' (reorder)' : '');
+        newWaitDays = 0;
       }
     }
 
@@ -2772,7 +2796,11 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     const step = e.step || 'unknown';
     const report = { supplier: cfg.supplierKey, ran: uk.date, dryRun, step, error: e.message };
     // persist to the error log + email a specific alert (what step, what went wrong)
-    await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, ...(activePoId ? { poId: activePoId } : {}), ...(e.context || {}) } }).catch(() => {});
+    // lineMode is recorded so PO adoption can tell the two halves of a split supplier apart. Both
+    // log under the same supplier name, so without it the 16:20 reorder run would happily adopt the
+    // 09:30 customer run's orphaned draft, empty it, and refill it with reorder lines only —
+    // dropping the customer lines from that PO with nothing to show it had happened.
+    await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, lineMode, ...(activePoId ? { poId: activePoId } : {}), ...(e.context || {}) } }).catch(() => {});
     if (!dryRun) { try { await saveState(pool, { id: cfg.stateId, workingDaysWaited: (await getState(pool, cfg.stateId)).working_days_waited, lastRunDate: uk.date, result: report }); } catch {} }
     return report;
   } finally { running = false; }
