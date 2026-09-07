@@ -177,6 +177,17 @@ export const SUPPLIERS = {
   // field and already in use on orders raised by hand, so the automation writes the same one rather
   // than the shared PCF_STOCKPO.
   BUCKLER: { contactId: 8981, costList: 20, poField: 'PCF_BUCKPO', lowInvSupplierId: 8981, brandIds: [149], detect: (n) => /buckler|buckbootz/i.test(n || '') },
+  // PULSAR UK (contact 11807, brand 168 "PULSAR®"). 1,130 live products; SKUs are code-colour-size
+  // (P487-YEL-2XL). The registry entry only makes Pulsar RESOLVABLE — for tag routing, previews and
+  // demand. Nothing orders until there is a SCHEDULED_SUPPLIERS entry and a poller, which is
+  // deliberate: the ordering route is not settled yet.
+  //
+  // ⚠️ 251 of the 1,130 live products (22%) have NO primary supplier set in Brightpearl. The
+  // low-inventory report is keyed on supplier, so those are invisible to REPLENISHMENT — they will
+  // never reorder, silently, however this supplier is ordered. Customer demand still finds them,
+  // because that goes by brand. Setting primarySupplierId to 11807 on those 251 is the fix, and it
+  // is a Brightpearl data job, not a code one.
+  PULSAR: { contactId: 11807, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 11807, brandIds: [168], detect: (n) => /pulsar/i.test(n || '') },
   V12: { contactId: 92811, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 92811, brandIds: [279], detect: (n) => /\bv\s*12\b/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
@@ -435,6 +446,11 @@ const TAG_ALIASES = {
   'BUCKLER BOOTS LTD': 'BUCKLER',
   'V12 FOOTWEAR': 'V12',
   'SNICKERS WORKWEAR': 'SNICKERS',
+  // The brand carries a ® in Brightpearl ("PULSAR®"), so a tag typed either way must land on the
+  // one key — an unmatched tag means the order contributes nothing and is only noticed by the
+  // 17:30 tag audit.
+  'PULSAR UK': 'PULSAR',
+  'PULSAR®': 'PULSAR',
 };
 // ── ALTERNATIVE SUPPLIERS INSIDE ONE TAG ─────────────────────────────────────
 // The two separators mean DIFFERENT things, and only "/" was ever handled:
