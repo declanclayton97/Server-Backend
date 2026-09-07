@@ -1518,8 +1518,18 @@ export async function createComboPOLive(opts = {}) {
     // "tagged but contributed nothing" alert would misfire or throw on an object. There is nothing
     // to flag here anyway: a reorder-only run never looks at tags, so it cannot judge them.
     : { contributors: [], demandAudit: { skipped: 'reorder-only run — sales-order demand not gathered' }, tagFlags: [] };
+  // NEWEST JOB FIRST on the PO (owner, 2026-09-07). Brightpearl's sales-order-search returns
+  // ascending, so the PO grouped its jobs oldest-first — the opposite of the order they are read
+  // in, which made checking a PO against the jobs it came from a matter of reading one list
+  // backwards against the other.
+  //
+  // Sorted HERE, where the lines are consumed, rather than in gatherLiveDemand: the demand read is
+  // shared by the previews, the audit and the demand log, and they compare against Brightpearl's
+  // own ordering. This changes how a PO is laid out, nothing about what it contains — same lines,
+  // same quantities, same totals, and the low-inv block still follows behind its separator.
+  const orderedContributors = [...contributors].sort((a, b) => Number(b.id) - Number(a.id));
   const soLines = []; const soQtyBySku = {};
-  for (const c of contributors) for (const l of c.lines) {
+  for (const c of orderedContributors) for (const l of c.lines) {
     const cost = await costOfLive(l.productId, priceListId, l.itemCost);
     soLines.push({ productId: l.productId, sku: l.sku, name: l.name, qty: l.qty, cost, order: c.id, taxCode: l.taxCode });
     const k = String(l.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + l.qty;
@@ -1687,7 +1697,9 @@ export async function createComboPOLive(opts = {}) {
 
     // note (SO#nnn render as clickable links)
     const nl = [`Auto-PO for ${supplierKey}.`];
-    if (soLines.length) { nl.push('Order demand from:'); for (const c of contributors) nl.push(`  SO#${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')); }
+    // Same order as the rows below it — a note listing the jobs oldest-first above rows grouped
+    // newest-first is the same mismatch this change exists to remove, just moved onto the note.
+    if (soLines.length) { nl.push('Order demand from:'); for (const c of orderedContributors) nl.push(`  SO#${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')); }
     if (lowLines.length) { nl.push('Low-inventory replenishment:'); for (const l of lowLines) nl.push(`  ${l.sku} x${l.qty}`); }
     if (skippedBundles.length) { nl.push('⚠ SKIPPED — bundles (cannot add to a PO; order the components manually):'); for (const b of skippedBundles) nl.push(`  ${b.sku || b.productId} x${b.qty} (${b.name || ''})`); }
     const addedOn = new Date().toISOString().replace('Z', '+00:00');
