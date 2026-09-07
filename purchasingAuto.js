@@ -1545,9 +1545,25 @@ export async function createComboPOLive(opts = {}) {
   const li = includeLowInv ? await fetchLowInventory({ supplierId: lowInvSupplierId, statusIds }) : { rows: [] };   // numResults omitted on purpose: 10000 silently got us 50 (see lowInventory.js)
   const lowLines = [];
   for (const d of li.rows) {
-    if (d.orderQty <= 0) continue;
+    // WHICH REPLENISHMENT FIGURE THIS RUN IS ENTITLED TO.
+    //
+    // The report's orderQty is minStock + openSO - onPO - onHand: it covers customer orders AND
+    // tops stock back to minimum, two jobs in one number. That is precisely why the dedupe below
+    // exists — the combined PO has to unpick them again.
+    //
+    // A reorder-only run must not do the first job. It has no sales orders to finalise, and the
+    // customer demand read never subtracts onOrder (its only guard is that finalise), so anything
+    // this run buys against an open SO gets bought a second time by the next customer run. Basing
+    // it on minStock alone leaves customer demand entirely to the customer half, which owns it and
+    // finalises it. No overlap, so nothing to dedupe.
+    const baseQty = includeSalesOrders
+      ? d.orderQty
+      : Math.max(0, (d.minStock || 0) - (d.onPO || 0) - (d.onHand || 0));
+    if (baseQty <= 0) continue;
+    // Only meaningful on a combined run; on a reorder-only run soQtyBySku is empty, so this is a
+    // no-op rather than a special case.
     const soQ = soQtyBySku[String(d.sku).toUpperCase()] || 0;
-    const qty = Math.max(0, d.orderQty - soQ);          // dedupe: SO units already ordered above the line
+    const qty = Math.max(0, baseQty - soQ);             // dedupe: SO units already ordered above the line
     if (qty <= 0) continue;
     const productId = await skuToProductId(d.sku);
     const cost = productId ? await costOfLive(productId, priceListId, 0) : 0;
