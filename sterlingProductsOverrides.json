@@ -7,5 +7,13 @@
     "sku": "Albany L31W30",
     "brand": "DeWalt",
     "_why": "Dewalt Albany Slim Work Trousers, 30 Waist / 31 Leg. Absent from the 2026-01-08 workbook (0 occurrences; the sizes either side are present), which blocked the whole Sterling run on 2026-08-28. Size L31W30 confirmed on sterling.famlive.net via a worker dry-run: matchedSize 30, ready true."
+  },
+  "5055160080886": {
+    "search": "Albany",
+    "colour": "Grey/Black",
+    "size": "L33W32",
+    "sku": "Albany L33W32",
+    "brand": "DeWalt",
+    "_why": "Dewalt Albany Slim Work Trousers, 32 Waist / 33 Leg (LONG). Absent from the workbook (error id 185, PO 487461, 2026-09-07). NOT verified against the live site with a worker dry-run this time (Sterling's basket is unreadable from here, so a stage() add can't be proven cleared afterwards) — instead cross-checked against data already trusted in sterlingProducts.json: Brightpearl's own size string for this product (261791) is '32 Waist, 33 Leg (LONG)', which is exactly search=Albany colour=Grey/Black size=L33W32 — the SAME style/colour/size cell as EAN 5055160085652, already present and presumably working in the workbook-derived data. Two EANs mapping to one portal cell is expected (Sterling's site has no EAN granularity); if this turns out wrong, delete this entry and check the L33W32 cell on the live site by hand before re-adding."
   }
 }
