@@ -242,11 +242,14 @@ export function buildChaseEmail(quotes, stage, urlFor) {
 
   const hi = firstNameOf(first) ? `Hi ${esc(firstNameOf(first))},` : "Hi,";
   const noun = many ? `${list.length} quotes` : `a quote`;
+  // Deliberately never says "final notice" or "last reminder". This is a sales
+  // follow-up, not a debt letter, and that wording reads like one — it also tells
+  // a customer who is simply still deciding that we are about to give up on them.
   const opener = stage === 1
     ? `We sent you ${noun} and wanted to check ${many ? "they" : "it"} reached you.`
     : stage === 2
-      ? `Just following up on the ${many ? "quotes" : "quote"} we sent — we have not heard back yet.`
-      : `This is our last reminder about the ${many ? "quotes" : "quote"} below.`;
+      ? `Just following up on the ${many ? "quotes" : "quote"} we sent you.`
+      : `Just another reminder about the ${many ? "quotes" : "quote"} we sent you — no rush, but it would be good to know either way.`;
   const subject = many
     ? (stage === 1 ? `Did you get our ${list.length} quotes?` : `Following up on your ${list.length} quotes`)
     : (stage === 1 ? `Did you get our quote? — SO${first.orderId}` : `Following up on your quote — SO${first.orderId}`);

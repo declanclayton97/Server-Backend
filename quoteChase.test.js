@@ -95,7 +95,13 @@ assertTrue("chase 1 has all four actions",
   ["go_ahead", "cancel", "more_time", "call_back"].every((a) => c1.html.includes(`action=${a}`)));
 assertTrue("chase 1 shows the value", c1.html.includes("£62.96"));
 assertTrue("text part carries the links too", c1.text.includes("action=go_ahead"));
-assertEq("chase 3 is worded as the last", buildChaseEmail(quote, 3, url).html.includes("last reminder"), true);
+// Chase 3 must not read like a debt letter — no "final notice" language, and
+// nothing telling a customer who is still deciding that we are giving up.
+const c3 = buildChaseEmail(quote, 3, url);
+assertTrue("chase 3 is a gentle reminder", c3.html.includes("Just another reminder"));
+assertEq("chase 3 never says 'last reminder'", /last reminder/i.test(c3.html), false);
+assertEq("no final-notice language anywhere", /final notice|final reminder|last chance/i.test(c3.html), false);
+assertEq("chase 2 does not scold", /have not heard back/i.test(buildChaseEmail(quote, 2, url).html), false);
 
 const r = buildResponseEmail(quote, { action: "cancel", reason: "too_expensive", note: "Got it £40 cheaper", stage: 2 });
 assertEq("response subject names the action", r.subject, "Cancel the quote — SO484347 · Sally Sanderson");
