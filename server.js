@@ -12573,6 +12573,7 @@ async function initializeQuoteChaseTable() {
     await pool.query(`
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_at TIMESTAMPTZ;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_by TEXT;
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS response_via TEXT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_id BIGINT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_name TEXT;
     `);
@@ -12830,8 +12831,13 @@ app.get('/quote/:token', async (req, res) => {
     }
     const r = q.rows[0];
     const action = String(req.query.action || '');
+    const known = QUOTE_ACTIONS.some((a) => a.key === action);
     if (r.responded_at && !action) return res.send(quoteThanksPage(r));
-    return res.send(quoteFormPage(r, action));
+    // A button press carries its action, so the answer is already known — record
+    // it on arrival rather than asking the customer to confirm what they just
+    // clicked. Nothing is recorded by this GET itself; see the page for why.
+    if (known) return res.send(quoteAutoConfirmPage(r, action));
+    return res.send(quoteFormPage(r, ''));
   } catch (e) {
     console.error('[quote-chase] response page failed:', e.message);
     res.status(500).send('Something went wrong.');
@@ -12850,27 +12856,54 @@ app.post('/api/quote-chase/respond', async (req, res) => {
     if (q.rowCount === 0) return res.status(404).json({ error: 'not found' });
     const r = q.rows[0];
 
-    const cleanNote = String(note || '').slice(0, 2000);
-    await pool.query(
-      `UPDATE quote_chase
-          SET responded_at = NOW(), response_action = $2, response_reason = $3, response_note = $4,
-              last_checked_at = NOW()
-        WHERE order_id = $1`,
-      [r.order_id, action, reason || null, cleanNote || null]
-    );
-
-    const view = quoteRowToView(r);
-    const detail = { action, reason: reason || '', note: cleanNote, stage: r.stage };
-    const mail = buildResponseEmail(view, detail);
-    const to = r.salesperson_email || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
-    await sendQuoteMail({ to, replyTo: r.customer_email || undefined, subject: mail.subject, html: mail.html });
-    if (!quoteChaseDryRun()) await postBpOrderNote(r.order_id, buildBpNote('response', detail));
-
-    console.log(`[quote-chase] SO${r.order_id} answered "${action}"${reason ? ' / ' + reason : ''} -> ${to}`);
+    await recordQuoteResponse(r, { action, reason, note, via: (req.body || {}).via });
     res.json({ success: true });
   } catch (e) {
     console.error('[quote-chase] respond failed:', e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Record a customer's answer: store it, tell the salesperson, note it on the
+// order. Shared by the scripted path, the no-script fallback and the full form,
+// so all three behave identically.
+//
+// A second answer is allowed to overwrite the first — someone who clicks "more
+// time" and then decides to go ahead should not be stuck — and the salesperson is
+// emailed again, so the latest word always reaches them.
+async function recordQuoteResponse(r, { action, reason, note, via }) {
+  const cleanNote = String(note || '').slice(0, 2000);
+  await pool.query(
+    `UPDATE quote_chase
+        SET responded_at = NOW(), response_action = $2, response_reason = $3, response_note = $4,
+            response_via = $5, last_checked_at = NOW()
+      WHERE order_id = $1`,
+    [r.order_id, action, reason || null, cleanNote || null, String(via || 'form').slice(0, 20)]
+  );
+
+  const detail = { action, reason: reason || '', note: cleanNote, stage: r.stage };
+  const mail = buildResponseEmail(quoteRowToView(r), detail);
+  const to = r.salesperson_email || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
+  await sendQuoteMail({ to, replyTo: r.customer_email || undefined, subject: mail.subject, html: mail.html });
+  if (!quoteChaseDryRun()) await postBpOrderNote(r.order_id, buildBpNote('response', detail));
+
+  console.log(`[quote-chase] SO${r.order_id} answered "${action}"${reason ? ' / ' + reason : ''} via ${via || 'form'} -> ${to}`);
+}
+
+// Fallback for a browser with JavaScript off. A POST, so a link scanner still
+// cannot trigger it — they fetch, they do not submit forms.
+app.post('/quote/:token/confirm', async (req, res) => {
+  if (!useDatabase) return res.status(503).send('Not configured');
+  try {
+    const action = String((req.body || {}).action || '');
+    if (!QUOTE_ACTIONS.some((a) => a.key === action)) return res.status(400).send('Unknown action');
+    const q = await pool.query(`SELECT * FROM quote_chase WHERE token = $1`, [req.params.token]);
+    if (q.rowCount === 0) return res.status(404).send(quotePage('Link not recognised', '<p>Please reply to the email instead.</p>'));
+    await recordQuoteResponse(q.rows[0], { action, reason: null, note: '', via: 'noscript' });
+    res.send(quoteThanksPage(q.rows[0]));
+  } catch (e) {
+    console.error('[quote-chase] confirm failed:', e.message);
+    res.status(500).send('Something went wrong.');
   }
 });
 
@@ -12978,6 +13011,7 @@ app.get('/api/quote-chase/list', async (req, res) => {
         responseAction: r.response_action,
         responseReason: r.response_reason,
         responseNote: r.response_note,
+        responseVia: r.response_via,
       })),
     });
   } catch (e) {
@@ -13003,6 +13037,96 @@ function quoteThanksPage(r) {
   return quotePage('Thank you',
     `<p>We have your answer and ${quoteEsc(r.salesperson_name || 'your account manager')} has been told.</p>
      <p style="color:#777;font-size:13px;">Quote SO${r.order_id}. If that was a mistake, just reply to the email.</p>`);
+}
+
+// One click from the email, without a security appliance answering on the
+// customer's behalf.
+//
+// Barracuda (which this domain sits behind) and Outlook Safe Links fetch every
+// URL in an email to scan it, before the recipient has opened anything. If the
+// link itself recorded the answer, the scanner would record it — "customer
+// accepted" seconds after sending, from a robot, and the chase would stop.
+//
+// So the GET records nothing. It returns a page that POSTs the answer from
+// JavaScript on load. Scanners fetch HTML; they do not run scripts, so they
+// record nothing. A real browser records instantly and the customer sees only
+// "thanks". <noscript> leaves a button for the rare person with JS off.
+//
+// Not bulletproof — a scanner driving a headless browser would still execute it —
+// but it is the strongest signal available, and responses carry `via` so a flood
+// of identical answers arriving in seconds would be recognisable.
+function quoteAutoConfirmPage(r, action) {
+  const label = (QUOTE_ACTIONS.find((a) => a.key === action) || {}).label || action;
+  const reasons = QUOTE_CANCEL_REASONS.map((x) => `
+    <label style="display:block;margin:5px 0;"><input type="radio" name="reason" value="${x.key}" style="margin-right:8px;">${quoteEsc(x.label)}</label>`).join('');
+
+  return quotePage(`Quote SO${r.order_id}`, `
+    <div id="working">
+      <p style="font-size:15px;">Recording your answer&hellip;</p>
+      <p style="color:#777;font-size:13px;">${quoteEsc(label)} &middot; quote SO${r.order_id}</p>
+    </div>
+
+    <div id="done" style="display:none;">
+      <p style="font-size:16px;"><strong>Thanks &mdash; that is logged.</strong></p>
+      <p>We have told ${quoteEsc(r.salesperson_name || 'your account manager')} that you chose
+         &ldquo;${quoteEsc(label)}&rdquo; for quote SO${r.order_id}.</p>
+      ${action === 'cancel' ? `
+      <div style="margin:18px 0;padding:16px;background:#fafafa;border-radius:6px;">
+        <div style="font-weight:bold;margin-bottom:6px;">If you don&#39;t mind saying why
+          <span style="font-weight:normal;color:#777;">(optional)</span></div>
+        <form id="extra">
+          ${reasons}
+          <textarea name="note" rows="3" placeholder="Anything else?"
+            style="width:100%;box-sizing:border-box;margin-top:8px;padding:10px;border:1px solid #ccc;border-radius:6px;font-family:inherit;"></textarea>
+          <button type="submit" style="margin-top:10px;background:#0073e6;color:#fff;border:0;padding:11px 20px;border-radius:6px;font-weight:bold;cursor:pointer;">Send that too</button>
+          <span id="extraok" style="display:none;color:#1e7b34;margin-left:10px;">Thanks.</span>
+        </form>
+      </div>` : ''}
+      <p style="color:#777;font-size:13px;">Changed your mind? Just reply to the email.</p>
+    </div>
+
+    <div id="failed" style="display:none;">
+      <p>Sorry, we could not record that automatically.</p>
+      <button id="retry" style="background:#0073e6;color:#fff;border:0;padding:12px 20px;border-radius:6px;font-weight:bold;cursor:pointer;">Try again</button>
+      <p style="color:#777;font-size:13px;">Or reply to the email and we will sort it.</p>
+    </div>
+
+    <noscript>
+      <p>Press the button to confirm: <strong>${quoteEsc(label)}</strong> for quote SO${r.order_id}.</p>
+      <form method="POST" action="/quote/${quoteEsc(r.token)}/confirm">
+        <input type="hidden" name="action" value="${quoteEsc(action)}">
+        <button type="submit" style="background:#0073e6;color:#fff;border:0;padding:13px 22px;border-radius:6px;font-size:15px;font-weight:bold;cursor:pointer;">Confirm</button>
+      </form>
+    </noscript>
+
+    <script>
+      var TOKEN = ${JSON.stringify(r.token)}, ACTION = ${JSON.stringify(action)};
+      function show(id){ ['working','done','failed'].forEach(function(x){
+        var el=document.getElementById(x); if(el) el.style.display = (x===id?'block':'none'); }); }
+      function send(){
+        show('working');
+        fetch('/api/quote-chase/respond', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ token:TOKEN, action:ACTION, via:'click' })
+        }).then(function(res){ if(!res.ok) throw new Error(); show('done'); })
+          .catch(function(){ show('failed'); });
+      }
+      send();
+      var retry=document.getElementById('retry'); if(retry) retry.addEventListener('click', send);
+      var extra=document.getElementById('extra');
+      if (extra) extra.addEventListener('submit', function(ev){
+        ev.preventDefault();
+        var rs=extra.querySelector('input[name=reason]:checked');
+        fetch('/api/quote-chase/respond', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ token:TOKEN, action:ACTION, via:'click',
+            reason: rs?rs.value:null, note: extra.note.value })
+        }).then(function(){
+          document.getElementById('extraok').style.display='inline';
+          extra.querySelector('button').disabled = true;
+        });
+      });
+    </script>`);
 }
 
 function quoteFormPage(r, preselect) {
