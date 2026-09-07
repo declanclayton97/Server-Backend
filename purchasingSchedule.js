@@ -2630,6 +2630,11 @@ const SCHEDULED_SUPPLIERS = {
 // the caller reason from those instead of from the clock.
 export const isRunInFlight = () => running;
 
+// Every supplier the schedule knows about. Exported so a host process can prove it has armed a
+// window for each one: a service that silently drops a supplier does not fail, it just never orders
+// that supplier again, and nobody finds out until the stock runs out.
+export const scheduledSupplierKeys = () => Object.keys(SCHEDULED_SUPPLIERS);
+
 // Display-only window times, so a dashboard can say "runs at 10:30" without scraping server.js.
 // THE AUTHORITY IS THE POLLERS in server.js (each one tests uk.hour/uk.minute itself) — this map
 // only describes them. If a poller time changes, change it here too or the page will lie.
