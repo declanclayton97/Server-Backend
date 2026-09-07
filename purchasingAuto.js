@@ -169,6 +169,11 @@ export const SUPPLIERS = {
   // detect is kept only as a cheap first pass that saves a product lookup on rows it already
   // recognises; brand is what catches anything renamed, which a "CT " prefix never would.
   CHADWICK: { contactId: 42485, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 42485, brandIds: [213], detect: (n) => /^ct\s/i.test(n || '') },
+  // V12 Footwear — email supplier, ordered by sending Brightpearl's own PO PDF to their order desk.
+  // 624 products, every one brand 279 ("V12") and named "V12 Footwear <style> …", so brand is the
+  // reliable signal and the name detect is a safety net rather than the primary route.
+  // Free carriage at £200 ex-VAT, £6.95 ex-VAT below it (owner, 2026-09-07).
+  V12: { contactId: 92811, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 92811, brandIds: [279], detect: (n) => /\bv\s*12\b/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },

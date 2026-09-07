@@ -9779,6 +9779,26 @@ if (process.env.TAG_AUDIT_ENABLED !== 'false') {
   console.log('✅ Supplier-tag audit scheduled (weekdays 17:30 UK)');
 } else { console.log('⏸️  Supplier-tag audit DISABLED (TAG_AUDIT_ENABLED=false)'); }
 
+// V12 Footwear auto-purchase poller — weekdays 12:20 UK. Email supplier: Brightpearl builds the PO
+// and emails its own PDF to sales@v12footwear.com, so there is no portal step that can fail.
+// Free carriage @ £200 ex-VAT; below that a £6.95 carriage row goes ON the PO before it is emailed,
+// because we order every few days and most orders pay it. State row id 15.
+// 12:20 is clear of Castle (12:00) and sits before Chadwick, which moved to 12:40 to make room.
+if (process.env.V12_SCHEDULE_ENABLED !== 'false') {
+  setInterval(() => {
+    try {
+      if (!pool) return;
+      const uk = purchasingSchedule.ukNow();
+      if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+      if (!(uk.hour === 12 && uk.minute >= 20 && uk.minute < 40)) return; // 12:20–12:39, before Chadwick
+      purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'V12' })
+        .then((r) => { if (!r.skipped) console.log('[v12-schedule]', JSON.stringify(r).slice(0, 300)); })
+        .catch((e) => console.error('[v12-schedule] error:', e.message));
+    } catch (e) { console.error('[v12-schedule] poller error:', e.message); }
+  }, 5 * 60 * 1000);
+  console.log('✅ V12 auto-purchase poller scheduled (weekdays 12:20 UK, £200 free-carriage threshold)');
+} else { console.log('⏸️  V12 auto-purchase poller DISABLED (V12_SCHEDULE_ENABLED=false)'); }
+
 // Chadwick auto-purchase poller — weekdays 12:40 UK. Two POSTs to portal.chadwicktextiles.co.uk
 // (wcp-ordupload then wcp-cartorder), whose response body IS the order number; no spreadsheet and
 // no browser worker, so it is one of the quicker suppliers. Free carriage @ £300 ex-VAT, state row

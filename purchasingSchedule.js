@@ -865,6 +865,79 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   return { poId, emailedTo: UNEEK_ORDER_EMAIL, steps };
 }
 
+// ── V12 Footwear placement chain (email supplier) ────────────────────────────
+// Same shape as Uneek and Scruffs: Brightpearl builds its own PO PDF and emails it to the supplier's
+// order desk, so there is no portal to drive and nothing to scrape. sales@v12footwear.com is on
+// their Brightpearl contact (92811), which is where emailOrderDocument reads it from.
+//
+// CARRIAGE IS THE DIFFERENCE HERE. Free over £200 ex-VAT, £6.95 ex-VAT below it, and we order every
+// few days — so most orders pay it. The other suppliers only ever WAIT for free carriage; this one
+// has to put the charge on the PO, or the PO says £X and the invoice says £X + 6.95 and every
+// reconciliation after that is out by the same £6.95 with nothing explaining it.
+//
+// It is added as a misc row at the moment of placing, and ONLY when the order is genuinely under
+// the threshold. addPoMiscRowLive refuses a duplicate of the same text, so a re-run cannot stack a
+// second charge onto a PO that already carries one.
+const V12_SUPPLIER_CONTACT = 92811;
+const V12_ORDER_EMAIL = process.env.PO_EMAIL_V12 || 'sales@v12footwear.com';
+const V12_CARRIAGE_NET = Number(process.env.V12_CARRIAGE_CHARGE || 6.95);
+const V12_CARRIAGE_FREE_OVER = Number(process.env.V12_FREESHIP_THRESHOLD || 200);
+
+async function placeV12Order(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await createPo({ supplierKey: 'V12', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw createPoErr(e); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // CARRIAGE, BEFORE THE PDF IS EMAILED. It has to be on the PO before Brightpearl renders the
+  // document, or the supplier receives a PO that does not match what they will invoice.
+  // Read the net back off the PO rather than trusting the run's own figure — padding, a dropped
+  // line or a pack multiple can all move it after the lines were counted.
+  const goodsNet = Number((po.netValue != null ? po.netValue : (po.soNet || 0) + (po.lowNet || 0))) || 0;
+  if (live && goodsNet > 0 && goodsNet < V12_CARRIAGE_FREE_OVER) {
+    try {
+      const c = await bp.addPoMiscRowLive({
+        poId, name: `Carriage (order under £${V12_CARRIAGE_FREE_OVER} ex-VAT)`,
+        net: V12_CARRIAGE_NET, qty: 1, execute: true,
+      });
+      steps.carriage = c && c.refused
+        ? { added: false, reason: c.reason, net: V12_CARRIAGE_NET }
+        : { added: true, net: V12_CARRIAGE_NET, goodsNet, freeOver: V12_CARRIAGE_FREE_OVER };
+    } catch (e) {
+      // Not fatal, but it must be visible: an order that silently omits carriage reconciles wrong
+      // every time and nothing points at why.
+      steps.carriage = { added: false, error: e.message, net: V12_CARRIAGE_NET };
+      await logPurchasingError(pool, {
+        supplier: 'V12', step: 'carriage', severity: 'review',
+        message: `Could not add the £${V12_CARRIAGE_NET} carriage line to PO#${poId} (goods £${goodsNet.toFixed(2)}, free over £${V12_CARRIAGE_FREE_OVER}): ${e.message}. The order was still placed — the PO will read £${V12_CARRIAGE_NET} light against V12's invoice.`,
+        context: { poId, goodsNet, carriage: V12_CARRIAGE_NET },
+      }).catch(() => {});
+    }
+  } else if (goodsNet >= V12_CARRIAGE_FREE_OVER) {
+    steps.carriage = { added: false, reason: `£${goodsNet.toFixed(2)} is over the £${V12_CARRIAGE_FREE_OVER} free-carriage threshold`, goodsNet };
+  }
+
+  // EMAIL Brightpearl's real PO PDF to V12's order desk.
+  const mail = await emailOrderDocument(poId, { contactId: V12_SUPPLIER_CONTACT, to: V12_ORDER_EMAIL, send: live });
+  if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${V12_ORDER_EMAIL}: ${JSON.stringify(mail).slice(0, 200)}`);
+  steps.email = { to: V12_ORDER_EMAIL, sent: true, status: mail.status };
+
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  await bp.addOrderNoteLive(poId, `PO emailed to V12 Footwear (${V12_ORDER_EMAIL}).`
+    + (steps.carriage && steps.carriage.added ? ` Carriage £${V12_CARRIAGE_NET} added — order under £${V12_CARRIAGE_FREE_OVER} ex-VAT.` : ''), V12_SUPPLIER_CONTACT).catch(() => {});
+  steps.link = { status: 7, emailedTo: V12_ORDER_EMAIL };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'V12', poId, noteContactId: V12_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `PO emailed + placed, but finalising SOs failed: ${e.message}`); } }
+  return { poId, emailedTo: V12_ORDER_EMAIL, steps };
+}
+
+
 // ── Scruffs placement chain (email supplier) ─────────────────────────────────
 // Same shape as Uneek: Brightpearl builds and emails its own PO PDF, so there is no portal or API
 // to go wrong. First order placed by hand 2026-08-20 (PO 483634, £108.70) to prove the address.
@@ -2386,6 +2459,7 @@ const SCHEDULED_SUPPLIERS = {
   SCRUFFS: { supplierKey: 'SCRUFFS', stateId: 11, placeFn: placeScruffsOrder, threshold: Number(process.env.SCRUFFS_FREESHIP_THRESHOLD || 100) }, // email supplier (salesorders@scruffs.com), BP emails its own PO PDF; carriage minimum £100 ex-VAT — a £90 order was seen carrying carriage
   'PERFORMANCE BRANDS': { supplierKey: 'PERFORMANCE BRANDS', stateId: 12, placeFn: placePerformanceBrandsOrder, threshold: Number(process.env.PERFORMANCE_BRANDS_FREESHIP_THRESHOLD || 200) }, // WooCommerce trade shop; free delivery @ £200 ex-VAT (user), else £7.00 flat. Needs PERFORMANCE_BRANDS_USER/PASS on Alt-Items
   MASCOT: { supplierKey: 'MASCOT', stateId: 13, placeFn: placeMascotOrder, threshold: Number(process.env.MASCOT_FREESHIP_THRESHOLD || 250) }, // b2b.mascot.dk two-stage SAP commit (CreateOrder then ReleaseOrder); free carriage @ £250 ex-VAT. Basket shows LIST price (~1.695x our cost) — never threshold-test on it
+  V12: { supplierKey: 'V12', stateId: 15, placeFn: placeV12Order, threshold: Number(process.env.V12_FREESHIP_THRESHOLD || 200) }, // V12 Footwear — email supplier; free carriage @ £200 ex-VAT, £6.95 below it and the charge goes ON the PO (owner, 2026-09-07)
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
 
@@ -2414,7 +2488,7 @@ export const isRunInFlight = () => running;
 const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
-  SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485,
+  SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811,
 };
 const WINDOW_DISPLAY = {
   BLAKLADER: { at: '09:30' },
@@ -2430,6 +2504,7 @@ const WINDOW_DISPLAY = {
   PORTWEST: { at: '15:00' },
   PENCARRIE: { at: '15:40' },
   UNEEK: { at: '16:00' },
+  V12: { at: '12:20' },
   CHADWICK: { at: '12:40' },
 };
 
