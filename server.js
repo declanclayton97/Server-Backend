@@ -9991,7 +9991,7 @@ const TUFF_PO_DELIVERY = {
 // Suppliers ordered by email (from the supplier order-methods list). Their order
 // email is read from env PO_EMAIL_<SUPPLIER> (e.g. PO_EMAIL_UNEEK); populate as
 // the addresses come in. No email = preview only (can't send).
-const EMAIL_SUPPLIERS = new Set(['UNEEK', 'DELTA PLUS', 'BUCKBOOTZ', 'BURLINGTON', 'CENTURION', 'PANTHER', 'ALSICO', 'TRANEMO', 'V12', 'ZECO', 'AS APPAREL', 'BLUE MAX BANNER', 'COFRA', 'DISLEY', 'ELKA', 'FUTURE GARMENTS', 'GAAARD', 'POLYCO', 'ROWLINSON', 'SHOES FOR CREWS', 'GLOBAL SAFETY', 'CLEAN BOOT', 'OCTOGRIP', 'PERFORMANCE BRANDS', 'PULSAR', 'U-POWER']);
+const EMAIL_SUPPLIERS = new Set(['UNEEK', 'DELTA PLUS', 'BUCKBOOTZ', 'BUCKLER', 'BURLINGTON', 'CENTURION', 'PANTHER', 'ALSICO', 'TRANEMO', 'V12', 'ZECO', 'AS APPAREL', 'BLUE MAX BANNER', 'COFRA', 'DISLEY', 'ELKA', 'FUTURE GARMENTS', 'GAAARD', 'POLYCO', 'ROWLINSON', 'SHOES FOR CREWS', 'GLOBAL SAFETY', 'CLEAN BOOT', 'OCTOGRIP', 'PERFORMANCE BRANDS', 'PULSAR', 'U-POWER']);
 // Recipient resolution order (see the purchasing flow): req.emailTo → the supplier's
 // PRIMARY email on its Brightpearl contact (supplierEmailOf — covers ~20 of these) →
 // PO_EMAIL_<SUPPLIER> env → this fallback map (order emails we know but that aren't on

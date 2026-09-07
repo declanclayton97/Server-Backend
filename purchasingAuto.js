@@ -253,6 +253,7 @@ const _SUPPLIER_NAME_HINTS = {
   CHADWICK: /chadwick/i, CARHARTT: /carhartt/i, MASCOT: /mascot/i, SCRUFFS: /scruffs/i,
   BLAKLADER: /bl[aå]kl[aä]der/i, SNICKERS: /snickers/i, FRISTADS: /fristads/i,
   'HELLY HANSEN': /helly/i, STERLING: /sterling/i, 'PERFORMANCE BRANDS': /performance\s*brands/i,
+  BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i,
 };
 export function tagFailsToMatch(rawTag) {
   const out = [];
@@ -426,6 +427,13 @@ const TAG_ALIASES = {
   'CASTLE CLOTHING': 'CASTLE',
   'PORTWEST CLOTHING': 'PORTWEST',
   'HELLY HANSEN WORKWEAR': 'HELLY HANSEN',
+  // Buckler is written three ways and all three mean the one supplier (owner, 2026-09-07). It also
+  // still appears as BUCKBOOTZ in the manual email-order endpoint, so without these the 12:30
+  // poller and a hand-run could each build a PO from the SAME tagged orders.
+  BUCKBOOTZ: 'BUCKLER',
+  'BUCKLER BOOTS': 'BUCKLER',
+  'BUCKLER BOOTS LTD': 'BUCKLER',
+  'V12 FOOTWEAR': 'V12',
   'SNICKERS WORKWEAR': 'SNICKERS',
 };
 // ── ALTERNATIVE SUPPLIERS INSIDE ONE TAG ─────────────────────────────────────
