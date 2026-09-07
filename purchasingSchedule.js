@@ -189,13 +189,18 @@ export async function ensureErrorTable(pool) {
 // has even decided whether to place. So a PenCarrie run that placed nothing still emailed "The
 // order was placed", and force-run-safety refused a legitimate re-run on the same false reading.
 // Left as null where the caller doesn't say, so every existing site keeps its current wording.
-export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error', placed = null } = {}) {
+// notify:false RECORDS without emailing. For an outcome that is expected, already handled, and
+// happens most days — Blaklader accepting an order and never answering — an alert every morning
+// trains everyone to ignore Blaklader alerts, which is worse than not sending one. The row is still
+// written, so the hub shows it, force-run-safety reads it and the history is intact; only the email
+// is withheld. Never use it for something nobody has looked at.
+export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error', placed = null, notify = true } = {}) {
   let errorId = null;
   // Recorded IN the context so the stored row carries the fact too — an email is read once, but
   // force-run-safety and the triage routine read the row for the rest of the day.
   const ctx = placed === null ? context : { ...(context || {}), placed };
   try { if (pool) { await ensureErrorTable(pool); const r = await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context, severity) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [supplier, step, message, ctx ? JSON.stringify(ctx) : null, severity]); errorId = r.rows[0] && r.rows[0].id; } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
-  try { await sendAlertEmail({ supplier, step, message, context: ctx, severity, placed }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); }
+  if (notify) { try { await sendAlertEmail({ supplier, step, message, context: ctx, severity, placed }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); } }
   try { await fireTriageRoutine({ supplier, step, message, context, severity, errorId }); } catch (e) { console.error('[purchasing-error-log] triage fire failed:', e.message); }
 }
 
@@ -2292,11 +2297,27 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
           cartView: (wr && wr.cartView) || (failure && failure.cartView) || null,
           checkedSupplierOrderList: true });
       }
-      steps.recovered = { workerError: String(failure.message).slice(0, 200), foundOrder: landed.internalId, via: 'blaklader order list' };
+      // IS THIS THE KNOWN ONE? Blaklader routinely accept an order and never answer the request:
+      // 27 and 31 Aug, 1, 3 and 4 Sept, every time with the order sitting on their list. That is
+      // not a fault to be told about each morning — the submit deadline catches it in five minutes,
+      // their list confirms it, and the run finalises exactly as a clean one would. Alerting daily
+      // on an outcome that is expected and already handled just teaches everyone to ignore
+      // Blaklader alerts, and then the day it IS something else nobody looks.
+      //
+      // Narrow on purpose. Only a submit that went unanswered, or a run the worker abandoned on its
+      // own ceiling, is treated as routine. A 500, an empty cart, a refused basket — anything that
+      // says something actually went wrong — still alerts even though the order was recovered,
+      // because those are not understood and one of them may not be recoverable next time.
+      const quiet = !!(wr && (wr.submitTimedOut || wr.jobCeilingHit))
+        || /did not answer within|abandoned this run after/i.test(String(failure.message || ''));
+      steps.recovered = { workerError: String(failure.message).slice(0, 200), foundOrder: landed.internalId, via: 'blaklader order list', routine: quiet };
       await logPurchasingError(pool, {
-        supplier: 'BLAKLADER', step: 'checkout-recovered', severity: 'review',
-        message: `The worker failed ("${String(failure.message).slice(0, 120)}") but the order IS at Blaklader as ${landed.internalId} (${landed.units} units, £${landed.total}). Marked placed from THEIR order list — re-running would have bought it twice.`,
-        context: { poId, landed, workerError: String(failure.message).slice(0, 400) },
+        supplier: 'BLAKLADER', step: 'checkout-recovered', severity: quiet ? 'info' : 'review',
+        notify: !quiet,
+        message: quiet
+          ? `Blaklader accepted the order and did not answer — their usual behaviour. Confirmed on THEIR order list as ${landed.internalId} (${landed.units} units, £${landed.total}) and finalised as normal. No action: the order is placed, and a re-run would buy it twice. Recorded without an alert because this is expected and already handled.`
+          : `The worker failed ("${String(failure.message).slice(0, 120)}") but the order IS at Blaklader as ${landed.internalId} (${landed.units} units, £${landed.total}). Marked placed from THEIR order list — re-running would have bought it twice.`,
+        context: { poId, landed, workerError: String(failure.message).slice(0, 400), routine: quiet },
       }).catch(() => {});
       wr = { ok: true, orderNo: landed.internalId, internalId: landed.internalId, recovered: true };
     }
