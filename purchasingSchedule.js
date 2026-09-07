@@ -724,6 +724,29 @@ async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, op
   throw stepErr('checkout', `worker job ${jobId} timed out (still running after 25 min)`);
 }
 
+// Ask the worker what its browser sees at Blaklader's checkout. READ-ONLY — cartProbe never touches
+// the basket and never submits; it exists because the empty-cart refusal records counts, not the
+// page, and the two causes it could have need opposite fixes.
+export async function blakladerCartProbe({ tries = 2 } = {}) {
+  const headers = { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET };
+  const start = await jfetch('cart-probe', `${STERLING_WORKER_URL}/place-order`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ supplier: 'BLAKLADER', ref: 'probe', lines: [{ stockCode: 'x', qty: 1 }], execute: false, async: true, opts: { cartProbe: true, tries } }),
+  });
+  const jobId = start && start.jobId;
+  if (!jobId) throw new Error(`worker didn't start a probe job: ${JSON.stringify(start).slice(0, 200)}`);
+  const deadline = Date.now() + 6 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 8000));
+    const res = await fetch(`${STERLING_WORKER_URL}/job/${jobId}`, { headers });
+    const text = await res.text();
+    let j = null; try { j = text ? JSON.parse(text) : null; } catch { /* keep polling */ }
+    if (j && j.status === 'done') return j;
+    if (j && j.status === 'error') throw new Error(`probe job errored: ${j.error}`);
+  }
+  throw new Error(`probe job ${jobId} did not finish within 6 minutes`);
+}
+
 // Fallback order-number pull: if place() didn't return the Sterling OrderID, read the
 // account's Order Status (worker ordersList mode) and find the row carrying OUR ref (PO#).
 // Retries a few times — a just-placed order can take a moment to list.

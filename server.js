@@ -9779,6 +9779,27 @@ if (process.env.TAG_AUDIT_ENABLED !== 'false') {
   console.log('✅ Supplier-tag audit scheduled (weekdays 17:30 UK)');
 } else { console.log('⏸️  Supplier-tag audit DISABLED (TAG_AUDIT_ENABLED=false)'); }
 
+// Read-only: what does the WORKER'S BROWSER actually see on Blaklader's checkout page?
+//
+// The run on 2026-09-07 refused to submit because the page parser found zero rows — while
+// Blaklader's own API cart held 63 lines / 90 units and pass 1 reported a successful reprice, which
+// an empty cart cannot do. So either the browser session is on a different cart, or the row parser
+// has stopped matching their markup. Those need opposite fixes and nothing in the failure context
+// separates them: it records counts, not the page.
+//
+// The worker's cartProbe mode logs in, opens the checkout and reports what it sees WITHOUT touching
+// the basket or submitting anything. This just exposes it, because guessing at a page nobody has
+// looked at is how the 500 cost a full day in August.
+app.get('/api/purchasing/blaklader-cart-probe', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  if (purchasingSchedule.isRunInFlight()) {
+    return res.status(409).json({ error: 'a purchasing run is IN FLIGHT — probing now would fight it for the session' });
+  }
+  try {
+    res.json(await purchasingSchedule.blakladerCartProbe({ tries: Number(req.query.tries) || 2 }));
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // V12 Footwear auto-purchase poller — weekdays 12:20 UK. Email supplier: Brightpearl builds the PO
 // and emails its own PDF to sales@v12footwear.com, so there is no portal step that can fail.
 // Free carriage @ £200 ex-VAT; below that a £6.95 carriage row goes ON the PO before it is emailed,
