@@ -13137,16 +13137,24 @@ function quoteAutoConfirmPage(r, action) {
       <p>We have told ${quoteEsc(r.salesperson_name || 'your account manager')} that you chose
          &ldquo;${quoteEsc(label)}&rdquo; for quote SO${r.order_id}.</p>
       ${action === 'cancel' ? `
-      <div style="margin:18px 0;padding:16px;background:#fafafa;border-radius:6px;">
+      <div id="extrawrap" style="margin:18px 0;padding:16px;background:#fafafa;border-radius:6px;">
         <div style="font-weight:bold;margin-bottom:6px;">If you don&#39;t mind saying why
           <span style="font-weight:normal;color:#777;">(optional)</span></div>
         <form id="extra">
           ${reasons}
           <textarea name="note" rows="3" placeholder="Anything else?"
             style="width:100%;box-sizing:border-box;margin-top:8px;padding:10px;border:1px solid #ccc;border-radius:6px;font-family:inherit;"></textarea>
-          <button type="submit" style="margin-top:10px;background:#0073e6;color:#fff;border:0;padding:11px 20px;border-radius:6px;font-weight:bold;cursor:pointer;">Send that too</button>
-          <span id="extraok" style="display:none;color:#1e7b34;margin-left:10px;">Thanks.</span>
+          <button id="extrasend" type="submit" style="margin-top:10px;background:#0073e6;color:#fff;border:0;padding:11px 20px;border-radius:6px;font-weight:bold;cursor:pointer;">Send</button>
+          <div id="extraerr" style="display:none;color:#c0392b;margin-top:8px;font-size:13px;">
+            Sorry, that did not send. Please reply to the email instead.</div>
         </form>
+      </div>
+      <!-- Replaces the form outright rather than adding a note beside it: a small
+           confirmation next to a still-visible form reads as "nothing happened". -->
+      <div id="extradone" style="display:none;margin:18px 0;padding:16px;background:#eefaf0;border-left:4px solid #1e7b34;border-radius:6px;">
+        <strong>Thanks for your feedback.</strong><br>
+        <span style="color:#555;font-size:13px;">That has been passed on to
+          ${quoteEsc(r.salesperson_name || 'your account manager')}.</span>
       </div>` : ''}
       <p style="color:#777;font-size:13px;">Changed your mind? Just reply to the email.</p>
     </div>
@@ -13182,14 +13190,22 @@ function quoteAutoConfirmPage(r, action) {
       var extra=document.getElementById('extra');
       if (extra) extra.addEventListener('submit', function(ev){
         ev.preventDefault();
+        var btn=document.getElementById('extrasend');
+        var err=document.getElementById('extraerr');
         var rs=extra.querySelector('input[name=reason]:checked');
+        err.style.display='none';
+        btn.disabled=true; btn.textContent='Sending…';
         fetch('/api/quote-chase/respond', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ token:TOKEN, action:ACTION, via:'click',
             reason: rs?rs.value:null, note: extra.note.value })
-        }).then(function(){
-          document.getElementById('extraok').style.display='inline';
-          extra.querySelector('button').disabled = true;
+        }).then(function(res){
+          if(!res.ok) throw new Error();
+          document.getElementById('extrawrap').style.display='none';
+          document.getElementById('extradone').style.display='block';
+        }).catch(function(){
+          btn.disabled=false; btn.textContent='Send';
+          err.style.display='block';
         });
       });
     </script>`);
