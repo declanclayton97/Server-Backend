@@ -1293,7 +1293,23 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     throw stepErr(r.step || 'checkout', `Chadwick did not confirm the order: ${String(r.error || JSON.stringify(r)).slice(0, 250)}${miss}`, { poId, missing: r.missing });
   }
 
-  const orderNo = r.orderNo || null;
+  // NEVER let a non-string reach the reference. Brightpearl stores whatever it is given, and an
+  // object arrives as the literal "[object Object]" — which is what PO 487454 carried on
+  // 2026-09-07 instead of SG215761. A reference that names nothing is worse than an obviously
+  // absent one: it looks filled in, so nobody checks it.
+  const rawOrderNo = r.orderNo;
+  const orderNo = (typeof rawOrderNo === 'string' || typeof rawOrderNo === 'number')
+    ? String(rawOrderNo).trim() || null
+    : null;
+  if (rawOrderNo != null && orderNo == null) {
+    await logPurchasingError(pool, {
+      supplier: 'CHADWICK', step: 'checkout', severity: 'review',
+      message: `Chadwick placed the order but did not return a usable order number (got ${typeof rawOrderNo}). `
+        + `PO#${poId} is marked placed with a fallback reference — find the real number on their order list `
+        + `by matching CustomerPO ${poId} (wcp-orders) and set it by hand.`,
+      context: { poId, rawOrderNo: JSON.stringify(rawOrderNo).slice(0, 300), rid: r.rid },
+    }).catch(() => {});
+  }
   steps.checkout = { ok: true, orderNo, cartCount: r.cartCount, rid: r.rid };
 
   const ref = orderNo || `Placed-${poId}`;
