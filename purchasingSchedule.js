@@ -685,7 +685,24 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
 // opts is passed straight through to the supplier module. Blaklader needs it: its module does NOT
 // drive the checkout UI, it posts the order body Alt-Items already built from inside the logged-in
 // page, so it must be handed { body, cartId }.
-async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, opts = null }) {
+// confirmPlaced — an OPTIONAL async probe that asks the SUPPLIER whether this PO already exists on
+// their order list. Supply it and the poll stops the moment the order is confirmed, instead of
+// waiting out a worker that is never going to answer.
+//
+// Blaklader routinely accept an order and never reply: 27 and 31 Aug, 1, 3, 4 and 7 Sept. Every one
+// of those was recovered by reading their order list — but only AFTER the worker gave up, so each
+// cost 20-25 minutes of a lock that every other supplier queues behind. On 2026-09-07 the run held
+// it from 10:35 while the order had been sitting at Blaklader almost the whole time.
+//
+// The waiting was never necessary. Their list is the authority the recovery already trusts, so ask
+// it DURING the poll: order confirmed, stop waiting, hand back the same not-ok shape a submit
+// timeout produces so the caller's existing recovery does the rest. Nothing new decides anything.
+//
+// Not before confirmAfterMs — the order cannot exist until the submit has been made, and an early
+// miss proves nothing. It matches on OUR PO number, so it can never mistake a previous order for
+// this one; a probe that throws is ignored, because failing to read the list is not evidence.
+async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, opts = null,
+  confirmPlaced = null, confirmAfterMs = 3 * 60 * 1000, confirmEveryMs = 36000 }) {
   const headers = { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET };
   const start = await jfetch('checkout', `${STERLING_WORKER_URL}/place-order`, {
     method: 'POST', headers,
@@ -693,6 +710,8 @@ async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, op
   });
   const jobId = start && start.jobId;
   if (!jobId) throw stepErr('checkout', `worker didn't start a job: ${JSON.stringify(start)}`);
+  const startedAt = Date.now();
+  let nextConfirm = startedAt + confirmAfterMs;
   const deadline = Date.now() + 25 * 60 * 1000;      // orders can be long; generous ceiling
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 12000));
@@ -720,6 +739,24 @@ async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, op
     if (!j) throw stepErr('checkout', `worker job ${jobId} returned no JSON`, { jobId });
     if (j.status === 'done') return j;            // ok OR not-ok - the caller inspects it
     if (j.status === 'error') throw stepErr('checkout', `worker job errored: ${j.error}`, { jobId, job: j });
+
+    // Still running. Ask the supplier whether the order already landed.
+    if (confirmPlaced && Date.now() >= nextConfirm) {
+      nextConfirm = Date.now() + confirmEveryMs;
+      const landed = await confirmPlaced().catch(() => null);
+      if (landed) {
+        const waited = Math.round((Date.now() - startedAt) / 60000);
+        // submitTimedOut marks this as the KNOWN unanswered-submit case, which is what makes the
+        // caller log it quietly. It is the honest label: the worker is still waiting on a reply
+        // that already produced an order.
+        return {
+          status: 'done', ok: false, earlyConfirmed: true, submitTimedOut: true, jobId, landed,
+          error: `${supplier} never answered the submit, but the order IS on their order list `
+            + `(${landed.internalId || landed.orderNumber}) — stopped waiting after ${waited} min `
+            + `instead of holding the run lock for the full 25.`,
+        };
+      }
+    }
   }
   throw stepErr('checkout', `worker job ${jobId} timed out (still running after 25 min)`);
 }
@@ -2393,7 +2430,10 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   else {
     let failure = null;
     try {
-      wr = await workerPlaceOrder({ supplier: 'BLAKLADER', ref: poId, lines: orderLines, opts: { body: prev.body, cartId: prev.cartId }, execute: true });
+      wr = await workerPlaceOrder({ supplier: 'BLAKLADER', ref: poId, lines: orderLines, opts: { body: prev.body, cartId: prev.cartId }, execute: true,
+        // Blaklader are the supplier that accepts and goes quiet, so they are the one that needs
+        // this. Same lookup the recovery below uses, just asked while there is still time to save.
+        confirmPlaced: () => blakladerOrderForPo(altItemsUrl, poId) });
       if (!wr || !wr.ok) failure = new Error(`Blaklader did not confirm the order: ${JSON.stringify((wr && (wr.error || wr)) || wr).slice(0, 250)}`);
     } catch (e) { wr = null; failure = e; }
     if (failure) {
