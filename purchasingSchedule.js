@@ -1312,7 +1312,51 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   }
   steps.checkout = { ok: true, orderNo, cartCount: r.cartCount, rid: r.rid };
 
-  const ref = orderNo || `Placed-${poId}`;
+  // PRICE CHECK against what Chadwick will ACTUALLY invoice. Chadwick was the only automated
+  // supplier with no price check at all, so a cost drift went into the accounts silently every
+  // time: on 2026-09-07 PO 487454 read £412.40 against their £405.31 and nothing flagged it — the
+  // gap was spotted by eye. Every other supplier logs this, which is how Fristads' £12 and
+  // Snickers' £2.81 surfaced the same morning.
+  //
+  // Their order list is the authority (it is what they will bill), and their price CSV names the
+  // line that moved. Purely diagnostic — the order is already placed and nothing here can unplace
+  // it, so a failure to read prices must never look like a failed order.
+  let landed = null;
+  try {
+    // Same basis every other supplier's check uses: the lines we asked for at our costs.
+    const poNet = +[...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (l.cost || 0) * l.qty, 0).toFixed(2);
+    const skus = [...new Set(orderLines.map((l) => l.sku).filter(Boolean))];
+    landed = await jfetch('price-check', `${altItemsUrl}/api/chadwick-order-lookup?pono=${encodeURIComponent(poId)}&skus=${encodeURIComponent(skus.join(','))}`, {});
+    if (landed && landed.found && landed.value != null && poNet != null) {
+      const gap = +(landed.value - poNet).toFixed(2);
+      steps.priceCheck = { theirs: landed.value, poNet: +poNet.toFixed(2), gap, theirLines: landed.lines, orderNo: landed.orderNo };
+      if (Math.abs(gap) >= 0.01) {
+        // Name the lines whose unit cost has moved, so this is actionable rather than a bare total.
+        const prices = landed.prices || {};
+        const changes = [];
+        for (const l of orderLines) {
+          const theirs = prices[String(l.sku).toUpperCase()];
+          const ours = Number(l.unitCost != null ? l.unitCost : l.cost);
+          if (theirs == null || !Number.isFinite(ours)) continue;
+          if (Math.abs(theirs - ours) >= 0.01) changes.push({ sku: l.sku, was: ours, now: theirs });
+        }
+        const named = changes.length
+          ? ` Offending line(s): ${changes.map((c) => `${c.sku} ours £${c.was.toFixed(2)} vs theirs £${c.now.toFixed(2)}`).join('; ')}.`
+          : ' Could not pin it to a line from their price file.';
+        steps.priceCheck.changes = changes;
+        await logPurchasingError(pool, {
+          supplier: 'CHADWICK', step: 'price-check', severity: 'review',
+          message: `Prices don't match: Chadwick order total £${landed.value.toFixed(2)} vs our PO net £${poNet.toFixed(2)} (diff £${gap}).${named} A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${landed.orderNo || orderNo || '(number unknown)'} still placed.`,
+          context: { poId, orderNo: landed.orderNo || orderNo, theirs: landed.value, poNet: +poNet.toFixed(2), gap, changes, theirLines: landed.lines },
+        }).catch(() => {});
+      }
+    } else if (landed && !landed.found) {
+      steps.priceCheck = { skipped: `their order list has no order carrying PO ${poId} (scanned ${landed.scanned})` };
+    }
+  } catch (e) { steps.priceCheck = { skipped: `couldn't read Chadwick's order list: ${e.message}` }; }
+
+  // Recover the order number from their list when the checkout response was unreadable.
+  const ref = orderNo || (landed && landed.found && landed.orderNo) || `Placed-${poId}`;
   await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
   let refWritten = false;
   try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
