@@ -9779,7 +9779,7 @@ if (process.env.TAG_AUDIT_ENABLED !== 'false') {
   console.log('✅ Supplier-tag audit scheduled (weekdays 17:30 UK)');
 } else { console.log('⏸️  Supplier-tag audit DISABLED (TAG_AUDIT_ENABLED=false)'); }
 
-// Chadwick auto-purchase poller — weekdays 12:30 UK. Two POSTs to portal.chadwicktextiles.co.uk
+// Chadwick auto-purchase poller — weekdays 12:40 UK. Two POSTs to portal.chadwicktextiles.co.uk
 // (wcp-ordupload then wcp-cartorder), whose response body IS the order number; no spreadsheet and
 // no browser worker, so it is one of the quicker suppliers. Free carriage @ £300 ex-VAT, state row
 // id 14.
@@ -9797,13 +9797,13 @@ if (process.env.CHADWICK_SCHEDULE_ENABLED !== 'false') {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
       if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
-      if (!(uk.hour === 12 && uk.minute >= 30)) return; // 12:30–12:59 window
+      if (!(uk.hour === 12 && uk.minute >= 40)) return; // 12:40–12:59 window
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'CHADWICK' })
         .then((r) => { if (!r.skipped) console.log('[chadwick-schedule]', JSON.stringify(r).slice(0, 300)); })
         .catch((e) => console.error('[chadwick-schedule] error:', e.message));
     } catch (e) { console.error('[chadwick-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
-  console.log('✅ Chadwick auto-purchase poller scheduled (weekdays 12:30 UK, £300 carriage-paid threshold)');
+  console.log('✅ Chadwick auto-purchase poller scheduled (weekdays 12:40 UK, £300 carriage-paid threshold)');
 } else { console.log('⏸️  Chadwick auto-purchase poller DISABLED (CHADWICK_SCHEDULE_ENABLED=false)'); }
 
 // Scruffs auto-purchase poller — weekdays 14:00 UK. Email supplier: Brightpearl builds the PO and
