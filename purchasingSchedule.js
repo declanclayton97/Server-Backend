@@ -2737,7 +2737,20 @@ const RETRY_SAFE_STEPS = new Set(['preflight', 'create-po', 'resolve']);
 // an order that DID go through and whose confirmation we failed to read — Blaklader timed out after
 // 25 minutes on 2026-08-27 and the order had in fact been placed. Fail closed: an unrecognised or
 // later step is never retried, because a duplicate order is far worse than a late one.
-const _retriedToday = new Map();   // supplierKey → uk date, so the 30-minute sweep retries ONCE
+// supplierKey → { date, count }. A BUDGET of attempts per supplier per day, not a single shot.
+//
+// One attempt was right when the sweep only ran at 17:00, by which time any fix was long deployed.
+// It is wrong as soon as the sweep runs during the day: a triage fix landing at 13:15 wants a retry
+// soon after, but an attempt spent at 11:00 — before the fix existed — used up the only one, and
+// the order then waited for tomorrow. On 2026-09-07 Sterling failed at "resolve" at 13:03, was
+// fixed by 13:15, and would still have sat unplaced until the 17:00 sweep.
+//
+// A budget is safe by the same argument that makes the sweep safe at all: only pre-supplier steps
+// are ever retried, so no attempt can reach the supplier twice. And it is self-limiting — if a
+// retry gets further and then fails at 'cart' or later, the step is no longer retry-safe and the
+// sweep stops considering it at all.
+const RETRY_ATTEMPTS_PER_DAY = 3;
+const _retriedToday = new Map();
 
 export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true } = {}) {
   const uk = ukNow();
@@ -2749,7 +2762,8 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
     catch (e) { suppliers.push({ supplier: key, skipped: 'state unreadable: ' + e.message }); continue; }
     if (!state.last_run_date || ukDateStr(state.last_run_date) !== uk.date) continue;   // never ran today
     const res = state.last_result || {};
-    const already = _retriedToday.get(key) === uk.date;
+    const spent = (() => { const r = _retriedToday.get(key); return r && r.date === uk.date ? r.count : 0; })();
+    const already = spent >= RETRY_ATTEMPTS_PER_DAY;
 
     // NO threshold re-evaluation here. A run that WAITED under the free-carriage threshold is
     // working as designed, and the sweep used to re-run it in the evening if the value had since
@@ -2790,11 +2804,21 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
       suppliers.push({ supplier: key, skipped: 'the PO its failure recorded is no longer a draft - already dealt with', poId: settledPo.poId, statusId: settledPo.statusId, step: res.step });
       continue;
     }
-    if (already) { suppliers.push({ supplier: key, skipped: 'already swept today' }); continue; }
-    if (!execute) { suppliers.push({ supplier: key, wouldRetry: true, step: res.step, error: String(res.error).slice(0, 140) }); continue; }
-    _retriedToday.set(key, uk.date);          // claim BEFORE running - same discipline as the day-claim
+    if (already) { suppliers.push({ supplier: key, skipped: `already retried ${spent}/${RETRY_ATTEMPTS_PER_DAY} times today` }); continue; }
+    if (!execute) { suppliers.push({ supplier: key, wouldRetry: true, step: res.step, attempt: spent + 1, error: String(res.error).slice(0, 140) }); continue; }
+    // Claim BEFORE running, same discipline as the day-claim, so two sweeps cannot both retry.
+    _retriedToday.set(key, { date: uk.date, count: spent + 1 });
     try {
       const r = await runSupplierScheduled({ pool, altItemsUrl, supplier: key, force: true });
+      // A run that never happened must not cost an attempt. runSupplierScheduled returns
+      // { skipped } when another run holds the lock — spending the budget on that would mean a
+      // sweep unlucky enough to land mid-run silently used up the supplier's chances without ever
+      // retrying anything. Hand it back and let the next sweep try.
+      if (r && r.skipped) {
+        _retriedToday.set(key, { date: uk.date, count: spent });
+        suppliers.push({ supplier: key, skipped: `a run was in flight — attempt not spent (${spent}/${RETRY_ATTEMPTS_PER_DAY} used)` });
+        continue;
+      }
       const poId = r && r.placement && r.placement.poId;
       suppliers.push({ supplier: key, retried: true, afterStep: res.step, placed: !!poId, poId: poId || null, decision: (r && r.decision) || null, error: (r && r.error) || null });
       await logPurchasingError(pool, {

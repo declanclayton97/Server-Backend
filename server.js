@@ -9943,7 +9943,13 @@ if (process.env.RETRY_SWEEP_ENABLED !== 'false') {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
       if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
-      if (!(uk.hour === 17 && uk.minute < 30)) return;               // 17:00–17:29 window
+      // 11:00-17:29, not just 17:00. A fix deployed at lunchtime used to wait until the evening
+      // sweep before the order it unblocked could be placed — Sterling failed at "resolve" at 13:03
+      // on 2026-09-07, was fixed by 13:15, and would still have sat unplaced for nearly four hours.
+      // Retrying sooner is safe for the same reason retrying at all is: only pre-supplier steps are
+      // eligible, so no attempt can reach the supplier twice, and the per-day attempt budget means
+      // an early try that fails does not use up the day.
+      if (!(uk.hour >= 11 && (uk.hour < 17 || uk.minute < 30))) return; // 11:00–17:29
       purchasingSchedule.retrySafeFailuresToday({ pool, altItemsUrl: ALT_ITEMS_URL, execute: true })
         .then((r) => { if ((r.suppliers || []).some((s) => s.retried)) console.log('[retry-sweep]', JSON.stringify(r).slice(0, 500)); })
         .catch((e) => console.error('[retry-sweep] error:', e.message));
