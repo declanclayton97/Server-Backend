@@ -12909,6 +12909,23 @@ app.post('/api/quote-chase/test-send', async (req, res) => {
     if (!/^[^@\s]+@tuffshop\.co\.uk$/i.test(to)) {
       return res.status(400).json({ error: 'recipient must be an @tuffshop.co.uk address' });
     }
+    // Cooldown. This endpoint fires a real email, which makes it tempting to use
+    // as a readiness probe in a retry loop — I did exactly that and sent someone
+    // three copies. One test per recipient per minute is plenty.
+    const recent = await pool.query(
+      `SELECT first_seen_at FROM quote_chase
+        WHERE is_test = TRUE AND lower(customer_email) = lower($1)
+          AND first_seen_at > NOW() - INTERVAL '60 seconds'
+        ORDER BY first_seen_at DESC LIMIT 1`,
+      [to]
+    );
+    if (recent.rowCount > 0) {
+      return res.status(429).json({
+        error: 'a test was already sent to that address in the last minute — wait a moment',
+        lastSentAt: recent.rows[0].first_seen_at,
+      });
+    }
+
     const stage = Math.min(3, Math.max(1, parseInt((req.body || {}).stage, 10) || 1));
     const orderId = 900000000 + Math.floor(Math.random() * 8999999);
     const token = crypto.randomUUID();
