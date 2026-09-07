@@ -12573,6 +12573,7 @@ async function initializeQuoteChaseTable() {
     await pool.query(`
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_at TIMESTAMPTZ;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_by TEXT;
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS response_via TEXT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_id BIGINT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_name TEXT;
@@ -12656,8 +12657,8 @@ function quoteResponseUrl(token) {
   return `${quotePublicBase()}/quote/${token}?e=1`;
 }
 
-async function sendQuoteMail({ to, replyTo, subject, html, text }) {
-  if (quoteChaseDryRun()) {
+async function sendQuoteMail({ to, replyTo, subject, html, text, force }) {
+  if (quoteChaseDryRun() && !force) {
     console.log(`[quote-chase] DRY RUN — would email ${to} (reply-to ${replyTo || '-'}): ${subject}`);
     return { dryRun: true };
   }
@@ -12703,7 +12704,7 @@ async function pollQuoteChase() {
   // Anything we were tracking that has left the status is settled — stop chasing.
   await pool.query(
     `UPDATE quote_chase SET still_quote_sent = FALSE, last_checked_at = NOW()
-      WHERE still_quote_sent = TRUE AND NOT (order_id = ANY($1::bigint[]))`,
+      WHERE still_quote_sent = TRUE AND is_test = FALSE AND NOT (order_id = ANY($1::bigint[]))`,
     [liveIds.length ? liveIds : [0]]
   );
 
@@ -12747,7 +12748,7 @@ async function pollQuoteChase() {
   const open = await pool.query(
     `SELECT * FROM quote_chase
       WHERE still_quote_sent = TRUE AND seeded = FALSE AND responded_at IS NULL
-        AND stopped_at IS NULL AND stage <= $1
+        AND stopped_at IS NULL AND is_test = FALSE AND stage <= $1
         AND NOT (COALESCE(channel_id, 0) = ANY($2::bigint[]))`,
     [QUOTE_CHASE_CONFIG.stageWorkingDays.length, quoteExcludedChannelsParam()]
   );
@@ -12884,11 +12885,76 @@ async function recordQuoteResponse(r, { action, reason, note, via }) {
   const detail = { action, reason: reason || '', note: cleanNote, stage: r.stage };
   const mail = buildResponseEmail(quoteRowToView(r), detail);
   const to = r.salesperson_email || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
-  await sendQuoteMail({ to, replyTo: r.customer_email || undefined, subject: mail.subject, html: mail.html });
-  if (!quoteChaseDryRun()) await postBpOrderNote(r.order_id, buildBpNote('response', detail));
+  await sendQuoteMail({ to, replyTo: r.customer_email || undefined, subject: mail.subject, html: mail.html, force: !!r.is_test });
+  if (!quoteChaseDryRun() && !r.is_test) await postBpOrderNote(r.order_id, buildBpNote('response', detail));
 
   console.log(`[quote-chase] SO${r.order_id} answered "${action}"${reason ? ' / ' + reason : ''} via ${via || 'form'} -> ${to}`);
 }
+
+// Send one real chase email to an internal address, so the whole customer path
+// can be walked before this is ever pointed at a customer.
+//
+// Kept safe by construction rather than by being careful:
+//   - recipient must be @tuffshop.co.uk, so it cannot reach a customer
+//   - the row uses a synthetic order id, so no real quote is touched
+//   - is_test rows are invisible to the poller and the dashboard, so one test
+//     cannot flip the dashboard out of live-read or start a real sequence
+//   - it never writes a Brightpearl note
+// It is the only place that sends while QUOTE_CHASE_DRY_RUN is on, and only for
+// the message it is explicitly asked to send.
+app.post('/api/quote-chase/test-send', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const to = String((req.body || {}).to || '').trim();
+    if (!/^[^@\s]+@tuffshop\.co\.uk$/i.test(to)) {
+      return res.status(400).json({ error: 'recipient must be an @tuffshop.co.uk address' });
+    }
+    const stage = Math.min(3, Math.max(1, parseInt((req.body || {}).stage, 10) || 1));
+    const orderId = 900000000 + Math.floor(Math.random() * 8999999);
+    const token = crypto.randomUUID();
+
+    await pool.query(
+      `INSERT INTO quote_chase
+         (order_id, token, entered_status_at, seeded, is_test, customer_name, company_name,
+          customer_email, net_value, reference, salesperson_id, salesperson_name, salesperson_email, stage)
+       VALUES ($1,$2,NOW(),FALSE,TRUE,$3,$4,$5,$6,$7,NULL,$8,$9,$10)`,
+      [orderId, token, (req.body || {}).customerName || 'Dec Clayton', 'Tuff Workwear Ltd (test)',
+       to, (req.body || {}).netValue || 249.99, 'TEST-QUOTE-CHASE',
+       (req.body || {}).salespersonName || 'Helen Jackson', to, stage - 1]
+    );
+
+    const view = { ...quoteRowToView((await pool.query(`SELECT * FROM quote_chase WHERE token=$1`, [token])).rows[0]) };
+    const mail = buildChaseEmail([view], stage, () => quoteResponseUrl(token));
+    await sendQuoteMail({ to, replyTo: to, subject: mail.subject, html: mail.html, text: mail.text, force: true });
+
+    console.log(`[quote-chase] TEST chase ${stage} sent to ${to} (order ${orderId}, token ${token})`);
+    res.json({
+      success: true, orderId, token, stage,
+      links: Object.fromEntries(QUOTE_ACTIONS.map((a) => [a.key, `${quoteResponseUrl(token)}&action=${a.key}`])),
+      watch: `${quotePublicBase()}/api/quote-chase/test-status/${token}`,
+    });
+  } catch (e) {
+    console.error('[quote-chase] test-send failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Watch a test row so the response can be seen landing without the dashboard.
+app.get('/api/quote-chase/test-status/:token', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const q = await pool.query(`SELECT * FROM quote_chase WHERE token = $1 AND is_test = TRUE`, [req.params.token]);
+    if (q.rowCount === 0) return res.status(404).json({ error: 'no such test' });
+    const r = q.rows[0];
+    res.json({
+      orderId: Number(r.order_id), sentTo: r.customer_email, stage: r.stage,
+      respondedAt: r.responded_at, action: r.response_action,
+      reason: r.response_reason, note: r.response_note, via: r.response_via,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Fallback for a browser with JavaScript off. A POST, so a link scanner still
 // cannot trigger it — they fetch, they do not submit forms.
@@ -12946,7 +13012,7 @@ app.get('/api/quote-chase/list', async (req, res) => {
   try {
     const q = await pool.query(
       `SELECT * FROM quote_chase
-        WHERE still_quote_sent = TRUE
+        WHERE still_quote_sent = TRUE AND is_test = FALSE
           AND NOT (COALESCE(channel_id, 0) = ANY($1::bigint[]))
         ORDER BY entered_status_at DESC`,
       [quoteExcludedChannelsParam()]
@@ -12960,7 +13026,7 @@ app.get('/api/quote-chase/list', async (req, res) => {
     // Deliberately does NOT resolve each order's true status-entry time: that is
     // one note lookup per order (126+ calls) and far too slow for a page load.
     // updatedOn is close enough for an age column and is flagged as such.
-    if (q.rowCount === 0 && BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
+    if (q.rowCount === 0 && BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {   // q already excludes is_test
       const ids = await bpQuoteSentOrderIds();
       const orders = [];
       for (let i = 0; i < ids.length; i += 200) {
