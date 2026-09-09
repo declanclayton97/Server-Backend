@@ -1120,6 +1120,19 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
     if (rr && rr.ok && rr.url && rr.pid) resolved.push({ ...l, url: rr.url, pid: rr.pid, sitePrice: rr.price, maxQty: rr.maxQty });
     else failedLines.push({ sku: l.sku, reason: (rr && rr.reason) || 'could not resolve', outOfStock: !!(rr && rr.outOfStock), lowInv: !!l.lowInv });
   }
+  // Two SO lines can resolve to the SAME variation (two orders both wanting PB271-BRN-06). The
+  // worker types one quantity into one box per pid per page visit — sending the same pid twice
+  // overwrites the box instead of summing it, so the second line is reported as added but never
+  // actually reaches the basket (error 212, 2026-09-09: added 6/expected 6, but only 5 units in
+  // cart). Same fix as Sterling's byVariant merge: one resolved line per pid, qty summed, before
+  // the worker ever sees it.
+  const byPid = new Map();
+  for (const l of resolved) {
+    const cur = byPid.get(l.pid);
+    if (cur) cur.qty += l.qty; else byPid.set(l.pid, { ...l });
+  }
+  resolved.length = 0;
+  resolved.push(...byPid.values());
   steps.resolve = { asked: orderLines.length, resolved: resolved.length, failed: failedLines.length };
 
   // A LOW-INVENTORY line that cannot be ordered is dropped rather than aborting the run; a line a
