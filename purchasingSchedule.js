@@ -1824,9 +1824,16 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     // it still left "32235804046 (wanted 1, not in basket)" — true, and no use without a reason.
     // The portal knows: that code is DISCONTINUED, which no amount of retrying will change.
     const why = new Map();
-    for (const m of miss.slice(0, 8)) {
-      const st = await snickersLineStatus(altItemsUrl, m.stockCode);
-      if (st) why.set(String(m.stockCode).toUpperCase(), st);
+    // Enriched exactly like the discontinued check above, and for the same reason: the portal
+    // matches on the size TEXT, which only Brightpearl holds. Asking without it can only ever
+    // answer "no", which is why this map was silently empty and every refused line was reported
+    // with no reason at all — the one thing this block exists to provide.
+    const missDetail = miss.slice(0, 8)
+      .map((m) => ({ ...(detailBySku.get(String(m.stockCode).toUpperCase()) || {}), sku: m.stockCode }));
+    await withVariantDetail(missDetail);
+    for (const m of missDetail) {
+      const st = await snickersLineStatus(altItemsUrl, m.sku, m.size);
+      if (st) why.set(String(m.sku).toUpperCase(), st);
     }
     const reason = (m) => {
       const st = why.get(String(m.stockCode).toUpperCase());
