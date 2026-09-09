@@ -9766,18 +9766,25 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
 //
 // They share the supplier's own kill switch: turning BLAKLADER_SCHEDULE_ENABLED off stops both
 // halves, which is what anyone reaching for it would expect.
+//
+// ON in CODE, not an environment variable (owner, 2026-09-09). A hardcoded constant so nothing
+// about the deployment can change it by accident — not a copied env block, not a Render preset,
+// not a typo — and so turning it off again is a commit, which is reviewable and revertible. It was
+// an env var while the reorder basis was unproven; that basis is now fixed (purchasingAuto.js: a
+// reorder-only run uses minStock - onPO - onHand, never the report's orderQty), so the
+// double-order path the flag was guarding is closed.
+//
+// WHY THIS MATTERS: the customer halves are lineMode 'so', which sets includeLowInv FALSE. While
+// these two pollers were gated off, Blaklader and Snickers bought customer demand and topped up
+// NO stock at all — from 291e29e going live on 2026-09-07 until today. Nothing covered the gap.
+const REORDER_SPLIT_ENABLED = true;
 if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
       if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
-      // OFF until the reorder basis is fixed. lowInventory's orderQty includes openSO, so this run
-      // would buy units for sales orders that have no PO yet — and, having no soIds, it does not
-      // finalise them. The customer demand read never subtracts onOrder (its only guard is that
-      // finalise), so those same orders would be bought AGAIN by the next morning's customer run.
-      // A combined PO never had this: one PO covered the SO units and finalised the orders together.
-      if (process.env.REORDER_SPLIT_ENABLED !== 'true') return;
+      if (!REORDER_SPLIT_ENABLED) return;
       if (!(uk.hour === 16 && uk.minute >= 20 && uk.minute < 40)) return; // 16:20–16:39, before Snickers' reorder
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'BLAKLADER_LOW' })
         .then((r) => { if (!r.skipped) console.log('[blaklader-reorder]', JSON.stringify(r).slice(0, 300)); })
@@ -9793,7 +9800,7 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
       if (!pool) return;
       const uk = purchasingSchedule.ukNow();
       if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
-      if (process.env.REORDER_SPLIT_ENABLED !== 'true') return;   // see the Blaklader reorder poller above
+      if (!REORDER_SPLIT_ENABLED) return;   // see the Blaklader reorder poller above
       if (!(uk.hour === 16 && uk.minute >= 40)) return; // 16:40–16:59
       purchasingSchedule.runSupplierScheduled({ pool, altItemsUrl: ALT_ITEMS_URL, supplier: 'SNICKERS_LOW' })
         .then((r) => { if (!r.skipped) console.log('[snickers-reorder]', JSON.stringify(r).slice(0, 300)); })
