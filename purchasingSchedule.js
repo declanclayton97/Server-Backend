@@ -2712,6 +2712,13 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
   running = true;
   activePoId = null;                    // never carry a PO id across runs
   const uk = ukNow();
+  // Declared OUT here because the CATCH reports it. A `const` inside the try is block-scoped and
+  // does not exist in the catch, so referencing it there threw ReferenceError while building the
+  // log context — over the top of the real error, and before .catch() was ever attached. That
+  // aborted the rest of the catch, so the failure logged nothing, emailed nothing, fired no triage
+  // and never wrote its state: the run just vanished, leaving the day claimed and the supplier
+  // unordered. Cost 8 Sep 2026: Helly Hansen, Performance Brands and Portwest, all silent.
+  const lineMode = cfg.lineMode || 'both';
   try {
     await ensureTable(pool);
     const state = await getState(pool, cfg.stateId);
@@ -2723,7 +2730,6 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     // The value-check MUST see the same half the placement will order. Valuing the combined demand
     // for a reorder-only run would threshold-test it against money that run is never going to
     // spend, so it would place — or wait — on a figure that does not exist.
-    const lineMode = cfg.lineMode || 'both';
     const splitOpts = { includeSalesOrders: lineMode !== 'low', includeLowInv: lineMode !== 'so' };
     let plan;
     try { plan = await createPo({ supplierKey: cfg.supplierKey, execute: false, ...splitOpts }); }
