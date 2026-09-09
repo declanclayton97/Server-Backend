@@ -388,7 +388,19 @@ async function jfetch(step, url, opts) {
   const text = await res.text();
   let j = null; try { j = text ? JSON.parse(text) : null; } catch { /* non-json */ }
   if (!res.ok) throw stepErr(step, `HTTP ${res.status} from ${url}: ${(j ? JSON.stringify(j) : text).slice(0, 250)}`);
-  if (j && j.error) throw stepErr(step, `${url} returned error: ${j.error}`);
+  // A supplier helper that answers {error} almost always answers a great deal MORE than that, and
+  // all of it used to be dropped right here: this throw took the sentence and discarded the parsed
+  // body, so the call sites' own carefully-built context — placeMascotOrder's `{ poId, basket:
+  // r.basket }` — was unreachable, because jfetch threw before the caller ever saw `r`.
+  // 2026-09-09: Mascot failed with "basket did not accept every line" and nothing else reached the
+  // alert, the error log or the triage routine, which stopped for want of a reason. The reason was
+  // in the reply all along — an SAP exception on MASCOT's side (CX_SY_MESSAGE_IN_PLUGIN_MODE,
+  // "Message E WVA 032 cannot be processed in plugin mode") with every one of our lines accepted
+  // and nothing unresolved. A supplier-side fault we spent an afternoon unable to see.
+  if (j && j.error) {
+    const { error, ...rest } = j;
+    throw stepErr(step, `${url} returned error: ${error}`, Object.keys(rest).length ? { response: rest } : null);
+  }
   return j;
 }
 
