@@ -1,6 +1,6 @@
-// Unit test for the Performance Brands line merge. The site's add-to-cart does not accumulate
-// repeat adds of one variation, so the SAME SKU MUST GO OUT ONCE with the quantities summed.
-import { mergePerformanceBrandsLines } from './purchasingSchedule.js';
+// Unit test for the shared PO line merge used by Performance Brands and Castle. Supplier baskets do
+// not reliably accumulate repeat adds of one variation, so the SAME SKU MUST GO OUT ONCE, summed.
+import { mergePoLinesBySku } from './purchasingSchedule.js';
 
 let pass = true;
 const check = (name, cond) => { console.log((cond ? 'PASS  ' : 'FAIL  ') + name); if (!cond) pass = false; };
@@ -20,7 +20,7 @@ const po = {
     { sku: 'PB271-BRN-06', qty: 1, cost: 20, name: 'Brandon 06', productId: 115 },
   ],
 };
-const rows = mergePerformanceBrandsLines(po);
+const rows = mergePoLinesBySku(po);
 
 check('one row per SKU', rows.length === 5);
 check('the duplicated SKU is sent ONCE', rows.filter((r) => r.sku === 'PB271-BRN-06').length === 1);
@@ -32,12 +32,17 @@ check('reorder-only lines are lowInv true', find(rows, 'PB271-BRN-06').lowInv ==
 
 // A SKU wanted by BOTH halves must merge as customer demand: a lowInv line may drop out silently,
 // a customer line stops the run. Merging the wrong way would quietly not buy it.
-const both = mergePerformanceBrandsLines({
+const both = mergePoLinesBySku({
   soLines: [{ sku: 'PB99', qty: 1, cost: 5, name: 'x', productId: 9 }],
   lowLines: [{ sku: 'PB99', qty: 3, cost: 5, name: 'x', productId: 9 }],
 });
 check('SKU in both halves merges to one row', both.length === 1);
 check('…quantities summed', both[0].qty === 4);
 check('…and it counts as CUSTOMER demand, not droppable', both[0].lowInv === false);
+
+// Castle sends only { sku, qty } — prove the merged shape still carries what it needs.
+const castle = rows.map((l) => ({ sku: l.sku, qty: l.qty }));
+check('Castle shape keeps one row per SKU', castle.length === 5);
+check('…and its expectUnits still totals 6', castle.reduce((a, l) => a + l.qty, 0) === 6);
 
 process.exit(pass ? 0 : 1);

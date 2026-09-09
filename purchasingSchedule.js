@@ -639,9 +639,11 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   // Build from the PO-creation result (soLines/lowLines) — NOT getOrderCartLines:
   // the created BP PO row can degrade a variant SKU to the product's base SKU (e.g.
   // "177-GRY-L" → "177"), but the creation result keeps the SO row's real SKU.
-  const cartLines = [...(po.soLines || []), ...(po.lowLines || [])]
-    .filter((l) => String(l.productId) !== '1000' && l.sku)
-    .map((l) => ({ sku: String(l.sku), qty: l.qty }));
+  // Same merge as Performance Brands and Sterling, for the same reason: the PO can carry the same
+  // SKU on two rows, and a basket that does not accumulate repeat adds keeps the LAST qty rather
+  // than the sum, leaving the cart short. Castle's cartCount check below would then stall the run
+  // — a safe failure, but an avoidable one, and this shape has already cost three orders.
+  const cartLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty }));
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   const cart = await jfetch('cart', `${altItemsUrl}/api/castle-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: cartLines }) });
   steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved };
@@ -1073,23 +1075,28 @@ async function placeScruffsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {})
 // Free delivery at £200 + VAT; under that it is £7.00 flat.
 const PERFORMANCE_BRANDS_SUPPLIER_CONTACT = 11611;
 
-// One line per SKU, quantities summed.
+// One line per SKU, quantities summed. SHARED — used by Performance Brands and Castle. Put it
+// here rather than inline so there is one implementation to test and no fourth copy to miss.
 //
-// The trade site's add-to-cart does NOT accumulate repeat adds of the same variation. On
-// 2026-09-09 the demand carried PB271-BRN-06 twice, so it went out as two separate qty-1 requests:
-// both came back ok, and the second one's own notice still read "1 × Brown, 06". Six adds produced
-// a five-unit cart, the cart check refused to place a short order, and PO 488064 was orphaned —
-// which then suppressed the reorder demand below the £200 threshold and talked the retry into
-// waiting. All from sending the same variation twice instead of once with qty 2.
+// A PO can carry the same SKU on two rows (two sales orders wanting it, or a customer line and a
+// reorder line). Supplier baskets do not reliably accumulate repeat adds of one variation: some
+// keep the LAST quantity rather than the sum, so sending it twice silently drops units.
 //
-// Snickers has never hit this because it sums into bySku before building its lines. This is the
-// same thing for the same reason.
+// On 2026-09-09 the Performance Brands demand carried PB271-BRN-06 twice and went out as two
+// qty-1 requests. Both came back ok, and the second one's own notice still read "1 × Brown, 06".
+// Six adds produced a five-unit cart, the cart check refused to place a short order, and PO 488064
+// was orphaned — which then suppressed the reorder demand below the £200 threshold and talked the
+// retry into waiting. All from sending one variation twice instead of once with qty 2.
+//
+// This is the fourth place the same shape has appeared. Sterling merges byVariant with the note
+// that "the shop's basket merges duplicate adds and keeps the LAST qty, not the sum"; Snickers
+// sums into bySku; Performance Brands and Castle now use this.
 //
 // lowInv is AND-ed, so a SKU wanted by both a customer order and the reorder merges as lowInv
 // false. That direction matters: an unorderable lowInv line is allowed to drop out quietly, while
 // a customer line stops the run. Merging the other way would silently not buy something a customer
 // is waiting for.
-export function mergePerformanceBrandsLines(po) {
+export function mergePoLinesBySku(po) {
   const bySku = new Map();
   for (const l of [
     ...((po && po.soLines) || []).map((x) => ({ ...x, lowInv: false })),
@@ -1123,7 +1130,7 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   // no supplier code in it (191339 is the Y-Shield H3) and can only be found by the style code in
   // the NAME. cost is sent so Alt-Items can report where the supplier's live price disagrees with
   // our Launch cost — PB56C was £43.05 against £39.50 when this was built.
-  const orderLines = mergePerformanceBrandsLines(po);
+  const orderLines = mergePoLinesBySku(po);
   if (!orderLines.length) throw stepErr('cart', 'no orderable Performance Brands lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
