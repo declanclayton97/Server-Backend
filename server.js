@@ -10029,6 +10029,29 @@ if (process.env.RETRY_SWEEP_ENABLED !== 'false') {
   console.log('✅ End-of-day retry sweep scheduled (weekdays 17:00 UK — pre-supplier failures only)');
 } else { console.log('⏸️  End-of-day retry sweep DISABLED (RETRY_SWEEP_ENABLED=false)'); }
 
+// Catch the runs that never came back. Deliberately its OWN timer rather than a line inside the
+// retry sweep above: that block is switched off by RETRY_SWEEP_ENABLED, and losing the detector for
+// silent failures — silently, via an env var — is the exact shape of the bug this exists to catch.
+// No 11:00 gate either, or Blaklader's 09:30 window would go unreported until lunchtime.
+setInterval(() => {
+  try {
+    if (!pool) return;
+    const uk = purchasingSchedule.ukNow();
+    if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
+    purchasingSchedule.sweepStuckClaims({ pool, execute: true })
+      .then((r) => { if ((r.found || []).length) console.log('[stuck-claim]', JSON.stringify(r).slice(0, 400)); })
+      .catch((e) => console.error('[stuck-claim] error:', e.message));
+  } catch (e) { console.error('[stuck-claim] poller error:', e.message); }
+}, 5 * 60 * 1000);
+console.log('✅ Stuck-claim sweep scheduled (weekdays, every 5 min — runs that claimed a day and never reported)');
+
+// Read-only by default: what the sweep WOULD report. ?execute=1 actually logs the rows.
+app.get('/api/purchasing/stuck-claims', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try { res.json(await purchasingSchedule.sweepStuckClaims({ pool, execute: req.query.execute === '1' })); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Manual trigger / dry run for the sweep. { execute: true } actually retries; default reports only.
 app.post('/api/purchasing/retry-sweep', express.json(), async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available (schedule state)' });

@@ -2830,6 +2830,77 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
 }
 
 
+// ── the run that never came back ─────────────────────────────────────────────
+// The day-claim is written BEFORE the supplier is contacted, so a run that dies after it leaves
+// the claim behind and nothing else: no report, no error row, no alert email, no triage fire. The
+// supplier is silently skipped for the day and its demand just sits there. Skipped-and-visible is
+// the RIGHT trade against duplicated-and-invisible — but nothing ever actually LOOKED, so it was
+// only visible in principle.
+//
+// 2026-09-08 is what that costs: Helly Hansen, Performance Brands and Portwest each ended the day
+// wearing this marker, and all three were found by hand the next morning. The cause that day was a
+// ReferenceError in the catch (fixed in 6c4abaf), but this hole is more general than that bug — the
+// catch cannot run at all if the process is gone. A crash, an OOM, or a deploy landing mid-window
+// produces the same silence, and 6c4abaf does nothing for any of them.
+//
+// The CLAIM TIMESTAMP is the ground truth here, not the window table. WINDOW_DISPLAY says of itself
+// that it is display-only and that the pollers are the authority, so a drifted entry would make this
+// either miss a failure or cry wolf. A run still wearing the marker an hour after it claimed is gone,
+// whatever its window was.
+const STUCK_CLAIM_MINUTES = 60;   // the longest legitimate run seen is a ~25 min Blaklader worker job
+
+export async function sweepStuckClaims({ pool, execute = true } = {}) {
+  const uk = ukNow();
+  // A run in flight legitimately wears the marker, and `running` is per-process — so if the process
+  // died, this is false and the check below is exactly the question we want to ask.
+  if (running) return { skipped: 'a run is in flight', found: [] };
+  const found = [];
+  for (const key of Object.keys(SCHEDULED_SUPPLIERS)) {
+    const cfg = SCHEDULED_SUPPLIERS[key];
+    let state;
+    try { state = await getState(pool, cfg.stateId); } catch { continue; }
+    if (!state.last_run_date || ukDateStr(state.last_run_date) !== uk.date) continue;
+    const res = state.last_result || {};
+    // Anything that reported — placed, waiting, no demand, or a caught error — overwrote the marker.
+    if (!/^placing/.test(String(res.state || ''))) continue;
+    const m = String(res.claimedAt || '').match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) continue;
+    const minutesAgo = (uk.hour * 60 + uk.minute) - (Number(m[1]) * 60 + Number(m[2]));
+    if (minutesAgo < STUCK_CLAIM_MINUTES) continue;
+    const lineMode = cfg.lineMode || 'both';
+    // One row per supplier-half per day. Without this the 5-minute poller re-reports the same dead
+    // run every tick and wakes triage each time.
+    try {
+      const dup = await pool.query(
+        `SELECT 1 FROM purchasing_error_log
+          WHERE upper(supplier) = $1 AND step = 'stuck-claim'
+            AND created_at > now() - interval '20 hours'
+            AND (context->>'lineMode') IS NOT DISTINCT FROM $2 LIMIT 1`,
+        [String(cfg.supplierKey).toUpperCase(), lineMode]);
+      if (dup.rows.length) continue;
+    } catch { /* if the check fails, fall through and report — a duplicate row beats silence */ }
+    found.push({ supplier: cfg.supplierKey, scheduleKey: key, claimedAt: res.claimedAt, minutesAgo, lineMode });
+    if (!execute) continue;
+    await logPurchasingError(pool, {
+      supplier: cfg.supplierKey, step: 'stuck-claim', severity: 'error',
+      // Deliberately NOT worded as "nothing was ordered". The claim is written before the supplier
+      // is contacted, but the run can die at ANY point after that — including after checkout, with
+      // the confirmation never read. Same rule as a worker timeout: absence of a result is not
+      // evidence of absence of an order, and a re-run on that assumption is how stock gets bought
+      // twice.
+      message: `${cfg.supplierKey} claimed today at ${res.claimedAt} and never reported back — the run is gone `
+        + `(${minutesAgo} min, no result, no error). It died between claiming the day and finishing: a crash, `
+        + `an OOM, or a deploy landing inside its window. The day is claimed, so its own poller will NOT run `
+        + `again today and the demand is still sitting there.\n\n`
+        + `THIS IS NOT PROOF THE ORDER FAILED. The run may have reached the supplier before it died. `
+        + `CHECK THE SUPPLIER'S OWN ORDER LIST AND BASKET before any re-run — force-run-safety first, `
+        + `and a re-run on the assumption it placed nothing is how the same stock gets bought twice.`,
+      context: { supplier: cfg.supplierKey, lineMode, claimedAt: res.claimedAt, minutesAgo, ran: res.ran, stuckClaim: true },
+    }).catch(() => {});
+  }
+  return { uk: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, execute, found };
+}
+
 // ── end-of-day retry of failures that never reached the supplier ─────────────
 // PLACING THE ORDER IS THE GOAL. A run that failed BEFORE it ever contacted the supplier bought
 // nothing, and the fix for it often lands within the hour — but TWO separate guards stop it ever
