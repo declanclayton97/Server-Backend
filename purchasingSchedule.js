@@ -1655,18 +1655,41 @@ export async function resendDiscontinuedNotice({ pool, errorId }) {
 //
 // Best-effort by design: if the derivation is wrong the lookup simply finds nothing and the error
 // reads exactly as it does today. It can add an answer, never remove one.
-async function snickersLineStatus(altItemsUrl, sku) {
+// Ask the portal what it says about ONE line. This is the only thing that can tell the
+// discontinued check that a code is genuinely dead, so when it cannot answer, the whole guard
+// silently does nothing.
+//
+// It used to derive the size from the SKU — String(Number('12180400006'.slice(8))) → "6" — and pass
+// that as the size. The portal matches on the size TEXT: 12180400006 is "L", and canonSize("6")
+// never equals canonSize("L"), so every Snickers line came back {found:false,"no colour/size
+// match"} and returned null. dead stayed empty, handleDiscontinuedLines was unreachable, and the
+// guard had in fact never worked for any line at all. On 2026-09-09 that turned one discontinued
+// jacket (12180400006, "WP Soft Shell Jacket Hood Black Size: L", whose portal row says
+// "Discontinued" in plain text) into a stalled Snickers run and a manual exclude.
+//
+// The size LABEL now comes from Brightpearl and goes to the endpoint's own sku+sizeLabel path,
+// which is what the other portal suppliers already use. Without a label there is nothing to match
+// on, so say so rather than asking a question that always answers "no".
+export async function snickersLineStatus(altItemsUrl, sku, sizeLabel) {
   const digits = String(sku || '').replace(/[^0-9]/g, '');
   if (digits.length < 9) return null;
-  const size = String(Number(digits.slice(8)) || digits.slice(8));
+  if (!String(sizeLabel || '').trim()) return null;
   const url = `${altItemsUrl}/api/supplier-stock?supplier=SNICKERS`
-    + `&code=${digits.slice(0, 4)}&colour=${digits.slice(4, 8)}&size=${encodeURIComponent(size)}&live=1`;
+    + `&sku=${encodeURIComponent(digits)}&sizeLabel=${encodeURIComponent(String(sizeLabel).trim())}&live=1`;
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(120000) });
     const j = await r.json();
     if (!j || j.found !== true) return null;
-    return { status: j.status || null, avail: j.avail == null ? null : Number(j.avail), barcode: j.barcode || null, size };
-  } catch { return null; }
+    // The portal's own size, not the label we asked with — it is the authoritative text and it is
+    // what the row actually matched on.
+    return { status: j.status || null, avail: j.avail == null ? null : Number(j.avail), barcode: j.barcode || null, size: j.size || sizeLabel || null };
+  } catch (e) {
+    // Returning null here means "not discontinued" to the caller, so a fault in this lookup
+    // disables the whole guard without a word — which is how it went unnoticed that it had never
+    // worked. Say something, even though the caller still gets null.
+    console.error(`[snickers-line-status] ${sku}: ${e.message}`);
+    return null;
+  }
 }
 
 async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [], includeSalesOrders = true, includeLowInv = true } = {}) {
@@ -1690,10 +1713,15 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // Worker lines = the PO's SKUs (skip the =====LOW INV==== separator productId 1000), summed
   // per SKU. Build from soLines/lowLines (FULL SKUs); the /po-cart-lines route truncates them.
   const bySku = new Map();
+  // productId is kept per SKU purely so a line that later fails to reach the basket can be looked
+  // up on the portal — that lookup needs the size TEXT ("L"), which only Brightpearl knows, and
+  // bySku itself is sku -> qty. See the discontinued check below.
+  const detailBySku = new Map();
   for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
     if (String(l.productId) === '1000' || !l.sku) continue;
     const k = String(l.sku).toUpperCase();
     bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty));
+    if (!detailBySku.has(k)) detailBySku.set(k, { sku: l.sku, productId: l.productId, name: l.name, colour: l.colour, size: l.size });
   }
   // Codes already proven discontinued are dropped BEFORE the basket is built, so a dead line is
   // rediscovered by failing exactly once and never again.
@@ -1733,9 +1761,15 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // than being retried on a guess.
   if ((!wr || !wr.placed) && (wr && (wr.missingLines || []).length)) {
     const dead = [];
-    for (const m of (wr.missingLines || []).slice(0, 8)) {
-      const st = await snickersLineStatus(altItemsUrl, m.stockCode);
-      if (st && /discontinued/i.test(st.status || '')) dead.push({ sku: m.stockCode, status: st.status });
+    // The portal needs the size TEXT, which lives in Brightpearl, not in the SKU. Enrich the
+    // refused lines from the PO rows first — one bulk product read for the lot — or the lookup
+    // below has nothing to match on and the guard cannot fire.
+    const missing = (wr.missingLines || []).slice(0, 8)
+      .map((m) => ({ ...(detailBySku.get(String(m.stockCode).toUpperCase()) || {}), sku: m.stockCode }));
+    await withVariantDetail(missing);
+    for (const m of missing) {
+      const st = await snickersLineStatus(altItemsUrl, m.sku, m.size);
+      if (st && /discontinued/i.test(st.status || '')) dead.push({ sku: m.sku, status: st.status });
     }
     if (dead.length && dead.length === (wr.missingLines || []).length) {
       // If the cleanup itself falls over, do NOT retry the placement: the PO may be half-tidied and
