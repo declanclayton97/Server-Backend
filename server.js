@@ -12875,7 +12875,11 @@ async function pollQuoteChase() {
     [liveIds.length ? liveIds : [0]]
   );
 
-  const known = await pool.query(`SELECT order_id FROM quote_chase`);
+  // is_test rows must not count here. A single test-send inserts one, and if that
+  // makes the table look non-empty the seeding branch never fires — the whole
+  // backlog is then inserted unseeded and chased on the spot. That happened on
+  // 2026-09-10; only QUOTE_CHASE_DRY_RUN stopped 97 emails going out.
+  const known = await pool.query(`SELECT order_id FROM quote_chase WHERE is_test = FALSE`);
   const knownSet = new Set(known.rows.map((r) => Number(r.order_id)));
   const isFirstRun = knownSet.size === 0;
   const newIds = liveIds.filter((id) => !knownSet.has(id));
@@ -12927,6 +12931,24 @@ async function pollQuoteChase() {
     stage: r.stage,
     row: r,
   })));
+
+  // Circuit breaker. In steady state a poll chases a couple of customers. Dozens
+  // at once means something upstream is wrong — a failed seed, a status rename, a
+  // restored backup — and the right move is to refuse and shout, not to send. The
+  // dry-run flag is not a safety net: it is meant to be turned off.
+  const dueNow = groups.filter((gr) => decideAction({
+    enteredStatusAt: gr.driver.enteredStatusAt, stage: gr.driver.stage,
+    responded: !!gr.driver.row.responded_at, stopped: !!gr.driver.row.stopped_at,
+    seeded: gr.driver.row.seeded, customerEmail: gr.driver.customerEmail,
+    stillQuoteSent: gr.driver.row.still_quote_sent,
+  }, now).action !== 'none').length;
+  const maxBurst = parseInt(process.env.QUOTE_CHASE_MAX_BURST || '25', 10);
+  if (dueNow > maxBurst) {
+    console.error(`[quote-chase] REFUSING TO RUN: ${dueNow} customers are due at once (limit ${maxBurst}). ` +
+      `This is what a failed seed looks like. Nothing sent. Inspect quote_chase, then either fix the rows ` +
+      `or raise QUOTE_CHASE_MAX_BURST deliberately.`);
+    return;
+  }
 
   for (const group of groups) {
     const driver = group.driver;
@@ -13186,6 +13208,53 @@ app.post('/quote/:token/confirm', async (req, res) => {
 //   - one email per CUSTOMER via the same grouping the chase uses
 //   - a failure on one customer is recorded and the run continues
 const ONE_OFF_CONFIRM = 'SEND THE ONE-OFF';
+
+// Repair a failed seed: put every tracked quote back to "backlog, never chase".
+//
+// Needed because the first poll on 2026-09-10 ran with isFirstRun false — a
+// test-send row made the table look non-empty — so 101 backlog quotes were
+// inserted unseeded and immediately advanced to stage 1. Only dry run stopped
+// them being emailed. The code bug is fixed above; this repairs the data.
+//
+// Deliberately not automatic: reseeding is destructive to a legitimately running
+// sequence, so it takes the same explicit confirm phrase as the one-off.
+app.post('/api/quote-chase/reseed', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const body = req.body || {};
+    const apply = body.confirm === 'RESEED THE BACKLOG';
+    const before = await pool.query(
+      `SELECT COUNT(*)::int AS rows,
+              COUNT(*) FILTER (WHERE seeded)::int AS seeded,
+              COUNT(*) FILTER (WHERE stage > 0)::int AS staged,
+              COUNT(*) FILTER (WHERE last_chase_at IS NOT NULL)::int AS chased,
+              COUNT(*) FILTER (WHERE responded_at IS NOT NULL)::int AS responded
+         FROM quote_chase WHERE is_test = FALSE`
+    );
+    if (!apply) {
+      return res.json({ dryRun: true, before: before.rows[0],
+        hint: 'POST again with {"confirm":"RESEED THE BACKLOG"} to apply' });
+    }
+    // responded_at is left alone: a real customer answer is data, not chase state.
+    const upd = await pool.query(
+      `UPDATE quote_chase
+          SET seeded = TRUE, stage = 0, last_chase_at = NULL, handover_at = NULL
+        WHERE is_test = FALSE AND (seeded = FALSE OR stage > 0 OR last_chase_at IS NOT NULL)`
+    );
+    const after = await pool.query(
+      `SELECT COUNT(*)::int AS rows,
+              COUNT(*) FILTER (WHERE seeded)::int AS seeded,
+              COUNT(*) FILTER (WHERE stage > 0)::int AS staged,
+              COUNT(*) FILTER (WHERE last_chase_at IS NOT NULL)::int AS chased
+         FROM quote_chase WHERE is_test = FALSE`
+    );
+    console.log(`[quote-chase] RESEED: ${upd.rowCount} row(s) returned to seeded backlog`);
+    res.json({ applied: true, updated: upd.rowCount, before: before.rows[0], after: after.rows[0] });
+  } catch (e) {
+    console.error('[quote-chase] reseed failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.post('/api/quote-chase/one-off', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
