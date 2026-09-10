@@ -272,5 +272,27 @@ assertEq("refresh: no stray html in the plain text", /<[a-z/]/i.test(refreshOne.
 const nasty = buildRefreshEmail([{ ...old1, reference: '<script>alert(1)</script>' }], rq);
 assertEq("refresh: reference is escaped", nasty.html.includes("<script>"), false);
 
+
+// ── buttons must survive Outlook ───────────────────────────────────────────────
+// Outlook's Word engine ignores padding on an inline <a>, which turns a styled
+// button into coloured text on a tight background. Dec's proof showed exactly
+// that. Buttons are therefore <td bgcolor> cells, and no anchor may carry padding.
+for (const [name, mail] of [["refresh", buildRefreshEmail([old1], rq)],
+                            ["chase", buildChaseEmail([old1], 1, () => "https://x.co/q?e=1")]]) {
+  assertTrue(`${name}: buttons are table cells with bgcolor`, /<td bgcolor="#[0-9a-f]{6}"/i.test(mail.html));
+  assertTrue(`${name}: cell carries real padding`, /<td bgcolor[^>]*padding:1?[0-9]+px/i.test(mail.html));
+  assertTrue(`${name}: and mso-padding-alt for Outlook`, mail.html.includes("mso-padding-alt"));
+  // the failure mode itself: a padded anchor
+  const paddedAnchor = /<a [^>]*style="[^"]*padding:/i.test(mail.html);
+  assertEq(`${name}: no <a> relies on padding`, paddedAnchor, false);
+  // and buttons must not rely on a background on the anchor either
+  const bgAnchor = /<a [^>]*style="[^"]*background:/i.test(mail.html);
+  assertEq(`${name}: no <a> relies on background`, bgAnchor, false);
+}
+// All four options must sit in ONE table, or Outlook stacks them as four blocks.
+const grid = buildRefreshEmail([old1], rq).html;
+assertEq("refresh: one button table, not four", (grid.match(/<table role="presentation"[^>]*cellspacing="6"/g) || []).length, 1);
+assertEq("refresh: four button cells in it", (grid.match(/<td bgcolor/g) || []).length, 4);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

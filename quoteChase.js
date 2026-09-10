@@ -223,6 +223,27 @@ const esc = (s) => String(s == null ? "" : s)
 
 const gbp = (n) => "£" + (Number(n) || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+// Outlook renders HTML mail with the Word engine, which IGNORES padding on an
+// inline <a>. A styled anchor therefore collapses to coloured text on a tight
+// background instead of a button — Dec's proof of the one-off showed exactly that.
+// A <td> carrying bgcolor + padding is honoured by every client including Outlook,
+// so buttons are built as table cells.
+//
+// The four options go in ONE table as a 2x2 grid rather than four separate tables:
+// Outlook renders each table as a block, so separate tables would stack into a
+// column of four full-width buttons.
+function buttonCell(href, label, bg) {
+  return `<td bgcolor="${bg}" style="border-radius:5px;padding:11px 16px;mso-padding-alt:11px 16px;text-align:center;">` +
+    `<a href="${esc(href)}" style="color:#ffffff;text-decoration:none;font-weight:bold;font-size:14px;` +
+    `font-family:Arial,sans-serif;display:inline-block;">${label}</a></td>`;
+}
+
+function buttonGrid(rows) {
+  return `<table role="presentation" cellpadding="0" cellspacing="6" border="0" style="margin:12px 0;border-collapse:separate;">` +
+    rows.map((r) => `<tr>${r.join("")}</tr>`).join("") + `</table>`;
+}
+
+
 function firstNameOf(quote) {
   const full = String(quote.customerName || "").trim();
   return (full.split(/\s+/)[0] || "").trim();
@@ -257,10 +278,6 @@ export function buildChaseEmail(quotes, stage, urlFor) {
     ? (stage === 1 ? `Did you get our ${list.length} quotes?` : `Following up on your ${list.length} quotes`)
     : (stage === 1 ? `Did you get our quote? — SO${first.orderId}` : `Following up on your quote — SO${first.orderId}`);
 
-  const button = (u, action, label, bg) => `
-    <a href="${esc(u)}&action=${action}"
-       style="display:inline-block;margin:4px 6px 4px 0;padding:11px 18px;border-radius:5px;
-              background:${bg};color:#fff;text-decoration:none;font-weight:bold;font-size:14px;">${label}</a>`;
 
   const body = many
     ? `<table style="border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;">
@@ -271,7 +288,7 @@ export function buildChaseEmail(quotes, stage, urlFor) {
            </td>
            <td style="padding:9px 10px;border-bottom:1px solid #eee;white-space:nowrap;">${gbp(q.netValue)} + VAT</td>
            <td style="padding:9px 0;border-bottom:1px solid #eee;text-align:right;">
-             <a href="${esc(url(q))}" style="display:inline-block;padding:8px 15px;border-radius:5px;background:#0073e6;color:#fff;text-decoration:none;font-weight:bold;font-size:13px;">Reply about this one</a>
+             <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block;"><tr><td bgcolor="#0073e6" style="border-radius:5px;padding:8px 15px;mso-padding-alt:8px 15px;"><a href="${esc(url(q))}" style="color:#ffffff;text-decoration:none;font-weight:bold;font-size:13px;font-family:Arial,sans-serif;display:inline-block;">Reply about this one</a></td></tr></table>
            </td>
          </tr>`).join("")}
        </table>
@@ -282,12 +299,12 @@ export function buildChaseEmail(quotes, stage, urlFor) {
          <tr><td style="padding:4px 12px 4px 0;color:#777;">Total</td><td style="padding:4px 0;font-weight:bold;">${gbp(first.netValue)} + VAT</td></tr>
        </table>
        <p>Let us know how you would like to proceed:</p>
-       <p style="margin:16px 0;">
-         ${button(url(first), "go_ahead", "Go ahead with the quote", "#1e7b34")}
-         ${button(url(first), "more_time", "I need more time", "#0073e6")}<br>
-         ${button(url(first), "call_back", "Please call me", "#b07000")}
-         ${button(url(first), "cancel", "Cancel the quote", "#8a8a8a")}
-       </p>`;
+       ${buttonGrid([
+         [buttonCell(url(first) + "&action=go_ahead", "Go ahead with the quote", "#1e7b34"),
+          buttonCell(url(first) + "&action=more_time", "I need more time", "#0073e6")],
+         [buttonCell(url(first) + "&action=call_back", "Please call me", "#b07000"),
+          buttonCell(url(first) + "&action=cancel", "Cancel the quote", "#8a8a8a")],
+       ])}`;
 
   // Trust signals. A styled button to an unfamiliar domain is exactly what a
   // phishing email looks like, so the message has to prove it is genuine before
@@ -452,10 +469,6 @@ export function buildRefreshEmail(quotes, urlFor) {
     If ${many ? "they are" : "it is"} no longer needed, just say so and we will close
     ${many ? "them" : "it"} off. Either answer is genuinely useful.`;
 
-  const button = (u, action, label, bg) => `
-    <a href="${esc(u)}&action=${action}"
-       style="display:inline-block;margin:4px 6px 4px 0;padding:11px 18px;border-radius:5px;
-              background:${bg};color:#fff;text-decoration:none;font-weight:bold;font-size:14px;">${label}</a>`;
 
   const ageOf = (q) => {
     if (!q.enteredStatusAt) return "";
@@ -474,7 +487,7 @@ export function buildRefreshEmail(quotes, urlFor) {
            </td>
            <td style="padding:9px 10px;border-bottom:1px solid #eee;white-space:nowrap;">${gbp(q.netValue)} + VAT</td>
            <td style="padding:9px 0;border-bottom:1px solid #eee;text-align:right;">
-             <a href="${esc(url(q))}" style="display:inline-block;padding:8px 15px;border-radius:5px;background:#0073e6;color:#fff;text-decoration:none;font-weight:bold;font-size:13px;">Tell us about this one</a>
+             <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block;"><tr><td bgcolor="#0073e6" style="border-radius:5px;padding:8px 15px;mso-padding-alt:8px 15px;"><a href="${esc(url(q))}" style="color:#ffffff;text-decoration:none;font-weight:bold;font-size:13px;font-family:Arial,sans-serif;display:inline-block;">Tell us about this one</a></td></tr></table>
            </td>
          </tr>`).join("")}
        </table>
@@ -485,12 +498,12 @@ export function buildRefreshEmail(quotes, urlFor) {
          ${ageOf(first) ? `<tr><td style="padding:4px 12px 4px 0;color:#777;">Sent</td><td style="padding:4px 0;">${esc(ageOf(first))}</td></tr>` : ""}
          <tr><td style="padding:4px 12px 4px 0;color:#777;">Total</td><td style="padding:4px 0;font-weight:bold;">${gbp(first.netValue)} + VAT</td></tr>
        </table>
-       <p style="margin:16px 0;">
-         ${button(url(first), "go_ahead", "Yes — go ahead", "#1e7b34")}
-         ${button(url(first), "requote", "Please re-quote it", "#0073e6")}<br>
-         ${button(url(first), "call_back", "Please call me", "#b07000")}
-         ${button(url(first), "cancel", "No longer needed", "#8a8a8a")}
-       </p>`;
+       ${buttonGrid([
+         [buttonCell(url(first) + "&action=go_ahead", "Yes — go ahead", "#1e7b34"),
+          buttonCell(url(first) + "&action=requote", "Please re-quote it", "#0073e6")],
+         [buttonCell(url(first) + "&action=call_back", "Please call me", "#b07000"),
+          buttonCell(url(first) + "&action=cancel", "No longer needed", "#8a8a8a")],
+       ])}`;
 
   const sentOn = String(first.enteredStatusAt || "").slice(0, 10);
   const why = `You are receiving this because ${esc(first.salespersonName || "our sales team")} sent you
