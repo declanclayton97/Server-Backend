@@ -15,5 +15,13 @@
     "sku": "Albany L33W32",
     "brand": "DeWalt",
     "_why": "Dewalt Albany Slim Work Trousers, 32 Waist / 33 Leg (LONG). Absent from the workbook (error id 185, PO 487461, 2026-09-07). NOT verified against the live site with a worker dry-run this time (Sterling's basket is unreadable from here, so a stage() add can't be proven cleared afterwards) — instead cross-checked against data already trusted in sterlingProducts.json: Brightpearl's own size string for this product (261791) is '32 Waist, 33 Leg (LONG)', which is exactly search=Albany colour=Grey/Black size=L33W32 — the SAME style/colour/size cell as EAN 5055160085652, already present and presumably working in the workbook-derived data. Two EANs mapping to one portal cell is expected (Sterling's site has no EAN granularity); if this turns out wrong, delete this entry and check the L33W32 cell on the live site by hand before re-adding."
+  },
+  "5063777009268": {
+    "search": "Wilbury",
+    "colour": "Djion & Navy",
+    "size": "XXL",
+    "sku": "Wilbury XXL",
+    "brand": "DeWalt",
+    "_why": "DeWalt Wilbury Two Pack T-Shirts, XXL. Absent from the Sterling product-data workbook entirely — not one Wilbury EAN of any size appears in sterlingProducts.json, so this is not a single missing row but the whole product line never having been ingested. Blocked PO 488289 (error id 231, 2026-09-10). Verified against the live site with a read-only worker inspect() (no basket add): searching \"Wilbury\" returns a single unambiguous result, styleid=WILBURY (\"wilbury dewalt two pack t-shrits\", score 100, no colour conflict), with a S/M/L/XL/XXL grid at £11.66 each and XXL showing 398 in stock. Colour kept as Brightpearl has it (\"Djion & Navy\", likely their own typo for Dijon) since the portal has no separate colour variant to match against — the single search result is enough. If Sterling ship a workbook that contains this EAN, delete this entry."
   }
 }
