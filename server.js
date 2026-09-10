@@ -24,6 +24,7 @@ import * as purchasingSchedule from './purchasingSchedule.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import {
   QUOTE_CHASE_CONFIG, QUOTE_ACTIONS, QUOTE_CANCEL_REASONS,
+  buildRefreshEmail,
   decideAction, groupQuotesForChase, quotesToAdvance, setBankHolidays,
   buildChaseEmail, buildResponseEmail, buildHandoverEmail, buildBpNote,
 } from './quoteChase.js';
@@ -12738,6 +12739,8 @@ async function initializeQuoteChaseTable() {
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_at TIMESTAMPTZ;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS stopped_by TEXT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+      -- Stamped by the one-off backlog refresh so re-running it cannot email anyone twice.
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS one_off_sent_at TIMESTAMPTZ;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS response_via TEXT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_id BIGINT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_name TEXT;
@@ -13105,7 +13108,11 @@ app.post('/api/quote-chase/test-send', async (req, res) => {
     );
 
     const view = { ...quoteRowToView((await pool.query(`SELECT * FROM quote_chase WHERE token=$1`, [token])).rows[0]) };
-    const mail = buildChaseEmail([view], stage, () => quoteResponseUrl(token));
+    // template:"refresh" proofs the one-off backlog email instead of a chase.
+    const body = req.body || {};
+    const mail = body.template === 'refresh'
+      ? buildRefreshEmail([view], () => quoteResponseUrl(token))
+      : buildChaseEmail([view], stage, () => quoteResponseUrl(token));
     await sendQuoteMail({ to, replyTo: to, subject: mail.subject, html: mail.html, text: mail.text, force: true });
 
     console.log(`[quote-chase] TEST chase ${stage} sent to ${to} (order ${orderId}, token ${token})`);
@@ -13161,6 +13168,139 @@ app.post('/quote/:token/confirm', async (req, res) => {
 // alone it would keep chasing someone who already answered, which is worse than
 // not chasing at all. `stopped_at` is deliberately separate from `responded_at`
 // so a manual stop never pollutes the "why do we lose quotes" reporting.
+
+// ---- One-off refresh of the pre-existing backlog ----------------------------
+//
+// The chase never touches seeded quotes, by design — emailing a two-year-old
+// quote would do real damage. That left a pile of genuinely recent quotes that
+// nobody would ever follow up. This sends ONE message to each of those customers
+// asking whether their quotes are still live, and then stops. It is not a chase
+// and does not start one: the rows stay seeded.
+//
+// Safe by construction rather than by being careful:
+//   - dry run unless `confirm` is exactly the phrase below, so a stray POST cannot send
+//   - `one_off_sent_at` is stamped per quote, so re-running can never double-send
+//   - `days` bounds it to recent quotes; the ancient backlog is excluded by age
+//   - quotes with no customer email, already answered, stopped, or on an excluded
+//     channel are filtered out in SQL, not in JS afterwards
+//   - one email per CUSTOMER via the same grouping the chase uses
+//   - a failure on one customer is recorded and the run continues
+const ONE_OFF_CONFIRM = 'SEND THE ONE-OFF';
+
+app.post('/api/quote-chase/one-off', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const body = req.body || {};
+    const days = Math.min(3650, Math.max(1, parseInt(body.days, 10) || 90));
+    const send = body.confirm === ONE_OFF_CONFIRM;
+    const limit = Math.max(0, parseInt(body.limit, 10) || 0);
+
+    const q = await pool.query(
+      `SELECT * FROM quote_chase
+        WHERE still_quote_sent = TRUE AND is_test = FALSE
+          AND one_off_sent_at IS NULL
+          AND responded_at IS NULL AND stopped_at IS NULL
+          AND COALESCE(customer_email, '') <> ''
+          AND entered_status_at >= NOW() - make_interval(days => $1)
+          AND NOT (COALESCE(channel_id, 0) = ANY($2::bigint[]))
+        ORDER BY entered_status_at DESC`,
+      [days, quoteExcludedChannelsParam()]
+    );
+
+    let groups = groupQuotesForChase(q.rows.map((r) => ({ ...quoteRowToView(r), stage: r.stage, row: r })));
+    const totalGroups = groups.length;
+    if (limit) groups = groups.slice(0, limit);
+
+    const results = [];
+    let sent = 0, failed = 0;
+    for (const group of groups) {
+      const driver = group.driver;
+      const ids = group.quotes.map((x) => x.orderId);
+      const mail = buildRefreshEmail(group.quotes, (x) => quoteResponseUrl(x.row.token));
+      const entry = {
+        to: driver.customerEmail,
+        company: driver.companyName || driver.customerName,
+        quotes: ids,
+        value: group.quotes.reduce((a, b) => a + Number(b.netValue || 0), 0),
+        subject: mail.subject,
+        replyTo: driver.salespersonEmail || null,
+      };
+      if (!send) { results.push({ ...entry, wouldSend: true }); continue; }
+      try {
+        await sendQuoteMail({
+          to: driver.customerEmail,
+          replyTo: driver.salespersonEmail || undefined,
+          subject: mail.subject, html: mail.html, text: mail.text,
+          force: true,           // the chase may still be in dry run; this is a deliberate one-off
+        });
+        await pool.query(
+          `UPDATE quote_chase SET one_off_sent_at = NOW() WHERE order_id = ANY($1::bigint[])`,
+          [ids]
+        );
+        for (const id of ids) {
+          try { await postBpOrderNote(id, buildBpNote('one_off', { to: driver.customerEmail })); }
+          catch (e) { /* a missing note must not undo a sent email */ }
+        }
+        sent++;
+        results.push({ ...entry, sent: true });
+        await new Promise((r2) => setTimeout(r2, 400));   // gentle on SMTP and on the BP note API
+      } catch (e) {
+        failed++;
+        results.push({ ...entry, error: e.message });
+        console.error(`[quote-chase] one-off failed for ${driver.customerEmail}: ${e.message}`);
+      }
+    }
+
+    console.log(`[quote-chase] one-off ${send ? 'SEND' : 'DRY RUN'}: ${groups.length} customer(s), ${q.rowCount} quote(s), sent=${sent} failed=${failed}`);
+    res.json({
+      dryRun: !send,
+      days,
+      quotes: q.rowCount,
+      customers: totalGroups,
+      customersThisRun: groups.length,
+      totalValue: q.rows.reduce((a, b) => a + Number(b.net_value || 0), 0),
+      sent, failed,
+      results,
+      ...(send ? {} : { hint: `POST again with {"confirm":"${ONE_OFF_CONFIRM}"} to actually send` }),
+    });
+  } catch (e) {
+    console.error('[quote-chase] one-off failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Render the one-off email exactly as a given customer would receive it, without
+// sending anything. Reviewing the real thing beats reviewing a description of it.
+app.get('/api/quote-chase/one-off-preview', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const days = Math.min(3650, Math.max(1, parseInt(req.query.days, 10) || 90));
+    const wanted = String(req.query.email || '').trim().toLowerCase();
+    const q = await pool.query(
+      `SELECT * FROM quote_chase
+        WHERE still_quote_sent = TRUE AND is_test = FALSE
+          AND one_off_sent_at IS NULL
+          AND responded_at IS NULL AND stopped_at IS NULL
+          AND COALESCE(customer_email, '') <> ''
+          AND entered_status_at >= NOW() - make_interval(days => $1)
+          AND NOT (COALESCE(channel_id, 0) = ANY($2::bigint[]))`,
+      [days, quoteExcludedChannelsParam()]
+    );
+    let groups = groupQuotesForChase(q.rows.map((r) => ({ ...quoteRowToView(r), stage: r.stage, row: r })));
+    if (wanted) groups = groups.filter((g) => g.key === wanted);
+    else groups.sort((a, b) => b.quotes.length - a.quotes.length);   // show the busiest by default
+    if (!groups.length) return res.status(404).send('no matching customer in the one-off set');
+    const mail = buildRefreshEmail(groups[0].quotes, (x) => quoteResponseUrl(x.row.token));
+    res.set('Content-Type', 'text/html; charset=utf-8').send(
+      `<p style="font:12px monospace;background:#f4f4f4;padding:10px;margin:0 0 16px;">` +
+      `To: ${groups[0].driver.customerEmail} &nbsp;·&nbsp; Reply-To: ${groups[0].driver.salespersonEmail || '-'}<br>` +
+      `Subject: <strong>${mail.subject}</strong> &nbsp;·&nbsp; ${groups[0].quotes.length} quote(s)</p>` + mail.html
+    );
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
 app.post('/api/quote-chase/stop', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
   try {

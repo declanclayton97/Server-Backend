@@ -13,6 +13,7 @@ import {
   dueAtForStage,
   decideAction,
   buildChaseEmail,
+  buildRefreshEmail,
   buildResponseEmail,
   buildBpNote,
   QUOTE_CHASE_CONFIG,
@@ -226,6 +227,50 @@ assertTrue("carries a real postal address", trust.html.includes("Aberford Road")
 assertTrue("offers replying instead of clicking", trust.html.includes("do not have to click anything"));
 assertTrue("plain-text part carries it too", trust.text.includes("Aberford Road"));
 assertEq("no stray html in the plain-text footer", /<[a-z/]/i.test(trust.text), false);
+
+
+// ── the one-off backlog refresh email ──────────────────────────
+// This is NOT a chase. It goes to people who may not have heard from us in weeks,
+// so it must not imply we have been waiting on them or that a reminder preceded it.
+const rq = (q) => `https://quotes.tuffshop.co.uk/quote/tok-${q.orderId}?e=1`;
+const old1 = { orderId: 480001, reference: "REF ONE", netValue: 1234.5,
+  customerName: "Sam Fletcher", customerEmail: "sam@example.com",
+  salespersonName: "Helen Jackson", enteredStatusAt: "2026-07-20T10:00:00Z" };
+const old2 = { ...old1, orderId: 480002, reference: "", netValue: 99 };
+
+const refreshOne = buildRefreshEmail([old1], rq);
+assertTrue("refresh single: subject names the quote", refreshOne.subject.includes("SO480001"));
+assertTrue("refresh single: offers to re-quote", refreshOne.html.includes("action=requote"));
+assertTrue("refresh single: offers a no-longer-needed exit", refreshOne.html.includes("action=cancel"));
+assertTrue("refresh single: says prices may have moved", /prices may have moved/i.test(refreshOne.html));
+
+// The words that would make this read as a chase or a mailing shot.
+for (const banned of ["reminder", "final notice", "last chance", "chasing", "still waiting", "unsubscribe"]) {
+  assertEq(`refresh: never says "${banned}"`, new RegExp(banned, "i").test(refreshOne.html), false);
+}
+assertTrue("refresh: says it is a one-off, not a list", /one-off message, not a mailing list/i.test(refreshOne.html));
+
+// Several quotes for one customer must arrive as ONE email listing them all —
+// the whole reason the chase groups by customer.
+const refreshMulti = buildRefreshEmail([old1, old2], rq);
+assertTrue("refresh multi: subject counts them", refreshMulti.subject.includes("2 quotes"));
+assertTrue("refresh multi: lists the first", refreshMulti.html.includes("SO480001"));
+assertTrue("refresh multi: lists the second", refreshMulti.html.includes("SO480002"));
+assertTrue("refresh multi: a link each", refreshMulti.html.includes("tok-480001") && refreshMulti.html.includes("tok-480002"));
+
+// Age is shown so an old quote is honest about being old.
+assertTrue("refresh: shows how long ago it was sent", /sent \d+ (days|weeks) ago/i.test(refreshMulti.html));
+
+// Same trust signals as the chase — these go to customers who were not expecting them.
+assertTrue("refresh: carries a postal address", refreshOne.html.includes("Aberford Road"));
+assertTrue("refresh: names who raised it", refreshOne.html.includes("Helen Jackson"));
+assertTrue("refresh: offers replying instead of clicking", refreshOne.html.includes("do not have to click anything"));
+assertTrue("refresh: plain text carries the quote", refreshOne.text.includes("SO480001"));
+assertEq("refresh: no stray html in the plain text", /<[a-z/]/i.test(refreshOne.text), false);
+
+// Customer-controlled text is escaped, same as everywhere else.
+const nasty = buildRefreshEmail([{ ...old1, reference: '<script>alert(1)</script>' }], rq);
+assertEq("refresh: reference is escaped", nasty.html.includes("<script>"), false);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

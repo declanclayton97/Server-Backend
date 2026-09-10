@@ -38,6 +38,9 @@ export const QUOTE_ACTIONS = [
   { key: "cancel",     label: "Cancel the quote" },
   { key: "more_time",  label: "I need more time" },
   { key: "call_back",  label: "Please call me" },
+  // Added for the one-off backlog refresh: the whole point of that email is to
+  // find which old quotes need re-pricing, and "cancel" is the wrong home for it.
+  { key: "requote",   label: "Please re-quote this" },
 ];
 
 // England & Wales bank holidays, from https://www.gov.uk/bank-holidays.json.
@@ -406,6 +409,7 @@ export function buildHandoverEmail(quotes) {
 // where the chase got to without anyone opening the dashboard.
 export function buildBpNote(kind, detail) {
   if (kind === "chase") return `Quote chase ${detail.stage} of 3 emailed to ${detail.to}`;
+  if (kind === "one_off") return `Quote refresh: one-off backlog email sent to ${detail.to}`;
   if (kind === "handover") return `Quote chase: no reply after 3 chases — passed to ${detail.salespersonName || "the salesperson"} to chase personally`;
   if (kind === "response") {
     const action = (QUOTE_ACTIONS.find((a) => a.key === detail.action) || {}).label || detail.action;
@@ -416,4 +420,122 @@ export function buildBpNote(kind, detail) {
     return `Quote chase: customer replied "${action}"${reason}${note} (after ${detail.stage || 0} chase${detail.stage === 1 ? "" : "s"})`;
   }
   return "Quote chase";
+}
+
+// A ONE-OFF email for the pre-existing backlog — not part of the chase sequence.
+//
+// The chase deliberately never touches seeded quotes, which left ~90 real, recent
+// quotes sitting in "Quote sent" that nobody would ever follow up. This is the
+// single message that clears that: it asks whether each is still live and offers
+// to re-price it, then stops. It is sent once per CUSTOMER, never once per quote.
+//
+// Tone rules are stricter than the chase, because a customer may not have heard
+// from us in weeks: it must not imply we have been waiting on them, must not read
+// as a reminder (there was no earlier one), and must give an easy "nothing needed"
+// exit. Ages are shown so an old quote is honest about being old rather than
+// pretending it is current.
+export function buildRefreshEmail(quotes, urlFor) {
+  const list = Array.isArray(quotes) ? quotes : [quotes];
+  const first = list[0] || {};
+  const many = list.length > 1;
+  const url = typeof urlFor === "function" ? urlFor : () => String(urlFor);
+
+  const hi = firstNameOf(first) ? `Hi ${esc(firstNameOf(first))},` : "Hi,";
+  const subject = many
+    ? `Are these ${list.length} quotes still needed?`
+    : `Is this quote still needed? — SO${first.orderId}`;
+
+  const opener = `We are having a tidy-up of the quotes still open on our system, and
+    ${many ? `these ${list.length} are` : "this one is"} still showing against your name.`;
+  const offer = `If ${many ? "any are" : "it is"} still of interest we will gladly refresh
+    ${many ? "them" : "it"} — ${many ? "some have" : "it has"} been open a little while and prices may have moved since.
+    If ${many ? "they are" : "it is"} no longer needed, just say so and we will close
+    ${many ? "them" : "it"} off. Either answer is genuinely useful.`;
+
+  const button = (u, action, label, bg) => `
+    <a href="${esc(u)}&action=${action}"
+       style="display:inline-block;margin:4px 6px 4px 0;padding:11px 18px;border-radius:5px;
+              background:${bg};color:#fff;text-decoration:none;font-weight:bold;font-size:14px;">${label}</a>`;
+
+  const ageOf = (q) => {
+    if (!q.enteredStatusAt) return "";
+    const days = Math.floor((Date.now() - new Date(q.enteredStatusAt).getTime()) / 86400000);
+    if (!Number.isFinite(days) || days < 0) return "";
+    return days < 14 ? `${days} days ago` : `${Math.floor(days / 7)} weeks ago`;
+  };
+
+  const body = many
+    ? `<table style="border-collapse:collapse;width:100%;font-size:14px;margin:14px 0;">
+         ${list.map((q) => `
+         <tr>
+           <td style="padding:9px 10px 9px 0;border-bottom:1px solid #eee;">
+             <strong>SO${q.orderId}</strong>${q.reference ? `<br><span style="color:#777;font-size:12px;">${esc(q.reference)}</span>` : ""}
+             ${ageOf(q) ? `<br><span style="color:#999;font-size:12px;">sent ${esc(ageOf(q))}</span>` : ""}
+           </td>
+           <td style="padding:9px 10px;border-bottom:1px solid #eee;white-space:nowrap;">${gbp(q.netValue)} + VAT</td>
+           <td style="padding:9px 0;border-bottom:1px solid #eee;text-align:right;">
+             <a href="${esc(url(q))}" style="display:inline-block;padding:8px 15px;border-radius:5px;background:#0073e6;color:#fff;text-decoration:none;font-weight:bold;font-size:13px;">Tell us about this one</a>
+           </td>
+         </tr>`).join("")}
+       </table>
+       <p>Let us know about any of them — or just reply to this email.</p>`
+    : `<table style="border-collapse:collapse;margin:14px 0;font-size:14px;">
+         <tr><td style="padding:4px 12px 4px 0;color:#777;">Quote</td><td style="padding:4px 0;font-weight:bold;">SO${first.orderId}</td></tr>
+         ${first.reference ? `<tr><td style="padding:4px 12px 4px 0;color:#777;">Reference</td><td style="padding:4px 0;">${esc(first.reference)}</td></tr>` : ""}
+         ${ageOf(first) ? `<tr><td style="padding:4px 12px 4px 0;color:#777;">Sent</td><td style="padding:4px 0;">${esc(ageOf(first))}</td></tr>` : ""}
+         <tr><td style="padding:4px 12px 4px 0;color:#777;">Total</td><td style="padding:4px 0;font-weight:bold;">${gbp(first.netValue)} + VAT</td></tr>
+       </table>
+       <p style="margin:16px 0;">
+         ${button(url(first), "go_ahead", "Yes — go ahead", "#1e7b34")}
+         ${button(url(first), "requote", "Please re-quote it", "#0073e6")}<br>
+         ${button(url(first), "call_back", "Please call me", "#b07000")}
+         ${button(url(first), "cancel", "No longer needed", "#8a8a8a")}
+       </p>`;
+
+  const sentOn = String(first.enteredStatusAt || "").slice(0, 10);
+  const why = `You are receiving this because ${esc(first.salespersonName || "our sales team")} sent you
+     ${many ? `${list.length} quotes` : `quote SO${first.orderId}`}${sentOn ? `, the ${many ? "most recent" : "latest"} on ${esc(sentOn)}` : ""},
+     and ${many ? "they are" : "it is"} still open on our system. This is a one-off message, not a mailing list.`;
+
+  const html = `
+  <div style="font-family:Arial,sans-serif;max-width:600px;color:#333;">
+    <p>${hi}</p>
+    <p>${opener}</p>
+    <p>${offer}</p>
+    ${body}
+    <p style="font-size:13px;color:#777;">Or just reply to this email and it will go straight to
+      ${esc(first.salespersonName || "your account manager")} — you do not have to click anything.</p>
+    <hr style="border:0;border-top:1px solid #e3e6ea;margin:22px 0 12px;">
+    <p style="font-size:11px;color:#999;line-height:1.5;margin:0;">
+      ${why}<br>
+      Sent by <strong>Tuff Workwear Ltd</strong>, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG ·
+      0113 2887713 · <a href="mailto:sales@tuffshop.co.uk" style="color:#999;">sales@tuffshop.co.uk</a><br>
+      Not expecting this? Reply and tell us and we will stop.
+    </p>
+  </div>`;
+
+  const text = `${hi}
+
+${opener.replace(/\s+/g, " ").trim()}
+
+${offer.replace(/\s+/g, " ").trim()}
+
+${many
+    ? list.map((q) => `  SO${q.orderId}${q.reference ? ` (${q.reference})` : ""} — ${gbp(q.netValue)} + VAT${ageOf(q) ? `, sent ${ageOf(q)}` : ""}\n    ${url(q)}`).join("\n")
+    : `Quote SO${first.orderId}${first.reference ? ` (${first.reference})` : ""} — ${gbp(first.netValue)} + VAT
+
+  Yes, go ahead:     ${url(first)}&action=go_ahead
+  Please re-quote:   ${url(first)}&action=requote
+  Please call me:    ${url(first)}&action=call_back
+  No longer needed:  ${url(first)}&action=cancel`}
+
+Or reply to this email and it will reach ${first.salespersonName || "your account manager"} —
+you do not have to click anything.
+
+--
+${why.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()}
+Tuff Workwear Ltd, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG
+0113 2887713 · sales@tuffshop.co.uk`;
+
+  return { subject, html, text };
 }
