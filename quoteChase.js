@@ -1,3 +1,5 @@
+import { SIGNATURE_HTML, SIGNATURE_TEXT, EMAIL_ASSETS_BASE } from "./emailSignature.js";
+
 // Quote follow-up: chase a customer who has been sent a quote, three times, then
 // hand the job back to the salesperson who raised it.
 //
@@ -232,6 +234,56 @@ const gbp = (n) => "£" + (Number(n) || 0).toLocaleString("en-GB", { minimumFrac
 // The four options go in ONE table as a 2x2 grid rather than four separate tables:
 // Outlook renders each table as a block, so separate tables would stack into a
 // column of four full-width buttons.
+// The house shell for CUSTOMER-facing quote mail: logo, a contained card, and the
+// shared Tuff Workwear signature the proof emails already use — so a quote email
+// looks like it came from the same company rather than from a script.
+//
+// Table-based and inline-styled throughout, because Outlook's Word engine ignores
+// <style> blocks, floats, and max-width on a <div>. Width is set as a real table
+// attribute as well as CSS for the same reason.
+//
+// The logo is a yellow tag on white, so the header stays WHITE with a black rule
+// under it. Reversing that (a black bar, as the internal proof notification uses)
+// puts a white box around the mark.
+function emailShell({ bodyHtml, whyHtml }) {
+  return `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f4f5f7" style="background:#f4f5f7;">
+  <tr>
+    <td align="center" style="padding:24px 12px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background:#ffffff;border:1px solid #e3e6ea;">
+        <tr>
+          <td style="padding:18px 24px 14px;border-bottom:3px solid #111111;">
+            <a href="https://tuffshop.co.uk" style="text-decoration:none;border:0;">
+              <img src="${EMAIL_ASSETS_BASE}/image001.png" alt="Tuff Workwear" width="113" height="80" style="display:block;border:0;outline:none;">
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:22px 24px 6px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.55;color:#333333;">
+            ${bodyHtml}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 24px 4px;">
+            <hr style="border:0;border-top:1px solid #e3e6ea;margin:18px 0 12px;">
+            <p style="font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#999999;line-height:1.5;margin:0;">
+              ${whyHtml}<br>
+              Not expecting this? Reply and tell us and we will stop.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 24px 22px;">
+            ${SIGNATURE_HTML}
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>`;
+}
+
+
 function buttonCell(href, label, bg) {
   return `<td bgcolor="${bg}" style="border-radius:5px;padding:11px 16px;mso-padding-alt:11px 16px;text-align:center;">` +
     `<a href="${esc(href)}" style="color:#ffffff;text-decoration:none;font-weight:bold;font-size:14px;` +
@@ -315,21 +367,15 @@ export function buildChaseEmail(quotes, stage, urlFor) {
   const why = `You are receiving this because ${esc(first.salespersonName || "our sales team")} sent you
      ${many ? `${list.length} quotes` : `quote SO${first.orderId}`}${sentOn ? ` on ${esc(sentOn)}` : ""}.`;
 
-  const html = `
-  <div style="font-family:Arial,sans-serif;max-width:600px;color:#333;">
+  const html = emailShell({
+    bodyHtml: `
     <p>${hi}</p>
     <p>${opener}</p>
     ${body}
-    <p style="font-size:13px;color:#777;">Or just reply to this email and it will go straight to
-      ${esc(first.salespersonName || "your account manager")} — you do not have to click anything.</p>
-    <hr style="border:0;border-top:1px solid #e3e6ea;margin:22px 0 12px;">
-    <p style="font-size:11px;color:#999;line-height:1.5;margin:0;">
-      ${why}<br>
-      Sent by <strong>Tuff Workwear Ltd</strong>, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG ·
-      0113 2887713 · <a href="mailto:sales@tuffshop.co.uk" style="color:#999;">sales@tuffshop.co.uk</a><br>
-      Not expecting this? Reply and tell us and we will stop.
-    </p>
-  </div>`;
+    <p style="font-size:13px;color:#777777;margin:16px 0 0;">Or just reply to this email and it will go straight to
+      ${esc(first.salespersonName || "your account manager")} — you do not have to click anything.</p>`,
+    whyHtml: why,
+  });
 
   const text = `${hi}
 
@@ -350,8 +396,7 @@ you do not have to click anything.
 
 --
 ${why.replace(/<[^>]*>/g, "")}
-Tuff Workwear Ltd, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG
-0113 2887713 · sales@tuffshop.co.uk`;
+${SIGNATURE_TEXT}`;
 
   return { subject, html, text };
 }
@@ -510,22 +555,16 @@ export function buildRefreshEmail(quotes, urlFor) {
      ${many ? `${list.length} quotes` : `quote SO${first.orderId}`}${sentOn ? `, the ${many ? "most recent" : "latest"} on ${esc(sentOn)}` : ""},
      and ${many ? "they are" : "it is"} still open on our system. This is a one-off message, not a mailing list.`;
 
-  const html = `
-  <div style="font-family:Arial,sans-serif;max-width:600px;color:#333;">
+  const html = emailShell({
+    bodyHtml: `
     <p>${hi}</p>
     <p>${opener}</p>
     <p>${offer}</p>
     ${body}
-    <p style="font-size:13px;color:#777;">Or just reply to this email and it will go straight to
-      ${esc(first.salespersonName || "your account manager")} — you do not have to click anything.</p>
-    <hr style="border:0;border-top:1px solid #e3e6ea;margin:22px 0 12px;">
-    <p style="font-size:11px;color:#999;line-height:1.5;margin:0;">
-      ${why}<br>
-      Sent by <strong>Tuff Workwear Ltd</strong>, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG ·
-      0113 2887713 · <a href="mailto:sales@tuffshop.co.uk" style="color:#999;">sales@tuffshop.co.uk</a><br>
-      Not expecting this? Reply and tell us and we will stop.
-    </p>
-  </div>`;
+    <p style="font-size:13px;color:#777777;margin:16px 0 0;">Or just reply to this email and it will go straight to
+      ${esc(first.salespersonName || "your account manager")} — you do not have to click anything.</p>`,
+    whyHtml: why,
+  });
 
   const text = `${hi}
 
@@ -547,8 +586,7 @@ you do not have to click anything.
 
 --
 ${why.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()}
-Tuff Workwear Ltd, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG
-0113 2887713 · sales@tuffshop.co.uk`;
+${SIGNATURE_TEXT}`;
 
   return { subject, html, text };
 }
