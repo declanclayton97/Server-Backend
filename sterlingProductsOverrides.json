@@ -23,5 +23,29 @@
     "sku": "Wilbury XXL",
     "brand": "DeWalt",
     "_why": "DeWalt Wilbury Two Pack T-Shirts, XXL. Absent from the Sterling product-data workbook entirely — not one Wilbury EAN of any size appears in sterlingProducts.json, so this is not a single missing row but the whole product line never having been ingested. Blocked PO 488289 (error id 231, 2026-09-10). Verified against the live site with a read-only worker inspect() (no basket add): searching \"Wilbury\" returns a single unambiguous result, styleid=WILBURY (\"wilbury dewalt two pack t-shrits\", score 100, no colour conflict), with a S/M/L/XL/XXL grid at £11.66 each and XXL showing 398 in stock. Colour kept as Brightpearl has it (\"Djion & Navy\", likely their own typo for Dijon) since the portal has no separate colour variant to match against — the single search result is enough. If Sterling ship a workbook that contains this EAN, delete this entry."
+  },
+  "5063777009237": {
+    "search": "Wilbury",
+    "colour": "Djion & Navy",
+    "size": "M",
+    "sku": "Wilbury M",
+    "brand": "DeWalt",
+    "_why": "DeWalt Wilbury Two Pack T-Shirts, M. Same absence as the XXL entry above — the whole product line was missing from the workbook, not one row — so this size would have blocked a Sterling run the first time anyone ordered it, exactly as XXL blocked PO 488289 on 2026-09-10. Added at the same time rather than waiting for it to fail: the worker inspect() that verified XXL returned the full grid in one read, S/M/L/XL/XXL at GBP 11.66 with stock 0/1035/1330/1028/398, so M (1035 in stock) is confirmed by the same evidence. Brightpearl carries M/L/XL/XXL only (product group 16619); Sterling also list an S, but we hold no S product so there is no EAN to key an override on. Colour kept as Brightpearl has it (\"Djion & Navy\") for the same reason as XXL. If Sterling ship a workbook that contains this EAN, delete this entry."
+  },
+  "5063777009244": {
+    "search": "Wilbury",
+    "colour": "Djion & Navy",
+    "size": "L",
+    "sku": "Wilbury L",
+    "brand": "DeWalt",
+    "_why": "DeWalt Wilbury Two Pack T-Shirts, L. Same absence as the XXL entry above — the whole product line was missing from the workbook, not one row — so this size would have blocked a Sterling run the first time anyone ordered it, exactly as XXL blocked PO 488289 on 2026-09-10. Added at the same time rather than waiting for it to fail: the worker inspect() that verified XXL returned the full grid in one read, S/M/L/XL/XXL at GBP 11.66 with stock 0/1035/1330/1028/398, so L (1330 in stock) is confirmed by the same evidence. Brightpearl carries M/L/XL/XXL only (product group 16619); Sterling also list an S, but we hold no S product so there is no EAN to key an override on. Colour kept as Brightpearl has it (\"Djion & Navy\") for the same reason as XXL. If Sterling ship a workbook that contains this EAN, delete this entry."
+  },
+  "5063777009251": {
+    "search": "Wilbury",
+    "colour": "Djion & Navy",
+    "size": "XL",
+    "sku": "Wilbury XL",
+    "brand": "DeWalt",
+    "_why": "DeWalt Wilbury Two Pack T-Shirts, XL. Same absence as the XXL entry above — the whole product line was missing from the workbook, not one row — so this size would have blocked a Sterling run the first time anyone ordered it, exactly as XXL blocked PO 488289 on 2026-09-10. Added at the same time rather than waiting for it to fail: the worker inspect() that verified XXL returned the full grid in one read, S/M/L/XL/XXL at GBP 11.66 with stock 0/1035/1330/1028/398, so XL (1028 in stock) is confirmed by the same evidence. Brightpearl carries M/L/XL/XXL only (product group 16619); Sterling also list an S, but we hold no S product so there is no EAN to key an override on. Colour kept as Brightpearl has it (\"Djion & Navy\") for the same reason as XXL. If Sterling ship a workbook that contains this EAN, delete this entry."
   }
 }
