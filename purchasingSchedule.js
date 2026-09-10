@@ -1337,9 +1337,14 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // Chadwick key on their ITEM CODE, which most of our SKUs already are (882-01-A-L). Some products
   // carry a Brightpearl-internal code instead (ML070622072) which their upload will silently drop —
   // the basket line-count check in Alt-Items catches that and refuses rather than ordering short.
-  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])]
-    .filter((l) => String(l.productId) !== '1000' && l.sku)
-    .map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name }));
+  // One line per SKU, same as Performance Brands and Castle. Chadwick's cart MERGES duplicate
+  // adds, and the basket check compares LINE COUNTS — so two demand rows for one SKU are sent as
+  // two lines, come back as one cart row, and the run refuses a basket that is actually complete.
+  // 2026-09-10, PO 488281: 17 lines sent, 15 rows in the cart, and Chadwick's own reply said
+  // TotalItems 17 — the order was right and the count was not. Brightpearl had already
+  // consolidated the same duplicates into 15 PO rows, which is why the PO and the cart agreed with
+  // each other and only our line count disagreed with both.
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty, cost: l.cost, name: l.name }));
   if (!orderLines.length) throw stepErr('cart', 'no orderable Chadwick lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
