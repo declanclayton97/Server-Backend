@@ -165,10 +165,22 @@ export const SUPPLIERS = {
   // some carry a Brightpearl-internal code instead (ML070622072) and will NOT resolve — the basket
   // line-count check catches that and refuses rather than ordering short.
   // Shares PCF_STOCKPO — safe now that PO fields append rather than overwrite.
-  // brandIds is the AUTHORITATIVE match — every Chadwick product carries brandId 213. The name
-  // detect is kept only as a cheap first pass that saves a product lookup on rows it already
-  // recognises; brand is what catches anything renamed, which a "CT " prefix never would.
-  CHADWICK: { contactId: 42485, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 42485, brandIds: [213], detect: (n) => /^ct\s/i.test(n || '') },
+  // brandIds catches anything renamed, which a "CT " prefix never would, and the name detect is
+  // kept as a cheap first pass that saves a product lookup on rows it already recognises.
+  //
+  // But brand 213 is NOT exclusive to Chadwick, which it was previously assumed to be. Behrens
+  // Group products (NEX-*, HER-*) carry the same brand with Behrens (38380) as their primary
+  // supplier, and a DU028 legging carries it with a third supplier again. Sent to Chadwick they
+  // are rejected outright — "400 Invalid Item NEX-TEE-RYL-L" on 2026-09-10 aborted the batch at 5
+  // of 23 lines and orphaned PO 488281, so 16 good CT lines went unordered because of 4 that were
+  // never Chadwick's. Hence both guards below, which are independent on purpose:
+  //   brandNeedsOwnSupplier — brand alone loses when BP names a DIFFERENT primary supplier.
+  //   notOurs               — a code shape that is somebody else's, which still works when BP
+  //                           carries NO primary supplier at all (251 Pulsar products are like
+  //                           that) and brand would otherwise be the only signal left.
+  // Neither is a global rule: a DISTRIBUTOR resells other brands by design, and PenCarrie depends
+  // on brand beating primarySupplierId — see its entry above.
+  CHADWICK: { contactId: 42485, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 42485, brandIds: [213], brandNeedsOwnSupplier: true, notOurs: /^(?:NEX|HER)-/i, detect: (n) => /^ct\s/i.test(n || '') },
   // V12 Footwear — email supplier, ordered by sending Brightpearl's own PO PDF to their order desk.
   // 624 products, every one brand 279 ("V12") and named "V12 Footwear <style> …", so brand is the
   // reliable signal and the name detect is a safety net rather than the primary route.
@@ -1179,6 +1191,10 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // Only the rows the name REJECTED need looking up, batched into one call per order.
     const supplierOwned = new Set();
     const brandOwned = new Set();
+    // productId → the OTHER supplier Brightpearl names as its primary. A shared brand is not proof
+    // the line is ours to buy: Chadwick matches on brandId 213, and Behrens Group products carry
+    // that same brand. See belongsHere below.
+    const foreignSupplier = new Map();
     // BRAND is the authoritative signal, not the product name. A name detect is a guess about how
     // someone typed the product; the brand is a field on the record. Chadwick is the clean case —
     // every one of its products carries brandId 213 — and brand catches anything renamed, which a
@@ -1202,6 +1218,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
             if (!p || p.id == null) continue;
             if (contactId && String(p.primarySupplierId) === String(contactId)) supplierOwned.add(String(p.id));
             if (brandIds.size && p.brandId != null && brandIds.has(String(p.brandId))) brandOwned.add(String(p.id));
+            if (contactId && p.primarySupplierId != null && String(p.primarySupplierId) !== String(contactId)) foreignSupplier.set(String(p.id), String(p.primarySupplierId));
           }
         } catch { /* additive only: if the lookup fails we fall back to name matching, never worse */ }
         await pause(150);
@@ -1210,10 +1227,43 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // Explicit per-supplier claims count too: products BP attributes elsewhere that we nonetheless
     // buy from this supplier, where that attribution cannot be corrected in Brightpearl at all.
     const claimed = new Set(((SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].claimProductIds) || []).map(String));
-    const belongsHere = (r) => detect(r.productName, r.productSku) || supplierOwned.has(String(r.productId)) || brandOwned.has(String(r.productId)) || claimed.has(String(r.productId));
+    // A shared BRAND is the weakest of these signals, and on its own it is not proof the line is
+    // ours to buy from this supplier. Chadwick is matched on brandId 213 because its name detect
+    // misses ~60 products — but Behrens Group products carry brand 213 too, with Behrens (38380)
+    // as their primary supplier. Sending those to Chadwick got the whole batch rejected on
+    // 2026-09-10: "400 Invalid Item NEX-TEE-RYL-L", 5 of 23 lines in the cart, PO 488281 orphaned
+    // and 16 perfectly good Carbon Technical lines unordered because of 4 that were never theirs.
+    //
+    // So brand-only membership loses to Brightpearl explicitly naming a DIFFERENT supplier. The
+    // three stronger signals still win outright: our own name/code detect, BP naming THIS supplier,
+    // and claimProductIds — which exists precisely for products BP attributes elsewhere that we
+    // nonetheless buy here, so a wrong attribution stays correctable without touching this rule.
+    // Opt-in per supplier. OWN-BRAND suppliers (Chadwick) set it; DISTRIBUTORS (PenCarrie) must not.
+    const brandNeedsOwnSupplier = !!(SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].brandNeedsOwnSupplier);
+    const notOurs = (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].notOurs) || null;
+    const belongsHere = (r) => belongsToSupplier(String(r.productId), {
+      sku: r.productSku, nameDetect: !!detect(r.productName, r.productSku), supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier, notOurs,
+    });
     let candidateRows = (singleSupplier && !hasBrandDetect)
       ? orderableRows
       : orderableRows.filter(([, r]) => belongsHere(r));
+    // Record what that rule dropped. A line removed here is one a human asked for and will not see
+    // on the PO, which is exactly the shape of "asked for but never ordered" — it must be
+    // answerable from the demand log rather than inferred later.
+    if (candidateRows !== orderableRows) {
+      const kept = new Set(candidateRows.map(([rowId]) => String(rowId)));
+      for (const [rowId, r] of orderableRows) {
+        const pid = String(r.productId);
+        if (kept.has(String(rowId)) || !brandOwned.has(pid)) continue;   // kept, or never a brand-only row
+        const why = (brandNeedsOwnSupplier && foreignSupplier.has(pid))
+          ? `Brightpearl names supplier ${foreignSupplier.get(pid)} as its primary`
+          : (notOurs && notOurs.test(String(r.productSku || '')) ? `its SKU is another supplier's code shape` : null);
+        if (!why) continue;                                             // dropped by something else
+        demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName,
+          ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0,
+          note: `shares ${supplierKey}'s brand, but ${why} — not ordered from ${supplierKey}` });
+      }
+    }
     // Apply THIS supplier's parenthetical scope, if its note is a real instruction rather than an
     // annotation. Only bites when every term is recognised on the order AND at least one row
     // satisfies them all — otherwise the note is left alone and nothing is filtered.
@@ -1402,6 +1452,41 @@ async function writeDemandLog(pool, poId, supplierKey, demandAudit) {
 // (which requires an empty PO — by then it is one). Emptying happens BEFORE the demand is read,
 // which is the entire point: read it first and the low-inv report is still suppressed by the very
 // rows we are about to delete.
+// Does this product belong to THIS supplier? Four signals, in strength order.
+//
+// A shared BRAND is the weakest and, alone, is not proof the line is ours to buy here. Chadwick is
+// matched on brandId 213 because its name detect misses ~60 products — but Behrens Group products
+// carry brand 213 too, with Behrens (38380) as their primary supplier. Sending those to Chadwick
+// had the whole batch rejected on 2026-09-10: "400 Invalid Item NEX-TEE-RYL-L", 5 of 23 lines in
+// the cart, PO 488281 orphaned, and 16 good Carbon Technical lines unordered because of 4 that
+// were never Chadwick's.
+//
+// So brand-only membership can lose to Brightpearl explicitly naming a DIFFERENT supplier — but
+// ONLY where the supplier opts in via brandNeedsOwnSupplier. It must never be the global rule.
+//
+// A DISTRIBUTOR resells other suppliers' brands by definition, and PenCarrie depends on the exact
+// opposite: SO 483237's ten Anthem lines (brand 216) carry primarySupplierId 205 (Ralawise), and
+// the instruction was "order 483237 needs to go with pencarrie". The registry says it outright —
+// "brand is the right signal here and primarySupplierId is not". Applying this globally would have
+// silently stopped ordering those, which is a worse bug than the one it fixes.
+//
+// The three stronger signals win outright either way: our own name/code detect, BP naming THIS
+// supplier, and claimProductIds — which exists precisely for products BP attributes elsewhere that
+// we do buy here, so a wrong attribution stays correctable without weakening this rule.
+export function belongsToSupplier(pid, { sku, nameDetect, supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier = false, notOurs = null }) {
+  const k = String(pid);
+  if (nameDetect) return true;
+  if (supplierOwned.has(k)) return true;
+  if (claimed.has(k)) return true;
+  if (!brandOwned.has(k)) return false;
+  // Brand-only from here. Two independent vetoes, because each covers what the other cannot:
+  // BP attribution is authoritative when present but is often absent, and a code shape works
+  // regardless of attribution but only for shapes we have actually seen.
+  if (brandNeedsOwnSupplier && foreignSupplier.has(k)) return false;
+  if (notOurs && notOurs.test(String(sku || ''))) return false;
+  return true;
+}
+
 const ADOPT_LOOKBACK_DAYS = 7;   // a Friday failure fixed on Monday is still the same PO
 // Use the PO NUMBER THE FAILED ATTEMPT RECORDED — never a search for "some draft belonging to this
 // supplier". Every placeFn throws stepErr(..., { poId }), so the failure itself names the PO it
