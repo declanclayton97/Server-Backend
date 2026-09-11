@@ -12878,6 +12878,22 @@ async function pollQuoteChase() {
     [liveIds.length ? liveIds : [0]]
   );
 
+  // ...and anything that came BACK to the status must be un-hidden. Without this
+  // the flag is one-way: a quote that leaves "Quote sent" and later returns is
+  // never re-inserted either, because newIds filters against every known row
+  // regardless of the flag — so it disappears from the dashboard permanently.
+  // Found 2026-09-11: SO488214 had been back in the status for 17 hours, on a
+  // channel that is not excluded, and was invisible.
+  //
+  // Deliberately does NOT touch seeded, stage, responded_at or stopped_at: a
+  // quote returning to the status is the same quote, and resetting its history
+  // would re-chase someone who has already answered.
+  await pool.query(
+    `UPDATE quote_chase SET still_quote_sent = TRUE, last_checked_at = NOW()
+      WHERE still_quote_sent = FALSE AND is_test = FALSE AND order_id = ANY($1::bigint[])`,
+    [liveIds.length ? liveIds : [0]]
+  );
+
   // is_test rows must not count here. A single test-send inserts one, and if that
   // makes the table look non-empty the seeding branch never fires — the whole
   // backlog is then inserted unseeded and chased on the spot. That happened on
