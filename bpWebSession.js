@@ -539,9 +539,19 @@ async function emailOrderDocument(orderId, { contactId, to, subject, message, te
   if (!orderId || !contactId || !to) throw new Error('orderId, contactId and to are required');
   const url = `${BP_HOST}/template_print.php?return-to-oid=${encodeURIComponent(orderId)}&oID=${encodeURIComponent(orderId)}&contacts_id=${encodeURIComponent(contactId)}&template_type_id=${encodeURIComponent(templateTypeId)}`;
   // 1. GET the send form → __fc_csrf_token + the recipient rows + default subject/message.
-  const g = await fetchAuthed(url, { client, method: 'GET' });
-  const html = g.html || '';
-  if (looksLikeLoginPage(html)) throw new Error(`template_print not authenticated for ${orderId}`);
+  // This runs moments after createPo's row writes (PO adoption empties + refills the order right
+  // before placement gets here) and BP's legacy app can serve a brief incomplete stub of this page
+  // in that window — short, no <form>, not a login page either (looksLikeLoginPage doesn't catch
+  // it). Seen the same way on patt-op.php right after a write. One retry after a beat clears it;
+  // a genuine outage or session problem still surfaces on the second attempt.
+  let html = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const g = await fetchAuthed(url, { client, method: 'GET' });
+    html = g.html || '';
+    if (looksLikeLoginPage(html)) throw new Error(`template_print not authenticated for ${orderId}`);
+    if (/__fc_csrf_token/.test(html)) break;
+    if (attempt === 0) await new Promise((r) => setTimeout(r, 1500));
+  }
   const token = (html.match(/name="__fc_csrf_token"[^>]*value="([^"]+)"/i) || html.match(/name=["']__fc_csrf_token["'][^>]*content=["']([^"']+)["']/i) || html.match(/__fc_csrf_token["'][^>]*(?:value|content)=["']([^"']+)["']/i) || [])[1];
   const toRows = [...new Set([...html.matchAll(/name="(email_to_\d+)"/gi)].map((m) => m[1]))];
   const idxRows = [...new Set([...html.matchAll(/name="(email_index_\d+)"/gi)].map((m) => m[1]))];
