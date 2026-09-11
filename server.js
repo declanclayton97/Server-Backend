@@ -8267,6 +8267,57 @@ app.post('/api/purchasing/product-status-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// Brightpearl Data Manager import (legacy web UI). The public API cannot set a product's
+// LIVE/ARCHIVED/DISCONTINUED status at all — PATCH and PUT /status both 404 and a whole-
+// product PUT silently ignores the field — so a saved import map is the only route.
+//
+// The form at /patt-op.php?scode=data-manager&xfer_map_id=N posts multipart with:
+//   xfer_file (the spreadsheet), action=import, xfer_map_id, MAX_FILE_SIZE
+//   doit=1        ACTUALLY import. WITHOUT IT THE UPLOAD IS A TEST RUN — use that first.
+//   skip=1        skip items not found using match column A
+//   update_only=1 update only, never create new products
+// body: { fileBase64, filename, mapId, doit, skip, updateOnly, emailReport, client }
+app.post('/api/purchasing/bp-import-upload', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  const { fileBase64, filename, mapId = 41, doit = false, skip = true, updateOnly = true, emailReport = false, client } = req.body || {};
+  if (!fileBase64 || !filename) return res.status(400).json({ error: 'fileBase64 and filename required' });
+  try {
+    const buf = Buffer.from(fileBase64, 'base64');
+    if (buf.length > 10000000) return res.status(400).json({ error: `file is ${buf.length} bytes, over the form's MAX_FILE_SIZE of 10000000` });
+    const fd = new FormData();
+    fd.set('action', 'import');
+    fd.set('xfer_map_id', String(mapId));
+    fd.set('MAX_FILE_SIZE', '10000000');
+    if (skip) fd.set('skip', '1');
+    if (updateOnly) fd.set('update_only', '1');
+    if (emailReport) fd.set('email_report', '1');
+    if (doit) fd.set('doit', '1');                       // omitted => BP treats it as a test run
+    fd.set('xfer_file', new Blob([buf]), filename);
+    const url = `${BP_WEB_HOST}/patt-op.php?scode=data-manager&xfer_map_id=${encodeURIComponent(mapId)}`;
+    let r = await bpWebFetch(url, { method: 'POST', body: fd, ...(client ? { client } : {}) });
+    // fetchAuthed only follows redirects for GET, and the importer 302s to its result
+    // page, so chase it here or the outcome is never seen.
+    const hops = [];
+    for (let i = 0; i < 3 && [301, 302, 303, 307, 308].includes(r.status) && r.location; i++) {
+      const next = r.location.startsWith('http') ? r.location : `${BP_WEB_HOST}${r.location.startsWith('/') ? '' : '/'}${r.location}`;
+      hops.push(next);
+      r = await bpWebFetch(next, { ...(client ? { client } : {}) });
+    }
+    const html = r.html || '';
+    // Pull the human-readable outcome out of the response rather than returning 260KB.
+    const strip = (s) => s.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+    const grab = (rx) => { const m = html.match(rx); return m ? strip(m[0]).slice(0, 600) : null; };
+    res.json({
+      ok: r.status === 200, status: r.status, finalUrl: r.finalUrl, hops, bytes: buf.length,
+      testRun: !doit, filename, mapId,
+      summary: grab(/<div[^>]*(?:result|summary|message|report)[^>]*>[\s\S]{0,2000}?<\/div>/i),
+      rowsMentioned: (strip(html).match(/\b\d+\s+(?:rows?|records?|items?|products?)\b[^.]{0,60}/gi) || []).slice(0, 12),
+      errors: (strip(html).match(/\b(?:error|failed|invalid|not found|could not)\b[^.]{0,120}/gi) || []).slice(0, 12),
+      len: html.length,
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // LIVE product-name append: add a token (e.g. the Ralawise style code) to every
 // salesChannels[].productName when it isn't already present. BP has no name PATCH,
 // so read-modify-PUT the whole product (same method as the native-weight write).
