@@ -456,6 +456,40 @@ async function healPrices(steps, { supplierKey, poId, changes, pool }) {
   } catch (e) { steps.priceHealWarn = e.message; }
 }
 
+// Ask the Fristads portal what it can actually supply for ONE line. Returns null when the answer
+// can't be trusted (probe failed, article not found, no numeric availability) — the caller then
+// leaves the line IN, because failing loudly at the basket is better than dropping a customer's
+// line on a network blip.
+// Split the cart lines into what Fristads can supply and what they cannot. FAILS OPEN by design:
+// anything the probe could not answer for (null) stays in `orderable`, because a dropped customer
+// line is far worse than the loud basket failure we already had. Pure, so the rule is pinned by a
+// test rather than only exercised on a live run.
+export function partitionFristadsLines(cartLines, stockBySku) {
+  const short = [], orderable = [];
+  for (const l of cartLines || []) {
+    const st = stockBySku && stockBySku.get(String(l.sku));
+    const avail = st && Number.isFinite(Number(st.avail)) ? Number(st.avail) : null;
+    if (avail !== null && avail < l.qty) short.push({ ...l, avail, deldate: (st && st.deldate) || null });
+    else orderable.push(l);
+  }
+  return { short, orderable };
+}
+
+export async function fristadsAvailable(altItemsUrl, line) {
+  const url = `${altItemsUrl}/api/fristads-stock?name=${encodeURIComponent(line.name || '')}`
+    + `&sku=${encodeURIComponent(line.sku || '')}&size=${encodeURIComponent(line.size || '')}`;
+  try {
+    const j = await (await fetch(url, { signal: AbortSignal.timeout(30000) })).json();
+    if (!j || j.found !== true || j.avail == null || !Number.isFinite(Number(j.avail))) return null;
+    return { avail: Number(j.avail), deldate: j.deldate || null };
+  } catch (e) {
+    // Same trap as snickersLineStatus: a silent null here would disable the guard with no word
+    // said, and nobody would know the check had stopped working.
+    console.log(`[fristads-stock] ${line.sku}: ${e.message}`);
+    return null;
+  }
+}
+
 async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   const steps = {};
   // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs)
@@ -464,19 +498,88 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   catch (e) { throw createPoErr(e); }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
-  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
-  // item names ordered per SO — for the SO note
+  let soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  // item names ordered per SO — for the SO note. productId is carried because it is the ONLY key
+  // that survives to the cart: soLines hold the Brightpearl SO row SKU (CB170321004) while the PO
+  // row, and so the cart line, holds the resolved Fristads code (125949-171-406). Matching these
+  // two by SKU silently matches nothing.
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. push the PO lines to the Fristads cart (unresolved = size/item not on the portal)
   const cartLines = await bp.getOrderCartLines(poId).catch((e) => { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); });
-  const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
-  const cart = await jfetch('cart', `${altItemsUrl}/api/fristads-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: cartLines }) });
-  steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved };
-  if ((cart.unresolved || []).length) throw stepErr('cart', `size/item not found on the Fristads portal (codes don't match): ${JSON.stringify(cart.unresolved)}`);
-  if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`);
+
+  // OUT-OF-STOCK PRE-FLIGHT. fristadsAddToBasket groups the lines by article+colour and sends ONE
+  // order-form POST per group, every size sharing the body. So Fristads refusing a single size
+  // rejects the whole POST and takes every OTHER size of that garment down with it — the basket is
+  // left short and nothing is placed at all.
+  //
+  // PO 488528 was refused exactly that way, twice, on 2026-09-11: the Medium of a FLAME hi-vis
+  // coverall was on zero, and it lost the Large and XL — which had 123 and 67 on the shelf — along
+  // with it. 3 of 6 units landed, the run threw, and four lines nobody had any trouble supplying
+  // went unordered. So ask first, and hold back only the sizes they cannot supply.
+  const stockBySku = new Map();
+  for (const l of cartLines) {
+    const st = await fristadsAvailable(altItemsUrl, l);
+    if (st) stockBySku.set(String(l.sku), st);
+  }
+  const { short: shortLines, orderable } = partitionFristadsLines(cartLines, stockBySku);
+  steps.stockCheck = { checked: cartLines.length, probed: stockBySku.size, short: shortLines };
+  if (shortLines.length) {
+    if (!orderable.length) {
+      throw stepErr('cart', `every line on PO#${poId} is out of stock at Fristads — nothing to order: `
+        + shortLines.map((s) => `${s.sku} (${s.size || '?'}) want ${s.qty}, they have ${s.avail}`).join('; '), { poId, shortLines });
+    }
+    // Take them OFF the PO. A row left on a Placed PO reads as ordered and counts as on-order, which
+    // is how the 4004 on PO 486597 and the HH row on 485410 both came to be "on the PO" and never
+    // arriving. Best-effort per row: a removal that fails is reported, not fatal — the log row below
+    // is what actually gets the line bought.
+    const removedRows = [];
+    for (const s of shortLines) {
+      try {
+        const r = await bp.removePoRowLive({ poId, sku: s.sku, execute: true });
+        removedRows.push({ sku: s.sku, ok: !!(r && (r.removed || r.ok)) });
+      } catch (e) { removedRows.push({ sku: s.sku, ok: false, error: e.message }); }
+    }
+    steps.stockCheck.removedRows = removedRows;
+    // Neither the SO note nor the finalise may claim a line we did not order. Drop the dead lines
+    // from the note, and drop from soIds any order left with NOTHING ordered — finalising that one
+    // would clear its supplier tag and set it to "Ordered Stock Awaiting Delivery" for goods that
+    // were never bought. Leaving the tag on also means the 17:30 tag audit keeps nagging about it.
+    const droppedPids = new Set(shortLines.map((s) => String(s.productId)));
+    for (const id of Object.keys(linesByOrder)) {
+      linesByOrder[id] = linesByOrder[id].filter((x) => !droppedPids.has(String(x.productId)));
+      if (!linesByOrder[id].length) delete linesByOrder[id];
+    }
+    const stranded = soIds.filter((id) => !linesByOrder[id]);
+    soIds = soIds.filter((id) => !!linesByOrder[id]);
+    steps.stockCheck.stranded = stranded;
+    // severity ERROR, not review: these are lines a CUSTOMER is waiting for, the SOs are already
+    // stamped with this PO (so no later run will pick them up again — see purchasingAuto:689), and
+    // finalise clears their tags when this order places. Nothing else will chase them.
+    await logPurchasingError(pool, {
+      supplier: 'FRISTADS', step: 'out-of-stock-dropped', severity: 'error',
+      message: `${shortLines.length} line(s) are out of stock at Fristads and were taken OFF PO#${poId} so the rest of the order could go through. `
+        + `Fristads add every size of one garment in a single POST, so leaving them in loses the in-stock sizes too. `
+        + `These are NOT ordered and nothing will chase them automatically — back-order them or find another source:\n`
+        + shortLines.map((s) => `      ${s.qty} × ${s.sku} (${s.size || '?'}) ${s.name || ''} — Fristads have ${s.avail}`
+          + (s.deldate ? `, next delivery ${s.deldate}` : '')).join('\n'),
+      context: { poId, dropped: shortLines, removedRows },
+    }).catch(() => {});
+  }
+
+  const expectUnits = orderable.reduce((a, l) => a + l.qty, 0);
+  const cart = await jfetch('cart', `${altItemsUrl}/api/fristads-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: orderable }) });
+  // `results` carries the portal's OWN message for each article+colour group it refused. Dropping it
+  // is why "portal shows 3, expected 6" was all anyone got from PO 488528 — the reason was in the
+  // response the whole time, and which lines dropped had to be reconstructed by hand afterwards.
+  const refused = (cart.results || []).filter((r) => !r.ok);
+  steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved, refused };
+  if ((cart.unresolved || []).length) throw stepErr('cart', `size/item not found on the Fristads portal (codes don't match): ${JSON.stringify(cart.unresolved)}`, { poId, unresolved: cart.unresolved, refused });
+  if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`
+    + (refused.length ? `. Fristads refused ${refused.length} group(s): ${refused.map((r) => `${r.key} — ${JSON.stringify(r.resp && r.resp.messages || r.reason || r.status)}`).join('; ').slice(0, 300)}` : ''),
+    { poId, cartCount: cart.cartCount, expectUnits, refused, sent: orderable.map((l) => ({ sku: l.sku, size: l.size, qty: l.qty })) });
 
   // 3. checkout / placeorder (Mark of goods=WORKWEAR, order ref = our PO#)
   const co = await jfetch('checkout', `${altItemsUrl}/api/fristads-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goodsMark: 'WORKWEAR', orderRef: String(poId), execute: true }) });
@@ -751,7 +854,12 @@ async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, op
       throw stepErr('checkout', `can't reach worker job ${jobId}: ${e.message}`, { jobId });
     }
     if (!j) throw stepErr('checkout', `worker job ${jobId} returned no JSON`, { jobId });
-    if (j.status === 'done') return j;            // ok OR not-ok - the caller inspects it
+    // Hand the jobId back with the result. The worker holds a finished job — screenshot, trail and
+    // all — for 30 minutes, but NEITHER service logs the id, so when Snickers PO 488518 failed at
+    // confirm on 2026-09-11 the one image that would have said whether £3k had been spent was
+    // sitting in memory at an address nobody could name, and it expired untouched. Callers put this
+    // in the error context; GET {worker}/job/{jobId} then retrieves it while it lasts.
+    if (j.status === 'done') return { ...j, jobId };  // ok OR not-ok - the caller inspects it
     if (j.status === 'error') throw stepErr('checkout', `worker job errored: ${j.error}`, { jobId, job: j });
 
     // Still running. Ask the supplier whether the order already landed.
@@ -1897,13 +2005,30 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     };
     const named = miss.map((m) => `${m.stockCode} (wanted ${m.wanted}${m.inCart ? `, only ${m.inCart} in cart` : ', not in basket'})${reason(m)}`).join('; ');
     const dead = miss.filter((m) => /discontinued/i.test((why.get(String(m.stockCode).toUpperCase()) || {}).status || ''));
+    // Did we actually submit? Hultafors is an `unreadable` supplier, so nothing downstream can ask
+    // the basket, and a blind re-run risks buying the whole order twice. The worker's confirmGone
+    // is the one thing that separates the two cases, and the answer has to be IN the error — on
+    // 2026-09-11 (PO 488518, 84/84 units staged, no missing lines) the run said only "did not
+    // confirm placement" and the evidence expired 30 minutes later with the worker's job.
+    const stillOnConfirm = wr && wr.confirmGone === false;
+    const verdict = miss.length ? ''
+      : stillOnConfirm
+        ? `. The Confirm button was STILL on screen after the click, so nothing was submitted — this order can be re-run.`
+        : `. The cart was complete (${(wr && wr.cart && wr.cart.qtySum) ?? '?'} of ${(wr && wr.expectedUnits) ?? '?'} units, no missing lines) and the Confirm button `
+          + `${wr && wr.confirmGone === true ? 'had gone' : 'could not be read'} without a confirmation appearing. It is NOT known whether Hultafors took this order. `
+          + `DO NOT re-run it: check the CLOSED order list on the partner portal first`
+          + (wr && wr.jobId ? `, and pull the worker's screenshot from {worker}/job/${wr.jobId} within 30 minutes` : '') + '.';
     throw stepErr('checkout',
       `Snickers worker did not confirm placement${miss.length ? ` — ${miss.length} line(s) never reached the basket: ${named.slice(0, 420)}` : ''}`
       + (dead.length ? `. Nothing else is wrong with this order: re-run excluding ${dead.map((d) => d.stockCode).join(', ')} to place the rest, and sort those line(s) separately — a discontinued code cannot be bought at any size.` : '')
+      + verdict
       + `: ${JSON.stringify((wr && (wr.error || wr.statusText)) || wr).slice(0, 200)}`,
       // context is NOT truncated — the full list belongs here, with the counts that prove the gap.
       { poId, missingLines: miss, lineStatus: Object.fromEntries(why), discontinued: dead.map((d) => d.stockCode),
-        expectedUnits: (wr && wr.expectedUnits) || null, cartUnits: (wr && wr.cart && wr.cart.qtySum) || null });
+        expectedUnits: (wr && wr.expectedUnits) || null, cartUnits: (wr && wr.cart && wr.cart.qtySum) || null,
+        // the evidence trail: jobId while the worker still holds it, then what it saw
+        jobId: (wr && wr.jobId) || null, confirmGone: (wr && wr.confirmGone) ?? null,
+        submitted: stillOnConfirm ? false : null, url: (wr && wr.url) || null, trail: (wr && wr.trail) || null });
   }
   const orderNo = wr.orderNo || null;
   steps.checkout = { placed: true, orderNo, poSet: wr.poSet || null };
