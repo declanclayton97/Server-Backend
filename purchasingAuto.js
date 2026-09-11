@@ -145,9 +145,11 @@ export const SUPPLIERS = {
   MASCOT:       { contactId: 334,   costList: 20,   poField: 'PCF_MASCOTPO', detect: (n) => /mascot/i.test(n || '') },
   // Scruffs Workwear Ltd — EMAIL supplier (salesorders@scruffs.com), same shape as Uneek. Carriage
   // paid at GBP100 ex-VAT, confirmed by carriage appearing on a GBP90 order (user, 2026-08-20).
-  // poField PCF_STOCKPO is the SHARED "Any Other Suppliers" field, also used by Engel (PO 483521) —
-  // an order needing BOTH would have one PO number overwrite the other, so give Scruffs its own
-  // field if that ever comes up.
+  // poField PCF_STOCKPO is the SHARED "Any Other Suppliers" field, also used by Engel (PO 483521)
+  // and Behrens (PO 488264). ⚠ Scruffs is one of only TWO automated suppliers still on it — there
+  // is no PCF_SCRUFFPO in Brightpearl to point at (checked against the full field list, 2026-09-11).
+  // Create one and move this over: the shared box mixes several suppliers' PO numbers on the same
+  // order, which defeats the one thing these fields exist for. V12 is the other.
   // A brand detect is ESSENTIAL here, not cosmetic: without a registry entry the tag-only fallback
   // treats a single "Scruffs" tag as "take every row", and a dry run built a PO carrying a Snickers
   // 6972 trouser at GBP90.35 and a Blaklader waistcoat at GBP0.
@@ -156,15 +158,17 @@ export const SUPPLIERS = {
   // distribute — PERF (302), LEMAITRE (116), SAFETIX (52), Y-SHIELD, VIRGO — so a name detect alone
   // misses about a third of the catalogue. The BP primarySupplierId union carries the remainder;
   // broad SKU prefixes (PB/CT/CC/ML/TB/CF/FA) were deliberately NOT used as a detector because they
-  // are short enough to collide with other suppliers' codes. Shares PCF_STOCKPO — safe now that PO
-  // fields append rather than overwrite. Free delivery at £200 + VAT, else £7 flat.
-  'PERFORMANCE BRANDS': { contactId: 11611, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 11611, detect: (n) => /^perf\b|performance\s*brands|lemaitre|safetix|y-?shield|virgo/i.test(n || '') },
+  // are short enough to collide with other suppliers' codes. Free delivery at £200 + VAT, else £7 flat.
+  // PCF_PERFBRPO ("Performance Brands PO Ref") is their OWN box and had existed in Brightpearl all
+  // along — this entry simply pointed at the shared PCF_STOCKPO instead, so their PO numbers landed
+  // in "Any Other Suppliers" mixed in with Engel's and Behrens'. The whole point of these fields is
+  // being able to tell which PO covered which order (owner, 2026-09-11).
+  'PERFORMANCE BRANDS': { contactId: 11611, costList: 20, poField: 'PCF_PERFBRPO', lowInvSupplierId: 11611, detect: (n) => /^perf\b|performance\s*brands|lemaitre|safetix|y-?shield|virgo/i.test(n || '') },
   // Chadwick Textiles (portal.chadwicktextiles.co.uk). 3,753 products, every one named "CT <style>
   // …", so the name detect is reliable and the primarySupplierId union covers anything renamed.
   // Their order upload keys on the ITEM CODE, which most of our SKUs already are (882-01-A-L), but
   // some carry a Brightpearl-internal code instead (ML070622072) and will NOT resolve — the basket
   // line-count check catches that and refuses rather than ordering short.
-  // Shares PCF_STOCKPO — safe now that PO fields append rather than overwrite.
   // brandIds catches anything renamed, which a "CT " prefix never would, and the name detect is
   // kept as a cheap first pass that saves a product lookup on rows it already recognises.
   //
@@ -206,8 +210,8 @@ export const SUPPLIERS = {
   // never reorder, silently, however this supplier is ordered. Customer demand still finds them,
   // because that goes by brand. Setting primarySupplierId to 11807 on those 251 is the fix, and it
   // is a Brightpearl data job, not a code one.
-  PULSAR: { contactId: 11807, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 11807, brandIds: [168], detect: (n) => /pulsar/i.test(n || '') },
-  V12: { contactId: 92811, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 92811, brandIds: [279], detect: (n) => /\bv\s*12\b/i.test(n || '') },
+  PULSAR: { contactId: 11807, costList: 20, poField: 'PCF_PULSARPO', lowInvSupplierId: 11807, brandIds: [168], detect: (n) => /pulsar/i.test(n || '') }, // PCF_PULSARPO ("PULSAR PO") existed already; this pointed at the shared box instead
+  V12: { contactId: 92811, costList: 20, poField: 'PCF_STOCKPO' /* ⚠ no PCF_V12PO exists in BP yet — create one and move this over */, lowInvSupplierId: 92811, brandIds: [279], detect: (n) => /\bv\s*12\b/i.test(n || '') },
   CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
@@ -259,7 +263,13 @@ export const SUPPLIERS = {
   // resolves shared brands (AWDis/Gildan/Regatta, also sold by Ralawise/BTC/Prestige) to PenCarrie
   // — the same policy the regex has always had, now applied consistently instead of depending on
   // whether the brand happens to appear in the name. Use a tag scope for the exceptions.
-  'PENCARRIE':  { contactId: 204,   costList: 20, poField: null,
+  // PCF_PENCPO ("Pencarrie PO") existed in Brightpearl all along; this said null, so PenCarrie was
+  // the ONE automated supplier stamping no PO number anywhere. Two costs. The link from an order to
+  // the PO that bought it lived only in the finalise NOTE — prose, unfilterable, and absent
+  // entirely on any order whose PO never finalised. And with no field, a cleared PCF_SUPPLIER tag
+  // was the only thing preventing a re-order: re-tag one of those orders and it is bought twice,
+  // where every other supplier is also protected by poFieldHasSupplierPo. Asked on PO 488362.
+  'PENCARRIE':  { contactId: 204,   costList: 20, poField: 'PCF_PENCPO',
     brandIds: [75, 77, 78, 80, 81, 82, 83, 84, 93, 96, 97, 98, 102, 110, 111, 116, 117, 119, 121, 125, 126, 133, 137, 147, 152, 153, 156, 157, 158, 160, 161, 163, 167, 171, 179, 185, 186, 199, 201, 202, 207, 214, 216, 220, 221, 225, 228, 242, 252, 264],
     detect: (n) => /\b(afd|anthem|awdis|babybugz|bagbase|beechfield|bella|brand\s*lab|canterbury|comfort\s*grip|craghoppers|denny'?s|ecologie|finden\s*hales|flexfit|front\s*row|fruit\s*of\s*the\s*loom|gildan|henbury|kariban|kimood|kustom\s*kit|larkwood|le\s*chef|mantis|mumbles|native\s*spirit|neoblue|premier|pro\s*rtx|proact|quadra|regatta|result|russell|so\s*denim|sol'?s|spiro|stormtech|tactical\s*threads|tee\s*jays|tombo|towel\s*city|warrior|westford\s*mill|yoko|yupoong)\b/i.test(n || '') },
 };
