@@ -8284,7 +8284,16 @@ app.post('/api/purchasing/bp-import-upload', async (req, res) => {
   try {
     const buf = Buffer.from(fileBase64, 'base64');
     if (buf.length > 10000000) return res.status(400).json({ error: `file is ${buf.length} bytes, over the form's MAX_FILE_SIZE of 10000000` });
+    const pageUrl = `${BP_WEB_HOST}/patt-op.php?scode=data-manager&xfer_map_id=${encodeURIComponent(mapId)}`;
+    // The page carries __fc_csrf_token in a meta tag and its JS stamps it into every form.
+    // Posting without it is a bare 403 with a 10-byte body, so read it off the page first
+    // and send it BOTH as a form field and as the X-CSRF-Token header.
+    const page = await bpWebFetch(pageUrl, { ...(client ? { client } : {}) });
+    const csrf = (page.html || '').match(/name="__fc_csrf_token"\s+content="([^"]+)"/i)?.[1]
+              || (page.html || '').match(/__fc_csrf_token"[^>]*value="([^"]+)"/i)?.[1] || null;
+    if (!csrf) return res.status(502).json({ error: 'could not read __fc_csrf_token from the import page', pageStatus: page.status });
     const fd = new FormData();
+    fd.set('__fc_csrf_token', csrf);
     fd.set('action', 'import');
     fd.set('xfer_map_id', String(mapId));
     fd.set('MAX_FILE_SIZE', '10000000');
@@ -8293,8 +8302,10 @@ app.post('/api/purchasing/bp-import-upload', async (req, res) => {
     if (emailReport) fd.set('email_report', '1');
     if (doit) fd.set('doit', '1');                       // omitted => BP treats it as a test run
     fd.set('xfer_file', new Blob([buf]), filename);
-    const url = `${BP_WEB_HOST}/patt-op.php?scode=data-manager&xfer_map_id=${encodeURIComponent(mapId)}`;
-    let r = await bpWebFetch(url, { method: 'POST', body: fd, ...(client ? { client } : {}) });
+    let r = await bpWebFetch(pageUrl, {
+      method: 'POST', body: fd, ...(client ? { client } : {}),
+      headers: { 'X-CSRF-Token': csrf, Origin: BP_WEB_HOST, Referer: pageUrl },
+    });
     // fetchAuthed only follows redirects for GET, and the importer 302s to its result
     // page, so chase it here or the outcome is never seen.
     const hops = [];
