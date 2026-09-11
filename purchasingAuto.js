@@ -180,7 +180,14 @@ export const SUPPLIERS = {
   //                           that) and brand would otherwise be the only signal left.
   // Neither is a global rule: a DISTRIBUTOR resells other brands by design, and PenCarrie depends
   // on brand beating primarySupplierId — see its entry above.
-  CHADWICK: { contactId: 42485, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 42485, brandIds: [213], brandNeedsOwnSupplier: true, notOurs: /^(?:NEX|HER)-/i, detect: (n) => /^ct\s/i.test(n || '') },
+  // poField is Chadwick's OWN box (owner, 2026-09-11), not the shared PCF_STOCKPO "Any Other
+  // Suppliers" field it used to write to. That field is the dedupe guard, and five suppliers were
+  // writing to one box, so any of them could make an order look already-ordered to the other four.
+  // Not theoretical: SO 483331 is tagged CHADWICK TEXTILES and carries "VIG PO#488494" — another
+  // supplier's PO — which was excluding it from Chadwick demand entirely. Moving to PCF_CHDWCKPO
+  // un-suppresses it. Verified the field exists by stamping SO 488045 and reading it back, since a
+  // wrong field name writes into nothing and would silently take the dedupe guard with it.
+  CHADWICK: { contactId: 42485, costList: 20, poField: 'PCF_CHDWCKPO', lowInvSupplierId: 42485, brandIds: [213], brandNeedsOwnSupplier: true, notOurs: /^(?:NEX|HER)-/i, detect: (n) => /^ct\s/i.test(n || '') },
   // V12 Footwear — email supplier, ordered by sending Brightpearl's own PO PDF to their order desk.
   // 624 products, every one brand 279 ("V12") and named "V12 Footwear <style> …", so brand is the
   // reliable signal and the name detect is a safety net rather than the primary route.
