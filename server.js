@@ -8237,14 +8237,31 @@ app.post('/api/purchasing/product-status-live', async (req, res) => {
       return res.json({ productId, changed: false, reason: 'already set', before, after: before });
     }
     const skuBefore = (p.identity && p.identity.sku) || null;
-    p.status = want;
-    await bpLive('PUT', `/product-service/product/${productId}`, p);
-    const a = await bpLive('GET', `/product-service/product/${productId}`);
-    const ap = Array.isArray(a) ? a[0] : a;
-    const after = ap && ap.status;
+    // A whole-product PUT SILENTLY IGNORES status — it returns 200 and leaves the product
+    // LIVE. So try the field-level routes first and fall back, reporting which one worked.
+    const full = JSON.parse(JSON.stringify(p)); full.status = want;
+    const attempts = [
+      ['PATCH-op',   () => bpLive('PATCH', `/product-service/product/${productId}`, [{ op: 'replace', path: '/status', value: want }])],
+      ['PUT-status', () => bpLive('PUT',   `/product-service/product/${productId}/status`, { status: want })],
+      ['PATCH-obj',  () => bpLive('PATCH', `/product-service/product/${productId}`, { status: want })],
+      ['PUT-full',   () => bpLive('PUT',   `/product-service/product/${productId}`, full)],
+    ];
+    const tried = [];
+    let after = before, method = null;
+    for (const [name, run] of attempts) {
+      try { await run(); } catch (e) { tried.push(`${name}: ${String(e.message).slice(0, 90)}`); continue; }
+      const chk = await bpLive('GET', `/product-service/product/${productId}`);
+      const cp = Array.isArray(chk) ? chk[0] : chk;
+      after = cp && cp.status;
+      if (String(after).toUpperCase() !== String(before).toUpperCase()) { method = name; break; }
+      tried.push(`${name}: 2xx but status unchanged`);
+    }
+    const fin = await bpLive('GET', `/product-service/product/${productId}`);
+    const ap = Array.isArray(fin) ? fin[0] : fin;
     res.json({
-      productId, changed: after !== before, before, wanted: want, after,
-      asAsked: after === want,
+      productId, changed: String(after).toUpperCase() !== String(before).toUpperCase(),
+      before, wanted: want, after, method, tried,
+      asAsked: String(after).toUpperCase() === want,
       skuIntact: !!(ap && ap.identity && (ap.identity.sku || null) === skuBefore),
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
