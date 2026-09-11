@@ -8209,6 +8209,47 @@ app.post('/api/purchasing/product-identity-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// LIVE product-status write — the per-variant LIVE / ARCHIVED / DISCONTINUED dropdown,
+// for retiring a supplier's dead range in bulk. BP has no status PATCH, so read-modify-PUT
+// the whole product (same method as the name and native-weight writes).
+// Guarded by expectOld so a product whose status has already moved is never overwritten
+// silently, and it reports what BP ACTUALLY set: Brightpearl may hold a product that still
+// has stock at DISCONTINUED rather than ARCHIVED until the stock depletes, so `after` can
+// legitimately differ from what was asked for. body: { productId, status, expectOld }.
+const PRODUCT_STATUSES = ['LIVE', 'ARCHIVED', 'DISCONTINUED'];
+app.post('/api/purchasing/product-status-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
+  const { productId, status, expectOld } = req.body || {};
+  const want = String(status || '').toUpperCase();
+  if (!productId || !PRODUCT_STATUSES.includes(want)) {
+    return res.status(400).json({ error: `productId and status (${PRODUCT_STATUSES.join('|')}) required` });
+  }
+  try {
+    const g = await bpLive('GET', `/product-service/product/${productId}`);
+    const p = Array.isArray(g) ? g[0] : g;
+    if (!p) return res.status(404).json({ error: 'product not found' });
+    const before = p.status;
+    if (expectOld != null && String(before).toUpperCase() !== String(expectOld).toUpperCase()) {
+      return res.json({ productId, changed: false, reason: 'status mismatch', before, wanted: want });
+    }
+    if (String(before).toUpperCase() === want) {
+      return res.json({ productId, changed: false, reason: 'already set', before, after: before });
+    }
+    const skuBefore = (p.identity && p.identity.sku) || null;
+    p.status = want;
+    await bpLive('PUT', `/product-service/product/${productId}`, p);
+    const a = await bpLive('GET', `/product-service/product/${productId}`);
+    const ap = Array.isArray(a) ? a[0] : a;
+    const after = ap && ap.status;
+    res.json({
+      productId, changed: after !== before, before, wanted: want, after,
+      asAsked: after === want,
+      skuIntact: !!(ap && ap.identity && (ap.identity.sku || null) === skuBefore),
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // LIVE product-name append: add a token (e.g. the Ralawise style code) to every
 // salesChannels[].productName when it isn't already present. BP has no name PATCH,
 // so read-modify-PUT the whole product (same method as the native-weight write).
