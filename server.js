@@ -13261,6 +13261,9 @@ app.post('/api/quote-chase/one-off', async (req, res) => {
   try {
     const body = req.body || {};
     const days = Math.min(3650, Math.max(1, parseInt(body.days, 10) || 90));
+    // A quote sent a few days ago does not want a robot chasing it — the
+    // salesperson is very likely still mid-conversation. Floor of 7 days.
+    const minAgeDays = Math.max(0, parseInt(body.minAgeDays, 10) || 7);
     const send = body.confirm === ONE_OFF_CONFIRM;
     const limit = Math.max(0, parseInt(body.limit, 10) || 0);
 
@@ -13271,9 +13274,10 @@ app.post('/api/quote-chase/one-off', async (req, res) => {
           AND responded_at IS NULL AND stopped_at IS NULL
           AND COALESCE(customer_email, '') <> ''
           AND entered_status_at >= NOW() - make_interval(days => $1)
+          AND entered_status_at <= NOW() - make_interval(days => $3)
           AND NOT (COALESCE(channel_id, 0) = ANY($2::bigint[]))
         ORDER BY entered_status_at DESC`,
-      [days, quoteExcludedChannelsParam()]
+      [days, quoteExcludedChannelsParam(), minAgeDays]
     );
 
     let groups = groupQuotesForChase(q.rows.map((r) => ({ ...quoteRowToView(r), stage: r.stage, row: r })));
@@ -13324,6 +13328,8 @@ app.post('/api/quote-chase/one-off', async (req, res) => {
     res.json({
       dryRun: !send,
       days,
+      minAgeDays,
+      window: `quotes aged ${minAgeDays}-${days} days`,
       quotes: q.rowCount,
       customers: totalGroups,
       customersThisRun: groups.length,
@@ -13344,6 +13350,7 @@ app.get('/api/quote-chase/one-off-preview', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
   try {
     const days = Math.min(3650, Math.max(1, parseInt(req.query.days, 10) || 90));
+    const minAgeDays = Math.max(0, parseInt(req.query.minAgeDays, 10) || 7);
     const wanted = String(req.query.email || '').trim().toLowerCase();
     const q = await pool.query(
       `SELECT * FROM quote_chase
@@ -13352,8 +13359,9 @@ app.get('/api/quote-chase/one-off-preview', async (req, res) => {
           AND responded_at IS NULL AND stopped_at IS NULL
           AND COALESCE(customer_email, '') <> ''
           AND entered_status_at >= NOW() - make_interval(days => $1)
+          AND entered_status_at <= NOW() - make_interval(days => $3)
           AND NOT (COALESCE(channel_id, 0) = ANY($2::bigint[]))`,
-      [days, quoteExcludedChannelsParam()]
+      [days, quoteExcludedChannelsParam(), minAgeDays]
     );
     let groups = groupQuotesForChase(q.rows.map((r) => ({ ...quoteRowToView(r), stage: r.stage, row: r })));
     if (wanted) groups = groups.filter((g) => g.key === wanted);
