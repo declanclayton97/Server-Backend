@@ -13259,6 +13259,73 @@ app.post('/api/quote-chase/reseed', async (req, res) => {
   }
 });
 
+// Re-send the salesperson notification for responses that already happened.
+//
+// Needed because the customer-facing one-off went out while QUOTE_CHASE_DRY_RUN
+// was still on. A customer response fires buildResponseEmail through sendQuoteMail
+// with `force: !!r.is_test`, so for a real row it respects dry run — five customers
+// replied on 2026-09-11 (including a call-back request) and every notification was
+// logged instead of sent. The responses themselves were recorded correctly; only
+// the pings were lost.
+//
+// `force: true` here on purpose: this exists precisely to send something dry run
+// swallowed, so honouring dry run would defeat it. It writes no Brightpearl note —
+// the note for a response is written once, when the response is recorded, and
+// re-sending an email must not duplicate it.
+app.post('/api/quote-chase/resend-notifications', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const body = req.body || {};
+    const since = body.since ? new Date(body.since) : new Date(Date.now() - 24 * 3600 * 1000);
+    if (isNaN(since.getTime())) return res.status(400).json({ error: 'since is not a date' });
+    const apply = body.confirm === 'RESEND';
+
+    const q = await pool.query(
+      `SELECT * FROM quote_chase
+        WHERE responded_at IS NOT NULL AND responded_at >= $1 AND is_test = FALSE
+        ORDER BY responded_at ASC`,
+      [since.toISOString()]
+    );
+
+    const plan = q.rows.map((r) => ({
+      orderId: Number(r.order_id),
+      customer: r.company_name || r.customer_name || '',
+      action: r.response_action,
+      to: r.salesperson_email || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk',
+      salesperson: r.salesperson_name || '',
+      respondedAt: r.responded_at,
+    }));
+    if (!apply) {
+      return res.json({ dryRun: true, since: since.toISOString(), count: plan.length, plan,
+        hint: 'POST again with {"confirm":"RESEND"} to send' });
+    }
+
+    let sent = 0, failed = 0;
+    const results = [];
+    for (const r of q.rows) {
+      const detail = { action: r.response_action, reason: r.response_reason || '',
+                       note: r.response_note || '', stage: r.stage };
+      const mail = buildResponseEmail(quoteRowToView(r), detail);
+      const to = r.salesperson_email || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
+      try {
+        await sendQuoteMail({ to, replyTo: r.customer_email || undefined,
+          subject: mail.subject, html: mail.html, force: true });
+        sent++;
+        results.push({ orderId: Number(r.order_id), to, sent: true });
+        await new Promise((d) => setTimeout(d, 300));
+      } catch (e) {
+        failed++;
+        results.push({ orderId: Number(r.order_id), to, error: e.message });
+        console.error(`[quote-chase] resend failed for SO${r.order_id}: ${e.message}`);
+      }
+    }
+    console.log(`[quote-chase] resent ${sent} response notification(s), ${failed} failed`);
+    res.json({ resent: sent, failed, since: since.toISOString(), results });
+  } catch (e) {
+    console.error('[quote-chase] resend-notifications failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 app.post('/api/quote-chase/one-off', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
   try {
