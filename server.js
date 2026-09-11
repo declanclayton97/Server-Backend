@@ -8316,15 +8316,24 @@ app.post('/api/purchasing/bp-import-upload', async (req, res) => {
     }
     const html = r.html || '';
     // Pull the human-readable outcome out of the response rather than returning 260KB.
-    const strip = (s) => s.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+    // Scripts and styles must go FIRST or the digest just scrapes minified JS and reports
+    // every "Error" identifier in the bundle as though it were an import failure.
+    const strip = (s) => s
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ').trim();
     const grab = (rx) => { const m = html.match(rx); return m ? strip(m[0]).slice(0, 600) : null; };
     res.json({
       ok: r.status === 200, status: r.status, finalUrl: r.finalUrl, hops, bytes: buf.length,
       testRun: !doit, filename, mapId,
       summary: grab(/<div[^>]*(?:result|summary|message|report)[^>]*>[\s\S]{0,2000}?<\/div>/i),
-      rowsMentioned: (strip(html).match(/\b\d+\s+(?:rows?|records?|items?|products?)\b[^.]{0,60}/gi) || []).slice(0, 12),
-      errors: (strip(html).match(/\b(?:error|failed|invalid|not found|could not)\b[^.]{0,120}/gi) || []).slice(0, 12),
+      rowsMentioned: (strip(html).match(/\b\d+\s+(?:rows?|records?|items?|products?|updated|skipped)\b[^.]{0,70}/gi) || []).slice(0, 12),
+      errors: (strip(html).match(/\b(?:error|failed|invalid|not found|could not|no match)\b[^.]{0,120}/gi) || []).slice(0, 12),
       len: html.length,
+      // The outcome is plain text on the page; return a slice of it so the result can be
+      // read without dumping the whole document.
+      text: strip(html).slice(0, Number(req.body?.textChars) || 2500),
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
