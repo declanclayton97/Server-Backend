@@ -12677,7 +12677,19 @@ const QUOTE_CHASE_EXCLUDED_CHANNELS = String(process.env.QUOTE_CHASE_EXCLUDE_CHA
 const quoteExcludedChannelsParam = () => (QUOTE_CHASE_EXCLUDED_CHANNELS.length ? QUOTE_CHASE_EXCLUDED_CHANNELS : [0]);
 const quoteChannelOf = (o) => (o && o.assignment && o.assignment.current && o.assignment.current.channelId) || 0;
 
-const QUOTE_CHASE_STATUS_ID = parseInt(process.env.QUOTE_CHASE_STATUS_ID || '18', 10);
+// 18 "Quote sent" and 60 "Order Confirmation Sent" are both waiting-on-the-customer
+// states, so both are chased. Kept as a list so adding another is config, not code.
+const QUOTE_CHASE_STATUS_IDS = String(process.env.QUOTE_CHASE_STATUS_IDS || '18,60')
+  .split(',').map((x) => parseInt(x.trim(), 10)).filter((n) => Number.isFinite(n));
+const QUOTE_CHASE_STATUS_ID = QUOTE_CHASE_STATUS_IDS[0];   // kept for the note lookup default
+
+// Adding a status brings its entire existing backlog with it — 195 orders sat in
+// status 60 the day it was added. Those are not new quotes, and isFirstRun is only
+// true on the very first poll ever, so without this they would insert UNSEEDED and
+// become chaseable. Anything that entered its status before this moment is seeded,
+// exactly as the first-ever poll does. Move the date forward only when deliberately
+// adopting another backlog.
+const QUOTE_CHASE_SEED_BEFORE = new Date(process.env.QUOTE_CHASE_SEED_BEFORE || '2026-09-11T09:00:00Z');
 const QUOTE_CHASE_SENDER = process.env.QUOTE_CHASE_SENDER || 'noreply@tuffshop.co.uk';
 // Dry run is now OFF by default — the chase sends for real. Flipped 2026-09-11
 // at go-live. Set QUOTE_CHASE_DRY_RUN=true to put it back in logging-only mode;
@@ -12744,6 +12756,9 @@ async function initializeQuoteChaseTable() {
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
       -- Stamped by the one-off backlog refresh so re-running it cannot email anyone twice.
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS one_off_sent_at TIMESTAMPTZ;
+      -- Which status the quote is sitting in: 18 "Quote sent" or 60 "Order
+      -- Confirmation Sent". Both are tracked; the dashboard has to tell them apart.
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS status_id INTEGER;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS response_via TEXT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_id BIGINT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_name TEXT;
@@ -12797,18 +12812,34 @@ async function resolveSalesperson(contactId) {
 async function quoteEnteredStatusAt(order) {
   try {
     const notes = await bpLive('GET', `/order-service/order/${order.id}/note`);
-    const hits = (notes || []).filter((n) => n.orderStatusId === QUOTE_CHASE_STATUS_ID && n.addedOn);
+    const hits = (notes || []).filter((n) => QUOTE_CHASE_STATUS_IDS.indexOf(n.orderStatusId) !== -1 && n.addedOn);
     if (hits.length) return new Date(hits[hits.length - 1].addedOn);
   } catch (e) { /* fall through */ }
   return new Date(order.updatedOn || order.createdOn || Date.now());
 }
 
+// Which status each live quote is in, filled by the sweep below. The order search
+// already returns it, so recording it costs no extra call.
+let QUOTE_CHASE_LIVE_STATUS = {};
+
+// Sweeps every tracked status, not just one.
 async function bpQuoteSentOrderIds() {
+  const all = [];
+  QUOTE_CHASE_LIVE_STATUS = {};
+  for (const statusId of QUOTE_CHASE_STATUS_IDS) {
+    const ids = await bpQuoteSentOrderIdsFor(statusId);
+    ids.forEach((id) => { QUOTE_CHASE_LIVE_STATUS[id] = statusId; });
+    all.push(...ids);
+  }
+  return [...new Set(all)].sort((a, b) => a - b);
+}
+
+async function bpQuoteSentOrderIdsFor(statusId) {
   const ids = [];
   let firstResult = 1;
   while (true) {
     const resp = await bpLive('GET',
-      `/order-service/order-search?orderTypeId=1&orderStatusId=${QUOTE_CHASE_STATUS_ID}` +
+      `/order-service/order-search?orderTypeId=1&orderStatusId=${statusId}` +
       `&pageSize=500&firstResult=${firstResult}`);
     const md = resp.metaData;
     const ix = {};
@@ -12894,6 +12925,18 @@ async function pollQuoteChase() {
     [liveIds.length ? liveIds : [0]]
   );
 
+  // Refresh which status each tracked quote is in. One query per status, from the
+  // map the sweep already built.
+  for (const statusId of QUOTE_CHASE_STATUS_IDS) {
+    const ids = Object.keys(QUOTE_CHASE_LIVE_STATUS)
+      .filter((k) => QUOTE_CHASE_LIVE_STATUS[k] === statusId).map(Number);
+    if (!ids.length) continue;
+    await pool.query(
+      `UPDATE quote_chase SET status_id = $2 WHERE order_id = ANY($1::bigint[]) AND is_test = FALSE`,
+      [ids, statusId]
+    );
+  }
+
   // is_test rows must not count here. A single test-send inserts one, and if that
   // makes the table look non-empty the seeding branch never fires — the whole
   // backlog is then inserted unseeded and chased on the spot. That happened on
@@ -12917,12 +12960,14 @@ async function pollQuoteChase() {
         const enteredAt = await quoteEnteredStatusAt(o);
         await pool.query(
           `INSERT INTO quote_chase
-             (order_id, token, entered_status_at, seeded, customer_name, company_name,
+             (order_id, token, entered_status_at, seeded, status_id, customer_name, company_name,
               customer_email, net_value, reference, salesperson_id, salesperson_name, salesperson_email,
               channel_id, channel_name)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
            ON CONFLICT (order_id) DO NOTHING`,
-          [o.id, crypto.randomUUID(), enteredAt, isFirstRun,
+          [o.id, crypto.randomUUID(), enteredAt,
+            isFirstRun || (enteredAt && enteredAt < QUOTE_CHASE_SEED_BEFORE),
+           QUOTE_CHASE_LIVE_STATUS[o.id] || null,
            cust.contactName || cust.addressFullName || '', cust.companyName || '',
            cust.email || '', parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
            o.reference || '', o.createdById || null, sp.name, sp.email,
@@ -13553,6 +13598,8 @@ app.get('/api/quote-chase/list', async (req, res) => {
         ...quoteRowToView(r),
         seeded: r.seeded,
         oneOffSentAt: r.one_off_sent_at,   // the one-off backlog email, not a chase
+        statusId: r.status_id,
+        statusName: r.status_id === 60 ? 'Order confirmation sent' : r.status_id === 18 ? 'Quote sent' : null,
         stoppedAt: r.stopped_at,
         stoppedBy: r.stopped_by,
         stage: r.stage,
