@@ -12655,7 +12655,7 @@ if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
 //
 // Env:
 //   QUOTE_CHASE_ENABLED   "true" to poll at all              (default off)
-//   QUOTE_CHASE_DRY_RUN   "false" to actually send           (default ON — logs only)
+//   QUOTE_CHASE_DRY_RUN   "true" to STOP sending             (default off — SENDS)
 //   QUOTE_CHASE_STATUS_ID "Quote sent" status id             (default 18)
 //   QUOTE_CHASE_SENDER    From: address                      (default noreply@tuffshop.co.uk)
 //   PUBLIC_BASE_URL       origin used in the customer links  (default the Render host)
@@ -12679,7 +12679,10 @@ const quoteChannelOf = (o) => (o && o.assignment && o.assignment.current && o.as
 
 const QUOTE_CHASE_STATUS_ID = parseInt(process.env.QUOTE_CHASE_STATUS_ID || '18', 10);
 const QUOTE_CHASE_SENDER = process.env.QUOTE_CHASE_SENDER || 'noreply@tuffshop.co.uk';
-const quoteChaseDryRun = () => process.env.QUOTE_CHASE_DRY_RUN !== 'false';
+// Dry run is now OFF by default — the chase sends for real. Flipped 2026-09-11
+// at go-live. Set QUOTE_CHASE_DRY_RUN=true to put it back in logging-only mode;
+// that is the emergency brake. The seeded backlog cannot be chased either way.
+const quoteChaseDryRun = () => process.env.QUOTE_CHASE_DRY_RUN === 'true';
 const quotePublicBase = () =>
   (process.env.PUBLIC_BASE_URL || 'https://server-backend-1i47.onrender.com').replace(/\/+$/, '');
 
@@ -13466,6 +13469,7 @@ app.get('/api/quote-chase/list', async (req, res) => {
       quotes: q.rows.map((r) => ({
         ...quoteRowToView(r),
         seeded: r.seeded,
+        oneOffSentAt: r.one_off_sent_at,   // the one-off backlog email, not a chase
         stoppedAt: r.stopped_at,
         stoppedBy: r.stopped_by,
         stage: r.stage,
