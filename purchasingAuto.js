@@ -393,7 +393,25 @@ export async function setProductIdentity(productId, changes = {}) {
 }
 
 // ---- helpers ----
-const tagsOf = (v) => String(v || '').split('/').map((x) => x.trim()).filter(Boolean);
+// Split on a separator that is OUTSIDE any bracket. Both tag separators are characters that occur
+// naturally inside a scope note, so a blind split tears the note in half:
+//   "PENCARRIE (RS237 BK/RD ONLY)"  →  ["PENCARRIE (RS237 BK", "RD ONLY)"]   ← two-tone colour
+//   "PENCARRIE (K241DKN6, K241DKN8)" → alternatives ["PENCARRIE (K241DKN6", "K241DKN8)"]
+// In both cases the supplier stops matching its own key, and the order is skipped for that supplier
+// with no error — the tag looks perfectly correct in Brightpearl. This catalogue is full of
+// two-tone colours (RS237-BK/RD, LV873-BK/WH), so the slash case is not hypothetical.
+export const splitOutsideBrackets = (v, sep) => {
+  const out = []; let buf = '', depth = 0;
+  for (const ch of String(v || '')) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === sep && depth === 0) { out.push(buf); buf = ''; continue; }
+    buf += ch;
+  }
+  out.push(buf);
+  return out.map((x) => x.trim()).filter(Boolean);
+};
+const tagsOf = (v) => splitOutsideBrackets(v, '/');
 // ── PO-number fields hold MORE THAN ONE number ───────────────────────────────
 // These fields were written with `value: String(poId)`, i.e. a straight overwrite, which loses
 // history in two separate ways:
@@ -492,7 +510,7 @@ const TAG_ALIASES = {
 // invisible NON-order, by every run, for as long as the tag had a comma in it. Same family as the
 // trailing-comma bug, but a whole group at a time. Found by the owner reading a live order,
 // 2026-08-24 — nothing in the system pointed at it.
-const tagAlternatives = (t) => String(t || '').split(',').map((x) => tagSupplier(x)).filter(Boolean);
+const tagAlternatives = (t) => splitOutsideBrackets(t, ',').map((x) => tagSupplier(x)).filter(Boolean);
 // Does this "/" group name the supplier anywhere among its alternatives?
 const groupHasSupplier = (t, key) => tagAlternatives(t).includes(key);
 // What the group becomes once `key` is dealt with.
@@ -575,25 +593,44 @@ const sizeEq = (a, b) => {
   const g = SIZE_WORDS.find((grp) => grp.includes(x));
   return !!g && g.includes(y);
 };
-// Parse "(RG165 NAVY, M X1 ONLY)" → { terms:['RG165','NAVY','M'], qty:1 }; null when there's no note.
+// Parse "(RG165 NAVY, M X1 ONLY)" → { terms:['RG165','NAVY','M'], groups:[['RG165','NAVY'],['M']], qty:1 };
+// null when there's no note.
+//
+// `terms` is every term flattened, and is what the AND reading uses — one row must satisfy all of
+// them. That is the right reading for a note narrowing ONE item by its attributes, which is what
+// this was built for.
+//
+// `groups` keeps the comma structure, because a comma is also how a human lists SEVERAL items:
+//   "(K241DKN6, K241DKN8, K241DKN12, 157619)"   ← four different products, not one
+// Those two readings share one syntax, so the caller decides between them on evidence rather than
+// guessing here — see the scope application, which only takes the list reading when the AND reading
+// matches nothing AND every group names a product code.
 export function parseTagScope(tag) {
   const m = /\(([^)]*)\)\s*$/.exec(String(tag || ''));
   if (!m) return null;
-  const toks = m[1].toUpperCase().split(/[\s,;]+/).filter(Boolean);
-  const terms = []; let qty = null;
-  for (let i = 0; i < toks.length; i++) {
-    const q = /^[X×](\d+)$/.exec(toks[i]);
-    if (q) { qty = Number(q[1]); continue; }
-    if (/^[X×]$/.test(toks[i]) && /^\d+$/.test(toks[i + 1] || '')) { qty = Number(toks[++i]); continue; }
-    if (SCOPE_NOISE.has(toks[i])) continue;
-    terms.push(toks[i]);
+  const terms = []; const groups = []; let qty = null;
+  for (const chunk of m[1].toUpperCase().split(/[,;]+/)) {
+    const toks = chunk.split(/\s+/).filter(Boolean);
+    const group = [];
+    for (let i = 0; i < toks.length; i++) {
+      const q = /^[X×](\d+)$/.exec(toks[i]);
+      if (q) { qty = Number(q[1]); continue; }
+      if (/^[X×]$/.test(toks[i]) && /^\d+$/.test(toks[i + 1] || '')) { qty = Number(toks[++i]); continue; }
+      if (SCOPE_NOISE.has(toks[i])) continue;
+      group.push(toks[i]); terms.push(toks[i]);
+    }
+    if (group.length) groups.push(group);
   }
-  return terms.length || qty != null ? { terms, qty } : null;
+  return terms.length || qty != null ? { terms, groups, qty } : null;
 }
+// A term that names a product rather than describing one. The list reading is allowed ONLY when
+// every group has one, which is what keeps "(RG165 NAVY, M X1)" out of it: "M" names no product, so
+// that note keeps its AND meaning and cannot widen into "every medium on the order".
+export const isCodeLikeTerm = (t) => /^[A-Z]{1,4}\d{2,}[A-Z0-9-]*$/.test(t) || /^\d{5,}$/.test(t);
 // Does this row satisfy a single scope term? SKU (exact / dash-part / substring), a whole word in
 // the product name, the colour, or the size (letter⇄word aware, since BP stores "Medium" and the
 // note says "M").
-const rowMatchesTerm = (r, term) => {
+export const rowMatchesTerm = (r, term) => {
   const t = String(term).toUpperCase();
   const sku = String(r.productSku || '').toUpperCase();
   if (sku && (sku === t || sku.split('-').includes(t) || sku.includes(t))) return true;
@@ -1286,7 +1323,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // satisfies them all — otherwise the note is left alone and nothing is filtered.
     const ourTag = allTags.find((t) => groupHasSupplier(t, supplierKey));
     const scope = parseTagScope(ourTag);
-    let scopeCap = null;
+    let scopeCap = null, scopeListReading = null;
     if (scope && scope.terms.length) {
       // A TAG-ONLY supplier (no brand regex) sharing an order with other suppliers would otherwise
       // be filtered by `dynamicDetect`, a regex on the supplier's own NAME — which can never match
@@ -1296,13 +1333,31 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       // "PENCARRIE (RS121M ONLY) / PORTWEST" work the way a human would expect.
       const rowsForScope = (!hasBrandDetect && !singleSupplier) ? orderableRows : candidateRows;
       const recognised = scope.terms.every((t) => rowsForScope.some(([, r]) => rowMatchesTerm(r, t)));
-      const qualifying = rowsForScope.filter(([, r]) => scope.terms.every((t) => rowMatchesTerm(r, t)));
+      let qualifying = rowsForScope.filter(([, r]) => scope.terms.every((t) => rowMatchesTerm(r, t)));
+      // A comma lists SEVERAL items as readily as it narrows one, and the syntax is identical. So
+      // read it as a list only on evidence: the AND reading satisfied NOTHING, there are at least
+      // two groups, and EVERY group names a product code. "(K241DKN6, K241DKN8, K241DKN12, 157619)"
+      // passes — no row is all four at once, and each names a product. "(RG165 NAVY, M X1)" cannot:
+      // if a row satisfies it the AND reading already won, and if none does, "M" names no product
+      // so this refuses rather than widening the order to every medium on it.
+      //
+      // Refusing is safe: the caller's codeLike branch below then orders nothing from this SO and
+      // flags the tag for a human, which is the correct answer to an instruction we cannot read.
+      const groups = (scope.groups || []).filter((g) => g.length);
+      if (!qualifying.length && groups.length > 1 && groups.every((g) => g.some(isCodeLikeTerm))) {
+        const byGroup = groups.map((g) => rowsForScope.filter(([, r]) => g.every((t) => rowMatchesTerm(r, t))));
+        if (byGroup.every((rows) => rows.length)) {
+          const ids = new Set(byGroup.flat().map(([rowId]) => rowId));
+          qualifying = rowsForScope.filter(([rowId]) => ids.has(rowId));
+          scopeListReading = { groups: groups.map((g) => g.join(' ')), rows: qualifying.length };
+        }
+      }
       if (recognised && qualifying.length) candidateRows = rowsForScope;   // so the drop-audit below reports against the right set
       // A term shaped like a product code (RG165, JC020, TR010, or a long numeric SKU) that we
       // CANNOT satisfy means a real instruction we don't understand — order nothing from this SO and
       // flag it, rather than fall back to taking every row. Word-only notes (BACK ORDER, LOW STOCK)
       // are annotations and change nothing.
-      const codeLike = scope.terms.some((t) => /^[A-Z]{1,4}\d{2,}[A-Z0-9-]*$/.test(t) || /^\d{5,}$/.test(t));
+      const codeLike = scope.terms.some(isCodeLikeTerm);
       if (codeLike && !(recognised && qualifying.length)) {
         for (const [rowId, r] of candidateRows) demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note: `PCF_SUPPLIER scope "${ourTag}" names an item no row satisfies — nothing ordered, needs review` });
         tagFlags.push({ soId: id, tag, reason: `the scope "${ourTag}" names an item no row on the order satisfies`,
@@ -1312,6 +1367,13 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
         for (const [rowId, r] of candidateRows) {
           if (qualifying.some(([q]) => q === rowId)) continue;
           demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note: `outside the PCF_SUPPLIER scope "${ourTag}"` });
+        }
+        // Say so when the comma was read as a LIST of items rather than one narrowed item. The two
+        // readings select different rows from the same words, so which one fired must be visible in
+        // the audit rather than inferred from what turned up on the PO.
+        if (scopeListReading) {
+          demandAudit.push({ soId: id, rowId: null, productId: null, sku: null, name: null, ordered: 0, allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0,
+            note: `PCF_SUPPLIER scope "${ourTag}" read as a LIST of ${scopeListReading.groups.length} items (${scopeListReading.groups.join(' | ')}) — no single row satisfied them all, and each names a product code` });
         }
         candidateRows = qualifying;
         // "X1" caps the TOTAL units taken from this SO, spent lowest rowId first.
