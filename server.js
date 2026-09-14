@@ -7846,15 +7846,23 @@ app.get('/api/purchasing/blocked-lines', async (req, res) => {
 
     // Who is waiting. One query for every PO in play rather than one per line.
     const poIds = [...new Set(r.rows.map((x) => x.context && x.context.poId).filter(Boolean).map(Number))];
-    const waiting = new Map();   // "poId|SKU" -> [{ soId, qty, name }]
+    const waiting = new Map();      // "poId|SKU" -> Map(soId -> { soId, qty, name })
+    const poHasDemand = new Set();  // POs we have ANY demand rows for, so "no match" can be told from "no data"
     if (poIds.length) {
       try {
         const d = await pool.query(
           `SELECT po_id, so_id, sku, name, ordered FROM demand_log WHERE po_id = ANY($1::int[]) AND so_id IS NOT NULL`, [poIds]);
         for (const row of d.rows) {
           const k = `${row.po_id}|${String(row.sku || '').toUpperCase()}`;
-          if (!waiting.has(k)) waiting.set(k, []);
-          waiting.get(k).push({ soId: row.so_id, qty: Number(row.ordered) || null, name: row.name || null });
+          poHasDemand.add(Number(row.po_id));
+          if (!waiting.has(k)) waiting.set(k, new Map());
+          // One entry per SALES ORDER, not per demand_log row. A supplier that failed and retried
+          // logs the same demand again each attempt, and PO 488528 accordingly listed
+          // "SO488357, SO488357, SO488357, SO488357" — four attempts, one customer.
+          const cur = waiting.get(k).get(row.so_id);
+          const qty = Number(row.ordered) || null;
+          if (!cur) waiting.get(k).set(row.so_id, { soId: row.so_id, qty, name: row.name || null });
+          else if (qty != null && (cur.qty == null || qty > cur.qty)) cur.qty = qty;
         }
       } catch { /* demand_log is a nicety here, never a requirement */ }
     }
@@ -7868,7 +7876,20 @@ app.get('/api/purchasing/blocked-lines', async (req, res) => {
         errorId: row.id, supplier: row.supplier, step: row.step, at: row.created_at, poId,
         handled: !!row.handled_at, handledBy: row.handled_by || null, handledNote: row.handled_note || null,
         message: String(row.message || '').replace(/\s+/g, ' ').slice(0, 300),
-        lines: lines.map((l) => ({ ...l, waitingFor: waiting.get(`${poId}|${String(l.sku).toUpperCase()}`) || [] })),
+        lines: lines.map((l) => {
+          const hit = waiting.get(`${poId}|${String(l.sku).toUpperCase()}`);
+          return {
+            ...l,
+            waitingFor: hit ? [...hit.values()] : [],
+            // "No customer is waiting" and "we could not match this code to a demand row" are
+            // different answers and only one of them is safe to act on. demand_log records the
+            // SALES ORDER's code while a blocked line often carries the supplier's resolved one
+            // (CB170321004 vs 125949-171-406 on PO 488528), so an unmatched code proves nothing.
+            // Saying "stock reorder" there would tell someone a customer is not waiting when one is.
+            demandMatched: !!hit,
+          };
+        }),
+        demandKnown: poHasDemand.has(Number(poId)),
       });
     }
     res.json({ days, count: out.length, lines: out.reduce((a, x) => a + x.lines.length, 0), rows: out });
