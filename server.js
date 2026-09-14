@@ -8267,6 +8267,61 @@ app.post('/api/purchasing/product-status-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// LIVE primary-supplier write, for the 7,803 live products that have NO supplier set at all.
+//
+// Brightpearl will not let the API MOVE a primary supplier — PUTting primarySupplierId onto a
+// product that already has one returns 200 and changes nothing, and so does the /supplier
+// sub-resource (see purchasingAuto.js). Setting one where the field is EMPTY has never been
+// tested, so this route tries the candidates in turn and reports which one actually took,
+// exactly like product-status-live does for status. It never reports success from a 2xx: it
+// re-reads the product and compares.
+//
+// `expectNone: true` (the default) refuses any product that already has a supplier, so this
+// can never silently attempt the move that does not work — or worse, half-work.
+// body: { productId, supplierId, expectNone }
+app.post('/api/purchasing/product-supplier-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
+  const { productId, supplierId, expectNone = true } = req.body || {};
+  const want = Number(supplierId);
+  if (!productId || !Number.isFinite(want) || want <= 0) return res.status(400).json({ error: 'productId and a numeric supplierId required' });
+  try {
+    const g = await bpLive('GET', `/product-service/product/${productId}`);
+    const p = Array.isArray(g) ? g[0] : g;
+    if (!p) return res.status(404).json({ error: 'product not found' });
+    const before = p.primarySupplierId ?? null;
+    if (before === want) return res.json({ productId, changed: false, reason: 'already set', before, after: before });
+    if (expectNone && before != null) {
+      return res.json({ productId, changed: false, reason: 'product already has a supplier — moving one is not supported by the API', before, wanted: want });
+    }
+    const skuBefore = (p.identity && p.identity.sku) || null;
+    const full = JSON.parse(JSON.stringify(p)); full.primarySupplierId = want;
+    const attempts = [
+      ['PATCH-op',     () => bpLive('PATCH', `/product-service/product/${productId}`, [{ op: 'replace', path: '/primarySupplierId', value: want }])],
+      ['PUT-supplier', () => bpLive('PUT',   `/product-service/product/${productId}/supplier`, { primarySupplierId: want })],
+      ['PATCH-obj',    () => bpLive('PATCH', `/product-service/product/${productId}`, { primarySupplierId: want })],
+      ['PUT-full',     () => bpLive('PUT',   `/product-service/product/${productId}`, full)],
+    ];
+    const tried = [];
+    let after = before, method = null;
+    for (const [name, run] of attempts) {
+      try { await run(); } catch (e) { tried.push(`${name}: ${String(e.message).slice(0, 90)}`); continue; }
+      const chk = await bpLive('GET', `/product-service/product/${productId}`);
+      const cp = Array.isArray(chk) ? chk[0] : chk;
+      after = (cp && cp.primarySupplierId) ?? null;
+      if (after === want) { method = name; break; }
+      tried.push(`${name}: 2xx but primarySupplierId unchanged`);
+    }
+    const fin = await bpLive('GET', `/product-service/product/${productId}`);
+    const fp = Array.isArray(fin) ? fin[0] : fin;
+    res.json({
+      productId, changed: after === want, before, wanted: want, after, method, tried,
+      skuIntact: !!(fp && fp.identity && (fp.identity.sku || null) === skuBefore),
+      statusIntact: !!(fp && fp.status === p.status),
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Brightpearl Data Manager import (legacy web UI). The public API cannot set a product's
 // LIVE/ARCHIVED/DISCONTINUED status at all — PATCH and PUT /status both 404 and a whole-
 // product PUT silently ignores the field — so a saved import map is the only route.
