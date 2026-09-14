@@ -1414,13 +1414,25 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   const dropped = r.droppedLowInv || [];
   if (dropped.length) {
     steps.droppedLowInv = dropped;
+    // Take them OFF the PO. Logging alone left the PO claiming stock that was never bought: PO
+    // 489129 (2026-09-14) went out at £156.76 while Performance Brands order 25099 covered only
+    // £107.98, because 14 units of H1C hard hats stayed on it after being dropped from the basket.
+    // Those rows also count as ON ORDER, so the very items that failed to order are then suppressed
+    // from the next reorder — the same trap as the 4004 on PO 486597 and the HH row on 485410.
+    const removedRows = [];
+    for (const d of dropped) {
+      try { const rm = await bp.removePoRowLive({ poId, sku: d.sku, execute: live }); removedRows.push({ sku: d.sku, ok: !!(rm && rm.done) }); }
+      catch (e) { removedRows.push({ sku: d.sku, ok: false, error: e.message }); }
+    }
+    steps.droppedRowsRemoved = removedRows;
     await logPurchasingError(pool, {
       supplier: 'PERFORMANCE BRANDS', step: 'low-inv-dropped', severity: 'review',
-      message: `${dropped.length} low-inventory line(s) could NOT be ordered and were left off PO#${poId}. `
+      message: `${dropped.length} low-inventory line(s) could NOT be ordered and were taken OFF PO#${poId} `
+        + `(${removedRows.filter((x) => x.ok).length} of ${removedRows.length} rows removed). `
         + `Customer demand was unaffected and the order was placed. This supplier has no back-order route, `
         + `so these need stock or an email to sales@performance-brands.com:\n`
         + dropped.map((d) => `      ${d.qty} × ${d.sku} — ${d.reason}`).join('\n'),
-      context: { poId, dropped },
+      context: { poId, dropped, removedRows },
     }).catch(() => {});
   }
 
