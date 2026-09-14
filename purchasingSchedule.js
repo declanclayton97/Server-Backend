@@ -771,9 +771,28 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   const cartLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty }));
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   const cart = await jfetch('cart', `${altItemsUrl}/api/castle-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: cartLines }) });
-  steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved };
-  if ((cart.unresolved || []).length) throw stepErr('cart', `item not found on the Castle portal (codes don't match): ${JSON.stringify(cart.unresolved)}`);
-  if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`);
+  // `results` is one entry per STYLE — Castle adds a whole style's variants in a single form POST,
+  // so when the basket ends short the failing group is named there and nowhere else. Dropping it is
+  // why PO 489088 could only say "48, expected 49" on 2026-09-14: every SKU resolved, every one had
+  // hundreds in stock, and which of 30 lines never went in was simply not recorded. Same omission
+  // the Fristads cart step had, and the same fix.
+  const castleRefused = (cart.results || []).filter((r) => !r.ok);
+  steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved, refused: castleRefused };
+  if ((cart.unresolved || []).length) throw stepErr('cart', `item not found on the Castle portal (codes don't match): ${JSON.stringify(cart.unresolved)}`, { poId, unresolved: cart.unresolved, refused: castleRefused });
+  // "A line was refused" and "every add was accepted and the basket is still short" are different
+  // faults needing different work, and the old message could not tell them apart. Castle reports
+  // what it SET per style (results[].added), so compare that with what the basket ended up holding.
+  const castleAttempted = (cart.results || []).reduce((a, r) => a + (r.added || []).reduce((b, x) => b + (Number(x.qty) || 0), 0), 0);
+  if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`
+    + (castleRefused.length
+      ? `. Castle refused ${castleRefused.length} style group(s): ${castleRefused.map((r) => `${r.id} — ${r.error || r.reason || r.status}`).join('; ').slice(0, 200)}`
+      : castleAttempted === expectUnits
+        ? `. Castle ACCEPTED every add (all ${(cart.results || []).length} style group(s) redirected) and the basket is still ${expectUnits - cart.cartCount} short — the portal dropped a line it had taken, so this is theirs, not a bad code.`
+        : `. Only ${castleAttempted} of ${expectUnits} units were even attempted — a variant did not map to an order field.`),
+    // The whole request goes in the context: with per-style results AND what we asked for, the
+    // missing line is a diff rather than a hunt through thirty SKUs by hand.
+    { poId, cartCount: cart.cartCount, expectUnits, attempted: castleAttempted, refused: castleRefused,
+      results: cart.results || null, sent: cartLines.map((l) => ({ sku: l.sku, qty: l.qty })) });
 
   // 3. checkout — Castle's POST places the order in one step. CustomerPO = our PO#.
   const co = await jfetch('checkout', `${altItemsUrl}/api/castle-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerPO: String(poId), execute: true }) });
