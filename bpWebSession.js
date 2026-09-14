@@ -542,6 +542,12 @@ async function emailOrderDocument(orderId, { contactId, to, subject, message, te
   const g = await fetchAuthed(url, { client, method: 'GET' });
   const html = g.html || '';
   if (looksLikeLoginPage(html)) throw new Error(`template_print not authenticated for ${orderId}`);
+  // fetchAuthed gives up after re-logging in once and returns { status: 0, html: '' }. An empty body
+  // is not a login page, so it slips past the check above and the caller then blames a MISSING CSRF
+  // TOKEN for what is actually a failed sign-in. That is what four Scruffs runs reported on
+  // 2026-09-11 (errors 258-261) while dry-run probes read the token fine before, between and after
+  // — and it sent both the triage bot and me hunting the form instead of the session.
+  if (!g.status || !html) throw new Error(`could not authenticate to Brightpearl for ${orderId} — the send form came back empty (status ${g.status}); the CSRF token is NOT the problem`);
   const token = (html.match(/name="__fc_csrf_token"[^>]*value="([^"]+)"/i) || html.match(/name=["']__fc_csrf_token["'][^>]*content=["']([^"']+)["']/i) || html.match(/__fc_csrf_token["'][^>]*(?:value|content)=["']([^"']+)["']/i) || [])[1];
   const toRows = [...new Set([...html.matchAll(/name="(email_to_\d+)"/gi)].map((m) => m[1]))];
   const idxRows = [...new Set([...html.matchAll(/name="(email_index_\d+)"/gi)].map((m) => m[1]))];

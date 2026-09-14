@@ -519,13 +519,24 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // coverall was on zero, and it lost the Large and XL — which had 123 and 67 on the shelf — along
   // with it. 3 of 6 units landed, the run threw, and four lines nobody had any trouble supplying
   // went unordered. So ask first, and hold back only the sizes they cannot supply.
+  // Probed a few at a time, not one after another. Each probe scrapes a portal page, so a 50-line
+  // order would sit through 50 round trips holding the shared run lock — and a run that overruns
+  // its window swallows the NEXT supplier's slot (Snickers lost its 10:00 on 2 Sept exactly that
+  // way). Six at a time is well inside what the portal tolerates and turns minutes into seconds.
   const stockBySku = new Map();
-  for (const l of cartLines) {
-    const st = await fristadsAvailable(altItemsUrl, l);
-    if (st) stockBySku.set(String(l.sku), st);
+  const FRISTADS_STOCK_CONCURRENCY = 6;
+  for (let i = 0; i < cartLines.length; i += FRISTADS_STOCK_CONCURRENCY) {
+    const batch = cartLines.slice(i, i + FRISTADS_STOCK_CONCURRENCY);
+    const got = await Promise.all(batch.map((l) => fristadsAvailable(altItemsUrl, l)));
+    batch.forEach((l, n) => { if (got[n]) stockBySku.set(String(l.sku), got[n]); });
   }
   const { short: shortLines, orderable } = partitionFristadsLines(cartLines, stockBySku);
   steps.stockCheck = { checked: cartLines.length, probed: stockBySku.size, short: shortLines };
+  // Keyed on productId, not SKU: po.soLines carry the Brightpearl SO row code (CB170321004) while
+  // the cart line carries the resolved Fristads one (125949-171-406), so a SKU comparison between
+  // them matches nothing. Used by BOTH the note/finalise trim below and the price check at the end,
+  // which otherwise values demand we deliberately did not buy.
+  const droppedPids = new Set(shortLines.map((s) => String(s.productId)));
   if (shortLines.length) {
     if (!orderable.length) {
       throw stepErr('cart', `every line on PO#${poId} is out of stock at Fristads — nothing to order: `
@@ -539,7 +550,12 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     for (const s of shortLines) {
       try {
         const r = await bp.removePoRowLive({ poId, sku: s.sku, execute: true });
-        removedRows.push({ sku: s.sku, ok: !!(r && (r.removed || r.ok)) });
+        // `done`, not `removed`/`ok` — removePoRowLive returns { done: !still } after reading the
+        // PO back. All three call sites read fields it has never returned, so a row that HAD come
+        // off reported ok:false. Seen live on PO 488528 (2026-09-11): the row was gone and the log
+        // said it was not. A false alarm about a dead line still sitting on a placed PO is the
+        // exact thing this reporting exists to rule out.
+        removedRows.push({ sku: s.sku, ok: !!(r && r.done) });
       } catch (e) { removedRows.push({ sku: s.sku, ok: false, error: e.message }); }
     }
     steps.stockCheck.removedRows = removedRows;
@@ -547,7 +563,6 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     // from the note, and drop from soIds any order left with NOTHING ordered — finalising that one
     // would clear its supplier tag and set it to "Ordered Stock Awaiting Delivery" for goods that
     // were never bought. Leaving the tag on also means the 17:30 tag audit keeps nagging about it.
-    const droppedPids = new Set(shortLines.map((s) => String(s.productId)));
     for (const id of Object.keys(linesByOrder)) {
       linesByOrder[id] = linesByOrder[id].filter((x) => !droppedPids.has(String(x.productId)));
       if (!linesByOrder[id].length) delete linesByOrder[id];
@@ -619,7 +634,14 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // price sanity check (NON-FATAL): the Fristads order total (what they'll invoice,
   // ex-VAT) vs our PO net. A gap means a BP cost price is stale → alert so it can be
   // adjusted; the order still stands (Fristads charges their price regardless).
-  const poNet = [...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (l.cost || 0) * l.qty, 0);
+  // Value only what we actually BOUGHT. An out-of-stock line held back above is still in po.soLines
+  // — it was demand, we just didn't order it — and counting it makes the comparison nonsense: on PO
+  // 488528 this reported "Fristads £320.75 vs our PO net £444.00, diff £-123.25" when £124.95 of
+  // that was simply the coverall we deliberately left off. A check that cries wolf on our own drop
+  // is worse than none, because the real drift (£1.70 of stale costs) is invisible underneath it.
+  const poNet = [...(po.soLines || []), ...(po.lowLines || [])]
+    .filter((l) => !droppedPids.has(String(l.productId)))
+    .reduce((a, l) => a + (l.cost || 0) * l.qty, 0);
   const fristadsTotal = parseFloat(String((order && order.sum) || '').replace(/[^\d.]/g, '')) || 0; // 0 if order# not indexed yet (skips the check)
   const priceGap = fristadsTotal ? +(fristadsTotal - poNet).toFixed(2) : 0;
   steps.priceCheck = { fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap };
@@ -632,7 +654,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     // their line reads "100222-900" + a display size of "L" where ours is 100222-910-407 — a
     // different colour code AND a numeric size code. The article is the only key both sides share.
     // Non-fatal throughout: the order is placed and Fristads charge their price regardless.
-    const ourLines = [...(po.soLines || []), ...(po.lowLines || [])];
+    const ourLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => !droppedPids.has(String(l.productId)));
     const breakdown = ourLines.map((l) => `${l.qty} × ${l.sku} — our £${(l.cost || 0).toFixed(2)}/ea (${l.name})`);
     const artOf = (sku) => (String(sku).match(/^(\d{6})/) || [])[1] || null;
     let changes = [];
@@ -1452,7 +1474,10 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // TotalItems 17 — the order was right and the count was not. Brightpearl had already
   // consolidated the same duplicates into 15 PO rows, which is why the PO and the cart agreed with
   // each other and only our line count disagreed with both.
-  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty, cost: l.cost, name: l.name }));
+  // lowInv rides along so Alt-Items can tell the two apart when Chadwick refuses a code by name:
+  // dropping a REORDER line to save the rest of the batch is a fair trade, dropping a line someone
+  // is waiting for is not, and only the caller knows which is which.
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty, cost: l.cost, name: l.name, lowInv: !!l.lowInv }));
   if (!orderLines.length) throw stepErr('cart', 'no orderable Chadwick lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
@@ -1462,7 +1487,31 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   });
   if (!r.ok) {
     const miss = (r.missing && r.missing.length) ? ` — item codes Chadwick did not accept: ${r.missing.join(', ').slice(0, 200)}` : '';
-    throw stepErr(r.step || 'checkout', `Chadwick did not confirm the order: ${String(r.error || JSON.stringify(r)).slice(0, 250)}${miss}`, { poId, missing: r.missing });
+    const rej = (r.rejected && r.rejected.length) ? ` — Chadwick rejected by name: ${r.rejected.join(', ')}` : '';
+    throw stepErr(r.step || 'checkout', `Chadwick did not confirm the order: ${String(r.error || JSON.stringify(r)).slice(0, 250)}${miss}${rej}`, { poId, missing: r.missing, rejected: r.rejected || [] });
+  }
+
+  // Reorder lines Chadwick refused by name were dropped so the rest of the batch could load. The
+  // order stands and no customer is waiting on them — but they must not disappear quietly, because
+  // a code that is wrong stays wrong and will fail again every day until someone fixes it in
+  // Brightpearl. That is the whole lesson of PO 488574: one stray "CT" cost four good lines, and
+  // was only found because a person went looking.
+  const rejected = r.rejected || [];
+  if (rejected.length) {
+    steps.rejected = rejected;
+    const dropped = orderLines.filter((l) => rejected.some((x) => String(x).toUpperCase() === String(l.sku).toUpperCase()));
+    for (const d of dropped) {
+      try { const rm = await bp.removePoRowLive({ poId, sku: d.sku, execute: live }); steps.rejectedRowsRemoved = [...(steps.rejectedRowsRemoved || []), { sku: d.sku, ok: !!(rm && rm.done) }]; }
+      catch (e) { steps.rejectedRowsRemoved = [...(steps.rejectedRowsRemoved || []), { sku: d.sku, ok: false, error: e.message }]; }
+    }
+    await logPurchasingError(pool, {
+      supplier: 'CHADWICK', step: 'item-code-rejected', severity: 'error',
+      message: `Chadwick rejected ${rejected.length} item code(s) outright and they were taken OFF PO#${poId} so the rest of the order could be placed. `
+        + `Their upload aborts at the first bad code and discards every line after it, so leaving them in loses good lines too. `
+        + `Each of these is almost certainly a WRONG SKU in Brightpearl rather than a dead product — check it against their catalogue:\n`
+        + dropped.map((d) => `      ${d.qty} × ${d.sku} ${d.name || ''}`).join('\n'),
+      context: { poId, rejected, dropped: dropped.map((d) => ({ sku: d.sku, qty: d.qty, name: d.name })) },
+    }).catch(() => {});
   }
 
   // NEVER let a non-string reach the reference. Brightpearl stores whatever it is given, and an
@@ -1726,7 +1775,7 @@ async function handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, d
     // 1. the PO row — it is never arriving
     try {
       const r = await bp.removePoRowLive({ poId, sku: d.sku, execute: true });
-      done.removedRows.push({ sku: d.sku, ok: !!(r && (r.removed || r.ok)) });
+      done.removedRows.push({ sku: d.sku, ok: !!(r && r.done) });
     } catch (e) { done.problems.push(`remove PO row ${d.sku}: ${e.message}`); }
     await recordDiscontinued(pool, supplierKey, { sku: d.sku, productName: name, poId, status: d.status || 'Discontinued' });
     done.recorded.push(d.sku);
@@ -2286,7 +2335,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
     for (const sku of excl) {
       try {
         const r = await bp.removePoRowLive({ poId, sku, execute: live });
-        steps.excluded.push({ sku, removed: !!(r && (r.removed || r.ok)) });
+        steps.excluded.push({ sku, removed: !!(r && r.done) });
       } catch (e) { steps.excluded.push({ sku, error: e.message }); }
     }
   }
