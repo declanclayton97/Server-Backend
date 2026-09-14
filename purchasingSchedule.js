@@ -783,7 +783,12 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   // faults needing different work, and the old message could not tell them apart. Castle reports
   // what it SET per style (results[].added), so compare that with what the basket ended up holding.
   const castleAttempted = (cart.results || []).reduce((a, r) => a + (r.added || []).reduce((b, x) => b + (Number(x.qty) || 0), 0), 0);
+  // Alt-Items now reads the basket back BY ITEM CODE, so name the lines outright rather than
+  // leaving a count to be diffed by hand.
+  const castleMissing = cart.missing || [];
   if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`
+    + (castleMissing.length ? `. MISSING: ${castleMissing.map((m) => `${m.sku} (wanted ${m.wanted}${m.inBasket ? `, only ${m.inBasket} in basket` : ', never reached the basket'})`).join('; ').slice(0, 300)}` : '')
+    + ((cart.unexpected || []).length ? `. Also in the basket but NOT asked for: ${cart.unexpected.map((u) => `${u.sku} x${u.qty}`).join(', ').slice(0, 150)}` : '')
     + (castleRefused.length
       ? `. Castle refused ${castleRefused.length} style group(s): ${castleRefused.map((r) => `${r.id} — ${r.error || r.reason || r.status}`).join('; ').slice(0, 200)}`
       : castleAttempted === expectUnits
@@ -792,6 +797,7 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
     // The whole request goes in the context: with per-style results AND what we asked for, the
     // missing line is a diff rather than a hunt through thirty SKUs by hand.
     { poId, cartCount: cart.cartCount, expectUnits, attempted: castleAttempted, refused: castleRefused,
+      missing: castleMissing, unexpected: cart.unexpected || [], basketItems: cart.basketItems || null,
       results: cart.results || null, sent: cartLines.map((l) => ({ sku: l.sku, qty: l.qty })) });
 
   // 3. checkout — Castle's POST places the order in one step. CustomerPO = our PO#.
@@ -1138,7 +1144,17 @@ async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToTh
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
-  const goodsNet = Number((po.netValue != null ? po.netValue : (po.soNet || 0) + (po.lowNet || 0))) || 0;
+  // createPo returns NONE of netValue, soNet or lowNet — it never has — so this read 0 on every
+  // run since it was written, and 0 satisfies no branch below: not "under the threshold, add
+  // carriage", not "over it, don't", not "this supplier has no carriage". Nothing ran, steps.carriage
+  // stayed undefined, and V12 has therefore never had a carriage line added to anything. PO 489092
+  // today is the example: £104.37 of goods against a £200 free-carriage threshold, £6.95 that should
+  // have gone on and did not. The scheduler had the figure the whole time (its own report says
+  // netValue 104.37); it just never reached here.
+  //
+  // Value the lines we actually put on the PO, the same way the Fristads price check does.
+  const goodsNet = Number(po.netValue != null ? po.netValue
+    : [...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (Number(l.cost) || 0) * (Number(l.qty) || 0), 0)) || 0;
   if (live && carriageNet > 0 && freeOver > 0 && goodsNet > 0 && goodsNet < freeOver) {
     try {
       const c = await bp.addPoMiscRowLive({ poId, name: `Carriage (order under £${freeOver} ex-VAT)`, net: carriageNet, qty: 1, execute: true });
@@ -1157,6 +1173,18 @@ async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToTh
     steps.carriage = { added: false, reason: `£${goodsNet.toFixed(2)} is over the £${freeOver} free-carriage threshold`, goodsNet };
   } else if (!(carriageNet > 0)) {
     steps.carriage = { added: false, reason: 'no carriage charge configured for this supplier' };
+  } else {
+    // The case that hid the bug for as long as it existed: a supplier that HAS a carriage charge,
+    // under a threshold, and we could not value the goods — so none of the branches above fit and
+    // the step silently did not happen. steps.carriage stayed undefined and the run report looked
+    // complete. Never let this be silent again: it is money the PO will be light by.
+    steps.carriage = { added: false, reason: `could not value the goods (goodsNet ${goodsNet}) — carriage NOT added`, goodsNet };
+    await logPurchasingError(pool, {
+      supplier: supplierKey, step: 'carriage', severity: 'error',
+      message: `Could not value PO#${poId}'s goods, so the £${carriageNet} carriage line was NOT added (free over £${freeOver}). `
+        + `The order was placed and the PO will read £${carriageNet} light against ${cfg.label}'s invoice.`,
+      context: { poId, goodsNet, carriage: carriageNet, freeOver },
+    }).catch(() => {});
   }
 
   const mail = await emailOrderDocument(poId, { contactId: cfg.contactId, to, send: live });
