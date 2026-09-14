@@ -2109,22 +2109,34 @@ export async function addPoMiscRowLive({ poId, name, net, qty = 1, taxCode = 'T2
   if (!(value >= 0)) throw new Error('net must be a number >= 0');
   const po = (await liveGet(`/order-service/order/${poId}`))[0];
   if (!po) throw new Error(`PO ${poId} not found`);
+  // MISC1 (pid 1001, "Misc item with VAT") is the row a carriage charge belongs on (owner,
+  // 2026-09-14). This wrote pid 1000, which is the NOTE-ROW marker — the same id as the
+  // "=====LOW INV====" separator, and the one isNoteRow() uses to mean "not a real line". A charge
+  // was therefore being carried on a row the rest of the pipeline treats as text.
+  //
+  // The duplicate guard compares the row TEXT, and Brightpearl strips "£" on the way in, so
+  // "Carriage (order under £200 ex-VAT)" comes back without it and never matched what we were about
+  // to add — the guard could not fire, and a re-run would stack a second charge. Compare with the
+  // pound signs removed from both sides, so it matches what Brightpearl actually stored.
+  const sameText = (a, b) => String(a || '').replace(/£/g, '').replace(/\s+/g, ' ').trim().toUpperCase()
+    === String(b || '').replace(/£/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
   const already = Object.values(po.orderRows || {})
-    .some((r) => String(r.productId) === '1000' && String(r.productName || '').trim() === String(name).trim());
+    .some((r) => (String(r.productId) === '1001' || String(r.productId) === '1000') && sameText(r.productName, name));
   if (already) return { refused: true, poId, name, reason: 'a misc row with that exact text is already on this PO' };
   const rate = taxRate(taxCode);
   const plan = { poId, name, qty, net: Number(value.toFixed(2)), taxCode, poNetWas: po.totalValue && po.totalValue.net };
   if (!execute) return { dryRun: true, ...plan };
   await liveWrite('POST', `/order-service/order/${poId}/row`, {
-    productId: 1000,
+    productId: 1001,                 // MISC1 — a real charge line, not the pid-1000 note marker
     productName: name,
     quantity: { magnitude: String(qty) },
     rowValue: { taxCode, rowNet: { currency: 'GBP', value: value.toFixed(2) }, rowTax: { currency: 'GBP', value: (value * rate).toFixed(2) } },
   });
-  // Read back rather than trust the write.
+  // Read back rather than trust the write — and compare the way Brightpearl stored it, or a row
+  // that landed perfectly well reports done:false because the pound sign was stripped.
   const after = (await liveGet(`/order-service/order/${poId}`))[0];
   const landed = Object.values((after && after.orderRows) || {})
-    .some((r) => String(r.productId) === '1000' && String(r.productName || '').trim() === String(name).trim());
+    .some((r) => (String(r.productId) === '1001' || String(r.productId) === '1000') && sameText(r.productName, name));
   return { done: landed, ...plan, poNetNow: after && after.totalValue && after.totalValue.net };
 }
 // Remove ONE row from a PO, addressed by SKU rather than rowId. Needed when a line turns out to be
