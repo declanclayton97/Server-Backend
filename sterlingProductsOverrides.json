@@ -47,5 +47,13 @@
     "sku": "Wilbury XL",
     "brand": "DeWalt",
     "_why": "DeWalt Wilbury Two Pack T-Shirts, XL. Same absence as the XXL entry above — the whole product line was missing from the workbook, not one row — so this size would have blocked a Sterling run the first time anyone ordered it, exactly as XXL blocked PO 488289 on 2026-09-10. Added at the same time rather than waiting for it to fail: the worker inspect() that verified XXL returned the full grid in one read, S/M/L/XL/XXL at GBP 11.66 with stock 0/1035/1330/1028/398, so XL (1028 in stock) is confirmed by the same evidence. Brightpearl carries M/L/XL/XXL only (product group 16619); Sterling also list an S, but we hold no S product so there is no EAN to key an override on. Colour kept as Brightpearl has it (\"Djion & Navy\") for the same reason as XXL. If Sterling ship a workbook that contains this EAN, delete this entry."
+  },
+  "5063777009190": {
+    "search": "Skyrock",
+    "colour": "Black/Grey",
+    "size": "M",
+    "sku": "Skyrock M",
+    "brand": "DeWalt",
+    "_why": "DeWalt Skyrock Polo Shirt, M. Absent from the Sterling product-data workbook entirely — not one Skyrock EAN appears in sterlingProducts.json, so this is the whole product line never having been ingested (same pattern as the Wilbury entries above). Blocked PO 489105 (error id 280, 2026-09-14). Verified against the live site with a read-only worker inspect() (no basket add): searching \"Skyrock\" returns a single unambiguous result, styleid=SKYROCK (\"skyrock dewalt polo shirt\", score 100, no colour conflict), with a single-colour S/M/L/XL/XXL grid at £9.91 each and M showing 1062 in stock. Colour kept as Brightpearl has it (\"Black/Grey\") since the portal has no separate colour variant to match against. Only M is added here — that is the only size currently on order; if another Skyrock size blocks a future run, verify and add it the same way. If Sterling ship a workbook that contains this EAN, delete this entry."
   }
 }
