@@ -7822,6 +7822,59 @@ app.post('/api/purchasing/discontinued-resend', express.json(), async (req, res)
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// ── WHAT IS BLOCKING AN ORDER, ITEM BY ITEM ─────────────────────────────────
+// A run is usually abandoned over ONE line, and the basket guard is right to refuse a short order —
+// but the offending item is then buried in a context blob, in JSON inside the message, or only in
+// the supplier's own words, so every occurrence has meant reading raw error rows by hand.
+//
+// Each blocked line is joined to the SALES ORDERS waiting on it (demand_log by PO + SKU), because
+// "125949-171-406 is stuck" is a puzzle and "SO 488357 is waiting for a coverall in Medium" is a
+// job. ?days= (default 14), ?supplier=, ?all=1 to include rows already handled.
+app.get('/api/purchasing/blocked-lines', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try {
+    const { extractBlockedLines } = await import('./blockedLines.js');
+    const days = Math.min(parseInt(req.query.days, 10) || 14, 90);
+    const params = [days];
+    let where = `severity = 'error' AND created_at > now() - ($1 || ' days')::interval`;
+    if (req.query.supplier) { params.push(String(req.query.supplier).toUpperCase()); where += ` AND upper(supplier) = $${params.length}`; }
+    if (!req.query.all) where += ' AND handled_at IS NULL';
+    await purchasingSchedule.ensureErrorTable(pool);
+    const r = await pool.query(
+      `SELECT id, supplier, step, message, context, created_at, handled_at, handled_by, handled_note
+       FROM purchasing_error_log WHERE ${where} ORDER BY id DESC LIMIT 300`, params);
+
+    // Who is waiting. One query for every PO in play rather than one per line.
+    const poIds = [...new Set(r.rows.map((x) => x.context && x.context.poId).filter(Boolean).map(Number))];
+    const waiting = new Map();   // "poId|SKU" -> [{ soId, qty, name }]
+    if (poIds.length) {
+      try {
+        const d = await pool.query(
+          `SELECT po_id, so_id, sku, name, ordered FROM demand_log WHERE po_id = ANY($1::int[]) AND so_id IS NOT NULL`, [poIds]);
+        for (const row of d.rows) {
+          const k = `${row.po_id}|${String(row.sku || '').toUpperCase()}`;
+          if (!waiting.has(k)) waiting.set(k, []);
+          waiting.get(k).push({ soId: row.so_id, qty: Number(row.ordered) || null, name: row.name || null });
+        }
+      } catch { /* demand_log is a nicety here, never a requirement */ }
+    }
+
+    const out = [];
+    for (const row of r.rows) {
+      const lines = extractBlockedLines(row);
+      if (!lines.length) continue;                       // not a line-level failure — the log has it
+      const poId = (row.context && row.context.poId) || null;
+      out.push({
+        errorId: row.id, supplier: row.supplier, step: row.step, at: row.created_at, poId,
+        handled: !!row.handled_at, handledBy: row.handled_by || null, handledNote: row.handled_note || null,
+        message: String(row.message || '').replace(/\s+/g, ' ').slice(0, 300),
+        lines: lines.map((l) => ({ ...l, waitingFor: waiting.get(`${poId}|${String(l.sku).toUpperCase()}`) || [] })),
+      });
+    }
+    res.json({ days, count: out.length, lines: out.reduce((a, x) => a + x.lines.length, 0), rows: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/purchasing/demand-log', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   try {

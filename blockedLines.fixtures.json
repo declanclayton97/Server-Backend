@@ -1,0 +1,461 @@
+[
+ {
+  "id": 262,
+  "supplier": "SCRUFFS",
+  "step": "unknown",
+  "message": "no __fc_csrf_token on template_print form — cannot send",
+  "context": {
+   "poId": 488618,
+   "dryRun": false,
+   "ukTime": "Fri 14:38",
+   "lineMode": "both"
+  }
+ },
+ {
+  "id": 254,
+  "supplier": "CHADWICK",
+  "step": "checkout",
+  "message": "https://alternate-items.onrender.com/api/chadwick-order returned error: basket holds 2 line(s), expected 7 — NOT ordering a short basket",
+  "context": {
+   "poId": 488574,
+   "dryRun": false,
+   "ukTime": "Fri 13:05",
+   "lineMode": "both",
+   "response": {
+    "ok": false,
+    "step": "basket",
+    "basket": {
+     "ok": false,
+     "resp": "400 Invalid Item CT894-35-A-S",
+     "sent": 7,
+     "status": 400,
+     "cartCount": "2",
+     "sampleLine": {
+      "Item": "868-39/39-A-S",
+      "Size": "Size S",
+      "Image": "868_3939_a_thumb.jpg",
+      "Price": "£16.80",
+      "QtyOrder": 1,
+      "wc1recid": 99284,
+      "wc2recid": 16029393,
+      "xiirecid": 805893,
+      "BackOrder": "",
+      "LineValue": "£16.80",
+      "TotalItems": 2,
+      "TotalValue": "£25.95",
+      "Description": "EDGE PRO TEAM MIDLAYER NAVY/NAVY Small",
+      "HighlightText": ""
+     }
+    },
+    "missing": [
+     "CT894-35-A-S",
+     "925-40/37-A-S",
+     "925-40/37-Y-XL",
+     "925-40/37-A-M",
+     "925-40/37-A-XL"
+    ]
+   }
+  }
+ },
+ {
+  "id": 247,
+  "supplier": "FRISTADS",
+  "step": "out-of-stock-dropped",
+  "message": "1 line(s) are out of stock at Fristads and were taken OFF PO#488528 so the rest of the order could go through. Fristads add every size of one garment in a single POST, so leaving them in loses the in-stock sizes too. These are NOT ordered and nothing will chase them automatically — back-order them or find another source:\n      1 × 125949-171-406 (Medium) Fristads FLAME HIGH VIS COVERALL CLASS 3 8084 FLAM — Fristads have 0, next delivery 2026-10-01",
+  "context": {
+   "poId": 488528,
+   "dropped": [
+    {
+     "qty": 1,
+     "sku": "125949-171-406",
+     "name": "Fristads FLAME HIGH VIS COVERALL CLASS 3 8084 FLAM",
+     "size": "Medium",
+     "avail": 0,
+     "colour": null,
+     "deldate": "2026-10-01",
+     "productId": 140160
+    }
+   ],
+   "removedRows": [
+    {
+     "ok": false,
+     "sku": "125949-171-406"
+    }
+   ]
+  }
+ },
+ {
+  "id": 245,
+  "supplier": "FRISTADS",
+  "step": "cart",
+  "message": "size/item not found on the Fristads portal (codes don't match): [{\"sku\":\"125949-171-406\",\"size\":\"M\",\"reason\":\"portal rejected the 125949-171 submission (status 3) — a row in the same group is likely unavailable\"},{\"sku\":\"125949-171-408\",\"size\":\"XL\",\"reason\":\"portal rejected the 125949-171 submission (status 3) — a row in the same group is likely unavailable\"},{\"sku\":\"125949-171-407\",\"size\":\"L\",\"reason\":\"portal rejected the 125949-171 submission (status 3) — a row in the same group is likely unavailable\"}]",
+  "context": {
+   "poId": 488528,
+   "dryRun": false,
+   "ukTime": "Fri 10:51",
+   "lineMode": "both"
+  }
+ },
+ {
+  "id": 242,
+  "supplier": "SNICKERS",
+  "step": "checkout",
+  "message": "Snickers worker did not confirm placement: \"TUFF SHOP purchasing@tuffshop.co.uk The Cart contains: 84 Articles Total cost: 3,084.60 GBP PRODUCTS CUSTOMER SERVICE ORDERS SEARCH PRODUCT ADD ARTICLE ORDER SUMMARY Bill To Address COMPANY NAME TUFF",
+  "context": {
+   "poId": 488518,
+   "dryRun": false,
+   "ukTime": "Fri 10:01",
+   "lineMode": "so",
+   "cartUnits": 84,
+   "lineStatus": {},
+   "discontinued": [],
+   "missingLines": [],
+   "expectedUnits": 84
+  }
+ },
+ {
+  "id": 233,
+  "supplier": "STERLING",
+  "step": "resolve",
+  "message": "Sterling lines not in the product-data file (order NOT placed): 5063777009268. Update the Sterling product-data file / ingest.",
+  "context": {
+   "poId": 488289,
+   "dryRun": false,
+   "ukTime": "Thu 13:14",
+   "lineMode": "both"
+  }
+ },
+ {
+  "id": 214,
+  "supplier": "MASCOT",
+  "step": "checkout",
+  "message": "https://alternate-items.onrender.com/api/mascot-order returned error: basket did not accept every line",
+  "context": {
+   "poId": 488006,
+   "dryRun": false,
+   "ukTime": "Wed 16:06",
+   "lineMode": "both",
+   "response": {
+    "ok": false,
+    "step": "basket",
+    "basket": {
+     "ok": false,
+     "cart": 0,
+     "added": [
+      "5711074571543x2",
+      "5711074077229x1",
+      "5707209956767x1",
+      "5711074785315x1",
+      "5711074717125x1",
+      "5715411042291x1",
+      "5711074717125x2"
+     ],
+     "errors": [
+      {
+       "Id": "",
+       "Size": "",
+       "Type": 2,
+       "Number": "",
+       "Message": "CX_SY_MESSAGE_IN_PLUGIN_MODE:An exception has occurred..Message E WVA 032 cannot be processed in plugin mode HTTP\r\nServer stack trace: \r\n   at System.ServiceModel.Channels.ServiceChannel.HandleReply(ProxyOperationRuntime operation, ProxyRpc& rpc)\r\n   at System.ServiceModel.Channels.ServiceChannel.EndCall(String action, Object[] outs, IAsyncResult result)\r\n   at System.ServiceModel.Channels.ServiceChannelProxy.InvokeEndService(IMethodCallMessage methodCall, ProxyOperationRuntime operation)\r\n   at System.ServiceModel.Channels.ServiceChannelProxy.Invoke(IMessage message)\r\n\r\nException rethrown at [0]: \r\n   at System.Runtime.Remoting.Proxies.RealProxy.HandleReturnMessage(IMessage reqMsg, IMessage retMsg)\r\n   at System.Runtime.Remoting.Proxies.RealProxy.PrivateInvoke(MessageData& msgData, Int32 type)\r\n   at Mascot.Apps.B2B.SAP.ChangeOrder.Z_CHA_AFS_SALES_ORDER_B2B.EndZChaAfsSalesOrderB2b(IAsyncResult result)\r\n   at Mascot.Apps.B2B.SAP.ChangeOrder.Z_CHA_AFS_SALES_ORDER_B2BClient.EndZChaAfsSalesOrderB2b(IAsyncResult result) in c:\\Projects\\Git\\b2b-source\\Mascot.Apps.B2B.SAP\\Service References\\ChangeOrder\\Reference.cs:line 889\r\n   at Mascot.Apps.B2B.SAP.ChangeOrder.Z_CHA_AFS_SALES_ORDER_B2BClient.OnEndZChaAfsSalesOrderB2b(IAsyncResult result) in c:\\Projects\\Git\\b2b-source\\Mascot.Apps.B2B.SAP\\Service References\\ChangeOrder\\Reference.cs:line 898\r\n   at System.ServiceModel.ClientBase`1.OnAsyncCallCompleted(IAsyncResult result)",
+       "Material": "",
+       "ShortMessage": "CX_SY_MESSAGE_IN_PLUGIN_MODE:An exception has occurred..Message E WVA 03"
+      }
+     ],
+     "blocked": [],
+     "notFound": []
+    }
+   }
+  }
+ },
+ {
+  "id": 212,
+  "supplier": "PERFORMANCE BRANDS",
+  "step": "checkout",
+  "message": "Performance Brands worker did not confirm placement: {\"added\":6,\"expected\":6,\"cartCount\":5,\"units\":5,\"wantUnits\":6,\"ready\":false,\"error\":\"not ready to place\"}",
+  "context": {
+   "poId": 488064,
+   "added": 6,
+   "dryRun": false,
+   "ukTime": "Wed 14:34",
+   "results": [
+    {
+     "ok": true,
+     "max": 114,
+     "pid": "18974",
+     "qty": 1,
+     "sku": "PB334-BLK-09",
+     "notice": "View cart “Duran Non-metal Safety Trainer” has been added to your cart in the following variations: 1 × 09"
+    },
+    {
+     "ok": true,
+     "max": 54,
+     "pid": "20214",
+     "qty": 1,
+     "sku": "PB56C-BRN-11",
+     "notice": "View cart “Pro Dealer Plus Boot c/w Cap” has been added to your cart in the following variations: 1 × 11"
+    },
+    {
+     "ok": true,
+     "max": 51,
+     "pid": "15856",
+     "qty": 1,
+     "sku": "PB26-BLK-10.5",
+     "notice": "View cart “PB26 Mid Length Foundry Boot (Steel)” has been added to your cart in the following variations: 1 × 10.5"
+    },
+    {
+     "ok": true,
+     "max": 202,
+     "pid": "20025",
+     "qty": 1,
+     "sku": "PB271-BRN-06",
+     "notice": "View cart “Brandon Pro Safety Dealer Boot” has been added to your cart in the following variations: 1 × Brown, 06 1 × Brown, 09"
+    },
+    {
+     "ok": true,
+     "max": 202,
+     "pid": "20025",
+     "qty": 1,
+     "sku": "PB271-BRN-06",
+     "notice": "View cart “Brandon Pro Safety Dealer Boot” has been added to your cart in the following variations: 1 × Brown, 06 1 × Brown, 09"
+    },
+    {
+     "ok": true,
+     "max": 541,
+     "pid": "20029",
+     "qty": 1,
+     "sku": "PB271-BRN-09",
+     "notice": "View cart “Brandon Pro Safety Dealer Boot” has been added to your cart in the following variations: 1 × Brown, 06 1 × Brown, 09"
+    }
+   ],
+   "expected": 6,
+   "lineMode": "both"
+  }
+ },
+ {
+  "id": 205,
+  "supplier": "MASCOT",
+  "step": "checkout",
+  "message": "https://alternate-items.onrender.com/api/mascot-order returned error: basket did not accept every line",
+  "context": {
+   "poId": 488006,
+   "dryRun": false,
+   "ukTime": "Wed 11:52",
+   "lineMode": "both"
+  }
+ },
+ {
+  "id": 201,
+  "supplier": "HELLY HANSEN",
+  "step": "preflight",
+  "message": "HELLY HANSEN lines not on the portal (PO NOT created): 78359_991_42 — fix the resolver/aliases first",
+  "context": {
+   "dryRun": false,
+   "ukTime": "Wed 11:03",
+   "lineMode": "both",
+   "unresolved": [
+    "78359_991_42"
+   ],
+   "enrichFailed": null
+  }
+ },
+ {
+  "id": 184,
+  "supplier": "CHADWICK",
+  "step": "checkout",
+  "message": "https://alternate-items.onrender.com/api/chadwick-order returned error: wcp-cartorder failed: 400 Invalid Request Date",
+  "context": {
+   "poId": 487454,
+   "dryRun": false,
+   "ukTime": "Mon 12:40"
+  }
+ },
+ {
+  "id": 173,
+  "supplier": "BLAKLADER",
+  "step": "checkout",
+  "message": "Blaklader did not confirm the order: \"storefront cart is EMPTY after 6 pass(es) — not submitting. The browser session is not on the backend's cart (cartId is passed in the body), so orders/send would 500. \"",
+  "context": {
+   "poId": 487374,
+   "dryRun": false,
+   "ukTime": "Mon 9:30",
+   "worker": {
+    "note": null,
+    "status": "done"
+   },
+   "cartView": {
+    "url": "https://www.blaklader.uk/en/checkout",
+    "empty": false,
+    "passes": [
+     {
+      "pass": 1,
+      "repriced": true,
+      "lineCount": 0,
+      "maintenance": false
+     },
+     {
+      "pass": 2,
+      "repriced": false,
+      "lineCount": 0,
+      "maintenance": false
+     },
+     {
+      "pass": 3,
+      "repriced": false,
+      "lineCount": 0,
+      "maintenance": false
+     },
+     {
+      "pass": 4,
+      "repriced": false,
+      "lineCount": 0,
+      "maintenance": false
+     },
+     {
+      "pass": 5,
+      "repriced": false,
+      "lineCount": 0,
+      "maintenance": false
+     },
+     {
+      "pass": 6,
+      "repriced": false,
+      "lineCount": 0,
+      "maintenance": false
+     }
+    ],
+    "repriced": false,
+    "lineCount": 0,
+    "maintenance": false
+   },
+   "repriced": false,
+   "cartPricesRead": 0,
+   "checkedSupplierOrderList": true
+  }
+ },
+ {
+  "id": 169,
+  "supplier": "PENCARRIE",
+  "step": "resolve",
+  "message": "3 PenCarrie line(s) couldn't be mapped to a prodcode — NOT placing. PO#486991 left for review. e.g. 152818, 152817, 152820",
+  "context": {
+   "poId": 486991,
+   "dryRun": false,
+   "ukTime": "Fri 17:01",
+   "unresolved": [
+    {
+     "sku": "152818",
+     "via": "no-match",
+     "diag": [
+      {
+       "src": "index",
+       "note": "size not in style",
+       "rows": 30,
+       "style": "RG139",
+       "sizedRows": 0
+      }
+     ],
+     "name": "Regatta RG139 Ladies Micro Fleece Jacket",
+     "size": "Medium",
+     "colour": "Dark Navy"
+    },
+    {
+     "sku": "152817",
+     "via": "no-match",
+     "diag": [
+      {
+       "src": "index",
+       "note": "size not in style",
+       "rows": 30,
+       "style": "RG139",
+       "sizedRows": 0
+      }
+     ],
+     "name": "Regatta RG139 Ladies Micro Fleece Jacket",
+     "size": "Large",
+     "colour": "Dark Navy"
+    },
+    {
+     "sku": "152820",
+     "via": "no-match",
+     "diag": [
+      {
+       "src": "index",
+       "note": "size not in style",
+       "rows": 30,
+       "style": "RG139",
+       "sizedRows": 0
+      }
+     ],
+     "name": "Regatta RG139 Ladies Micro Fleece Jacket",
+     "size": "XL",
+     "colour": "Dark Navy"
+    }
+   ]
+  }
+ },
+ {
+  "id": 164,
+  "supplier": "STERLING",
+  "step": "checkout",
+  "message": "Sterling worker did not confirm placement: {\"cartCount\":11,\"added\":9,\"expected\":10,\"units\":12,\"ready\":false,\"cleared\":{\"cleared\":0},\"error\":\"not ready to place\",\"hasScreenshot\":true,\"results\":[{\"line\":\"Mercury\",\"size\":\"9\",\"qty\":2,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl01_rpMaterial_ctl00_rpColour_ctl00_txtqty6\",\"matchedSize\":\"9\",\"addedVia\":\"#ctl00_ContentPlaceHolder1_cmdadd\"},{\"line\":\"Force\",\"size\":\"XL\",\"qty\":2,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl01_rpMaterial_ctl00_rpColour_ctl00_txtqty3\",\"matchedSize\":\"XL\",\"addedVia\":\"#ctl00_ContentPlaceHolder1_cmdadd\"},{\"line\":\"Carlisle\",\"size\":\"6\",\"qty\":1,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl01_rpMaterial_ctl00_rpColour_ctl00_txtqty0\",\"matchedSize\":\"6\",\"addedVia\":\"#ctl00_ContentPlaceHolder1_cmdadd\"},{\"line\":\"Albany\",\"size\":\"L31W30\",\"qty\":1,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl01_rpMaterial_ctl00_rpColour_ctl01_txtqty0\",\"matchedSize\":\"leg[1/3] W30\",\"addedVia\":\"#ctl00_ContentPlaceHolder1_cmdadd\"},{\"line\":\"Sudbury Grey/Black\",\"size\":\"L31W36\",\"qty\":1,\"ok\":false,\"reason\":\"no results for \\\"Sudbury /Black\\\"\"},{\"line\":\"Lander\",\"size\":\"8\",\"qty\":1,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl04_rpMaterial_ctl00_rpColour_ctl00_txtqty2\",\"matchedSize\":\"8\",\"addedVia\":\"qty-postback\"},{\"line\":\"Sudbury Black\",\"size\":\"L31W40\",\"qty\":1,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl06_rpMaterial_ctl00_rpColour_ctl01_txtqty6\",\"matchedSize\":\"leg[1/3] W40\",\"addedVia\":\"#ctl00_ContentPlaceHolder1_cmdadd\"},{\"line\":\"Yellowknife\",\"size\":\"L31W34\",\"qty\":1,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl07_rpMaterial_ctl00_rpColour_ctl00_txtqty3\",\"matchedSize\":\"leg[0/2] W34\",\"addedVia\":\"qty-postback\"},{\"line\":\"Bancroft\",\"size\":\"L29 W30\",\"qty\":1,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl02_rpMaterial_ctl00_rpColour_ctl00_txtqty0\",\"matchedSize\":\"leg[0/3] W30\",\"addedVia\":\"#ctl00_ContentPlaceHolder1_cmdadd\"},{\"line\":\"Bancroft\",\"size\":\"L31W32\",\"qty\":1,\"ok\":true,\"boxId\":\"ctl00_ContentPlaceHolder1_rpStyle_ctl02_rpMaterial_ctl00_rpColour_ctl01_txtqty1\",\"matchedSize\":\"leg[1/3] W32\",\"addedVia\":\"#ctl00_ContentPlaceHolder1_cmdadd\"}]}",
+  "context": {
+   "poId": 486943,
+   "dryRun": false,
+   "ukTime": "Fri 13:04"
+  }
+ },
+ {
+  "id": 156,
+  "supplier": "SNICKERS",
+  "step": "checkout",
+  "message": "Snickers worker did not confirm placement — 1 line(s) never reached the basket: 32235804046 (wanted 1, not in basket): \"not ready to place\"",
+  "context": {
+   "poId": 486870,
+   "dryRun": false,
+   "ukTime": "Fri 10:02",
+   "cartUnits": 139,
+   "missingLines": [
+    {
+     "inCart": 0,
+     "reason": "not in basket",
+     "wanted": 1,
+     "stockCode": "32235804046"
+    }
+   ],
+   "expectedUnits": 140
+  }
+ },
+ {
+  "id": 141,
+  "supplier": "PENCARRIE",
+  "step": "checkout",
+  "message": "PenCarrie did not confirm the order: \"Stopped: Order ID (TUWO_TW486420) already exists and Updateexistingorder = 0.\"",
+  "context": {
+   "poId": 486420,
+   "dryRun": false,
+   "ukTime": "Wed 16:26"
+  }
+ },
+ {
+  "id": 135,
+  "supplier": "PERFORMANCE BRANDS",
+  "step": "checkout",
+  "message": "https://alternate-items.onrender.com/api/performance-brands-order returned error: basket has 0 line(s), expected 3 — NOT ordering a short basket",
+  "context": {
+   "poId": 486391,
+   "dryRun": false,
+   "ukTime": "Wed 14:32"
+  }
+ },
+ {
+  "id": 133,
+  "supplier": "HELLY HANSEN",
+  "step": "checkout",
+  "message": "https://alternate-items.onrender.com/api/hellyhansen-basket returned error: refusing — 3 unresolved SKU(s): 79242_900-L, 75117_991-L, 75106_595-L",
+  "context": {
+   "poId": 486379,
+   "dryRun": false,
+   "ukTime": "Wed 14:02"
+  }
+ }
+]
