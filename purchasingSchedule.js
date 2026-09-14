@@ -786,7 +786,12 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   // Alt-Items now reads the basket back BY ITEM CODE, so name the lines outright rather than
   // leaving a count to be diffed by hand.
   const castleMissing = cart.missing || [];
+  // A PACK rule is a different answer from a missing line and the only one with an obvious action:
+  // Castle sell it in sixes, we asked for one, so ask for six. Put it first — it explains the
+  // shortfall, and without it 606-BLK-ONE just reads as "never reached the basket" with no reason.
+  const packBlocked = cart.packBlocked || [];
   if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`
+    + (packBlocked.length ? `. PACK SIZE: ${packBlocked.map((p) => `${p.sku} is sold in multiples of ${p.pack} — we asked for ${p.qty}, order ${p.suggest}`).join('; ').slice(0, 300)}` : '')
     + (castleMissing.length ? `. MISSING: ${castleMissing.map((m) => `${m.sku} (wanted ${m.wanted}${m.inBasket ? `, only ${m.inBasket} in basket` : ', never reached the basket'})`).join('; ').slice(0, 300)}` : '')
     + ((cart.unexpected || []).length ? `. Also in the basket but NOT asked for: ${cart.unexpected.map((u) => `${u.sku} x${u.qty}`).join(', ').slice(0, 150)}` : '')
     + (castleRefused.length
@@ -797,7 +802,7 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
     // The whole request goes in the context: with per-style results AND what we asked for, the
     // missing line is a diff rather than a hunt through thirty SKUs by hand.
     { poId, cartCount: cart.cartCount, expectUnits, attempted: castleAttempted, refused: castleRefused,
-      missing: castleMissing, unexpected: cart.unexpected || [], basketItems: cart.basketItems || null,
+      missing: castleMissing, packBlocked, unexpected: cart.unexpected || [], basketItems: cart.basketItems || null,
       results: cart.results || null, sent: cartLines.map((l) => ({ sku: l.sku, qty: l.qty })) });
 
   // 3. checkout — Castle's POST places the order in one step. CustomerPO = our PO#.
