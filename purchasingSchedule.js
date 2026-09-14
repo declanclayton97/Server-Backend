@@ -771,9 +771,15 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   const cartLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty }));
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   const cart = await jfetch('cart', `${altItemsUrl}/api/castle-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: cartLines }) });
-  steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved };
+  // `results` carries the portal's OWN response per product-style group it refused. Dropping it is
+  // why "portal shows 48, expected 49" was all anyone got from PO 489088 — which SKU and why had to
+  // be reconstructed by hand afterwards. Same fix as Fristads (32e2372).
+  const refused = (cart.results || []).filter((r) => !r.ok);
+  steps.cart = { cartCount: cart.cartCount, expectUnits, unresolved: cart.unresolved, refused };
   if ((cart.unresolved || []).length) throw stepErr('cart', `item not found on the Castle portal (codes don't match): ${JSON.stringify(cart.unresolved)}`);
-  if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`);
+  if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`
+    + (refused.length ? `. Castle refused ${refused.length} group(s): ${refused.map((r) => `${r.id} — ${r.error || r.reason || r.status}`).join('; ').slice(0, 300)}` : ''),
+    { poId, cartCount: cart.cartCount, expectUnits, refused, sent: cartLines });
 
   // 3. checkout — Castle's POST places the order in one step. CustomerPO = our PO#.
   const co = await jfetch('checkout', `${altItemsUrl}/api/castle-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerPO: String(poId), execute: true }) });
