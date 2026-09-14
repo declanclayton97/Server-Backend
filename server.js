@@ -7830,6 +7830,10 @@ app.post('/api/purchasing/discontinued-resend', express.json(), async (req, res)
 // Each blocked line is joined to the SALES ORDERS waiting on it (demand_log by PO + SKU), because
 // "125949-171-406 is stuck" is a puzzle and "SO 488357 is waiting for a coverall in Medium" is a
 // job. ?days= (default 14), ?supplier=, ?all=1 to include rows already handled.
+// The same set the hub calls "placed": 7 Placed with supplier, 8 Received, 45 Back order,
+// 68 Invoice received, 86. Anything here means the order reached the supplier, so a line that
+// failed on the way is history rather than a job.
+const PLACED_PO_STATUSES = new Set([7, 8, 45, 68, 86]);
 app.get('/api/purchasing/blocked-lines', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   try {
@@ -7867,11 +7871,35 @@ app.get('/api/purchasing/blocked-lines', async (req, res) => {
       } catch { /* demand_log is a nicety here, never a requirement */ }
     }
 
+    // A failure whose PO WENT ON TO PLACE is finished, whatever the log still says. Chadwick's
+    // error 229 (PO 488281, 23 lines expected, 5 landed) sat here naming 15 items to go and chase
+    // while that PO had been placed days earlier as SG216130 — a list of settled problems is worse
+    // than no list, because it trains you to ignore it.
+    //
+    // Read the POs in ONE ascending id-set. Ascending is not a style choice: BP 400s (CMNC-006) on
+    // an unordered path id-list, and the catch below would then silently mark nothing as settled.
+    const placedPos = new Set();
+    if (poIds.length) {
+      const asc = [...poIds].sort((a, b) => a - b);
+      for (let i = 0; i < asc.length; i += 50) {
+        const chunk = asc.slice(i, i + 50);
+        try {
+          const got = await purchasingAuto.bpLiveGet(`/order-service/order/${chunk.join(',')}`);
+          for (const o of got || []) {
+            const st = o && o.orderStatus && o.orderStatus.orderStatusId;
+            if (PLACED_PO_STATUSES.has(Number(st))) placedPos.add(Number(o.id));
+          }
+        } catch { /* can't tell → show it, which is the safe direction */ }
+      }
+    }
+
     const out = [];
     for (const row of r.rows) {
       const lines = extractBlockedLines(row);
       if (!lines.length) continue;                       // not a line-level failure — the log has it
       const poId = (row.context && row.context.poId) || null;
+      const settled = !!(poId && placedPos.has(Number(poId)));
+      if (settled && !req.query.all) continue;
       out.push({
         errorId: row.id, supplier: row.supplier, step: row.step, at: row.created_at, poId,
         handled: !!row.handled_at, handledBy: row.handled_by || null, handledNote: row.handled_note || null,
@@ -7890,6 +7918,7 @@ app.get('/api/purchasing/blocked-lines', async (req, res) => {
           };
         }),
         demandKnown: poHasDemand.has(Number(poId)),
+        settled,   // only ever true here with ?all=1; the PO placed despite this failure
       });
     }
     res.json({ days, count: out.length, lines: out.reduce((a, x) => a + x.lines.length, 0), rows: out });
