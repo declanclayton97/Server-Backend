@@ -13591,6 +13591,94 @@ app.post('/api/quote-chase/reseed', async (req, res) => {
 // swallowed, so honouring dry run would defeat it. It writes no Brightpearl note —
 // the note for a response is written once, when the response is recorded, and
 // re-sending an email must not duplicate it.
+// ---- Client diagnostics ------------------------------------------------------
+//
+// The Mockup Creator locks the whole browser tab intermittently — no clicks,
+// devtools will not open, only a hard refresh recovers it — reportedly when a
+// dragged logo is dropped. It had NO client-side error reporting of any kind, so
+// every occurrence left no evidence anywhere and there was nothing to diagnose.
+//
+// A frozen main thread cannot send anything, so the browser side writes
+// breadcrumbs to localStorage and uploads the previous session on the NEXT load
+// when it never closed cleanly. The user's hard refresh is what delivers the
+// report, and `kind = 'hang'` is that case.
+//
+// Deliberately unauthenticated and best-effort: it is fed by navigator.sendBeacon
+// from a page that may be dying, so it cannot negotiate auth. It is therefore
+// write-only, size-capped, and holds no customer data — breadcrumbs are step
+// names, timings and heap sizes.
+async function initializeClientLogTable() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS client_log (
+        id BIGSERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        kind TEXT NOT NULL,
+        session_id TEXT,
+        app_user TEXT,
+        url TEXT,
+        ua TEXT,
+        heap_mb INTEGER,
+        message TEXT,
+        detail JSONB
+      );
+      CREATE INDEX IF NOT EXISTS idx_client_log_at ON client_log(created_at DESC);
+    `);
+  } catch (e) {
+    console.error('[client-log] table init failed:', e.message);
+  }
+}
+
+app.post('/api/client-log', express.json({ limit: '256kb' }), async (req, res) => {
+  // Always 204, even on failure: the page is often mid-teardown and nothing good
+  // comes of making it retry or surface an error to the user.
+  res.status(204).end();
+  if (!useDatabase) return;
+  try {
+    const b = req.body || {};
+    const kind = String(b.kind || 'unknown').slice(0, 40);
+    if (['hang', 'error', 'rejection', 'longtask'].indexOf(kind) === -1) return;
+    await pool.query(
+      `INSERT INTO client_log (kind, session_id, app_user, url, ua, heap_mb, message, detail)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [kind,
+       String(b.sessionId || '').slice(0, 64),
+       String(b.user || '').slice(0, 64),
+       String(b.url || '').slice(0, 500),
+       String(b.ua || '').slice(0, 300),
+       Number.isFinite(b.heapMB) ? Math.round(b.heapMB) : null,
+       String(b.message || '').slice(0, 1000),
+       b.detail || null]
+    );
+    if (kind === 'hang' || kind === 'longtask') {
+      console.warn(`[client-log] ${kind} from ${b.user || 'unknown'}: ${String(b.message || '').slice(0, 200)}`);
+    }
+  } catch (e) {
+    console.error('[client-log] insert failed:', e.message);
+  }
+});
+
+// Read them back. Defaults to the interesting kinds so a plain call is useful.
+app.get('/api/client-log', async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const kinds = String(req.query.kind || 'hang,error,rejection,longtask')
+      .split(',').map((x) => x.trim()).filter(Boolean);
+    const q = await pool.query(
+      `SELECT id, created_at, kind, session_id, app_user, url, heap_mb, message, detail
+         FROM client_log
+        WHERE kind = ANY($1::text[])
+        ORDER BY created_at DESC
+        LIMIT $2`,
+      [kinds, limit]
+    );
+    res.json({ count: q.rowCount, rows: q.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 app.post('/api/quote-chase/resend-notifications', async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
   try {
@@ -14045,6 +14133,7 @@ function quoteFormPage(r, preselect) {
 }
 
 initializeQuoteChaseTable();
+initializeClientLogTable();
 refreshBankHolidays();
 setInterval(() => refreshBankHolidays(), 7 * 24 * 60 * 60 * 1000);
 if (process.env.QUOTE_CHASE_ENABLED === 'true' && BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
