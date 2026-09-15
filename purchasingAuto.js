@@ -378,6 +378,14 @@ export async function getProductIdentity(productId) {
   return (p && p.identity) || {};
 }
 
+// LIVE counterpart of getProductIdentity — api() above is the sandbox/TEST account (see bpApi's
+// comment), so a real product's identity (e.g. Chadwick's mpn) has to come from liveGet instead.
+export async function getProductIdentityLive(productId) {
+  const resp = await liveGet(`/product-service/product/${productId}`);
+  const p = Array.isArray(resp) ? resp[0] : resp;
+  return (p && p.identity) || {};
+}
+
 // changes: any of { sku, ean, upc, mpn, isbn }. Pass "" / null to intentionally
 // clear one. Every identifier NOT in `changes` is preserved from the current
 // identity. Returns { productId, before, put } for logging/verification.

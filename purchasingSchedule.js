@@ -1296,7 +1296,7 @@ export function mergePoLinesBySku(po) {
     if (String(l.productId) === '1000' || !l.sku) continue;   // the =====LOW INV==== separator
     const k = String(l.sku);
     const cur = bySku.get(k);
-    if (!cur) { bySku.set(k, { sku: k, qty: Math.round(l.qty), cost: l.cost, name: l.name, lowInv: !!l.lowInv }); continue; }
+    if (!cur) { bySku.set(k, { sku: k, qty: Math.round(l.qty), cost: l.cost, name: l.name, lowInv: !!l.lowInv, productId: l.productId }); continue; }
     cur.qty += Math.round(l.qty);
     cur.lowInv = cur.lowInv && !!l.lowInv;
     if (!cur.name) cur.name = l.name;
@@ -1550,13 +1550,27 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // lowInv rides along so Alt-Items can tell the two apart when Chadwick refuses a code by name:
   // dropping a REORDER line to save the rest of the batch is a fair trade, dropping a line someone
   // is waiting for is not, and only the caller knows which is which.
-  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty, cost: l.cost, name: l.name, lowInv: !!l.lowInv }));
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty, cost: l.cost, name: l.name, lowInv: !!l.lowInv, productId: l.productId }));
   if (!orderLines.length) throw stepErr('cart', 'no orderable Chadwick lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
+  // A handful of products carry a Brightpearl-internal SKU (ML110722012) instead of Chadwick's own
+  // item code, and their upload silently drops those. For that range, the real code is recorded in
+  // Brightpearl's `mpn` field instead (837-39-A-3XL for ML110722012 — confirmed live against their
+  // stock feed). Resolve it per line and fall back to the SKU when there is no mpn; a product with
+  // neither is a genuine data gap and will still be refused and reported as before.
+  for (const l of orderLines) {
+    l.itemCode = l.sku;
+    if (!l.productId) continue;
+    try {
+      const identity = await bp.getProductIdentityLive(l.productId);
+      if (identity.mpn && String(identity.mpn).trim()) l.itemCode = String(identity.mpn).trim();
+    } catch { /* fall back to sku */ }
+  }
+
   const r = await jfetch('checkout', `${altItemsUrl}/api/chadwick-order`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: live }),
+    body: JSON.stringify({ lines: orderLines.map((l) => ({ sku: l.itemCode, qty: l.qty, lowInv: l.lowInv })), purchaseOrder: String(poId), place: live }),
   });
   if (!r.ok) {
     const miss = (r.missing && r.missing.length) ? ` — item codes Chadwick did not accept: ${r.missing.join(', ').slice(0, 200)}` : '';
@@ -1572,7 +1586,7 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const rejected = r.rejected || [];
   if (rejected.length) {
     steps.rejected = rejected;
-    const dropped = orderLines.filter((l) => rejected.some((x) => String(x).toUpperCase() === String(l.sku).toUpperCase()));
+    const dropped = orderLines.filter((l) => rejected.some((x) => String(x).toUpperCase() === String(l.itemCode).toUpperCase()));
     for (const d of dropped) {
       try { const rm = await bp.removePoRowLive({ poId, sku: d.sku, execute: live }); steps.rejectedRowsRemoved = [...(steps.rejectedRowsRemoved || []), { sku: d.sku, ok: !!(rm && rm.done) }]; }
       catch (e) { steps.rejectedRowsRemoved = [...(steps.rejectedRowsRemoved || []), { sku: d.sku, ok: false, error: e.message }]; }
@@ -1619,7 +1633,7 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   try {
     // Same basis every other supplier's check uses: the lines we asked for at our costs.
     const poNet = +[...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (l.cost || 0) * l.qty, 0).toFixed(2);
-    const skus = [...new Set(orderLines.map((l) => l.sku).filter(Boolean))];
+    const skus = [...new Set(orderLines.map((l) => l.itemCode).filter(Boolean))];
     landed = await jfetch('price-check', `${altItemsUrl}/api/chadwick-order-lookup?pono=${encodeURIComponent(poId)}&skus=${encodeURIComponent(skus.join(','))}`, {});
     if (landed && landed.found && landed.value != null && poNet != null) {
       const gap = +(landed.value - poNet).toFixed(2);
@@ -1629,7 +1643,7 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
         const prices = landed.prices || {};
         const changes = [];
         for (const l of orderLines) {
-          const theirs = prices[String(l.sku).toUpperCase()];
+          const theirs = prices[String(l.itemCode).toUpperCase()];
           const ours = Number(l.unitCost != null ? l.unitCost : l.cost);
           if (theirs == null || !Number.isFinite(ours)) continue;
           if (Math.abs(theirs - ours) >= 0.01) changes.push({ sku: l.sku, was: ours, now: theirs });
