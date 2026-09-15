@@ -18,7 +18,7 @@ import { VARIABLE_SCHEMA, renderTemplate } from './orderPipelineRenderer.js';
 import { deriveVariables, firstName as deriveFirstName, pickCustomerName } from './orderPipelineVariables.js';
 import { checkReviewEligibility } from './orderPipelineEligibility.js';
 import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
-import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, updateOrderReference as bpUpdateOrderReference, lockedValidateOrder as bpLockedValidateOrder, orderAjaxPost as bpOrderAjaxPost, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
+import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, exportCookies as bpWebExportCookies, updateOrderReference as bpUpdateOrderReference, lockedValidateOrder as bpLockedValidateOrder, orderAjaxPost as bpOrderAjaxPost, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
 import * as purchasingAuto from './purchasingAuto.js';
 import * as purchasingSchedule from './purchasingSchedule.js';
 import { convertDesignToPng } from './wilcomClient.js';
@@ -12083,6 +12083,80 @@ app.post("/api/whatsapp/send-message", async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// The customer-facing quote PDF, as Brightpearl prints it. Brightpearl only
+// generates its own PDF inside the email flow (there is no download URL), and
+// the print view is HTML for the browser's print dialog — so the portal worker
+// opens template_print.php as our logged-in web session and saves it as PDF,
+// which is exactly what "Print → Save as PDF" does in Chrome.
+// ---------------------------------------------------------------------------
+const BP_QUOTE_TEMPLATE_ID = Number(process.env.BP_QUOTE_TEMPLATE_ID) || 13;   // "TuffShop Quote"
+
+async function brightpearlQuotePdf(orderId) {
+  const id = Number(orderId);
+  if (!id) throw Object.assign(new Error('orderId required'), { status: 400 });
+  const workerUrl = process.env.STERLING_WORKER_URL || 'https://portal-order-worker.onrender.com';
+  const secret = process.env.STERLING_WORKER_SECRET || '';
+  const orders = await bpLive('GET', `/order-service/order/${id}`) || [];
+  const order = orders[0];
+  if (!order) throw Object.assign(new Error(`Order ${id} not found in Brightpearl`), { status: 404 });
+  const contactId = order.parties?.customer?.contactId;
+  if (!contactId) throw Object.assign(new Error(`Order ${id} has no customer contact`), { status: 422 });
+  const url = `${BP_WEB_HOST}/template_print.php?template_id=${BP_QUOTE_TEMPLATE_ID}&oID=${id}&contacts_id=${contactId}&output=print`;
+
+  // One retry with a fresh login: the worker tells us if the page came back as
+  // the login form, which means our cached session lapsed.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const cookies = await bpWebExportCookies();
+    const r = await fetch(`${workerUrl}/print-pdf`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-worker-secret': secret },
+      body: JSON.stringify({ url, cookies }),
+      signal: AbortSignal.timeout(90000),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401 && attempt === 0) { bpWebInvalidate(); continue; }
+    if (!r.ok || !j.pdfBase64) throw Object.assign(new Error(j.error || `worker returned ${r.status}`), { status: 502 });
+    const buf = Buffer.from(j.pdfBase64, 'base64');
+    if (buf.slice(0, 5).toString() !== '%PDF-') throw Object.assign(new Error('worker did not return a PDF'), { status: 502 });
+    return { buf, filename: `Quote-SO${id}.pdf`, order };
+  }
+  throw Object.assign(new Error('Brightpearl session could not be established'), { status: 502 });
+}
+
+// Preview / download the quote PDF — the "preview" link on the Quote Sent page.
+app.get('/api/quote-chase/:orderId/quote.pdf', async (req, res) => {
+  try {
+    const { buf, filename } = await brightpearlQuotePdf(req.params.orderId);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="${filename}"`);
+    res.send(buf);
+  } catch (e) {
+    console.error('[quote-pdf] failed:', e.message);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// Upload a PDF to WhatsApp media for the given channel; returns the media id.
+async function whatsAppUploadPdf(channel, buf, filename) {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = waPhoneNumberId(channel);
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", "application/pdf");
+  form.append("file", new Blob([buf], { type: "application/pdf" }), filename);
+  const upRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/media`, {
+    method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+  });
+  const upData = await upRes.json().catch(() => ({}));
+  if (!upRes.ok || !upData?.id) {
+    console.error("[whatsapp/media-upload] error:", JSON.stringify(upData?.error || upData));
+    throw Object.assign(new Error(upData?.error?.message || `Media upload failed (${upRes.status})`), { status: 502 });
+  }
+  return upData.id;
+}
+
 // Send an approved message template from staff — the only way to open a
 // conversation when the customer has not messaged us in the last 24h. Built
 // for the sales number on the Quote Sent page, but channel-agnostic. Only
@@ -12096,7 +12170,7 @@ app.post("/api/whatsapp/send-template", async (req, res) => {
   if (!token || !phoneNumberId) {
     return res.status(503).json({ error: `WhatsApp ${channel} number not configured` });
   }
-  const { phone, templateName, templateLang, bodyParams, sentBy, orderNumber } = req.body || {};
+  const { phone, templateName, templateLang, bodyParams, sentBy, orderNumber, quoteOrderId } = req.body || {};
   const to = normaliseWhatsAppNumber(phone);
   if (!to) return res.status(400).json({ error: "A valid phone number is required" });
   const name = (templateName || "").toString().trim();
@@ -12112,7 +12186,13 @@ app.post("/api/whatsapp/send-template", async (req, res) => {
   }
   if (!tpl) return res.status(404).json({ error: `Template "${name}" not found in the WhatsApp Business Account` });
   if (tpl.status !== "APPROVED") return res.status(409).json({ error: `Template "${name}" is ${tpl.status}, not APPROVED` });
-  if (tpl.headerHasParam || (tpl.headerFormat && tpl.headerFormat !== "TEXT")) {
+  // A DOCUMENT header is filled with the quote PDF (quoteOrderId); any other
+  // header variable/media is not something this send knows how to fill.
+  const wantsQuote = tpl.headerFormat === "DOCUMENT";
+  if (wantsQuote && !Number(quoteOrderId)) {
+    return res.status(400).json({ error: `Template "${name}" has a document header — send it from a quote so the PDF can be attached` });
+  }
+  if (tpl.headerHasParam || (tpl.headerFormat && tpl.headerFormat !== "TEXT" && !wantsQuote)) {
     return res.status(400).json({ error: `Template "${name}" needs a header variable/media, which this send does not support` });
   }
   const params = Array.isArray(bodyParams) ? bodyParams.map((v) => (v == null ? "" : String(v)).trim()) : [];
@@ -12127,7 +12207,14 @@ app.post("/api/whatsapp/send-template", async (req, res) => {
   const components = clean.length
     ? [{ type: "body", parameters: clean.map((text) => ({ type: "text", text })) }]
     : [];
+  let quoteMediaId = null, quoteFilename = null;
   try {
+    if (wantsQuote) {
+      const { buf, filename } = await brightpearlQuotePdf(quoteOrderId);
+      quoteFilename = filename;
+      quoteMediaId = await whatsAppUploadPdf(channel, buf, filename);
+      components.unshift({ type: "header", parameters: [{ type: "document", document: { id: quoteMediaId, filename } }] });
+    }
     const gRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -12149,18 +12236,19 @@ app.post("/api/whatsapp/send-template", async (req, res) => {
       waMessageId: messageId,
       direction: "out",
       peerNumber: to,
-      body: rendered,
+      body: quoteFilename ? `📎 ${quoteFilename}\n${rendered}` : rendered,
       msgType: "template",
       status: "sent",
       orderNumber: (orderNumber || "").toString().trim().slice(0, 40) || null,
+      mediaId: quoteMediaId,
       sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
-      raw: { template: tpl.name, language: tpl.language, bodyParams: clean },
+      raw: { template: tpl.name, language: tpl.language, bodyParams: clean, quoteOrderId: wantsQuote ? Number(quoteOrderId) : null },
       channel,
     });
-    res.json({ success: true, messageId, to, channel, template: tpl.name, rendered });
+    res.json({ success: true, messageId, to, channel, template: tpl.name, rendered, attached: quoteFilename });
   } catch (err) {
     console.error("[whatsapp/send-template] error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -12258,14 +12346,26 @@ app.post("/api/whatsapp/send-document", async (req, res) => {
   const phoneNumberId = waPhoneNumberId(channel);
   if (!token || !phoneNumberId) return res.status(503).json({ error: `WhatsApp ${channel} number not configured` });
 
-  const { phone, fileBase64, mimeType, filename, caption, sentBy } = req.body || {};
+  const { phone, fileBase64, mimeType, filename: filenameIn, caption, sentBy, quoteOrderId, orderNumber } = req.body || {};
   const to = normaliseWhatsAppNumber(phone);
   if (!to) return res.status(400).json({ error: "A valid phone number is required" });
-  const mime = (mimeType || "").toLowerCase();
-  if (!fileBase64 || !WA_SEND_DOC_TYPES.includes(mime)) {
-    return res.status(400).json({ error: "A PDF document is required" });
+  // Either the operator uploaded a PDF, or asked for the quote PDF of an order
+  // (rendered from Brightpearl's print view via the portal worker).
+  let buf, filename = filenameIn, mime = (mimeType || "").toLowerCase();
+  if (Number(quoteOrderId)) {
+    try {
+      const q = await brightpearlQuotePdf(quoteOrderId);
+      buf = q.buf; filename = filename || q.filename; mime = "application/pdf";
+    } catch (e) {
+      console.error("[whatsapp/send-document] quote pdf failed:", e.message);
+      return res.status(e.status || 500).json({ error: `Could not produce the quote PDF: ${e.message}` });
+    }
+  } else {
+    if (!fileBase64 || !WA_SEND_DOC_TYPES.includes(mime)) {
+      return res.status(400).json({ error: "A PDF document is required" });
+    }
+    buf = Buffer.from(fileBase64, "base64");
   }
-  const buf = Buffer.from(fileBase64, "base64");
   if (!buf.length) return res.status(400).json({ error: "Empty document" });
   if (buf.length > 25 * 1024 * 1024) return res.status(413).json({ error: "Document too large (max 25MB)" });
 
@@ -12324,10 +12424,11 @@ app.post("/api/whatsapp/send-document", async (req, res) => {
       msgType: "document",
       status: "sent",
       mediaId,
+      orderNumber: (orderNumber || "").toString().trim().slice(0, 40) || null,
       sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
       channel,
     });
-    res.json({ success: true, messageId, to });
+    res.json({ success: true, messageId, to, attached: docName });
   } catch (err) {
     console.error("[whatsapp/send-document] error:", err.message);
     res.status(500).json({ error: err.message });

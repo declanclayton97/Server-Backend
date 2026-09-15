@@ -582,4 +582,19 @@ async function emailOrderDocument(orderId, { contactId, to, subject, message, te
   return { sent: okStatus && !errored, status: res.status, sentTo: to, orderId, errored };
 }
 
-export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, getOrderAllocations, lockedValidateOrder, orderAjaxPost, emailOrderDocument, BP_HOST };
+// The live session's cookies for BP_HOST, in the shape Playwright's
+// context.addCookies() takes — so the portal worker can open a Brightpearl page
+// AS this session (print views, which only a browser can turn into a PDF).
+// Logs in first if there is no session yet.
+async function exportCookies(client = BP_CLIENT) {
+  const { jar } = await getSession(client);
+  const host = new URL(BP_HOST).hostname;
+  const cookies = await jar.getCookies(BP_HOST + '/');
+  return cookies.map((c) => ({
+    name: c.key, value: c.value,
+    domain: c.domain || host, path: c.path || '/',
+    secure: !!c.secure, httpOnly: !!c.httpOnly,
+  }));
+}
+
+export { attachFileToOrder, login, invalidateSession, fetchAuthed, getSession, getCookieHeader, updateOrderReference, getOrderAllocations, lockedValidateOrder, orderAjaxPost, emailOrderDocument, exportCookies, BP_HOST };
