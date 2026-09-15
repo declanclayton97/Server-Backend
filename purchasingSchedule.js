@@ -563,6 +563,11 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     // from the note, and drop from soIds any order left with NOTHING ordered — finalising that one
     // would clear its supplier tag and set it to "Ordered Stock Awaiting Delivery" for goods that
     // were never bought. Leaving the tag on also means the 17:30 tag audit keeps nagging about it.
+    // Snapshot BEFORE the trim below — that is the only place the link from a dropped line back to
+    // the customer who wanted it still exists. After the filter it is gone, which is precisely why
+    // nobody could tell who was waiting for one of these.
+    const linesByOrderBeforeDrop = Object.fromEntries(
+      Object.entries(linesByOrder).map(([k, v]) => [k, (v || []).slice()]));
     for (const id of Object.keys(linesByOrder)) {
       linesByOrder[id] = linesByOrder[id].filter((x) => !droppedPids.has(String(x.productId)));
       if (!linesByOrder[id].length) delete linesByOrder[id];
@@ -582,6 +587,10 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
           + (s.deldate ? `, next delivery ${s.deldate}` : '')).join('\n'),
       context: { poId, dropped: shortLines, removedRows },
     }).catch(() => {});
+    // …and tell whoever raised each affected sales order, which the error row above does not do.
+    steps.stockCheck.notified = await notifyDroppedLines(pool, {
+      supplier: 'FRISTADS', poId, dropped: shortLines, linesByOrder: linesByOrderBeforeDrop,
+    }).catch((e) => ({ sent: 0, error: e.message }));
   }
 
   const expectUnits = orderable.reduce((a, l) => a + l.qty, 0);
@@ -2598,6 +2607,11 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
             + steps.verify.dropped.map((d) => `${d.want} × ${d.sku}`).join('; ')),
       context: { poId, orderNo, dropped: steps.verify.dropped, droppedForCustomers },
     }).catch(() => {});
+    // Portwest lines carry no productId, so this matches on SKU — exact here, because Portwest
+    // order by our code rather than resolving it to one of their own.
+    steps.notified = await notifyDroppedLines(pool, {
+      supplier: 'PORTWEST', poId, dropped: steps.verify.dropped, linesByOrder,
+    }).catch((e) => ({ sent: 0, error: e.message }));
   }
   // The line STAYS dropped — Portwest will not take it, and a PO that claims otherwise is the
   // orphan-rows problem all over again. The SO still finalises too: holding it back would re-tag it
@@ -3403,6 +3417,150 @@ export async function runFristadsScheduled(opts = {}) { return runSupplierSchedu
 // prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
 export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null, packSizes, excludeSkus }); }
 export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes, excludeSkus }); }
+
+
+// ── TELL THE PERSON WITH THE CUSTOMER, NOT JUST PURCHASING ───────────────────────────────────
+// A dropped line is only half-reported by the error row: that tells purchasing. It does not tell
+// whoever raised the sales order, and they are the one with a customer expecting the garment.
+//
+// This was built once already, on /api/purchasing/prepare-supplier-order — orderRecipient sends a
+// website order's shortfall to sales and everything else to the staff member who created it. The
+// scheduled runs replaced that route and never picked the notification up, so from the day the
+// scheduler took over, every dropped line went quiet. SO 487469 sat eight days on the back of it.
+//
+// MATCH ON productId, NEVER ON SKU. A PO's SO rows carry Brightpearl's code (CB170321004) while
+// the cart line carries the supplier's resolved one (125949-171-406); comparing the two matches
+// nothing, which is the same trap that makes demandMatched unreliable on the Stuck items tab.
+const DROP_NOTICE_REPEAT_DAYS = 7;
+
+async function ensureDropNoticeTable(pool) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS dropped_line_notice (
+    so_id integer NOT NULL, product_id text NOT NULL, supplier text, sku text, po_id integer,
+    notified_to text, first_seen timestamptz DEFAULT now(), last_notified timestamptz DEFAULT now(),
+    PRIMARY KEY (so_id, product_id))`);
+}
+
+// dropped: [{ productId, sku, qty, size, name, avail, deldate }]
+// linesByOrder: the snapshot taken BEFORE the dropped lines were filtered out of it.
+export async function notifyDroppedLines(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true } = {}) {
+  if (!Array.isArray(dropped) || !dropped.length) return { sent: 0, reason: 'nothing dropped' };
+  const label = supplier.charAt(0) + supplier.slice(1).toLowerCase();
+
+  // productId where we have one, SKU only where we do not. Fristads resolves our code to theirs
+  // (CB170321004 -> 125949-171-406) so only the productId can bridge the two; Portwest orders by
+  // our SKU directly and carries no productId on a dropped line, where matching on SKU is exact.
+  // Never fall back to SKU when a productId was supplied — that is how a near-miss becomes a
+  // confident wrong answer.
+  const sosFor = (d) => Object.keys(linesByOrder || {}).filter((id) => (linesByOrder[id] || []).some((x) => (
+    d.productId != null
+      ? String(x.productId) === String(d.productId)
+      : String(x.sku || '').toUpperCase() === String(d.sku || '').toUpperCase())));
+
+  // A line with no productId keys on its SKU instead, so the dedupe still holds for Portwest.
+  const keyOf = (d) => String(d.productId != null ? d.productId : `sku:${String(d.sku || '').toUpperCase()}`);
+  const perSo = new Map();  // soId -> [line]
+  for (const d of dropped) {
+    for (const soId of sosFor(d)) {
+      if (!perSo.has(soId)) perSo.set(soId, []);
+      perSo.get(soId).push(d);
+    }
+  }
+  if (!perSo.size) return { sent: 0, reason: 'no customer lines among the dropped ones' };
+
+  // Don't re-tell someone the same thing every run. The same line is re-gathered and re-dropped
+  // daily until it is resolved, with three retry attempts a day on top of that.
+  const fresh = new Map();
+  try {
+    await ensureDropNoticeTable(pool);
+    for (const [soId, lines] of perSo) {
+      const keep = [];
+      for (const d of lines) {
+        const r = await pool.query(
+          `SELECT last_notified FROM dropped_line_notice WHERE so_id = $1 AND product_id = $2
+             AND last_notified > now() - ($3 || ' days')::interval`,
+          [Number(soId), keyOf(d), DROP_NOTICE_REPEAT_DAYS]);
+        if (!r.rows.length) keep.push(d);
+      }
+      if (keep.length) fresh.set(soId, keep);
+    }
+  } catch (e) {
+    // A dedupe table we cannot read must not silence the notification — tell them twice rather
+    // than not at all.
+    console.error('[dropped-line-notice] dedupe unavailable:', e.message);
+    for (const [k, v] of perSo) fresh.set(k, v);
+  }
+  if (!fresh.size) return { sent: 0, reason: 'already notified within ' + DROP_NOTICE_REPEAT_DAYS + ' days' };
+
+  // Who to tell. Website orders go to sales, everything else to whoever raised it.
+  const salesEmail = process.env.PURCHASING_SALES_EMAIL || 'sales@tuffshop.co.uk';
+  const ids = [...fresh.keys()].map(Number).sort((a, b) => a - b);   // ascending, or BP 400s
+  const orderById = new Map();
+  try {
+    for (let i = 0; i < ids.length; i += 50) {
+      const got = await bp.bpLiveGet(`/order-service/order/${ids.slice(i, i + 50).join(',')}`);
+      for (const o of got || []) orderById.set(String(o.id), o);
+    }
+  } catch (e) { console.error('[dropped-line-notice] order read failed:', e.message); }
+
+  const byRecipient = new Map();
+  for (const [soId, lines] of fresh) {
+    const o = orderById.get(String(soId)) || {};
+    let to = salesEmail;
+    try {
+      to = (await bp.orderRecipient({
+        createdById: o.createdById || null,
+        channelId: (o.assignment && o.assignment.current && o.assignment.current.channelId) || null,
+      }, salesEmail)) || salesEmail;
+    } catch { /* fall back to sales */ }
+    if (!byRecipient.has(to)) byRecipient.set(to, []);
+    byRecipient.get(to).push({ soId, ref: o.reference || '', customer: (o.parties && o.parties.customer && o.parties.customer.companyName) || '', lines });
+  }
+
+  const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const sent = [];
+  for (const [to, orders] of byRecipient) {
+    const count = orders.reduce((a, x) => a + x.lines.length, 0);
+    const plural = count === 1 ? '' : 's';
+    const subject = label + ' could not supply ' + count + ' line' + plural + ' — ' + orders.map((x) => 'SO ' + x.soId).join(', ');
+    const blocks = orders.map((x) => {
+      const head = '<p><strong>SO ' + esc(x.soId) + '</strong>'
+        + (x.ref ? ' — ' + esc(x.ref) : '') + (x.customer ? ' — ' + esc(x.customer) : '') + '</p>';
+      const items = x.lines.map((d) => '<li><strong>' + esc(d.qty != null ? d.qty : d.want) + ' × ' + esc(d.sku) + '</strong>'
+        + (d.size ? ' (' + esc(d.size) + ')' : '')
+        + (d.name ? ' — ' + esc(d.name) : '')
+        + (typeof d.avail === 'number' ? ' — ' + label + ' have ' + esc(d.avail) : '')
+        + (d.deldate ? ', next delivery <strong>' + esc(d.deldate) + '</strong>' : '')
+        + '</li>').join('');
+      return head + '<ul>' + items + '</ul>';
+    }).join('');
+    const html = '<p><strong>' + label + ' would not supply the line' + plural + ' below, so '
+      + (count === 1 ? 'it was' : 'they were') + ' left off PO#' + esc(poId) + '.</strong> '
+      + 'The rest of the order went through as normal.</p>'
+      + '<p>Nothing will chase ' + (count === 1 ? 'this' : 'these') + ' automatically — '
+      + 'it needs sourcing elsewhere, putting on back order with the customer, or crediting.</p>'
+      + blocks
+      + '<p style="color:#666;font-size:12px">Sent once per line per ' + DROP_NOTICE_REPEAT_DAYS
+      + ' days. You are getting this because you raised the order.</p>';
+    if (!execute || !process.env.SMTP_PASS) {
+      sent.push({ to, orders: orders.map((x) => x.soId), skipped: !execute ? 'dry run' : 'no SMTP_PASS' });
+      continue;
+    }
+    try {
+      await transporter().sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to, subject, html, text: subject });
+      sent.push({ to, orders: orders.map((x) => x.soId), lines: count });
+      for (const x of orders) {
+        for (const d of x.lines) {
+          await pool.query(
+            `INSERT INTO dropped_line_notice (so_id, product_id, supplier, sku, po_id, notified_to)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (so_id, product_id) DO UPDATE SET last_notified = now(), notified_to = EXCLUDED.notified_to`,
+            [Number(x.soId), keyOf(d), supplier, d.sku || null, poId, to]).catch(() => {});
+        }
+      }
+    } catch (e) { sent.push({ to, error: e.message }); }
+  }
+  return { sent: sent.filter((x) => !x.error && !x.skipped).length, detail: sent };
+}
 
 function ukDateStr(d) { // normalise a pg date (Date or 'YYYY-MM-DD') to YYYY-MM-DD
   if (typeof d === 'string') return d.slice(0, 10);
