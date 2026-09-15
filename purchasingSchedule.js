@@ -1668,6 +1668,34 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     } catch { /* fall back to sku */ }
   }
 
+  // ── TWO PRODUCTS MUST NEVER RESOLVE TO ONE ITEM CODE ────────────────────────────────────────
+  // Everything above rewrites a line's code from data that can be wrong. Brightpearl product
+  // 253317 (CT 835 Impact Rugby Shorts YOUTH XL, sku 835-39-Y-XL) carried mpn 835-39-A-XL — the
+  // ADULT code — so the youth line and the adult line both went out as 835-39-A-XL. Chadwick did
+  // the only sensible thing and summed them: one row of 7 against demand for 4 adult and 3 youth.
+  // Nothing was short, so a line COUNT saw nothing wrong; only reading the basket back caught it.
+  //
+  // Catch it here instead. Two different products sharing one code is always a data fault on our
+  // side, it is knowable before a single request reaches the supplier, and letting it through
+  // spends a whole basket load to learn what this comparison already knows.
+  const byCode = new Map();
+  for (const l of orderLines) {
+    const k = String(l.itemCode || '').toUpperCase();
+    if (!k) continue;
+    if (!byCode.has(k)) byCode.set(k, []);
+    byCode.get(k).push(l);
+  }
+  const collisions = [...byCode.entries()]
+    .filter(([, ls]) => new Set(ls.map((l) => String(l.productId))).size > 1)
+    .map(([code, ls]) => ({ code, lines: ls.map((l) => ({ productId: l.productId, sku: l.sku, qty: l.qty, name: l.name })) }));
+  if (collisions.length) {
+    throw stepErr('resolve', `${collisions.length} Chadwick item code(s) are shared by more than one product — NOT ordering, `
+      + `the supplier would merge them and deliver the wrong goods: `
+      + collisions.map((c) => `${c.code} ← ` + c.lines.map((l) => `${l.qty} × ${l.sku} (product ${l.productId})`).join(' + ')).join('; ')
+      + `. Fix the mpn on the product whose own SKU is not that code.`,
+      { poId, collisions });
+  }
+
   const r = await jfetch('checkout', `${altItemsUrl}/api/chadwick-order`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ lines: orderLines.map((l) => ({ sku: l.itemCode, qty: l.qty, lowInv: l.lowInv })), purchaseOrder: String(poId), place: live }),
