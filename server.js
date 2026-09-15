@@ -7625,6 +7625,9 @@ function requirePurchasing(res) {
 }
 const parseOrderIds = (v) => (v ? String(v).split(',').map((s) => parseInt(s.trim(), 10)).filter(Boolean) : null);
 
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [ROUTES: 34 purchasing route(s)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 app.get('/api/purchasing/suppliers', (req, res) => {
   if (!requirePurchasing(res)) return;
   res.json({ suppliers: Object.keys(purchasingAuto.SUPPLIERS) });
@@ -8249,6 +8252,7 @@ app.post('/api/purchasing/product-identity', async (req, res) => {
     res.json({ productId, changes, before, after, skuPreserved: after.sku === before.sku });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
+// ⚠ END PURCHASING [ROUTES: 34 purchasing route(s)] — DELETE AFTER CUTOVER
 
 // ── LIVE product-identity write (stock barcode auto-heal) ────────────────────
 // UNLIKE /api/purchasing/product-identity (SANDBOX via BP_TEST creds), this writes
@@ -8294,6 +8298,9 @@ async function liveSetIdentity(productId, changes) {
   await bpLive('PUT', `/product-service/product/${productId}/identity`, put);
   return { before: cur, put };
 }
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [ROUTES: 11 purchasing route(s)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 app.post('/api/purchasing/product-identity-live', async (req, res) => {
   if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
@@ -8767,6 +8774,7 @@ app.post('/api/purchasing/product-price-live', async (req, res) => {
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
+// ⚠ END PURCHASING [ROUTES: 11 purchasing route(s)] — DELETE AFTER CUTOVER
 
 /* ---------------- price approvals ----------------
    The price-check step has always logged what a supplier CHARGED against Brightpearl's cost, but
@@ -8871,6 +8879,9 @@ function parsePriceRows(rows) {
   return { items: [...items.values()], applied, unparsed };
 }
 
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [ROUTES: 33 purchasing route(s)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 app.get('/api/purchasing/price-approvals', async (req, res) => {
   if (!requirePurchasing(res)) return;
   const days = Math.min(120, Math.max(1, parseInt(req.query.days, 10) || 21));
@@ -9860,6 +9871,7 @@ app.post('/api/purchasing/error-log/:id/handled', express.json(), async (req, re
     }).catch((e) => console.error('[purchasing-error-log] resolution email failed:', e.message));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+// ⚠ END PURCHASING [ROUTES: 33 purchasing route(s)] — DELETE AFTER CUTOVER
 
 // Poller: every 5 min check UK local time; run the Fristads purchase once at ~10:30
 // on weekdays. The once-per-day guard (last_run_date) keeps it to a single run.
@@ -9880,6 +9892,9 @@ if (process.env.FRISTADS_SCHEDULE_ENABLED !== 'false') {
 
 // Castle auto-purchase poller — weekdays 12:00 UK (weekends off, per user 2026-08-07).
 // Free-carriage threshold £150 ex-VAT (CASTLE_FREESHIP_THRESHOLD). State row id 2.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CASTLE]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.CASTLE_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -9892,11 +9907,15 @@ if (process.env.CASTLE_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[castle-schedule] error:', e.message));
     } catch (e) { console.error('[castle-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: CASTLE] — DELETE AFTER CUTOVER
   console.log('✅ Castle auto-purchase poller scheduled (weekdays 12:00 UK, £150 ex-VAT)');
 }
 
 // Sterling auto-purchase poller — daily 13:00 UK (user: "like the others, for 1pm").
 // Places via the headless portal-order worker. Threshold £150 ex-VAT, state row id 4.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CASTLE]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -9909,12 +9928,16 @@ if (process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[sterling-schedule] error:', e.message));
     } catch (e) { console.error('[sterling-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: CASTLE] — DELETE AFTER CUTOVER
   console.log('✅ Sterling auto-purchase poller scheduled (weekdays 13:00 UK, £150 ex-VAT)');
 }
 
 // Uneek auto-purchase poller — weekdays 16:00 UK. EMAIL supplier: creates the PO, emails
 // Brightpearl's own PO PDF to Uneek's order desk (auto-send), marks placed + finalises.
 // Free-carriage threshold £100 ex-VAT (no min order), state row id 3.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: STERLING]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -9927,6 +9950,7 @@ if (process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[uneek-schedule] error:', e.message));
     } catch (e) { console.error('[uneek-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: STERLING] — DELETE AFTER CUTOVER
   console.log('✅ Uneek auto-purchase poller scheduled (weekdays 16:00 UK, £100 ex-VAT, email)');
 }
 
@@ -9934,6 +9958,9 @@ if (process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
 // worker (Hultafors partner portal). ON by default (SNICKERS_SCHEDULE_ENABLED != 'false').
 // £300 ex-VAT threshold as a failsafe (SNICKERS_FREESHIP_THRESHOLD; rarely hit — high volume),
 // so tiny orders accumulate instead of placing daily. State row id 5.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: UNEEK]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -9946,12 +9973,16 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[snickers-schedule] error:', e.message));
     } catch (e) { console.error('[snickers-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: UNEEK] — DELETE AFTER CUTOVER
   console.log('✅ Snickers auto-purchase poller scheduled (weekdays 10:00 UK, £300 ex-VAT failsafe, portal worker)');
 }
 
 // Carhartt auto-purchase poller — Mon/Wed/Fri 13:30 UK. Elastic Suite portal (order.carhartt.com).
 // ON by default since 2026-08-19 (user) — set CARHARTT_SCHEDULE_ENABLED=false to stop.
 // £300 ex-VAT failsafe, state row id 6.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: SNICKERS]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.CARHARTT_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -9964,6 +9995,7 @@ if (process.env.CARHARTT_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[carhartt-schedule] error:', e.message));
     } catch (e) { console.error('[carhartt-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: SNICKERS] — DELETE AFTER CUTOVER
   console.log('✅ Carhartt auto-purchase poller scheduled (Mon/Wed/Fri 13:30 UK, £300 ex-VAT failsafe)');
 } else { console.log('⏸️  Carhartt auto-purchase poller DISABLED (CARHARTT_SCHEDULE_ENABLED=false)'); }
 
@@ -9971,6 +10003,9 @@ if (process.env.CARHARTT_SCHEDULE_ENABLED !== 'false') {
 // (b2bwork.hellyhansen.com). ON by default (HELLYHANSEN_SCHEDULE_ENABLED != 'false').
 // PO line costs come from the portal's live wholesale price (portal wins) so the PO reconciles
 // to the HH invoice; OOS lines get back-ordered. £300 ex-VAT failsafe, state row id 7.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CARHARTT]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -9983,6 +10018,7 @@ if (process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[hellyhansen-schedule] error:', e.message));
     } catch (e) { console.error('[hellyhansen-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: CARHARTT] — DELETE AFTER CUTOVER
   console.log('✅ Helly Hansen auto-purchase poller scheduled (weekdays 11:00 UK, £300 ex-VAT failsafe)');
 } else { console.log('⏸️  Helly Hansen auto-purchase poller DISABLED (HELLYHANSEN_SCHEDULE_ENABLED=false)'); }
 
@@ -9990,6 +10026,9 @@ if (process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
 // checkout_summary→place_order, basket-vs-PO reconcile (carton round-ups) + row consolidation.
 // ON by default (PORTWEST_SCHEDULE_ENABLED != 'false'). £150 free-carriage threshold, state row
 // id 8. (P351WHR temporarily excluded in purchasingSchedule — box/single unit mismatch.)
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: HELLY HANSEN]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10002,6 +10041,7 @@ if (process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[portwest-schedule] error:', e.message));
     } catch (e) { console.error('[portwest-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: HELLY HANSEN] — DELETE AFTER CUTOVER
   console.log('✅ Portwest auto-purchase poller scheduled (weekdays 15:00 UK, £150 threshold)');
 } else { console.log('⏸️  Portwest auto-purchase poller DISABLED (PORTWEST_SCHEDULE_ENABLED=false)'); }
 
@@ -10010,6 +10050,9 @@ if (process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
 // (TUWO_TW482741 / ordno 7701889, 18 lines, £217.74); set PENCARRIE_SCHEDULE_ENABLED=false to stop.
 // £175 carriage-paid threshold, state row id 9. placePencarrieOrder refuses to finalise unless the
 // order came back from the LIVE gateway, so a missing PENCARRIE_ENV=live fails loudly, not silently.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: PORTWEST]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.PENCARRIE_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10022,6 +10065,7 @@ if (process.env.PENCARRIE_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[pencarrie-schedule] error:', e.message));
     } catch (e) { console.error('[pencarrie-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: PORTWEST] — DELETE AFTER CUTOVER
   console.log('✅ PenCarrie auto-purchase poller scheduled (weekdays 15:40 UK, £175 threshold)');
 } else { console.log('⏸️  PenCarrie auto-purchase poller DISABLED (PENCARRIE_SCHEDULE_ENABLED=false)'); }
 
@@ -10031,6 +10075,9 @@ if (process.env.PENCARRIE_SCHEDULE_ENABLED !== 'false') {
 // ON by default since 2026-08-20 (user) — set BLAKLADER_SCHEDULE_ENABLED=false to stop. It was
 // dormant while the submit was unvalidated; that is now settled, and the basket is verified against
 // the request before anything is sent, so a short basket refuses instead of ordering.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: PENCARRIE]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10043,6 +10090,7 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[blaklader-schedule] error:', e.message));
     } catch (e) { console.error('[blaklader-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: PENCARRIE] — DELETE AFTER CUTOVER
   console.log('✅ Blaklader auto-purchase poller scheduled (weekdays 09:30 UK, £300 carriage-paid threshold)');
 } else { console.log('⏸️  Blaklader auto-purchase poller DISABLED (BLAKLADER_SCHEDULE_ENABLED=false)'); }
 
@@ -10066,6 +10114,9 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
 // these two pollers were gated off, Blaklader and Snickers bought customer demand and topped up
 // NO stock at all — from 291e29e going live on 2026-09-07 until today. Nothing covered the gap.
 const REORDER_SPLIT_ENABLED = true;
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: BLAKLADER_LOW (reorder half)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10079,9 +10130,13 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[blaklader-reorder] error:', e.message));
     } catch (e) { console.error('[blaklader-reorder] poller error:', e.message); }
   }, 60 * 1000);
+// ⚠ END PURCHASING [POLLER: BLAKLADER_LOW (reorder half)] — DELETE AFTER CUTOVER
   console.log('✅ Blaklader REORDER poller scheduled (weekdays 16:20 UK, low-inventory only)');
 }
 
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: SNICKERS_LOW (reorder half)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10095,17 +10150,22 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[snickers-reorder] error:', e.message));
     } catch (e) { console.error('[snickers-reorder] poller error:', e.message); }
   }, 60 * 1000);
+// ⚠ END PURCHASING [POLLER: SNICKERS_LOW (reorder half)] — DELETE AFTER CUTOVER
   console.log('✅ Snickers REORDER poller scheduled (weekdays 16:40 UK, low-inventory only)');
 }
 
 // Tags that name a supplier we automate but never reach it. READ-ONLY — it reports, it never edits
 // a tag: a tag is somebody's instruction about what to buy, and rewriting one on a guess is how the
 // wrong thing gets ordered.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [ROUTES: 1 purchasing route(s)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 app.get('/api/purchasing/tag-audit', async (req, res) => {
   if (!requirePurchasing(res)) return;
   try { res.json(await purchasingAuto.auditSupplierTags()); }
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
+// ⚠ END PURCHASING [ROUTES: 1 purchasing route(s)] — DELETE AFTER CUTOVER
 
 // Run it once a day and LOG what it finds, because the whole point is that this failure is silent.
 // 17:30 is after the retry sweep and clear of every supplier window, so it cannot compete for the
@@ -10149,6 +10209,9 @@ if (process.env.TAG_AUDIT_ENABLED !== 'false') {
 // The worker's cartProbe mode logs in, opens the checkout and reports what it sees WITHOUT touching
 // the basket or submitting anything. This just exposes it, because guessing at a page nobody has
 // looked at is how the 500 cost a full day in August.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [ROUTES: 1 purchasing route(s)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 app.get('/api/purchasing/blaklader-cart-probe', async (req, res) => {
   if (!requirePurchasing(res)) return;
   if (purchasingSchedule.isRunInFlight()) {
@@ -10158,12 +10221,16 @@ app.get('/api/purchasing/blaklader-cart-probe', async (req, res) => {
     res.json(await purchasingSchedule.blakladerCartProbe({ tries: Number(req.query.tries) || 2 }));
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
+// ⚠ END PURCHASING [ROUTES: 1 purchasing route(s)] — DELETE AFTER CUTOVER
 
 // V12 Footwear auto-purchase poller — weekdays 12:20 UK. Email supplier: Brightpearl builds the PO
 // and emails its own PDF to sales@v12footwear.com, so there is no portal step that can fail.
 // Free carriage @ £200 ex-VAT; below that a £6.95 carriage row goes ON the PO before it is emailed,
 // because we order every few days and most orders pay it. State row id 15.
 // 12:20 is clear of Castle (12:00) and sits before Chadwick, which moved to 12:40 to make room.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: V12]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.V12_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10180,6 +10247,7 @@ if (process.env.V12_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[v12-schedule] error:', e.message));
     } catch (e) { console.error('[v12-schedule] poller error:', e.message); }
   }, 60 * 1000);
+// ⚠ END PURCHASING [POLLER: V12] — DELETE AFTER CUTOVER
   console.log('✅ V12 auto-purchase poller scheduled (weekdays 12:20 UK, £200 free-carriage threshold)');
 } else { console.log('⏸️  V12 auto-purchase poller DISABLED (V12_SCHEDULE_ENABLED=false)'); }
 
@@ -10187,6 +10255,9 @@ if (process.env.V12_SCHEDULE_ENABLED !== 'false') {
 // PO PDF to orders@bucklerboots.com, so there is no portal step that can fail. State row id 16.
 // Email suppliers finish in well under ten minutes, which is why V12 (12:20), Buckler (12:30) and
 // Chadwick (12:40) sit that close together; the run lock serialises them if one overruns.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: BUCKLER]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.BUCKLER_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10199,6 +10270,7 @@ if (process.env.BUCKLER_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[buckler-schedule] error:', e.message));
     } catch (e) { console.error('[buckler-schedule] poller error:', e.message); }
   }, 60 * 1000);
+// ⚠ END PURCHASING [POLLER: BUCKLER] — DELETE AFTER CUTOVER
   console.log('✅ Buckler Boots auto-purchase poller scheduled (weekdays 12:30 UK)');
 } else { console.log('⏸️  Buckler Boots auto-purchase poller DISABLED (BUCKLER_SCHEDULE_ENABLED=false)'); }
 
@@ -10214,6 +10286,9 @@ if (process.env.BUCKLER_SCHEDULE_ENABLED !== 'false') {
 //
 // Matching is on brandId 213, not the product name: every Chadwick product is named "CT <style>"
 // but the name detect misses roughly 60 of them, and the brand is a field on the record.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CHADWICK]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.CHADWICK_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10226,12 +10301,16 @@ if (process.env.CHADWICK_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[chadwick-schedule] error:', e.message));
     } catch (e) { console.error('[chadwick-schedule] poller error:', e.message); }
   }, 60 * 1000);
+// ⚠ END PURCHASING [POLLER: CHADWICK] — DELETE AFTER CUTOVER
   console.log('✅ Chadwick auto-purchase poller scheduled (weekdays 12:40 UK, £300 carriage-paid threshold)');
 } else { console.log('⏸️  Chadwick auto-purchase poller DISABLED (CHADWICK_SCHEDULE_ENABLED=false)'); }
 
 // Scruffs auto-purchase poller — weekdays 14:00 UK. Email supplier: Brightpearl builds the PO and
 // emails its own PDF to salesorders@scruffs.com, so there is no portal step to fail. Carriage
 // minimum £100 ex-VAT, state row id 11. 14:00–14:29 is a clear slot — nothing else runs in hour 14.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CHADWICK]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.SCRUFFS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10244,6 +10323,7 @@ if (process.env.SCRUFFS_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[scruffs-schedule] error:', e.message));
     } catch (e) { console.error('[scruffs-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: CHADWICK] — DELETE AFTER CUTOVER
   console.log('✅ Scruffs auto-purchase poller scheduled (weekdays 14:00 UK, £100 carriage minimum)');
 } else { console.log('⏸️  Scruffs auto-purchase poller DISABLED (SCRUFFS_SCHEDULE_ENABLED=false)'); }
 // Performance Brands auto-purchase poller — weekdays 14:30 UK. WooCommerce trade shop: Alt-Items
@@ -10251,6 +10331,9 @@ if (process.env.SCRUFFS_SCHEDULE_ENABLED !== 'false') {
 // b2b_credit_limit trade credit account. Free delivery @ £200 ex-VAT, state row id 12.
 // 14:30–14:59 sits between Scruffs (14:00) and Portwest (15:00).
 // Requires PERFORMANCE_BRANDS_USER / PERFORMANCE_BRANDS_PASS on the Alt-Items service.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: SCRUFFS]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.PERFORMANCE_BRANDS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10263,6 +10346,7 @@ if (process.env.PERFORMANCE_BRANDS_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[performance-brands-schedule] error:', e.message));
     } catch (e) { console.error('[performance-brands-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: SCRUFFS] — DELETE AFTER CUTOVER
   console.log('✅ Performance Brands auto-purchase poller scheduled (weekdays 14:30 UK, £200 free-delivery threshold)');
 } else { console.log('⏸️  Performance Brands auto-purchase poller DISABLED (PERFORMANCE_BRANDS_SCHEDULE_ENABLED=false)'); }
 // Mascot auto-purchase poller — weekdays 11:30 UK. Alt-Items fills the basket then runs Mascot's
@@ -10272,6 +10356,9 @@ if (process.env.PERFORMANCE_BRANDS_SCHEDULE_ENABLED !== 'false') {
 // the poller retries every 5 minutes across its own window.
 // A ReleaseOrder failure is reported with needsHuman + the SAP number and MUST NOT be re-run: the
 // CreateOrder before it has already left a draft at Mascot that Brightpearl cannot see.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: PERFORMANCE BRANDS]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.MASCOT_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10284,6 +10371,7 @@ if (process.env.MASCOT_SCHEDULE_ENABLED !== 'false') {
         .catch((e) => console.error('[mascot-schedule] error:', e.message));
     } catch (e) { console.error('[mascot-schedule] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: PERFORMANCE BRANDS] — DELETE AFTER CUTOVER
   console.log('✅ Mascot auto-purchase poller scheduled (weekdays 11:30 UK, £250 threshold)');
 } else { console.log('⏸️  Mascot auto-purchase poller DISABLED (MASCOT_SCHEDULE_ENABLED=false)'); }
 
@@ -10296,6 +10384,9 @@ if (process.env.MASCOT_SCHEDULE_ENABLED !== 'false') {
 // 17:00 is safe by construction: the last supplier window is Uneek at 16:00, and deploy-window.mjs
 // treats a window as busy until 15 minutes after it closes (16:45). Keep those two in step.
 // Only pre-supplier failures are retried — see RETRY_SAFE_STEPS in purchasingSchedule.js.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: RETRY SWEEP]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 if (process.env.RETRY_SWEEP_ENABLED !== 'false') {
   setInterval(() => {
     try {
@@ -10314,6 +10405,7 @@ if (process.env.RETRY_SWEEP_ENABLED !== 'false') {
         .catch((e) => console.error('[retry-sweep] error:', e.message));
     } catch (e) { console.error('[retry-sweep] poller error:', e.message); }
   }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: RETRY SWEEP] — DELETE AFTER CUTOVER
   console.log('✅ End-of-day retry sweep scheduled (weekdays 17:00 UK — pre-supplier failures only)');
 } else { console.log('⏸️  End-of-day retry sweep DISABLED (RETRY_SWEEP_ENABLED=false)'); }
 
@@ -10321,6 +10413,9 @@ if (process.env.RETRY_SWEEP_ENABLED !== 'false') {
 // retry sweep above: that block is switched off by RETRY_SWEEP_ENABLED, and losing the detector for
 // silent failures — silently, via an env var — is the exact shape of the bug this exists to catch.
 // No 11:00 gate either, or Blaklader's 09:30 window would go unreported until lunchtime.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: RETRY SWEEP]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 setInterval(() => {
   try {
     if (!pool) return;
@@ -10331,9 +10426,13 @@ setInterval(() => {
       .catch((e) => console.error('[stuck-claim] error:', e.message));
   } catch (e) { console.error('[stuck-claim] poller error:', e.message); }
 }, 5 * 60 * 1000);
+// ⚠ END PURCHASING [POLLER: RETRY SWEEP] — DELETE AFTER CUTOVER
 console.log('✅ Stuck-claim sweep scheduled (weekdays, every 5 min — runs that claimed a day and never reported)');
 
 // Read-only by default: what the sweep WOULD report. ?execute=1 actually logs the rows.
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [ROUTES: 2 purchasing route(s)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 app.get('/api/purchasing/stuck-claims', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   try { res.json(await purchasingSchedule.sweepStuckClaims({ pool, execute: req.query.execute === '1' })); }
@@ -10348,6 +10447,7 @@ app.post('/api/purchasing/retry-sweep', express.json(), async (req, res) => {
     res.json(await purchasingSchedule.retrySafeFailuresToday({ pool, altItemsUrl: ALT_ITEMS_URL, execute: b.execute === true }));
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+// ⚠ END PURCHASING [ROUTES: 2 purchasing route(s)] — DELETE AFTER CUTOVER
 
 
 async function sendOutOfStockEmail(supplier, lines, to) {
@@ -10669,6 +10769,9 @@ app.post('/api/debug/bp-setref', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [ROUTES: 1 purchasing route(s)]
+// See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
+// or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
   if (!requirePurchasing(res)) return;
   try {
@@ -10892,6 +10995,7 @@ app.post('/api/purchasing/prepare-supplier-order', async (req, res) => {
     });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+// ⚠ END PURCHASING [ROUTES: 1 purchasing route(s)] — DELETE AFTER CUTOVER
 
 // ============================================================
 // Proof Approval System
