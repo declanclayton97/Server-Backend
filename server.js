@@ -7937,7 +7937,20 @@ app.get('/api/purchasing/blocked-lines', async (req, res) => {
       const lines = extractBlockedLines(row);
       if (!lines.length) continue;                       // not a line-level failure — the log has it
       const poId = (row.context && row.context.poId) || null;
-      const settled = !!(poId && placedPos.has(Number(poId)));
+      // ── A DROP IS NOT SETTLED BY THE PO PLACING ─────────────────────────────────────────────
+      // "The PO went on to place" settles a CHECKOUT failure: the order got through after all.
+      // It settles nothing for a DROP. There the PO placing is the expected outcome — the line was
+      // taken off precisely so the rest could go — and the dropped item is still unordered with
+      // nobody chasing it. Treating those alike hid the only rows that can never resolve themselves.
+      //
+      // Fristads PO 489329 today: 1 x 119627-271-407 (Large) dropped out of stock, SO 489299
+      // waiting, logged at severity error exactly as intended — and invisible on the tab, because
+      // the PO placed nine seconds later. The Portwest rows added this morning would have gone the
+      // same way. Matching on the SKU being absent from the PO would be the tighter test, but a
+      // blocked line often carries the supplier's resolved code where the PO row carries ours
+      // (125949-171-406 vs CB170321004), so it would wrongly un-hide the settled ones instead.
+      const isDrop = /-dropped$/.test(String(row.step || ''));
+      const settled = !!(poId && placedPos.has(Number(poId)) && !isDrop);
       if (settled && !req.query.all) continue;
       out.push({
         errorId: row.id, supplier: row.supplier, step: row.step, at: row.created_at, poId,
