@@ -107,6 +107,16 @@ export function extractBlockedLines(row) {
   // 5. a nested supplier response (Chadwick, Mascot, Helly Hansen via Alt-Items)
   const resp = ctx.response || {};
   const basket = resp.basket || {};
+  // A SUBSTITUTED line is not a missing one, and the difference is what someone needs to read:
+  // the order would arrive complete, at the right price, in the wrong item. Pushed BEFORE
+  // resp.missing so this reason is the one that survives the de-dupe — the same sku appears in
+  // both, and the plain "missing" entry says far less. (Chadwick PO 489373: youth XL merged into
+  // adult XL.)
+  for (const m of resp.merged || []) {
+    push({ sku: m.from, qty: m.qty, reason: `SUBSTITUTED — the supplier merged this into ${m.into}`
+      + ` (now ${m.nowAt}, we asked for ${m.asked}). It would arrive as the wrong item, not short` });
+  }
+  for (const w of resp.wrongQty || []) push({ sku: w.sku, qty: w.want, reason: `basket held ${w.got}, we asked for ${w.want}` });
   for (const m of resp.missing || []) push(typeof m === 'string' ? { sku: m, reason: 'not accepted by the supplier' } : m);
   for (const e of basket.errors || []) push({ sku: e.Id || e.Number, size: e.Size, reason: e.Message });
   // Chadwick names the offending code in the 400 body itself

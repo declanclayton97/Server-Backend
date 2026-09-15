@@ -89,5 +89,19 @@ check('the two refused codes are found',        ['TB150922148','ML110722012'].ev
 check('…and the PO in the aside is NOT an item', !cw.some((l) => l.sku === '488574'));
 check('…so exactly two lines come back',        cw.length === 2);
 
+// A substituted line must read as a substitution, not a shortfall. Chadwick PO 489373.
+const sub = extractBlockedLines({ supplier: 'CHADWICK', step: 'checkout',
+  message: 'basket does not match what was sent (39 line(s), expected 40) — NOT ordering.',
+  context: { poId: 489373, response: { ok: false, step: 'basket',
+    missing: [{ sku: '835-39-Y-XL', qty: 3 }],
+    wrongQty: [{ sku: '835-39-A-XL', want: 4, got: 7 }],
+    merged: [{ from: '835-39-Y-XL', into: '835-39-A-XL', qty: 3, nowAt: 7, asked: 4 }] } } });
+const youth = sub.find((l) => l.sku === '835-39-Y-XL');
+check('the substituted line is surfaced',       !!youth);
+check('…and reads as a SUBSTITUTION',          /SUBSTITUTED/.test(youth.reason || ''));
+check('…naming what it was merged into',       /835-39-A-XL/.test(youth.reason || ''));
+check('…and is listed once, not twice',        sub.filter((l) => l.sku === '835-39-Y-XL').length === 1);
+check('the inflated line is surfaced too',     sub.some((l) => l.sku === '835-39-A-XL'));
+
 console.log(pass ? '\nALL PASS' : '\nFAILURES');
 process.exit(pass ? 0 : 1);
