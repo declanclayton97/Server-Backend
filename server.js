@@ -3984,6 +3984,16 @@ async function initializeWhatsAppTables() {
       -- app's ?user= param). Null for automated sends (auto-reply, cross-sell).
       ALTER TABLE whatsapp_messages
         ADD COLUMN IF NOT EXISTS sent_by TEXT;
+      -- Which of OUR numbers the message belongs to: 'proof' (the original
+      -- proofing number) or 'sales' (WHATSAPP_SALES_PHONE_NUMBER_ID). Both
+      -- numbers live in one WhatsApp Business Account, so Meta delivers every
+      -- inbound message for both to the same webhook; the channel is how the
+      -- two inboxes are kept apart. Rows from before the column existed were
+      -- all proof traffic, hence the default.
+      ALTER TABLE whatsapp_messages
+        ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'proof';
+      CREATE INDEX IF NOT EXISTS idx_wa_messages_channel_peer
+        ON whatsapp_messages(channel, peer_number, created_at);
     `);
     // Back-fill media_id for media rows received before the column existed —
     // the id was always kept in the raw webhook payload. Idempotent (only
@@ -6134,24 +6144,50 @@ app.delete('/api/crosssell/rules/:id', async (req, res) => {
 // status) so we can see the EXACT name/locale to use. Needs WHATSAPP_WABA_ID
 // (the WhatsApp Business Account id) — set it on Render once; it's in WhatsApp
 // Manager → Account tools / API setup.
-app.get('/api/whatsapp/templates', async (req, res) => {
+// Message templates belong to the WABA, so both numbers share one library.
+// Fetched with components so callers can see the body text and how many
+// {{n}} variables it takes; cached briefly because the Quote Sent page asks
+// on every chat open and the library changes about once a month.
+let _waTemplateCache = { at: 0, templates: null };
+async function fetchWhatsAppTemplates() {
   const token = process.env.WHATSAPP_TOKEN;
   const wabaId = process.env.WHATSAPP_WABA_ID;
-  if (!token) return res.status(503).json({ error: 'WhatsApp not configured' });
-  if (!wabaId) return res.status(400).json({ error: 'Set WHATSAPP_WABA_ID env (WhatsApp Business Account id) to list templates' });
+  if (!token) throw Object.assign(new Error('WhatsApp not configured'), { status: 503 });
+  if (!wabaId) throw Object.assign(new Error('Set WHATSAPP_WABA_ID env (WhatsApp Business Account id) to list templates'), { status: 400 });
+  if (_waTemplateCache.templates && Date.now() - _waTemplateCache.at < 5 * 60 * 1000) return _waTemplateCache.templates;
   const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || 'v21.0';
+  const r = await fetch(
+    `https://graph.facebook.com/${graphVersion}/${wabaId}/message_templates?fields=name,language,status,category,components&limit=200`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data?.error?.message || `Graph API ${r.status}`), { status: 502, details: data?.error || null });
+  const templates = (data.data || []).map((t) => {
+    const comps = Array.isArray(t.components) ? t.components : [];
+    const body = comps.find((c) => c.type === 'BODY');
+    const header = comps.find((c) => c.type === 'HEADER');
+    const bodyText = body?.text || '';
+    const nums = [...bodyText.matchAll(/\{\{(\d+)\}\}/g)].map((m) => Number(m[1]));
+    return {
+      name: t.name, language: t.language, status: t.status, category: t.category,
+      bodyText,
+      bodyParamCount: nums.length ? Math.max(...nums) : 0,
+      headerFormat: header?.format || null,               // TEXT | IMAGE | DOCUMENT | null
+      headerHasParam: !!(header && header.format === 'TEXT' && /\{\{\d+\}\}/.test(header.text || '')),
+      buttons: (comps.find((c) => c.type === 'BUTTONS')?.buttons || []).map((b) => ({ type: b.type, text: b.text })),
+    };
+  });
+  _waTemplateCache = { at: Date.now(), templates };
+  return templates;
+}
+
+app.get('/api/whatsapp/templates', async (req, res) => {
   try {
-    const r = await fetch(
-      `https://graph.facebook.com/${graphVersion}/${wabaId}/message_templates?fields=name,language,status,category&limit=200`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) return res.status(502).json({ error: data?.error?.message || `Graph API ${r.status}`, details: data?.error || null });
-    const templates = (data.data || []).map((t) => ({ name: t.name, language: t.language, status: t.status, category: t.category }));
+    const templates = await fetchWhatsAppTemplates();
     res.json({ count: templates.length, templates });
   } catch (err) {
-    console.error('[whatsapp/templates] failed:', err.message);
-    res.status(500).json({ error: err.message });
+    if (!err.status || err.status >= 500) console.error('[whatsapp/templates] failed:', err.message);
+    res.status(err.status || 500).json({ error: err.message, details: err.details || undefined });
   }
 });
 
@@ -11190,6 +11226,43 @@ async function fetchBrightpearlParties(orderId) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// WhatsApp channels. Two of our numbers share one WhatsApp Business Account:
+//   proof — the original proofing number (WHATSAPP_PHONE_NUMBER_ID)
+//   sales — the sales number (WHATSAPP_SALES_PHONE_NUMBER_ID), surfaced on the
+//           Quote Sent dashboard, never in the proof inbox
+// Meta posts BOTH numbers' traffic to the same webhook; value.metadata
+// .phone_number_id says which number a customer wrote to. Every read and
+// send is scoped by channel so sales never see proof chats and vice versa.
+// ---------------------------------------------------------------------------
+const WA_CHANNELS = ["proof", "sales"];
+
+function waPhoneNumberId(channel) {
+  return channel === "sales"
+    ? process.env.WHATSAPP_SALES_PHONE_NUMBER_ID || null
+    : process.env.WHATSAPP_PHONE_NUMBER_ID || null;
+}
+
+// Which channel a webhook payload belongs to. Returns null for a number we do
+// not recognise (a third number added to the WABA later) so it is logged and
+// dropped rather than silently landing in the proof inbox. A payload with no
+// metadata at all is treated as proof — that is what every payload was before
+// the sales number existed.
+function waChannelForPhoneNumberId(phoneNumberId) {
+  if (!phoneNumberId) return "proof";
+  const id = String(phoneNumberId);
+  if (id === String(process.env.WHATSAPP_SALES_PHONE_NUMBER_ID || "")) return "sales";
+  if (id === String(process.env.WHATSAPP_PHONE_NUMBER_ID || "")) return "proof";
+  return null;
+}
+
+// Validate a channel from a query/body param. Anything but an exact known
+// value falls back to proof, so an old caller that never sends one keeps
+// working and a typo cannot open a third bucket.
+function waChannelParam(v) {
+  return WA_CHANNELS.includes(v) ? v : "proof";
+}
+
 // Insert one message row into whatsapp_messages. Best-effort: a logging
 // failure must never break the actual send/receive path, so we swallow.
 async function recordWhatsAppMessage({
@@ -11203,15 +11276,16 @@ async function recordWhatsAppMessage({
   mediaId = null,
   sentBy = null,
   raw = null,
+  channel = "proof",
 }) {
   if (!useDatabase) return;
   try {
     await pool.query(
       `INSERT INTO whatsapp_messages
-         (wa_message_id, direction, peer_number, body, msg_type, status, order_number, media_id, sent_by, raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+         (wa_message_id, direction, peer_number, body, msg_type, status, order_number, media_id, sent_by, raw, channel)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [waMessageId, direction, peerNumber, body, msgType, status, orderNumber, mediaId, sentBy,
-       raw ? JSON.stringify(raw) : null]
+       raw ? JSON.stringify(raw) : null, waChannelParam(channel)]
     );
   } catch (err) {
     console.error("[whatsapp] recordWhatsAppMessage failed:", err.message);
@@ -11220,12 +11294,15 @@ async function recordWhatsAppMessage({
 
 // The 24h customer-service window is open iff the customer sent us an
 // inbound message within the last 24h. Returns { open, expiresAt }.
-async function whatsAppWindow(peerNumber) {
+// The window is per (our number, customer) pair — a customer who messaged the
+// proof number has NOT opened a window on the sales number — so it is scoped
+// by channel.
+async function whatsAppWindow(peerNumber, channel = "proof") {
   if (!useDatabase) return { open: false, expiresAt: null };
   const r = await pool.query(
     `SELECT MAX(created_at) AS last_in FROM whatsapp_messages
-       WHERE peer_number = $1 AND direction = 'in'`,
-    [peerNumber]
+       WHERE peer_number = $1 AND direction = 'in' AND channel = $2`,
+    [peerNumber, waChannelParam(channel)]
   );
   const lastIn = r.rows[0]?.last_in ? new Date(r.rows[0].last_in) : null;
   if (!lastIn) return { open: false, expiresAt: null };
@@ -11258,6 +11335,7 @@ async function maybeSendAutoReply(peer) {
     const r = await pool.query(
       `SELECT 1 FROM whatsapp_messages
         WHERE peer_number = $1
+          AND channel = 'proof'
           AND direction = 'out'
           AND msg_type IN ('auto_reply','text')
           AND created_at > NOW() - ($2 || ' minutes')::interval
@@ -11563,6 +11641,21 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
     for (const entry of entries) {
       for (const change of entry.changes || []) {
         const value = change.value || {};
+        // Which of OUR numbers this payload is for. Both numbers share the
+        // WABA and therefore this webhook; a message to the sales number must
+        // never be recorded as proof traffic (it would surface in the proof
+        // inbox, get the "proof only" auto-reply and could even be read as a
+        // cross-sell YES). Status callbacks are keyed by our own message id and
+        // carry no channel, so only inbound messages are gated.
+        const channel = waChannelForPhoneNumberId(value.metadata?.phone_number_id);
+        if (channel === null) {
+          console.warn(
+            `[whatsapp/webhook] payload for unknown phone_number_id ${value.metadata?.phone_number_id} ` +
+            `(display ${value.metadata?.display_phone_number || "?"}) — dropped ${(value.messages || []).length} message(s)`
+          );
+          // Fall through so status updates in the same payload still apply.
+          value.messages = [];
+        }
         const contacts = value.contacts || [];
         const nameByWaId = {};
         for (const c of contacts) nameByWaId[c.wa_id] = c.profile?.name;
@@ -11595,8 +11688,12 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             msgType: m.type || "text",
             mediaId,
             raw: { message: m, contactName: nameByWaId[peer] || null },
+            channel,
           });
-          console.log(`[whatsapp/webhook] inbound from ${peer}: ${text?.slice(0, 80)}`);
+          console.log(`[whatsapp/webhook] inbound (${channel}) from ${peer}: ${text?.slice(0, 80)}`);
+          // Sales messages are a human conversation on the Quote Sent page —
+          // no cross-sell handling and no "proof only" auto-reply.
+          if (channel !== "proof") continue;
           // If this is a reply to a cross-sell offer, handle it (auto-reply +
           // notify sales) and skip the generic proof-only auto-reply. Otherwise
           // fall back to the rate-limited generic auto-reply.
@@ -11906,19 +12003,23 @@ ${SIGNATURE_TEXT || ''}`;
 // customer-service window (i.e. they messaged us within 24h); outside it
 // WhatsApp requires a template, so we 409 with windowClosed so the UI can
 // explain and offer the proof template instead.
+// Free-text reply from staff. `channel` picks which of our numbers sends it
+// (default proof, so the proof inbox is unchanged); the 24h window is checked
+// on that same number.
 app.post("/api/whatsapp/send-message", async (req, res) => {
   const token = process.env.WHATSAPP_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const channel = waChannelParam((req.body || {}).channel);
+  const phoneNumberId = waPhoneNumberId(channel);
   if (!token || !phoneNumberId) {
-    return res.status(503).json({ error: "WhatsApp not configured" });
+    return res.status(503).json({ error: `WhatsApp ${channel} number not configured` });
   }
-  const { phone, body, sentBy } = req.body || {};
+  const { phone, body, sentBy, orderNumber } = req.body || {};
   const to = normaliseWhatsAppNumber(phone);
   if (!to) return res.status(400).json({ error: "A valid phone number is required" });
   const text = (body || "").toString().trim();
   if (!text) return res.status(400).json({ error: "Message body is required" });
 
-  const win = await whatsAppWindow(to);
+  const win = await whatsAppWindow(to, channel);
   if (!win.open) {
     return res.status(409).json({
       error: "The 24-hour reply window has closed for this customer.",
@@ -11958,11 +12059,94 @@ app.post("/api/whatsapp/send-message", async (req, res) => {
       body: text,
       msgType: "text",
       status: "sent",
+      orderNumber: (orderNumber || "").toString().trim().slice(0, 40) || null,
       sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
+      channel,
     });
-    res.json({ success: true, messageId, to });
+    res.json({ success: true, messageId, to, channel });
   } catch (err) {
     console.error("[whatsapp/send-message] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send an approved message template from staff — the only way to open a
+// conversation when the customer has not messaged us in the last 24h. Built
+// for the sales number on the Quote Sent page, but channel-agnostic. Only
+// templates with plain text BODY variables (and no header variable) are
+// supported; the body is rendered server-side so the chat log shows what
+// the customer actually received, not "[template]".
+app.post("/api/whatsapp/send-template", async (req, res) => {
+  const token = process.env.WHATSAPP_TOKEN;
+  const channel = waChannelParam((req.body || {}).channel);
+  const phoneNumberId = waPhoneNumberId(channel);
+  if (!token || !phoneNumberId) {
+    return res.status(503).json({ error: `WhatsApp ${channel} number not configured` });
+  }
+  const { phone, templateName, templateLang, bodyParams, sentBy, orderNumber } = req.body || {};
+  const to = normaliseWhatsAppNumber(phone);
+  if (!to) return res.status(400).json({ error: "A valid phone number is required" });
+  const name = (templateName || "").toString().trim();
+  if (!name) return res.status(400).json({ error: "templateName is required" });
+
+  let tpl;
+  try {
+    const all = await fetchWhatsAppTemplates();
+    tpl = all.find((t) => t.name === name && (!templateLang || t.language === templateLang))
+       || all.find((t) => t.name === name);
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message });
+  }
+  if (!tpl) return res.status(404).json({ error: `Template "${name}" not found in the WhatsApp Business Account` });
+  if (tpl.status !== "APPROVED") return res.status(409).json({ error: `Template "${name}" is ${tpl.status}, not APPROVED` });
+  if (tpl.headerHasParam || (tpl.headerFormat && tpl.headerFormat !== "TEXT")) {
+    return res.status(400).json({ error: `Template "${name}" needs a header variable/media, which this send does not support` });
+  }
+  const params = Array.isArray(bodyParams) ? bodyParams.map((v) => (v == null ? "" : String(v)).trim()) : [];
+  if (params.length !== tpl.bodyParamCount || params.some((v) => !v)) {
+    return res.status(400).json({ error: `Template "${name}" takes ${tpl.bodyParamCount} variable(s); all must be filled` });
+  }
+  // WhatsApp rejects newlines / tabs / 4+ spaces inside a variable.
+  const clean = params.map((v) => v.replace(/\s+/g, " ").slice(0, 1024));
+  const rendered = tpl.bodyText.replace(/\{\{(\d+)\}\}/g, (_, n) => clean[Number(n) - 1] ?? "");
+
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  const components = clean.length
+    ? [{ type: "body", parameters: clean.map((text) => ({ type: "text", text })) }]
+    : [];
+  try {
+    const gRes = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "template",
+        template: { name: tpl.name, language: { code: tpl.language }, components },
+      }),
+    });
+    const data = await gRes.json().catch(() => ({}));
+    if (!gRes.ok) {
+      const fbErr = data?.error?.message || `Graph API returned ${gRes.status}`;
+      console.error("[whatsapp/send-template] Graph error:", JSON.stringify(data?.error || data));
+      return res.status(502).json({ error: fbErr });
+    }
+    const messageId = data?.messages?.[0]?.id || null;
+    await recordWhatsAppMessage({
+      waMessageId: messageId,
+      direction: "out",
+      peerNumber: to,
+      body: rendered,
+      msgType: "template",
+      status: "sent",
+      orderNumber: (orderNumber || "").toString().trim().slice(0, 40) || null,
+      sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
+      raw: { template: tpl.name, language: tpl.language, bodyParams: clean },
+      channel,
+    });
+    res.json({ success: true, messageId, to, channel, template: tpl.name, rendered });
+  } catch (err) {
+    console.error("[whatsapp/send-template] error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -11974,8 +12158,9 @@ app.post("/api/whatsapp/send-message", async (req, res) => {
 const WA_SEND_IMAGE_TYPES = ["image/jpeg", "image/png"];
 app.post("/api/whatsapp/send-image", async (req, res) => {
   const token = process.env.WHATSAPP_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  if (!token || !phoneNumberId) return res.status(503).json({ error: "WhatsApp not configured" });
+  const channel = waChannelParam((req.body || {}).channel);
+  const phoneNumberId = waPhoneNumberId(channel);
+  if (!token || !phoneNumberId) return res.status(503).json({ error: `WhatsApp ${channel} number not configured` });
 
   const { phone, imageBase64, mimeType, caption, sentBy } = req.body || {};
   const to = normaliseWhatsAppNumber(phone);
@@ -11988,7 +12173,7 @@ app.post("/api/whatsapp/send-image", async (req, res) => {
   if (!buf.length) return res.status(400).json({ error: "Empty image" });
   if (buf.length > 5 * 1024 * 1024) return res.status(413).json({ error: "Image too large (max 5MB)" });
 
-  const win = await whatsAppWindow(to);
+  const win = await whatsAppWindow(to, channel);
   if (!win.open) {
     return res.status(409).json({ error: "The 24-hour reply window has closed for this customer.", windowClosed: true });
   }
@@ -12039,6 +12224,7 @@ app.post("/api/whatsapp/send-image", async (req, res) => {
       status: "sent",
       mediaId,
       sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
+      channel,
     });
     res.json({ success: true, messageId, to });
   } catch (err) {
@@ -12055,8 +12241,9 @@ app.post("/api/whatsapp/send-image", async (req, res) => {
 const WA_SEND_DOC_TYPES = ["application/pdf"];
 app.post("/api/whatsapp/send-document", async (req, res) => {
   const token = process.env.WHATSAPP_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  if (!token || !phoneNumberId) return res.status(503).json({ error: "WhatsApp not configured" });
+  const channel = waChannelParam((req.body || {}).channel);
+  const phoneNumberId = waPhoneNumberId(channel);
+  if (!token || !phoneNumberId) return res.status(503).json({ error: `WhatsApp ${channel} number not configured` });
 
   const { phone, fileBase64, mimeType, filename, caption, sentBy } = req.body || {};
   const to = normaliseWhatsAppNumber(phone);
@@ -12069,7 +12256,7 @@ app.post("/api/whatsapp/send-document", async (req, res) => {
   if (!buf.length) return res.status(400).json({ error: "Empty document" });
   if (buf.length > 25 * 1024 * 1024) return res.status(413).json({ error: "Document too large (max 25MB)" });
 
-  const win = await whatsAppWindow(to);
+  const win = await whatsAppWindow(to, channel);
   if (!win.open) {
     return res.status(409).json({ error: "The 24-hour reply window has closed for this customer.", windowClosed: true });
   }
@@ -12125,6 +12312,7 @@ app.post("/api/whatsapp/send-document", async (req, res) => {
       status: "sent",
       mediaId,
       sentBy: (sentBy || "").toString().trim().slice(0, 120) || null,
+      channel,
     });
     res.json({ success: true, messageId, to });
   } catch (err) {
@@ -12134,8 +12322,12 @@ app.post("/api/whatsapp/send-document", async (req, res) => {
 });
 
 // Conversation list — one row per customer number, newest activity first.
+// Conversation list for ONE channel (?channel=proof|sales, default proof).
+// Grouping is per channel too: the same customer on both numbers is two
+// separate conversations, which is the whole point.
 app.get("/api/whatsapp/conversations", async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  const channel = waChannelParam(req.query.channel);
   try {
     const r = await pool.query(`
       SELECT m.peer_number,
@@ -12150,21 +12342,23 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
              -- the last human exchange, not the canned "proof-only" reply
              -- that fires after every inbound message.
              (SELECT body FROM whatsapp_messages x
-                WHERE x.peer_number = m.peer_number
+                WHERE x.peer_number = m.peer_number AND x.channel = $1
                   AND x.msg_type <> 'auto_reply'
                 ORDER BY x.created_at DESC LIMIT 1) AS last_body,
              (SELECT direction FROM whatsapp_messages x
-                WHERE x.peer_number = m.peer_number
+                WHERE x.peer_number = m.peer_number AND x.channel = $1
                   AND x.msg_type <> 'auto_reply'
                 ORDER BY x.created_at DESC LIMIT 1) AS last_direction,
              (SELECT order_number FROM whatsapp_messages x
-                WHERE x.peer_number = m.peer_number AND x.order_number IS NOT NULL
+                WHERE x.peer_number = m.peer_number AND x.channel = $1
+                  AND x.order_number IS NOT NULL
                 ORDER BY x.created_at DESC LIMIT 1) AS order_number
         FROM whatsapp_messages m
+       WHERE m.channel = $1
        GROUP BY m.peer_number
       HAVING bool_or(m.dismissed_at IS NULL)   -- hide fully-dismissed convos
        ORDER BY last_at DESC
-    `);
+    `, [channel]);
     const now = Date.now();
     const conversations = r.rows.map((row) => {
       const lastIn = row.last_in_at ? new Date(row.last_in_at).getTime() : null;
@@ -12180,7 +12374,7 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
         windowExpiresAt: expiresAt,
       };
     });
-    res.json({ conversations });
+    res.json({ channel, conversations });
   } catch (err) {
     console.error("[whatsapp/conversations] error:", err.message);
     res.status(500).json({ error: err.message });
@@ -12222,18 +12416,19 @@ app.get("/api/whatsapp/media/:mediaId", async (req, res) => {
 // Full message thread for one customer number.
 app.get("/api/whatsapp/conversations/:phone/messages", async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  const channel = waChannelParam(req.query.channel);
   try {
     const phone = req.params.phone;
     const r = await pool.query(
       `SELECT id, wa_message_id, direction, peer_number, body, msg_type,
               status, order_number, read_at, created_at, media_id, sent_by
          FROM whatsapp_messages
-        WHERE peer_number = $1
+        WHERE peer_number = $1 AND channel = $2
         ORDER BY created_at ASC`,
-      [phone]
+      [phone, channel]
     );
-    const win = await whatsAppWindow(phone);
-    res.json({ phone, messages: r.rows, windowOpen: win.open, windowExpiresAt: win.expiresAt });
+    const win = await whatsAppWindow(phone, channel);
+    res.json({ phone, channel, messages: r.rows, windowOpen: win.open, windowExpiresAt: win.expiresAt });
   } catch (err) {
     console.error("[whatsapp/messages] error:", err.message);
     res.status(500).json({ error: err.message });
@@ -12243,12 +12438,13 @@ app.get("/api/whatsapp/conversations/:phone/messages", async (req, res) => {
 // Mark all inbound messages from a customer as read.
 app.post("/api/whatsapp/conversations/:phone/read", async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
   try {
     await pool.query(
       `UPDATE whatsapp_messages
           SET read_at = NOW()
-        WHERE peer_number = $1 AND direction = 'in' AND read_at IS NULL`,
-      [req.params.phone]
+        WHERE peer_number = $1 AND channel = $2 AND direction = 'in' AND read_at IS NULL`,
+      [req.params.phone, channel]
     );
     res.json({ success: true });
   } catch (err) {
@@ -12262,12 +12458,13 @@ app.post("/api/whatsapp/conversations/:phone/read", async (req, res) => {
 // inbound message has dismissed_at NULL, so the conversation resurfaces.
 app.post("/api/whatsapp/conversations/:phone/dismiss", async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
   try {
     await pool.query(
       `UPDATE whatsapp_messages
           SET dismissed_at = NOW()
-        WHERE peer_number = $1 AND dismissed_at IS NULL`,
-      [req.params.phone]
+        WHERE peer_number = $1 AND channel = $2 AND dismissed_at IS NULL`,
+      [req.params.phone, channel]
     );
     res.json({ success: true });
   } catch (err) {
@@ -13153,6 +13350,12 @@ async function initializeQuoteChaseTable() {
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS response_via TEXT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_id BIGINT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS channel_name TEXT;
+      -- Customer's WhatsApp number (E.164 without +, as whatsapp_messages
+      -- keys it) so the Quote Sent page can open a SALES-number chat per
+      -- quote. phone_checked_at marks rows the back-fill has looked at, so
+      -- "no phone on the order" is not re-fetched from Brightpearl every poll.
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS customer_phone TEXT;
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS phone_checked_at TIMESTAMPTZ;
     `);
     console.log('✅ quote_chase table initialized');
   } catch (err) {
@@ -13273,8 +13476,46 @@ async function sendQuoteMail({ to, replyTo, subject, html, text, force }) {
   return { sent: true };
 }
 
+// The number sales would WhatsApp for a quote. Prefer a UK mobile from either
+// party field (the order's Telephone often holds the mobile — eBay and most
+// hand-keyed orders), otherwise whatever is in Mobile if it normalises.
+function quoteCustomerWhatsApp(cust) {
+  if (!cust) return null;
+  const m = ukMobileNumber(cust.mobileTelephone) || ukMobileNumber(cust.telephone);
+  if (m) return normaliseWhatsAppNumber(m);
+  return normaliseWhatsAppNumber(cust.mobileTelephone) || null;
+}
+
+// Rows inserted before customer_phone existed have no number. Fill them from
+// Brightpearl a batch at a time, independent of QUOTE_CHASE_ENABLED, and stamp
+// every row looked at so the ones with no phone are not fetched again.
+async function backfillQuotePhones() {
+  if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+  const r = await pool.query(
+    `SELECT order_id FROM quote_chase
+      WHERE phone_checked_at IS NULL AND still_quote_sent = TRUE AND is_test = FALSE
+      ORDER BY entered_status_at DESC LIMIT 200`
+  );
+  if (!r.rowCount) return;
+  const ids = r.rows.map((x) => Number(x.order_id));
+  const orders = await bpLive('GET', `/order-service/order/${ids.join(',')}`) || [];
+  const byId = {};
+  for (const o of orders) byId[o.id] = quoteCustomerWhatsApp(o.parties && o.parties.customer);
+  let found = 0;
+  for (const id of ids) {
+    const phone = byId[id] || null;
+    if (phone) found++;
+    await pool.query(
+      `UPDATE quote_chase SET customer_phone = $2, phone_checked_at = NOW() WHERE order_id = $1`,
+      [id, phone]
+    );
+  }
+  console.log(`[quote-chase] phone back-fill: ${ids.length} row(s) checked, ${found} with a WhatsApp number`);
+}
+
 const quoteRowToView = (r) => ({
   orderId: Number(r.order_id),
+  customerPhone: r.customer_phone || null,
   customerName: r.customer_name || '',
   companyName: r.company_name || '',
   customerEmail: r.customer_email || '',
@@ -13353,8 +13594,8 @@ async function pollQuoteChase() {
           `INSERT INTO quote_chase
              (order_id, token, entered_status_at, seeded, status_id, customer_name, company_name,
               customer_email, net_value, reference, salesperson_id, salesperson_name, salesperson_email,
-              channel_id, channel_name)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              channel_id, channel_name, customer_phone, phone_checked_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
            ON CONFLICT (order_id) DO NOTHING`,
           [o.id, crypto.randomUUID(), enteredAt,
             isFirstRun || (enteredAt && enteredAt < QUOTE_CHASE_SEED_BEFORE),
@@ -13362,7 +13603,8 @@ async function pollQuoteChase() {
            cust.contactName || cust.addressFullName || '', cust.companyName || '',
            cust.email || '', parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
            o.reference || '', o.createdById || null, sp.name, sp.email,
-           quoteChannelOf(o) || null, channels[quoteChannelOf(o)] || null]
+           quoteChannelOf(o) || null, channels[quoteChannelOf(o)] || null,
+           quoteCustomerWhatsApp(cust)]
         );
       }
     }
@@ -14047,6 +14289,7 @@ app.get('/api/quote-chase/list', async (req, res) => {
         const sp = await resolveSalesperson(o.createdById);   // cached, ~10 distinct staff
         quotes.push({
           orderId: o.id,
+          customerPhone: quoteCustomerWhatsApp(cust),
           customerName: cust.contactName || cust.addressFullName || '',
           companyName: cust.companyName || '',
           customerEmail: cust.email || '',
@@ -14065,7 +14308,8 @@ app.get('/api/quote-chase/list', async (req, res) => {
         dryRun: quoteChaseDryRun(),
         enabled: process.env.QUOTE_CHASE_ENABLED === 'true',
         source: 'live',
-        quotes,
+        whatsapp: quoteWhatsAppMeta(),
+        quotes: await attachSalesWhatsApp(quotes),
       });
     }
 
@@ -14073,7 +14317,8 @@ app.get('/api/quote-chase/list', async (req, res) => {
       dryRun: quoteChaseDryRun(),
       enabled: process.env.QUOTE_CHASE_ENABLED === 'true',
       source: 'tracked',
-      quotes: q.rows.map((r) => ({
+      whatsapp: quoteWhatsAppMeta(),
+      quotes: await attachSalesWhatsApp(q.rows.map((r) => ({
         ...quoteRowToView(r),
         seeded: r.seeded,
         oneOffSentAt: r.one_off_sent_at,   // the one-off backlog email, not a chase
@@ -14089,12 +14334,64 @@ app.get('/api/quote-chase/list', async (req, res) => {
         responseReason: r.response_reason,
         responseNote: r.response_note,
         responseVia: r.response_via,
-      })),
+      }))),
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Whether the SALES WhatsApp number is set up, so the dashboard can say why
+// the chat buttons are missing instead of failing on click.
+function quoteWhatsAppMeta() {
+  return {
+    salesConfigured: !!(process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_SALES_PHONE_NUMBER_ID),
+    templatesConfigured: !!process.env.WHATSAPP_WABA_ID,
+  };
+}
+
+// One query for the whole page: per customer phone, the state of the SALES
+// conversation (unread count, last message, whether the 24h reply window is
+// open). Proof-number traffic is excluded by channel — a customer chatting
+// about a proof must not look like a sales reply.
+async function attachSalesWhatsApp(quotes) {
+  const phones = [...new Set(quotes.map((q) => q.customerPhone).filter(Boolean))];
+  const byPhone = {};
+  if (useDatabase && phones.length) {
+    try {
+      const r = await pool.query(
+        `SELECT m.peer_number,
+                COUNT(*) FILTER (WHERE m.direction = 'in' AND m.read_at IS NULL) AS unread,
+                MAX(m.created_at) AS last_at,
+                MAX(m.created_at) FILTER (WHERE m.direction = 'in') AS last_in_at,
+                (SELECT body FROM whatsapp_messages x
+                  WHERE x.peer_number = m.peer_number AND x.channel = 'sales'
+                  ORDER BY x.created_at DESC LIMIT 1) AS last_body,
+                (SELECT direction FROM whatsapp_messages x
+                  WHERE x.peer_number = m.peer_number AND x.channel = 'sales'
+                  ORDER BY x.created_at DESC LIMIT 1) AS last_direction
+           FROM whatsapp_messages m
+          WHERE m.channel = 'sales' AND m.peer_number = ANY($1::text[])
+          GROUP BY m.peer_number`,
+        [phones]
+      );
+      const now = Date.now();
+      for (const row of r.rows) {
+        const lastIn = row.last_in_at ? new Date(row.last_in_at).getTime() : null;
+        byPhone[row.peer_number] = {
+          unread: Number(row.unread) || 0,
+          lastAt: row.last_at,
+          lastBody: row.last_body,
+          lastDirection: row.last_direction,
+          windowOpen: lastIn ? lastIn + 24 * 3600 * 1000 > now : false,
+        };
+      }
+    } catch (e) {
+      console.error('[quote-chase] sales WhatsApp summary failed:', e.message);
+    }
+  }
+  return quotes.map((q) => ({ ...q, whatsapp: (q.customerPhone && byPhone[q.customerPhone]) || null }));
+}
 
 const quoteEsc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -14275,6 +14572,14 @@ if (process.env.QUOTE_CHASE_ENABLED === 'true' && BRIGHTPEARL_API_TOKEN && BRIGH
   console.log(`✅ Quote-chase poller scheduled (every 30 min, first run +4min). Dry-run ${quoteChaseDryRun() ? 'ON' : 'OFF'}.`);
 } else {
   console.log('ℹ️  Quote-chase poller idle (set QUOTE_CHASE_ENABLED=true to start).');
+}
+// Fill customer_phone on quote rows tracked before the column existed: 200 per
+// pass, so the backlog is done within a few passes and then it is a no-op.
+// Deliberately NOT gated on QUOTE_CHASE_ENABLED — the Quote Sent page shows
+// tracked rows (and their WhatsApp buttons) whether or not the chase runs.
+if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
+  setTimeout(() => backfillQuotePhones().catch((e) => console.error('Quote phone back-fill failed:', e.message)), 5 * 60 * 1000);
+  setInterval(() => backfillQuotePhones().catch((e) => console.error('Quote phone back-fill failed:', e.message)), 30 * 60 * 1000);
 }
 
 app.listen(PORT, () => {
