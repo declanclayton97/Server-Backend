@@ -1569,13 +1569,31 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
   // A handful of products carry a Brightpearl-internal SKU (ML110722012) instead of Chadwick's own
-  // item code, and their upload silently drops those. For that range, the real code is recorded in
-  // Brightpearl's `mpn` field instead (837-39-A-3XL for ML110722012 — confirmed live against their
-  // stock feed). Resolve it per line and fall back to the SKU when there is no mpn; a product with
-  // neither is a genuine data gap and will still be refused and reported as before.
+  // item code, and their upload silently drops those. Two places can hold the real code:
+  //   - the PO's OWN row can already carry it (873-39/39-A-L for TB150922148 on PO 489373 —
+  //     confirmed live against Chadwick's stock feed) even though the product's identity.sku is
+  //     still the internal code. It is unclear how it gets there — a per-row correction, not a
+  //     product-record edit — but it is the freshest, most specific thing we can read, so it wins
+  //     when it differs from the plain SKU.
+  //   - otherwise the product's `mpn` field, when set (837-39-A-3XL for ML110722012 — also
+  //     confirmed live).
+  // Fall back to the SKU when neither is set; a product with none of the three is a genuine data
+  // gap and will still be refused and reported as before.
+  let poRowSkuByProductId = {};
+  try {
+    const liveOrder = (await bp.bpLiveGet(`/order-service/order/${poId}`))[0];
+    for (const r of Object.values((liveOrder && liveOrder.orderRows) || {})) {
+      if (r.productId != null) poRowSkuByProductId[String(r.productId)] = r.productSku;
+    }
+  } catch { /* fall back to mpn/sku only */ }
   for (const l of orderLines) {
     l.itemCode = l.sku;
     if (!l.productId) continue;
+    const rowSku = poRowSkuByProductId[String(l.productId)];
+    if (rowSku && String(rowSku).trim() && String(rowSku).trim().toUpperCase() !== String(l.sku).toUpperCase()) {
+      l.itemCode = String(rowSku).trim();
+      continue;
+    }
     try {
       const identity = await bp.getProductIdentityLive(l.productId);
       if (identity.mpn && String(identity.mpn).trim()) l.itemCode = String(identity.mpn).trim();
