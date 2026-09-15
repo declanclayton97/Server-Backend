@@ -13505,7 +13505,9 @@ async function backfillQuotePhones() {
       ORDER BY entered_status_at DESC LIMIT 200`
   );
   if (!r.rowCount) return;
-  const ids = r.rows.map((x) => Number(x.order_id));
+  // Brightpearl rejects a path id-set that is not ascending (CMNC-006), and the
+  // SELECT above is newest-first — sort before building the URL.
+  const ids = r.rows.map((x) => Number(x.order_id)).sort((a, b) => a - b);
   const orders = await bpLive('GET', `/order-service/order/${ids.join(',')}`) || [];
   const byId = {};
   for (const o of orders) byId[o.id] = quoteCustomerWhatsApp(o.parties && o.parties.customer);
