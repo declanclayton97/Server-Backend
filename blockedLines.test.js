@@ -69,5 +69,15 @@ for (const bad of [null, {}, { message: null }, { context: null }, { context: { 
 }
 check('survives malformed rows', true);
 
+// Portwest drops a line the cart refused and names the quantity `want`, not `qty` — SO 487469
+// (CD883DKR40) went eight days unnoticed because nothing raised this at all.
+const pw = extractBlockedLines({ supplier: 'PORTWEST', step: 'customer-line-dropped', severity: 'error',
+  message: 'Portwest would not take 1 line(s); they were removed from PO#489300',
+  context: { poId: 489300, dropped: [{ sku: 'CD883DKR40', want: 1 }],
+             droppedForCustomers: [{ sku: 'CD883DKR40', want: 1, soIds: ['487469'] }] } });
+check('a Portwest dropped line is surfaced',  pw.some((l) => l.sku === 'CD883DKR40'));
+check('…with its quantity, from want',        pw.find((l) => l.sku === 'CD883DKR40').qty === 1);
+check('…and is not duplicated per shape',     pw.filter((l) => l.sku === 'CD883DKR40').length === 1);
+
 console.log(pass ? '\nALL PASS' : '\nFAILURES');
 process.exit(pass ? 0 : 1);

@@ -69,7 +69,7 @@ const line = (o) => {
     sku,
     name: str(o.name || o.productName || o.Description) || null,
     size: str(o.size || o.Size) || null,
-    qty: o.qty != null ? Number(o.qty) : (o.wanted != null ? Number(o.wanted) : (o.Quantity != null ? Number(o.Quantity) : null)),
+    qty: o.qty != null ? Number(o.qty) : (o.wanted != null ? Number(o.wanted) : (o.want != null ? Number(o.want) : (o.Quantity != null ? Number(o.Quantity) : null))),
     reason: clean(o.reason || o.Message || o.note || o.status || '') || null,
     // what the supplier says it can supply, when it said anything — Fristads gives both
     avail: o.avail != null ? Number(o.avail) : null,

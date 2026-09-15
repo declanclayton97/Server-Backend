@@ -2563,7 +2563,48 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
   catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Portwest — order ${ref}. Reference-set failed: ${e.message}`, PORTWEST_SUPPLIER_CONTACT).catch(() => {}); }
   steps.link = { reference: ref, refWritten, orderNo, status: 7 };
-  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'PORTWEST', poId, noteContactId: PORTWEST_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+
+  // ── A LINE PORTWEST WOULD NOT TAKE MUST NOT VANISH ──────────────────────────────────────────
+  // Dropping it from the PO (above) is right: the PO must not claim stock nobody bought. Carrying
+  // on instead of hard-aborting is right too — one dead code should not kill a 41-line order, which
+  // is why d913882 changed it on 2026-08-14. What that change never added is the other half: SAYING
+  // SO. The drop went into steps.reconcile and nowhere else, so the PO became honest while the
+  // SALES ORDER became the lie — finalised to "Ordered Stock Awaiting Delivery" for a line that had
+  // just been deleted.
+  //
+  // SO 487469 is what that costs. CD883DKR40 (a damage-claim replacement, "DAMAGE CLAIM CREDITED
+  // VIA SC#487468") was gathered with toOrder 1 on 7 Sept and again on 11 Sept, dropped both times
+  // because Portwest do not stock that colour, and finalised both times as ordered. Eight days, two
+  // runs, no error row anywhere, and a customer waiting on it. Found only because someone asked.
+  const soOf = (sku) => Object.entries(linesByOrder || {})
+    .filter(([, items]) => (items || []).some((x) => String(x.sku || '').toUpperCase() === String(sku).toUpperCase()))
+    .map(([id]) => id);
+  const droppedForCustomers = [];
+  for (const d of (steps.verify && steps.verify.dropped) || []) {
+    const sos = soOf(d.sku);
+    if (sos.length) droppedForCustomers.push({ ...d, soIds: sos });
+  }
+  if ((steps.verify && steps.verify.dropped || []).length) {
+    await logPurchasingError(pool, {
+      supplier: 'PORTWEST',
+      step: droppedForCustomers.length ? 'customer-line-dropped' : 'low-inv-dropped',
+      severity: droppedForCustomers.length ? 'error' : 'review',
+      message: `Portwest would not take ${steps.verify.dropped.length} line(s); they were removed from PO#${poId} so it matches the order actually placed (${ref}). `
+        + (droppedForCustomers.length
+          ? `⚠ ${droppedForCustomers.length} of them are CUSTOMER lines — those sales orders are NOT fully ordered and nothing will chase them: `
+            + droppedForCustomers.map((d) => `${d.want} × ${d.sku} (SO ${d.soIds.join(', ')})`).join('; ')
+            + `. Source them elsewhere or credit the customer.`
+          : `All were reorder lines, so no customer is waiting: `
+            + steps.verify.dropped.map((d) => `${d.want} × ${d.sku}`).join('; ')),
+      context: { poId, orderNo, dropped: steps.verify.dropped, droppedForCustomers },
+    }).catch(() => {});
+  }
+  // The line STAYS dropped — Portwest will not take it, and a PO that claims otherwise is the
+  // orphan-rows problem all over again. The SO still finalises too: holding it back would re-tag it
+  // every night and re-drop it every night, which is noise, not a fix. What changes is that it is
+  // no longer silent — the error row above is the notification, and a customer line raises it to
+  // severity error so it lands in triage and on the hub instead of dying in steps.reconcile.
+  try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'PORTWEST', poId, noteContactId: PORTWEST_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); }
   return { poId, orderNo, steps };
 }
 
@@ -3047,7 +3088,13 @@ export async function schedulerState(pool) {
 }
 
 // ── one scheduled run (supplier-generic) ─────────────────────────────────────
-export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false, forcePlace = false, excludeSkus = [] } = {}) {
+// notify:false silences the report email and the error-log row for a run whose result is for
+// COMPARISON only. The shadow runs on Purchasing-Automation use it: 18 suppliers dry-running every
+// weekday would otherwise send 18 emails a day about orders nobody placed, and — worse — write
+// duplicate rows into the shared purchasing_error_log, where the hub would count them as real
+// failures and the triage routine would wake up to fix a service that is not live yet.
+// Defaults to TRUE, so the live schedule's behaviour is unchanged.
+export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false, forcePlace = false, excludeSkus = [], notify = true } = {}) {
   const cfg = SCHEDULED_SUPPLIERS[String(supplier).toUpperCase()];
   if (!cfg) return { error: `unknown scheduled supplier ${supplier}` };
   const threshold = cfg.threshold ?? THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier — `??` so a deliberate 0 (no minimum, e.g. Snickers) is honoured, not treated as "unset"
@@ -3144,7 +3191,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
 
     const report = { supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold, decision, reason, workingDaysWaited: newWaitDays, placement };
     if (!dryRun) await saveState(pool, { id: cfg.stateId, workingDaysWaited: newWaitDays, lastRunDate: uk.date, result: report });
-    await sendReportEmail(report).catch(() => {});
+    if (notify) await sendReportEmail(report).catch(() => {});
     return report;
   } catch (e) {
     const step = e.step || 'unknown';
@@ -3154,7 +3201,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     // log under the same supplier name, so without it the 16:20 reorder run would happily adopt the
     // 09:30 customer run's orphaned draft, empty it, and refill it with reorder lines only —
     // dropping the customer lines from that PO with nothing to show it had happened.
-    await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, lineMode, ...(activePoId ? { poId: activePoId } : {}), ...(e.context || {}) } }).catch(() => {});
+    if (notify) await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, lineMode, ...(activePoId ? { poId: activePoId } : {}), ...(e.context || {}) } }).catch(() => {});
     if (!dryRun) { try { await saveState(pool, { id: cfg.stateId, workingDaysWaited: (await getState(pool, cfg.stateId)).working_days_waited, lastRunDate: uk.date, result: report }); } catch {} }
     return report;
   } finally { running = false; }
