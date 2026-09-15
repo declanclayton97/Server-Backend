@@ -201,6 +201,29 @@ export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = '
   const ctx = placed === null ? context : { ...(context || {}), placed };
   try { if (pool) { await ensureErrorTable(pool); const r = await pool.query(`INSERT INTO purchasing_error_log (supplier, step, message, context, severity) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [supplier, step, message, ctx ? JSON.stringify(ctx) : null, severity]); errorId = r.rows[0] && r.rows[0].id; } } catch (e) { console.error('[purchasing-error-log] insert failed:', e.message); }
   if (notify) { try { await sendAlertEmail({ supplier, step, message, context: ctx, severity, placed }); } catch (e) { console.error('[purchasing-error-log] email failed:', e.message); } }
+  // ── and the person who raised the order, for EVERY supplier ────────────────────────────────
+  // Wired here rather than at each drop site so no supplier can be forgotten — including ones
+  // added later. extractBlockedLines already knows how to read every supplier's failure shape
+  // (that is what the Stuck items tab runs on) and returns NOTHING for a failure that names no
+  // line, so a login timeout or a bad request date reaches nobody's inbox.
+  //
+  // A line the supplier could not supply is a sales problem wherever it happened; a line WE could
+  // not resolve is purchasing's problem to fix and is deliberately not routed to a salesperson.
+  if (notify && pool && severity === 'error') {
+    try {
+      const c = ctx || {};
+      const lines = (Array.isArray(c.dropped) && c.dropped.length)
+        ? c.dropped                                            // carries productId — the exact match
+        : (await import('./blockedLines.js')).extractBlockedLines({ supplier, step, message, context: c });
+      if (lines && lines.length) {
+        await notifyDroppedLines(pool, {
+          supplier, poId: c.poId || null, dropped: lines, linesByOrder: c.linesByOrder || {},
+          placed: /-dropped$/.test(String(step)) || placed === true,
+          execute: !c.dryRun,
+        });
+      }
+    } catch (e) { console.error('[dropped-line-notice] failed:', e.message); }
+  }
   try { await fireTriageRoutine({ supplier, step, message, context, severity, errorId }); } catch (e) { console.error('[purchasing-error-log] triage fire failed:', e.message); }
 }
 
@@ -563,11 +586,6 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     // from the note, and drop from soIds any order left with NOTHING ordered — finalising that one
     // would clear its supplier tag and set it to "Ordered Stock Awaiting Delivery" for goods that
     // were never bought. Leaving the tag on also means the 17:30 tag audit keeps nagging about it.
-    // Snapshot BEFORE the trim below — that is the only place the link from a dropped line back to
-    // the customer who wanted it still exists. After the filter it is gone, which is precisely why
-    // nobody could tell who was waiting for one of these.
-    const linesByOrderBeforeDrop = Object.fromEntries(
-      Object.entries(linesByOrder).map(([k, v]) => [k, (v || []).slice()]));
     for (const id of Object.keys(linesByOrder)) {
       linesByOrder[id] = linesByOrder[id].filter((x) => !droppedPids.has(String(x.productId)));
       if (!linesByOrder[id].length) delete linesByOrder[id];
@@ -587,10 +605,6 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
           + (s.deldate ? `, next delivery ${s.deldate}` : '')).join('\n'),
       context: { poId, dropped: shortLines, removedRows },
     }).catch(() => {});
-    // …and tell whoever raised each affected sales order, which the error row above does not do.
-    steps.stockCheck.notified = await notifyDroppedLines(pool, {
-      supplier: 'FRISTADS', poId, dropped: shortLines, linesByOrder: linesByOrderBeforeDrop,
-    }).catch((e) => ({ sent: 0, error: e.message }));
   }
 
   const expectUnits = orderable.reduce((a, l) => a + l.qty, 0);
@@ -2607,11 +2621,6 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
             + steps.verify.dropped.map((d) => `${d.want} × ${d.sku}`).join('; ')),
       context: { poId, orderNo, dropped: steps.verify.dropped, droppedForCustomers },
     }).catch(() => {});
-    // Portwest lines carry no productId, so this matches on SKU — exact here, because Portwest
-    // order by our code rather than resolving it to one of their own.
-    steps.notified = await notifyDroppedLines(pool, {
-      supplier: 'PORTWEST', poId, dropped: steps.verify.dropped, linesByOrder,
-    }).catch((e) => ({ sent: 0, error: e.message }));
   }
   // The line STAYS dropped — Portwest will not take it, and a PO that claims otherwise is the
   // orphan-rows problem all over again. The SO still finalises too: holding it back would re-tag it
@@ -3442,7 +3451,13 @@ async function ensureDropNoticeTable(pool) {
 
 // dropped: [{ productId, sku, qty, size, name, avail, deldate }]
 // linesByOrder: the snapshot taken BEFORE the dropped lines were filtered out of it.
-export async function notifyDroppedLines(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true } = {}) {
+// `placed` says which of two very different things happened, and the email must not blur them:
+//   true  — the order went through WITHOUT this line. Nothing will ever chase it. Act now.
+//   false — the run stopped, so nothing was ordered at all. The SO keeps its supplier tag and is
+//           picked up again on the next run, so this is a heads-up, not a task.
+// Telling someone "nothing will chase this" about a line that retries in the morning is how a
+// warning stops being read.
+export async function notifyDroppedLines(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true, placed = true } = {}) {
   if (!Array.isArray(dropped) || !dropped.length) return { sent: 0, reason: 'nothing dropped' };
   const label = supplier.charAt(0) + supplier.slice(1).toLowerCase();
 
@@ -3464,6 +3479,29 @@ export async function notifyDroppedLines(pool, { supplier = 'FRISTADS', poId = n
       if (!perSo.has(soId)) perSo.set(soId, []);
       perSo.get(soId).push(d);
     }
+  }
+
+  // No linesByOrder means this came from a supplier whose run does not build one — every supplier
+  // except Fristads and Portwest. demand_log answers the same question for all of them: it records
+  // po_id, so_id, product_id AND sku for every line a run gathered, so it bridges the two codes the
+  // same way, and it is already what the Stuck items tab reads. Only consulted as a fallback,
+  // because a run that HAS the mapping in hand knows it more precisely than the log does.
+  if (!perSo.size && poId) {
+    try {
+      const d = await pool.query(
+        `SELECT DISTINCT so_id, product_id, sku FROM demand_log WHERE po_id = $1 AND so_id IS NOT NULL`, [poId]);
+      for (const line of dropped) {
+        for (const row of d.rows) {
+          const hit = line.productId != null && row.product_id != null
+            ? String(row.product_id) === String(line.productId)
+            : String(row.sku || '').toUpperCase() === String(line.sku || '').toUpperCase();
+          if (!hit) continue;
+          const soId = String(row.so_id);
+          if (!perSo.has(soId)) perSo.set(soId, []);
+          if (!perSo.get(soId).some((x) => x === line)) perSo.get(soId).push(line);
+        }
+      }
+    } catch (e) { console.error('[dropped-line-notice] demand_log lookup failed:', e.message); }
   }
   if (!perSo.size) return { sent: 0, reason: 'no customer lines among the dropped ones' };
 
@@ -3521,7 +3559,8 @@ export async function notifyDroppedLines(pool, { supplier = 'FRISTADS', poId = n
   for (const [to, orders] of byRecipient) {
     const count = orders.reduce((a, x) => a + x.lines.length, 0);
     const plural = count === 1 ? '' : 's';
-    const subject = label + ' could not supply ' + count + ' line' + plural + ' — ' + orders.map((x) => 'SO ' + x.soId).join(', ');
+    const subject = label + ' could not supply ' + count + ' line' + plural
+      + (placed ? '' : ' (order not placed)') + ' — ' + orders.map((x) => 'SO ' + x.soId).join(', ');
     const blocks = orders.map((x) => {
       const head = '<p><strong>SO ' + esc(x.soId) + '</strong>'
         + (x.ref ? ' — ' + esc(x.ref) : '') + (x.customer ? ' — ' + esc(x.customer) : '') + '</p>';
@@ -3533,11 +3572,18 @@ export async function notifyDroppedLines(pool, { supplier = 'FRISTADS', poId = n
         + '</li>').join('');
       return head + '<ul>' + items + '</ul>';
     }).join('');
-    const html = '<p><strong>' + label + ' would not supply the line' + plural + ' below, so '
-      + (count === 1 ? 'it was' : 'they were') + ' left off PO#' + esc(poId) + '.</strong> '
-      + 'The rest of the order went through as normal.</p>'
-      + '<p>Nothing will chase ' + (count === 1 ? 'this' : 'these') + ' automatically — '
-      + 'it needs sourcing elsewhere, putting on back order with the customer, or crediting.</p>'
+    const html = (placed
+      ? '<p><strong>' + label + ' would not supply the line' + plural + ' below, so '
+        + (count === 1 ? 'it was' : 'they were') + ' left off PO#' + esc(poId) + '.</strong> '
+        + 'The rest of the order went through as normal.</p>'
+        + '<p>Nothing will chase ' + (count === 1 ? 'this' : 'these') + ' automatically — '
+        + 'it needs sourcing elsewhere, putting on back order with the customer, or crediting.</p>'
+      : '<p><strong>' + label + ' could not supply the line' + plural + ' below, and the order was '
+        + 'not placed because of ' + (count === 1 ? 'it' : 'them') + '.</strong></p>'
+        + '<p>The order will be tried again on the next run, so there is nothing to do yet — but if '
+        + (count === 1 ? 'this line is' : 'these lines are') + ' wrong or discontinued '
+        + (count === 1 ? 'it' : 'they') + ' will keep holding the whole order up until someone '
+        + 'changes ' + (count === 1 ? 'it' : 'them') + '.</p>')
       + blocks
       + '<p style="color:#666;font-size:12px">Sent once per line per ' + DROP_NOTICE_REPEAT_DAYS
       + ' days. You are getting this because you raised the order.</p>';
