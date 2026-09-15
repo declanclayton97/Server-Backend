@@ -2184,6 +2184,57 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // pack quantity, an unreadable cart, a genuine outage — falls through to the error below rather
   // than being retried on a guess.
   if ((!wr || !wr.placed) && (wr && (wr.missingLines || []).length)) {
+    // ONE retry, and only for a line whose BP `sku` is not what Hultafors actually calls the
+    // product. Chadwick already resolves this (see placeChadwickOrder: mpn wins when it differs
+    // from the plain SKU) because several Hultafors-group brands sold through Snickers — Hellberg,
+    // EMMA, CLC, Toe Guard (see SUPPLIERS.SNICKERS.detect) — are catalogued under their own
+    // manufacturer code, not our internal SKU numbering. Snickers itself never hit this so the
+    // checkout here never got the same lookup — until a Hellberg line did. ML1207210001 ("Hellberg
+    // Secure 2 Foldable Ear Defenders", PO 489448, 2026-09-15) carries identity.mpn "41502-001",
+    // which IS the live Hultafors stockcode (1335 in stock); the plain SKU is not a code the portal
+    // has ever heard of, so the CSV import silently dropped it — same shape as Chadwick's "CT-"
+    // prefix bug. Safe to retry for the same reason as the discontinued check below: the worker did
+    // NOT place, and re-import replaces the basket rather than adding to it.
+    const wrongCode = [];
+    for (const m of (wr.missingLines || []).slice(0, 8)) {
+      const d = detailBySku.get(String(m.stockCode).toUpperCase());
+      if (!d || !d.productId) continue;
+      let itemCode = null;
+      try {
+        const identity = await bp.getProductIdentityLive(d.productId);
+        if (identity.mpn && String(identity.mpn).trim()) itemCode = String(identity.mpn).trim();
+      } catch { /* fall back to sku */ }
+      if (itemCode && itemCode.toUpperCase() !== String(m.stockCode).toUpperCase()) wrongCode.push({ sku: m.stockCode, itemCode, detail: d });
+    }
+    if (wrongCode.length) {
+      // TWO PRODUCTS MUST NEVER RESOLVE TO ONE ITEM CODE. Chadwick was bitten by exactly this the
+      // same day (product 253317's mpn pointed at a DIFFERENT product's code, and the supplier
+      // merged both lines into one — nothing short, so a unit-count gate saw nothing wrong). Same
+      // rewrite here, same risk: if the corrected code already names a line already in the basket,
+      // that is a data fault on our side, not something to silently sum. Leave that one line alone
+      // — it falls through to the missing-line report below, same as any other unresolved code —
+      // and only retry the lines whose corrected code is not already spoken for.
+      const collisions = [];
+      const fixed = [];
+      for (const { sku, itemCode, detail } of wrongCode) {
+        const k = itemCode.toUpperCase();
+        if (bySku.has(k)) { collisions.push({ sku, itemCode }); continue; }
+        const qty = bySku.get(sku);
+        if (qty == null) continue;
+        bySku.delete(sku);
+        bySku.set(k, qty);
+        if (!detailBySku.has(k)) detailBySku.set(k, { ...detail, sku: itemCode });
+        fixed.push({ sku, itemCode });
+      }
+      if (collisions.length) steps.itemCodeCollision = collisions;
+      if (fixed.length) {
+        steps.itemCodeFixed = fixed;
+        lines = buildLines();
+        wr = await workerPlaceOrder({ supplier: 'SNICKERS', ref: poId, lines, execute: live });
+      }
+    }
+  }
+  if ((!wr || !wr.placed) && (wr && (wr.missingLines || []).length)) {
     const dead = [];
     // The portal needs the size TEXT, which lives in Brightpearl, not in the SKU. Enrich the
     // refused lines from the PO rows first — one bulk product read for the lot — or the lookup
