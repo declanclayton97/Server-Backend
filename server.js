@@ -12352,7 +12352,14 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
              (SELECT order_number FROM whatsapp_messages x
                 WHERE x.peer_number = m.peer_number AND x.channel = $1
                   AND x.order_number IS NOT NULL
-                ORDER BY x.created_at DESC LIMIT 1) AS order_number
+                ORDER BY x.created_at DESC LIMIT 1) AS order_number,
+             -- The name on the customer's WhatsApp profile, captured from the
+             -- webhook contacts[] block. For a sales chat with no quote this is
+             -- the only name we have.
+             (SELECT raw->>'contactName' FROM whatsapp_messages x
+                WHERE x.peer_number = m.peer_number AND x.channel = $1
+                  AND x.direction = 'in' AND x.raw->>'contactName' IS NOT NULL
+                ORDER BY x.created_at DESC LIMIT 1) AS contact_name
         FROM whatsapp_messages m
        WHERE m.channel = $1
        GROUP BY m.peer_number
@@ -12370,6 +12377,7 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
         lastDirection: row.last_direction,
         unread: Number(row.unread) || 0,
         orderNumber: row.order_number || null,
+        contactName: row.contact_name || null,
         windowOpen: expiresAt ? expiresAt.getTime() > now : false,
         windowExpiresAt: expiresAt,
       };
