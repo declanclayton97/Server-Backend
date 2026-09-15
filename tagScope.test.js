@@ -77,5 +77,31 @@ const risky = parseTagScope('PENCARRIE (TR010 BLACK, M ONLY)');
 check('narrowed note: AND picks the one right row',  andRows(risky).map((r) => r.productSku).join() === 'TR010-BLK-M');
 check('…and the gate refuses to widen it',           gate(risky) === false);
 
+// ── A ROW KEEPS THE CODE IT WAS RAISED WITH ──────────────────────────────────
+// Brightpearl stamps the SKU onto the order row at creation; renaming the product never rewrites
+// it. Invisible until a bulk SKU migration runs — then open orders carry stale codes while tags
+// are written with the new ones. SO 485033 (2026-09-15): tag "RX500F NAV XS", row still reading
+// ML271019011, product long since renamed RX500F-NAV-XS. altCodes carries the current name.
+const frozenRow = {
+  productSku: 'ML271019011',
+  productName: "RX500F Women's Soft Shell Jacket - Navy-8",
+  productOptions: { 1: { optionName: 'Colour', optionValue: 'Navy' }, 2: { optionName: 'Size', optionValue: 'XS - 8' } },
+};
+const LIVE_SKU = ['RX500F-NAV-XS'];
+check('the frozen row matches RX500F by name',   rowMatchesTerm(frozenRow, 'RX500F'));
+check('…but NAV cannot match Navy on its own',   !rowMatchesTerm(frozenRow, 'NAV'));
+check('…so the group fails, as it did live',     !['RX500F', 'NAV', 'XS'].every((t) => rowMatchesTerm(frozenRow, t)));
+check('NAV matches through the current sku',     rowMatchesTerm(frozenRow, 'NAV', LIVE_SKU));
+check('XS matches through the current sku',      rowMatchesTerm(frozenRow, 'XS', LIVE_SKU));
+check('…so the whole group matches',             ['RX500F', 'NAV', 'XS'].every((t) => rowMatchesTerm(frozenRow, t, LIVE_SKU)));
+const blouseRow = {
+  productSku: 'K241DKN6',
+  productName: "K241 Women's Short Sleeve Blouse - Navy-6",
+  productOptions: { 1: { optionName: 'Colour', optionValue: 'Dark Navy' }, 2: { optionName: 'Size', optionValue: '6' } },
+};
+check('a different row is not widened into the scope', !rowMatchesTerm(blouseRow, 'RX500F', ['K241-DKN-6']));
+check('an empty alt list behaves as before',     rowMatchesTerm(frozenRow, 'RX500F', []) === rowMatchesTerm(frozenRow, 'RX500F'));
+check('undefined alts are safe',                 rowMatchesTerm(frozenRow, 'RX500F', undefined) === true);
+
 console.log(pass ? '\nALL PASS' : '\nFAILURES');
 process.exit(pass ? 0 : 1);

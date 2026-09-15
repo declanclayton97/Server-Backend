@@ -380,6 +380,20 @@ export async function getProductIdentity(productId) {
 
 // LIVE counterpart of getProductIdentity — api() above is the sandbox/TEST account (see bpApi's
 // comment), so a real product's identity (e.g. Chadwick's mpn) has to come from liveGet instead.
+// What is this product called NOW? Cached: a run can touch the same product on many orders, and
+// this only ever fires when a tag failed to match the code frozen on the row.
+const _liveSku = new Map();
+async function liveSkuOf(productId) {
+  if (productId == null) return null;
+  const k = String(productId);
+  if (_liveSku.has(k)) return _liveSku.get(k);
+  let sku = null;
+  try { const id = await getProductIdentityLive(productId); sku = (id && id.sku) ? String(id.sku) : null; }
+  catch { /* unreadable → fall back to the frozen code, which is the old behaviour */ }
+  _liveSku.set(k, sku);
+  return sku;
+}
+
 export async function getProductIdentityLive(productId) {
   const resp = await liveGet(`/product-service/product/${productId}`);
   const p = Array.isArray(resp) ? resp[0] : resp;
@@ -638,10 +652,15 @@ export const isCodeLikeTerm = (t) => /^[A-Z]{1,4}\d{2,}[A-Z0-9-]*$/.test(t) || /
 // Does this row satisfy a single scope term? SKU (exact / dash-part / substring), a whole word in
 // the product name, the colour, or the size (letter⇄word aware, since BP stores "Medium" and the
 // note says "M").
-export const rowMatchesTerm = (r, term) => {
+// `altCodes` are other identifiers the same row can legitimately be known by — in practice the
+// product's CURRENT sku, when the row was raised before a rename. See the lazy lookup in
+// gatherLiveDemand: an order row keeps the code it was raised with, forever.
+export const rowMatchesTerm = (r, term, altCodes = []) => {
   const t = String(term).toUpperCase();
-  const sku = String(r.productSku || '').toUpperCase();
-  if (sku && (sku === t || sku.split('-').includes(t) || sku.includes(t))) return true;
+  const codes = [String(r.productSku || ''), ...(altCodes || [])]
+    .map((s) => String(s || '').toUpperCase()).filter(Boolean);
+  for (const sku of codes) if (sku === t || sku.split('-').includes(t) || sku.includes(t)) return true;
+  const sku = codes[0] || '';
   const name = String(r.productName || '').toUpperCase();
   try { if (new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(name)) return true; } catch { /* ignore */ }
   const colour = String(optValue(r.productOptions, /colou?r/i) || '').toUpperCase();
@@ -1340,8 +1359,29 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       // selector, so evaluate it against every orderable row instead. This is what makes
       // "PENCARRIE (RS121M ONLY) / PORTWEST" work the way a human would expect.
       const rowsForScope = (!hasBrandDetect && !singleSupplier) ? orderableRows : candidateRows;
-      const recognised = scope.terms.every((t) => rowsForScope.some(([, r]) => rowMatchesTerm(r, t)));
-      let qualifying = rowsForScope.filter(([, r]) => scope.terms.every((t) => rowMatchesTerm(r, t)));
+      // ── A ROW KEEPS THE CODE IT WAS RAISED WITH ───────────────────────────────────────────────
+      // Brightpearl stamps the SKU onto the order row when the row is created, and renaming the
+      // product afterwards never rewrites it. That is invisible until a bulk SKU migration runs:
+      // then every OPEN order carries stale codes while everyone writes tags using the NEW ones,
+      // and the tag matches nothing. SO 485033 on 2026-09-15 — tag "RX500F NAV XS", row still
+      // reading ML271019011, product long since renamed RX500F-NAV-XS.
+      //
+      // So try the row as raised first, and only if that fails ask what the product is called now.
+      // Lazy on purpose: it is one live call per product, and the frozen code is usually right.
+      const altByRow = new Map();
+      const matches = (rowId, r, t) => rowMatchesTerm(r, t, altByRow.get(rowId));
+      const evaluateScope = () => ({
+        recognised: scope.terms.every((t) => rowsForScope.some(([rowId, r]) => matches(rowId, r, t))),
+        qualifying: rowsForScope.filter(([rowId, r]) => scope.terms.every((t) => matches(rowId, r, t))),
+      });
+      let { recognised, qualifying } = evaluateScope();
+      if (!(recognised && qualifying.length)) {
+        for (const [rowId, r] of rowsForScope) {
+          const live = await liveSkuOf(r.productId);
+          if (live && live.toUpperCase() !== String(r.productSku || '').toUpperCase()) altByRow.set(rowId, [live]);
+        }
+        if (altByRow.size) ({ recognised, qualifying } = evaluateScope());
+      }
       // A comma lists SEVERAL items as readily as it narrows one, and the syntax is identical. So
       // read it as a list only on evidence: the AND reading satisfied NOTHING, there are at least
       // two groups, and EVERY group names a product code. "(K241DKN6, K241DKN8, K241DKN12, 157619)"
@@ -1353,7 +1393,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       // flags the tag for a human, which is the correct answer to an instruction we cannot read.
       const groups = (scope.groups || []).filter((g) => g.length);
       if (!qualifying.length && groups.length > 1 && groups.every((g) => g.some(isCodeLikeTerm))) {
-        const byGroup = groups.map((g) => rowsForScope.filter(([, r]) => g.every((t) => rowMatchesTerm(r, t))));
+        const byGroup = groups.map((g) => rowsForScope.filter(([rowId, r]) => g.every((t) => matches(rowId, r, t))));
         if (byGroup.every((rows) => rows.length)) {
           const ids = new Set(byGroup.flat().map(([rowId]) => rowId));
           qualifying = rowsForScope.filter(([rowId]) => ids.has(rowId));
