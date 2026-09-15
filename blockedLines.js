@@ -40,7 +40,16 @@ function codesAfterColon(message) {
   // Tokenise rather than splitting on commas: the codes are usually followed by prose in the same
   // breath — "…(order NOT placed): 5063777009268. Update the Sterling product-data file / ingest."
   // — so the comma-chunk is code AND sentence, and matched nothing.
-  return m[1].split(/[\s,;]+/).map((x) => x.replace(/^[("']+|[.,)"']+$/g, '').trim()).filter(looksLikeCode);
+  // A number introduced as a PO/SO/order is OURS, not an item. Chadwick's refusal message explains
+  // itself with "(a Brightpearl SKU carrying a stray "CT" prefix did this on PO 488574)", and 488574
+  // was listed on the Stuck items tab as a third thing to go and find. Same class of false positive
+  // as the order id TUWO_TW486420; the difference is that a bare number passes CODE on its own, so
+  // it has to be caught by what INTRODUCES it.
+  const ours = new Set();
+  for (const mm of String(message).matchAll(/\b(?:PO|SO|order)\s*#?\s*(\d{4,})\b/gi)) ours.add(mm[1]);
+  return m[1].split(/[\s,;]+/)
+    .map((x) => x.replace(/^[("']+|[.,)"']+$/g, '').trim())
+    .filter((x) => looksLikeCode(x) && !ours.has(x));
 }
 
 // Some rows carry their detail as JSON INSIDE the message rather than in context — the Fristads

@@ -175,11 +175,28 @@ export async function ensureErrorTable(pool) {
   // severity was only ever passed to the email, never stored — so nothing reading the log could
   // tell "the run stopped" from "the order went through, fix the data afterwards".
   // handled_* lets an automated triage pass claim a row, so the same error isn't worked twice.
+  // triage_sig/triage_fired_at exist to stop the routine being fired at the same unfixable failure
+  // over and over — see fireTriageRoutine.
   await pool.query(`ALTER TABLE purchasing_error_log
     ADD COLUMN IF NOT EXISTS severity text,
     ADD COLUMN IF NOT EXISTS handled_at timestamptz,
     ADD COLUMN IF NOT EXISTS handled_by text,
-    ADD COLUMN IF NOT EXISTS handled_note text`);
+    ADD COLUMN IF NOT EXISTS handled_note text,
+    ADD COLUMN IF NOT EXISTS triage_sig text,
+    ADD COLUMN IF NOT EXISTS triage_fired_at timestamptz`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS purchasing_error_log_triage_idx
+    ON purchasing_error_log(triage_sig, triage_fired_at)`);
+}
+
+// What makes two failures "the same failure" for the purpose of not re-triaging one. The supplier
+// and step, plus the ITEMS involved — a Chadwick checkout that refuses TB150922148 today is the
+// same problem as the one that refused it an hour ago, and a different problem from one refusing a
+// different code. Falls back to the message with every number masked, so a PO id or a quantity
+// changing does not read as a new failure.
+export function triageSignature({ supplier, step, message, context }, lines) {
+  const skus = (lines || []).map((l) => String(l.sku || '').toUpperCase()).filter(Boolean).sort();
+  const tail = skus.length ? skus.join(',') : String(message || '').replace(/\d+/g, '#').slice(0, 300);
+  return `${String(supplier || '').toUpperCase()}|${step || ''}|${tail}`;
 }
 
 // Persist an error AND email an alert. Used for every failure in the flow.
@@ -224,7 +241,7 @@ export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = '
       }
     } catch (e) { console.error('[dropped-line-notice] failed:', e.message); }
   }
-  try { await fireTriageRoutine({ supplier, step, message, context, severity, errorId }); } catch (e) { console.error('[purchasing-error-log] triage fire failed:', e.message); }
+  try { await fireTriageRoutine({ pool, supplier, step, message, context, severity, errorId }); } catch (e) { console.error('[purchasing-error-log] triage fire failed:', e.message); }
 }
 
 // Push a failure at the triage routine the moment it happens, instead of a routine waking on a
@@ -239,10 +256,56 @@ export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = '
 //
 // Fire-and-forget by design: purchasing must never fail because a notification failed. Unset env
 // vars make it a silent no-op, so nothing breaks before the routine exists.
-async function fireTriageRoutine({ supplier, step, message, context, severity, errorId }) {
+// ── DO NOT KEEP SENDING A BOT AT SOMETHING IT CANNOT FIX ────────────────────────────────────
+// Every severity 'error' row fired a routine, with no memory of what it had already been sent at.
+// A supplier retries three times a day and the same demand is re-gathered tomorrow, so ONE bad
+// item code spawned a triage session on every attempt, indefinitely. Chadwick's TB150922148 /
+// ML110722012 refusal on 2026-09-15 is the case that surfaced it: the codes are wrong in
+// Brightpearl, no amount of re-reading the portal changes that, and each pass burned a session to
+// reach the same conclusion.
+//
+// Fire once per distinct failure, then leave it alone:
+//   - nothing within COOLDOWN hours for the same signature, which covers the same-day retries;
+//   - and at most MAX_FIRES attempts at a signature that has NEVER been resolved, after which it
+//     is a human's problem and the Stuck items tab is where it waits.
+// A signature that WAS handled and then comes back is new information, so its count starts again.
+const TRIAGE_COOLDOWN_HOURS = 20;
+const TRIAGE_MAX_FIRES = 3;
+
+async function triageAlreadyChasing(pool, sig) {
+  if (!pool || !sig) return null;
+  const r = await pool.query(
+    `SELECT count(*)::int AS fires,
+            max(triage_fired_at) AS last_fired,
+            bool_or(handled_at IS NOT NULL) AS ever_handled
+       FROM purchasing_error_log
+      WHERE triage_sig = $1 AND triage_fired_at IS NOT NULL
+        AND triage_fired_at > now() - interval '7 days'`, [sig]);
+  const row = r.rows[0] || {};
+  if (!row.fires) return null;
+  if (row.ever_handled) return null;                         // it was fixed before; this is new
+  const hrs = (Date.now() - new Date(row.last_fired).getTime()) / 3600000;
+  if (hrs < TRIAGE_COOLDOWN_HOURS) return `already fired ${hrs.toFixed(1)}h ago (cooldown ${TRIAGE_COOLDOWN_HOURS}h)`;
+  if (row.fires >= TRIAGE_MAX_FIRES) return `fired ${row.fires}× already and never resolved — leaving it for a human`;
+  return null;
+}
+
+async function fireTriageRoutine({ pool, supplier, step, message, context, severity, errorId }) {
   const url = process.env.TRIAGE_ROUTINE_URL, token = process.env.TRIAGE_ROUTINE_TOKEN;
   if (!url || !token) return;                 // not configured yet
   if (severity !== 'error') return;
+
+  let sig = null;
+  try {
+    const { extractBlockedLines } = await import('./blockedLines.js');
+    sig = triageSignature({ supplier, step, message, context },
+      extractBlockedLines({ supplier, step, message, context }));
+    const skip = await triageAlreadyChasing(pool, sig);
+    if (skip) { console.log(`[purchasing-error-log] triage NOT fired for ${supplier}/${step}: ${skip}`); return; }
+  } catch (e) {
+    // Never let the guard itself stop a genuine escalation — fire, and accept a duplicate.
+    console.error('[purchasing-error-log] triage dedupe failed:', e.message);
+  }
   // The routine receives this wrapped as UNTRUSTED data, so its own prompt has to opt into acting
   // on it. Give it the error id first: everything else it needs is already in the log behind that
   // id, and the id is the thing it marks handled.
@@ -267,6 +330,11 @@ async function fireTriageRoutine({ supplier, step, message, context, severity, e
   });
   const body = await res.text();
   if (!res.ok) throw new Error(`routine fire HTTP ${res.status}: ${body.slice(0, 200)}`);
+  // Stamp the row AFTER a successful fire — a firing that failed should be retried, not counted.
+  if (pool && errorId != null) {
+    await pool.query(`UPDATE purchasing_error_log SET triage_sig = $2, triage_fired_at = now() WHERE id = $1`,
+      [errorId, sig]).catch((e) => console.error('[purchasing-error-log] triage stamp failed:', e.message));
+  }
   console.log(`[purchasing-error-log] triage routine fired for ${supplier}/${step}:`, body.slice(0, 200));
 }
 

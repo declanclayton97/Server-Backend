@@ -79,5 +79,15 @@ check('a Portwest dropped line is surfaced',  pw.some((l) => l.sku === 'CD883DKR
 check('…with its quantity, from want',        pw.find((l) => l.sku === 'CD883DKR40').qty === 1);
 check('…and is not duplicated per shape',     pw.filter((l) => l.sku === 'CD883DKR40').length === 1);
 
+// A PO number used to EXPLAIN a refusal is not a third item to go and find. Chadwick, 15 Sept.
+const cw = extractBlockedLines({ supplier: 'CHADWICK', step: 'checkout',
+  message: 'Chadwick refused 2 line(s) a customer is waiting for — NOT ordering without them: '
+    + 'TB150922148 x1, ML110722012 x1. Check the item code against their catalogue '
+    + '(a Brightpearl SKU carrying a stray "CT" prefix did this on PO 488574).',
+  context: { poId: 489373 } });
+check('the two refused codes are found',        ['TB150922148','ML110722012'].every((c) => cw.some((l) => l.sku === c)));
+check('…and the PO in the aside is NOT an item', !cw.some((l) => l.sku === '488574'));
+check('…so exactly two lines come back',        cw.length === 2);
+
 console.log(pass ? '\nALL PASS' : '\nFAILURES');
 process.exit(pass ? 0 : 1);
