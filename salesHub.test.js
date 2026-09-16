@@ -195,6 +195,16 @@ assertTrue("PO without a date -> still no promise",
   etaSentence({ supplier: "Blaklader", placedOn: "2026-09-10" }).expectedDate === undefined);
 assertEq("PO without a date proposes nothing",
   etaSentence({ supplier: "Blaklader", placedOn: "2026-09-10" }).dates, []);
+// A supplier due date on a WEEKEND must not become a promised weekend delivery.
+// 19 Sept 2026 is a Saturday; the copy should say the Monday.
+const weekend = etaSentence({ supplier: "CHADWICK", expectedDate: "2026-09-19" });
+assertFalse("never promises a Saturday", /Saturday/.test(weekend.text));
+assertTrue("rolls forward to the Monday", /Monday 21 September/.test(weekend.text));
+assertEq("and proposes the rolled date", weekend.dates, ["09-21"]);
+// A weekday date is left exactly as it is.
+const weekday = etaSentence({ supplier: "CHADWICK", expectedDate: "2026-09-23" });
+assertTrue("a Wednesday stays Wednesday", /Wednesday 23 September/.test(weekday.text));
+
 const withDate = etaSentence({ supplier: "Blaklader", expectedDate: "2026-09-25" });
 assertTrue("PO with a date names the supplier", withDate.text.includes("Blaklader"));
 assertTrue("PO with a date proposes one", withDate.dates.length > 0);

@@ -124,17 +124,28 @@ export function registerSalesHubRoutes(app, deps) {
                 AND created_at > now() - interval '60 days'
               ORDER BY id DESC LIMIT 300`
           );
+          // One SKU, one entry. A supplier that failed and retried logs the
+          // same line again on every attempt, so PO 489373 listed
+          // "835-39-A-XL, 835-39-A-XL, TB150922148" - the same item twice in a
+          // warning a person has to read. Keep the OLDEST sighting, which is
+          // when the problem actually started.
+          const seen = new Map();
           for (const row of errs.rows) {
             const poId = Number((row.context && row.context.poId) || 0);
             if (!poId || !myPos.has(poId)) continue;
             for (const l of extractBlockedLines(row)) {
-              blockedLines.push({
+              const key = String(l.sku || l.name || "").toUpperCase().trim();
+              if (!key) continue;
+              const entry = {
                 sku: l.sku, name: l.name, want: l.want,
                 reason: l.reason, supplier: row.supplier,
                 step: row.step, since: row.created_at, poId,
-              });
+              };
+              const prev = seen.get(key);
+              if (!prev || new Date(entry.since) < new Date(prev.since)) seen.set(key, entry);
             }
           }
+          blockedLines = [...seen.values()];
         }
       } catch (e) {
         // A reporting table being unavailable must not stop a salesperson

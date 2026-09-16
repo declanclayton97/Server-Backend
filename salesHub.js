@@ -17,6 +17,9 @@
 //      a comparison of the dates themselves catches it.
 
 import { SIGNATURE_HTML } from "./emailSignature.js";
+// The bank-holiday list the quote chase already maintains, so both agree on
+// what counts as a working day rather than keeping two calendars.
+import { isBankHoliday } from "./quoteChase.js";
 
 // ---------------------------------------------------------------------------
 // Intents. Ordered: the first match wins, so put the specific before the vague.
@@ -403,10 +406,24 @@ export function etaSentence(po) {
   };
 }
 
+// A supplier's due date lands on a Saturday often enough, and "due with us
+// Saturday 19 September" promises a delivery on a day nobody delivers. Roll
+// forward to the next working day - later than the raw date, never earlier,
+// which is the safe direction for a promise.
+function nextWorkingDay(d) {
+  const out = new Date(d.getTime());
+  for (let i = 0; i < 10; i++) {
+    const day = out.getDay();
+    if (day !== 0 && day !== 6 && !isBankHoliday(out)) return out;
+    out.setDate(out.getDate() + 1);
+  }
+  return out;
+}
+
 function formatDay(when) {
   const d = new Date(when);
   if (isNaN(d.getTime())) return String(when);
-  return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+  return nextWorkingDay(d).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
 }
 
 /**
