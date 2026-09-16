@@ -11251,6 +11251,42 @@ async function fetchBrightpearlParties(orderId) {
 // ---------------------------------------------------------------------------
 const WA_CHANNELS = ["proof", "sales"];
 
+// GET /api/whatsapp/number-status?channel=sales
+//
+// What META thinks of our number, as opposed to what our env vars say. The
+// dashboard's existing "salesConfigured" only means WHATSAPP_SALES_PHONE_NUMBER_ID
+// is set — it says nothing about whether the number can actually send, which is
+// a different thing and the reason a "Pending" number looks configured here.
+//
+// Read-only. Registering a number is a deliberate act and is not done from a GET.
+app.get('/api/whatsapp/number-status', async (req, res) => {
+  const channel = WA_CHANNELS.includes(String(req.query.channel)) ? String(req.query.channel) : 'proof';
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = waPhoneNumberId(channel);
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || 'v21.0';
+  if (!token) return res.status(400).json({ error: 'WHATSAPP_TOKEN is not set' });
+  if (!phoneNumberId) return res.status(400).json({ error: `No phone number id configured for channel "${channel}"` });
+  try {
+    // These fields are what distinguishes "the display name is in review" from
+    // "the number was never registered for the Cloud API" — the two states that
+    // both show as Pending in WhatsApp Manager but need opposite actions.
+    const fields = [
+      'display_phone_number', 'verified_name', 'name_status', 'new_name_status',
+      'code_verification_status', 'quality_rating', 'platform_type',
+      'throughput', 'status', 'account_mode',
+    ].join(',');
+    const r = await fetch(
+      `https://graph.facebook.com/${graphVersion}/${phoneNumberId}?fields=${fields}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const body = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: (body && body.error && body.error.message) || 'Graph rejected the request', graph: body });
+    res.json({ channel, phoneNumberId, graph: body });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 function waPhoneNumberId(channel) {
   return channel === "sales"
     ? process.env.WHATSAPP_SALES_PHONE_NUMBER_ID || null
