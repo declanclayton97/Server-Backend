@@ -3391,7 +3391,31 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       }
     }
 
-    const report = { supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold, decision, reason, workingDaysWaited: newWaitDays, placement };
+    // ── REPORT WHAT WAS ORDERED, NOT WHAT WAS GATHERED ──────────────────────────────────────────
+    // netValue/units describe the demand this run GATHERED. When the run fills a PO that already
+    // held rows, that is not what goes to the supplier — the placement sends the whole PO.
+    //
+    // Snickers PO 489448 on 2026-09-15: the reorder lane subtracts on-order from need, so the 27
+    // units already sitting on the pending PO suppressed themselves and the gather saw 4 units
+    // (£179.13). The order placed was 31 units, £1,619.88 net, and Hultafors charged £1,671.64 —
+    // while the report emailed "£179.13 ex-VAT (4 units)" directly above the order number. Anyone
+    // reconciling that against the invoice is out by a factor of nine.
+    //
+    // Read the PO back and say what it actually contains. Best-effort: a failure here must never
+    // turn a placed order into a failed run, so it degrades to the gathered figures as before.
+    let ordered = null;
+    if (placement && placement.poId && !dryRun) {
+      try {
+        const rows = await bp.getOrderCartLines(placement.poId);
+        ordered = {
+          poId: placement.poId,
+          lines: rows.length,
+          units: rows.reduce((a, l) => a + (Number(l.qty) || 0), 0),
+          net: Number(rows.reduce((a, l) => a + (Number(l.qty) || 0) * (Number(l.cost) || 0), 0).toFixed(2)),
+        };
+      } catch (e) { ordered = { poId: placement.poId, unreadable: e.message }; }
+    }
+    const report = { supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold, decision, reason, workingDaysWaited: newWaitDays, placement, ordered };
     if (!dryRun) await saveState(pool, { id: cfg.stateId, workingDaysWaited: newWaitDays, lastRunDate: uk.date, result: report });
     if (notify) await sendReportEmail(report).catch(() => {});
     return report;
@@ -3810,6 +3834,14 @@ async function sendReportEmail(report) {
        <ul>
          <li>Demand value: <strong>£${report.netValue}</strong> ex-VAT (${report.units} units), threshold £${report.threshold}</li>
          <li>Decision: <strong>${report.decision}</strong></li>
+         ${report.ordered && report.ordered.net != null
+           ? `<li><strong>Actually ordered: £${report.ordered.net} ex-VAT (${report.ordered.units} units over ${report.ordered.lines} lines)</strong>`
+             + (Number(report.ordered.net) !== Number(report.netValue)
+               ? ` — this differs from the demand value above because the order filled PO ${report.ordered.poId}, which already held rows. <em>This figure is the one to reconcile against the invoice.</em>`
+               : '')
+             + `</li>`
+           : ''}
+         ${report.ordered && report.ordered.unreadable ? `<li>Could not read PO ${report.ordered.poId} back to confirm what was ordered: ${report.ordered.unreadable}</li>` : ''}
          ${placedLine}
          ${!p && report.workingDaysWaited ? `<li>Working days waited: ${report.workingDaysWaited} of ${MAX_WAIT_WORKING_DAYS}</li>` : ''}
        </ul>`;
