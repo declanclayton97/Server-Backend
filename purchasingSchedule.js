@@ -3403,15 +3403,29 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     //
     // Read the PO back and say what it actually contains. Best-effort: a failure here must never
     // turn a placed order into a failed run, so it degrades to the gathered figures as before.
+    // getOrderCartLines DISCARDS the row cost — it exists to build supplier baskets, which only
+    // need sku/size/qty. Summing a field it never returns gives £0.00, and a confident "Actually
+    // ordered: £0.00" is worse than the wrong-but-plausible number this set out to replace. Read
+    // the order itself and take itemCost, the same field getPoContributors uses.
+    //
+    // net stays NULL unless every orderable row carries a cost. A partial sum understates the
+    // order, and understating what was committed is the failure being fixed here, not a lesser one.
     let ordered = null;
     if (placement && placement.poId && !dryRun) {
       try {
-        const rows = await bp.getOrderCartLines(placement.poId);
+        const o = (await bp.bpLiveGet(`/order-service/order/${placement.poId}`))[0];
+        const rows = Object.values((o && o.orderRows) || {}).filter((r) => String(r.productId) !== '1000');
+        let net = 0, costed = 0;
+        for (const r of rows) {
+          const qty = parseFloat(r.quantity && r.quantity.magnitude) || 0;
+          const cost = r.itemCost ? parseFloat(r.itemCost.value) : NaN;
+          if (Number.isFinite(cost)) { net += qty * cost; costed++; }
+        }
         ordered = {
           poId: placement.poId,
           lines: rows.length,
-          units: rows.reduce((a, l) => a + (Number(l.qty) || 0), 0),
-          net: Number(rows.reduce((a, l) => a + (Number(l.qty) || 0) * (Number(l.cost) || 0), 0).toFixed(2)),
+          units: rows.reduce((a, r) => a + (parseFloat(r.quantity && r.quantity.magnitude) || 0), 0),
+          net: costed === rows.length && rows.length ? Number(net.toFixed(2)) : null,
         };
       } catch (e) { ordered = { poId: placement.poId, unreadable: e.message }; }
     }
@@ -3834,11 +3848,13 @@ async function sendReportEmail(report) {
        <ul>
          <li>Demand value: <strong>£${report.netValue}</strong> ex-VAT (${report.units} units), threshold £${report.threshold}</li>
          <li>Decision: <strong>${report.decision}</strong></li>
-         ${report.ordered && report.ordered.net != null
-           ? `<li><strong>Actually ordered: £${report.ordered.net} ex-VAT (${report.ordered.units} units over ${report.ordered.lines} lines)</strong>`
-             + (Number(report.ordered.net) !== Number(report.netValue)
-               ? ` — this differs from the demand value above because the order filled PO ${report.ordered.poId}, which already held rows. <em>This figure is the one to reconcile against the invoice.</em>`
-               : '')
+         ${report.ordered && report.ordered.lines
+           ? `<li><strong>Actually ordered: ${report.ordered.net != null ? `£${report.ordered.net} ex-VAT ` : ''}(${report.ordered.units} units over ${report.ordered.lines} lines)</strong>`
+             + (report.ordered.net == null
+               ? ` on PO ${report.ordered.poId} — value not shown because at least one row carries no cost, so any total would understate the order.`
+               : Number(report.ordered.net) !== Number(report.netValue)
+                 ? ` — this differs from the demand value above because the order filled PO ${report.ordered.poId}, which already held rows. <em>This figure is the one to reconcile against the invoice.</em>`
+                 : '')
              + `</li>`
            : ''}
          ${report.ordered && report.ordered.unreadable ? `<li>Could not read PO ${report.ordered.poId} back to confirm what was ordered: ${report.ordered.unreadable}</li>` : ''}
