@@ -12299,7 +12299,22 @@ app.post("/api/whatsapp/send-template", async (req, res) => {
   if (wantsQuote && !Number(quoteOrderId)) {
     return res.status(400).json({ error: `Template "${name}" has a document header — send it from a quote so the PDF can be attached` });
   }
-  if (tpl.headerHasParam || (tpl.headerFormat && tpl.headerFormat !== "TEXT" && !wantsQuote)) {
+  // A TEXT header CAN carry one variable, and now does: order_update is
+  // "Hi {{1}}, there's a problem or we have an update on your order" with a
+  // headline above it. Meta allows exactly one variable in a text header.
+  // Anything else with a parameter (an IMAGE or VIDEO header) is still refused,
+  // because there is nothing sensible to fill it with from here.
+  const wantsHeaderText = tpl.headerFormat === "TEXT" && tpl.headerHasParam;
+  const headerParams = Array.isArray((req.body || {}).headerParams)
+    ? (req.body || {}).headerParams.map((v) => (v == null ? "" : String(v)).trim())
+    : [];
+  if (wantsHeaderText && (headerParams.length !== 1 || !headerParams[0])) {
+    return res.status(400).json({ error: `Template "${name}" has a text header variable — pass headerParams: ["..."]` });
+  }
+  if (!wantsHeaderText && tpl.headerHasParam) {
+    return res.status(400).json({ error: `Template "${name}" needs a header variable/media, which this send does not support` });
+  }
+  if (tpl.headerFormat && tpl.headerFormat !== "TEXT" && !wantsQuote) {
     return res.status(400).json({ error: `Template "${name}" needs a header variable/media, which this send does not support` });
   }
   const params = Array.isArray(bodyParams) ? bodyParams.map((v) => (v == null ? "" : String(v)).trim()) : [];
@@ -12314,6 +12329,14 @@ app.post("/api/whatsapp/send-template", async (req, res) => {
   const components = clean.length
     ? [{ type: "body", parameters: clean.map((text) => ({ type: "text", text })) }]
     : [];
+  if (wantsHeaderText) {
+    // Same sanitising as the body: WhatsApp rejects newlines, tabs and runs of
+    // spaces inside any variable, header included.
+    components.unshift({
+      type: "header",
+      parameters: [{ type: "text", text: headerParams[0].replace(/\s+/g, " ").slice(0, 60) }],
+    });
+  }
   let quoteMediaId = null, quoteFilename = null;
   try {
     if (wantsQuote) {
