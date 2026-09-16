@@ -8,6 +8,7 @@ import {
   datesMentioned,
   dateKeys,
   notesSince,
+  lastContact,
   classifyNote,
   assessDuplication,
   etaSentence,
@@ -159,6 +160,32 @@ assertTrue("quotes the colleague", clash.reasons[0].text.includes("Sarah"));
 
 // Nothing since the email at all.
 assertEq("quiet order -> ok", assessDuplication({ notes: [notes[0]], emailDate: emailMon, proposedDates: dateKeys("25 September") }).level, "ok");
+
+// NO EMAIL DATE: must NOT read as a clean bill of health. "ok" means we looked
+// and found nothing; saying that when we never looked is the one lie this
+// module must not tell.
+const noDate = assessDuplication({ notes, emailDate: null, proposedDates: dateKeys("25 September") });
+assertEq("no email date -> unknown, not ok", noDate.level, "unknown");
+assertTrue("explains why the check is off", noDate.reasons.some(r => r.kind === "no_email_date"));
+// The one fact that lets a salesperson decide for themselves: when this
+// customer was last actually spoken to, and what was said.
+assertTrue("names when they were last contacted", /Wednesday 16 September/.test(noDate.reasons[0].text));
+assertTrue("names who", /Sarah/.test(noDate.reasons[0].text));
+assertTrue("quotes what was said", noDate.reasons[0].text.includes("gave ETA 25/09"));
+assertTrue("tells them how to use it", /older than that/.test(noDate.reasons[0].text));
+const noDateQuiet = assessDuplication({ notes: [], emailDate: null, proposedDates: [] });
+assertTrue("says so when there is nothing to worry about either",
+  /Nobody has contacted this customer/.test(noDateQuiet.reasons[0].text));
+// lastContact ignores machine notes entirely.
+assertEq("lastContact skips auto-PO chatter",
+  lastContact([{addedOn:"2026-09-20T10:00:00Z",text:"Auto-PO for CHADWICK. Order demand from: SO#1"},
+               {addedOn:"2026-09-18T10:00:00Z",text:"Rang customer, gave ETA 25/09",addedBy:"Sarah"}]).text,
+  "Rang customer, gave ETA 25/09");
+assertEq("lastContact on a silent order is null", lastContact([]), null);
+// A blocked line still blocks even with no date - that check needs no date.
+assertEq("no date but a blocked line + a date still blocks",
+  assessDuplication({ notes: [], emailDate: null, proposedDates: dateKeys("25 September"),
+    blockedLines: [{ sku: "X" }] }).level, "blocked");
 
 // Contact since, but no date in it - still worth a look.
 const vague = assessDuplication({

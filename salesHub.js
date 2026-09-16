@@ -241,6 +241,28 @@ export function classifyNote(note) {
 export const isContactNote = (n) => classifyNote(n) !== "system";
 
 /**
+ * The most recent note that represents real contact with this customer.
+ *
+ * This is the single most useful fact on the whole page when we do not know the
+ * email's date: the salesperson is looking at their email and can see its date,
+ * so "last contact was Wednesday 14:32, Sarah gave an ETA" is all they need to
+ * work out whether their reply is already stale.
+ */
+export function lastContact(notes) {
+  return (notes || [])
+    .filter(isContactNote)
+    .map((n) => ({ ...n, _t: new Date(n.addedOn).getTime() }))
+    .filter((n) => !isNaN(n._t))
+    .sort((a, b) => b._t - a._t)[0] || null;
+}
+
+// Notes run long (a pasted email thread can be pages). Keep the gist.
+function summarise(text, max = 120) {
+  const t = String(text || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max - 1) + "…" : t;
+}
+
+/**
  * Notes newer than the email we are answering - the ones that can make our
  * reply redundant or wrong.
  *
@@ -267,6 +289,10 @@ export function notesSince(notes, emailDate, opts = {}) {
  *
  * Returns { level, reasons[], laterNotes[] } where level is:
  *   "ok"      - nothing has happened since; send normally.
+ *   "unknown" - we do not know WHEN the email was sent, so the whole check is
+ *               inert. Distinct from "ok" on purpose: "ok" means we looked and
+ *               found nothing, and showing that when we never looked is the
+ *               one lie this module must not tell.
  *   "warn"    - they have been contacted since, but we are not contradicting
  *               anything. Soften the wording ("further to your call...").
  *   "blocked" - we are about to give a DIFFERENT date to one already promised,
@@ -276,7 +302,25 @@ export function notesSince(notes, emailDate, opts = {}) {
 export function assessDuplication({ notes, emailDate, proposedDates = [], blockedLines = [], automatedEmails = [] }) {
   const laterNotes = notesSince(notes, emailDate);
   const reasons = [];
-  let level = "ok";
+  let level = emailDate ? "ok" : "unknown";
+
+  if (!emailDate) {
+    // Without a date we cannot compare anything - but the salesperson has the
+    // email open in front of them, so give them the ONE fact that lets them
+    // decide in a second: when this customer was last actually spoken to, and
+    // what was said. They can see their own email's date; they cannot see this.
+    const last = lastContact(notes);
+    reasons.push({
+      kind: "no_email_date",
+      text: last
+        ? `Last contact with this customer was ${formatWhen(last.addedOn)}` +
+          (last.addedBy ? ` by ${last.addedBy}` : "") + `: "${summarise(last.text)}". ` +
+          `If your email is older than that, they have already been answered.`
+        : "Nobody has contacted this customer about this order yet, so there is " +
+          "nothing to repeat whenever the email was sent.",
+      note: last || undefined,
+    });
+  }
 
   const bump = (to) => {
     if (to === "blocked") level = "blocked";

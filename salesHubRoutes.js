@@ -13,6 +13,7 @@ import {
   extractSentDate,
   notesSince,
   classifyNote,
+  lastContact,
   assessDuplication,
   buildSalesReply,
   buildSalesNote,
@@ -196,6 +197,11 @@ export function registerSalesHubRoutes(app, deps) {
       blockedLines,
       automatedEmails,
       timeline,
+      // The last time anyone actually spoke to this customer, machine notes
+      // excluded. Shown on the page whether or not we know the email's date:
+      // the salesperson can see their own email's date, so this one line tells
+      // them whether their reply is already stale.
+      lastContact: lastContact(timeline),
     };
   }
 
