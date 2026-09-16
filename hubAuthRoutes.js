@@ -66,6 +66,29 @@ export function registerHubAuthRoutes(app, deps) {
   // Exposed so other routes can stamp "who did this" without re-implementing it.
   app.locals.hubUserFromToken = userFromToken;
 
+  /**
+   * Express middleware: refuse unless a real hub session is presented.
+   *
+   * Used on the routes only the Sales Hub calls. It is NOT applied to the older
+   * shared endpoints — the React app and the purchasing hub call those and have
+   * no session — which is why the WhatsApp routes gate on channel=sales instead
+   * of blanket-refusing.
+   *
+   * Fails closed: if the database is down we cannot tell who this is, and the
+   * right answer to "I do not know who you are" is no.
+   */
+  app.locals.requireHubUser = async function requireHubUser(req, res, next) {
+    try {
+      const u = await userFromToken(req);
+      if (!u) return res.status(401).json({ error: "Sign in to the Sales Hub first" });
+      req.hubUser = u;
+      next();
+    } catch (e) {
+      console.error("[hub-auth] session check failed:", e.message);
+      res.status(503).json({ error: "Could not verify your sign-in" });
+    }
+  };
+
   async function issueSession(key) {
     const token = newSessionToken();
     await getPool().query(
@@ -90,10 +113,32 @@ export function registerHubAuthRoutes(app, deps) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // Tells the sign-in screen whether it may offer "create an account" at all,
+  // so somebody without the code is not invited to fill in a form that cannot
+  // succeed.
+  app.get("/api/hub/signup-open", (req, res) => {
+    res.json({ open: !!process.env.HUB_SIGNUP_CODE });
+  });
+
   // First time someone opens the hub.
   app.post("/api/hub/register", async (req, res) => {
     if (!needDb(res)) return;
     const b = req.body || {};
+
+    // Registration needs the shared code. FAIL CLOSED: with no HUB_SIGNUP_CODE
+    // set, nobody can register at all. That is deliberate — this hub will soon
+    // read a mailbox and send as sales@, and "anyone with the link can make an
+    // account" stops being acceptable the moment that is true.
+    const code = process.env.HUB_SIGNUP_CODE;
+    if (!code) {
+      return res.status(503).json({
+        error: "Sign-up is closed. Set HUB_SIGNUP_CODE on the backend to let new people register.",
+      });
+    }
+    if (String(b.authCode || "").trim() !== code) {
+      return res.status(403).json({ error: "That sign-up code is not right. Ask whoever sent you the link." });
+    }
+
     const n = validateName(b.name);
     if (!n.ok) return res.status(400).json({ error: n.error });
     const p = validatePassword(b.password);
@@ -154,6 +199,27 @@ export function registerHubAuthRoutes(app, deps) {
         await getPool().query(`DELETE FROM hub_sessions WHERE token_hash = $1`, [hashToken(token)]);
       }
       res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Remove an account entirely — somebody who has left, or a test row.
+  // Admin-gated for the same reason as the password reset: there is no identity
+  // check here beyond a name, so anyone could otherwise delete anyone.
+  app.post("/api/hub/delete-user", async (req, res) => {
+    if (!needDb(res)) return;
+    const b = req.body || {};
+    const admin = process.env.HUB_ADMIN_KEY;
+    if (!admin) return res.status(503).json({ error: "Set HUB_ADMIN_KEY on the backend to remove accounts" });
+    if (String(b.adminKey || "") !== admin) return res.status(403).json({ error: "Wrong admin key" });
+    const key = nameKey(b.name);
+    if (!key) return res.status(400).json({ error: "Which name?" });
+    try {
+      await ensureTables();
+      // Sessions go with them (the foreign key cascades, but be explicit).
+      await getPool().query(`DELETE FROM hub_sessions WHERE name_key = $1`, [key]);
+      const r = await getPool().query(`DELETE FROM hub_users WHERE name_key = $1`, [key]);
+      if (!r.rowCount) return res.status(404).json({ error: "No account with that name" });
+      res.json({ success: true, removed: b.name });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

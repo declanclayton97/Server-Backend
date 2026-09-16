@@ -25,6 +25,10 @@ import {
 const num = (v) => (v == null || v === "" || isNaN(Number(v)) ? null : Number(v));
 
 export function registerSalesHubRoutes(app, deps) {
+  // Only the Sales Hub page calls these routes, so they can require a signed-in
+  // person outright — unlike the older shared endpoints, which the React app and
+  // the purchasing hub also call. Registered by hubAuthRoutes, which mounts first.
+  const requireUser = (req, res, next) => app.locals.requireHubUser(req, res, next);
   const { bpLive, postBpOrderNote, useDatabase, resolveSalesperson } = deps;
   // Read the pool at CALL time, not registration time. server.js declares it
   // with `let` and assigns it separately; destructuring it here would capture
@@ -323,7 +327,7 @@ export function registerSalesHubRoutes(app, deps) {
 
   // POST /api/sales-hub/lookup  { query, emailDate? }
   // `query` is either a bare order number or a whole pasted email.
-  app.post("/api/sales-hub/lookup", async (req, res) => {
+  app.post("/api/sales-hub/lookup", requireUser, async (req, res) => {
     try {
       const raw = String((req.body && req.body.query) || "").trim();
       if (!raw) return res.status(400).json({ error: "Nothing to look up" });
@@ -378,7 +382,7 @@ export function registerSalesHubRoutes(app, deps) {
   });
 
   // POST /api/sales-hub/draft  { orderId, intent, emailDate }
-  app.post("/api/sales-hub/draft", async (req, res) => {
+  app.post("/api/sales-hub/draft", requireUser, async (req, res) => {
     try {
       const orderId = num(req.body && req.body.orderId);
       if (!orderId) return res.status(400).json({ error: "orderId required" });
@@ -398,8 +402,9 @@ export function registerSalesHubRoutes(app, deps) {
         intent, order, po,
         blockedLines: order.blockedLines,
         salesperson: order.salesperson,
-        // Whoever is signed into the hub, not whoever raised the order.
-        signedBy: (req.body && req.body.sentBy) || "",
+        // The SESSION says who this is; the body is only a fallback for a
+        // draft requested before sign-in existed.
+        signedBy: (req.hubUser && req.hubUser.name) || (req.body && req.body.sentBy) || "",
       });
 
       const assessment = assessDuplication({
@@ -423,7 +428,7 @@ export function registerSalesHubRoutes(app, deps) {
   // Always called from a human pressing Send on a draft they have read. The
   // acknowledgedLevel is what the page showed them, so overriding a warning is
   // recorded on the order rather than lost.
-  app.post("/api/sales-hub/send", async (req, res) => {
+  app.post("/api/sales-hub/send", requireUser, async (req, res) => {
     const b = req.body || {};
     try {
       const orderId = num(b.orderId);
@@ -452,7 +457,8 @@ export function registerSalesHubRoutes(app, deps) {
         auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
       });
 
-      const fromName = String(b.sentBy || "").trim() || salesperson.name || "Tuffshop Sales";
+      const who = (req.hubUser && req.hubUser.name) || "";
+      const fromName = who || String(b.sentBy || "").trim() || salesperson.name || "Tuffshop Sales";
       const fromAddress = process.env.SALES_SENDER_EMAIL || process.env.SENDER_EMAIL || "sales@tuffshop.co.uk";
 
       await transporter.sendMail({
@@ -468,7 +474,7 @@ export function registerSalesHubRoutes(app, deps) {
       const note = buildSalesNote({
         intent: b.intent || "eta",
         to, subject,
-        sentBy: b.sentBy || salesperson.name || "",
+        sentBy: who || b.sentBy || salesperson.name || "",
         proposedDates: Array.isArray(b.proposedDates) ? b.proposedDates : dateKeys(html),
         duplicationLevel: b.acknowledgedLevel,
       });
@@ -486,7 +492,7 @@ export function registerSalesHubRoutes(app, deps) {
   });
 
   // GET /api/sales-hub/notes/:orderId?since=ISO — the timeline panel on its own.
-  app.get("/api/sales-hub/notes/:orderId", async (req, res) => {
+  app.get("/api/sales-hub/notes/:orderId", requireUser, async (req, res) => {
     try {
       const order = await gatherOrder(req.params.orderId);
       if (!order) return res.status(404).json({ error: "Order not found" });

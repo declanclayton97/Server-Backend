@@ -11252,6 +11252,26 @@ async function fetchBrightpearlParties(orderId) {
 // ---------------------------------------------------------------------------
 const WA_CHANNELS = ["proof", "sales"];
 
+/**
+ * Guard the SALES channel behind a Sales Hub sign-in, and leave proof alone.
+ *
+ * These endpoints are shared: the React app (src/WhatsAppInbox.js, App.js) uses
+ * them for proofing and has no hub session, so a blanket requirement would
+ * break it. But the React app never passes a channel — it defaults to proof —
+ * which makes the channel a clean dividing line.
+ *
+ * So: reading or sending on the SALES number needs a signed-in salesperson;
+ * everything proofing does is untouched.
+ */
+async function requireHubForSales(req, res, next) {
+  const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
+  if (channel !== "sales") return next();
+  const check = app.locals.requireHubUser;
+  // If auth is not mounted (no database), refuse rather than fall open.
+  if (!check) return res.status(503).json({ error: "Sales Hub sign-in is unavailable" });
+  return check(req, res, next);
+}
+
 // GET /api/whatsapp/number-status?channel=sales
 //
 // What META thinks of our number, as opposed to what our env vars say. The
@@ -12127,7 +12147,7 @@ ${SIGNATURE_TEXT || ''}`;
 // Free-text reply from staff. `channel` picks which of our numbers sends it
 // (default proof, so the proof inbox is unchanged); the 24h window is checked
 // on that same number.
-app.post("/api/whatsapp/send-message", async (req, res) => {
+app.post("/api/whatsapp/send-message", requireHubForSales, async (req, res) => {
   const token = process.env.WHATSAPP_TOKEN;
   const channel = waChannelParam((req.body || {}).channel);
   const phoneNumberId = waPhoneNumberId(channel);
@@ -12271,7 +12291,7 @@ async function whatsAppUploadPdf(channel, buf, filename) {
 // templates with plain text BODY variables (and no header variable) are
 // supported; the body is rendered server-side so the chat log shows what
 // the customer actually received, not "[template]".
-app.post("/api/whatsapp/send-template", async (req, res) => {
+app.post("/api/whatsapp/send-template", requireHubForSales, async (req, res) => {
   const token = process.env.WHATSAPP_TOKEN;
   const channel = waChannelParam((req.body || {}).channel);
   const phoneNumberId = waPhoneNumberId(channel);
@@ -12471,7 +12491,7 @@ app.post("/api/whatsapp/send-image", async (req, res) => {
 // record it with the returned media id so the chat shows a "📎 Open document"
 // link via the media proxy.
 const WA_SEND_DOC_TYPES = ["application/pdf"];
-app.post("/api/whatsapp/send-document", async (req, res) => {
+app.post("/api/whatsapp/send-document", requireHubForSales, async (req, res) => {
   const token = process.env.WHATSAPP_TOKEN;
   const channel = waChannelParam((req.body || {}).channel);
   const phoneNumberId = waPhoneNumberId(channel);
@@ -12570,7 +12590,7 @@ app.post("/api/whatsapp/send-document", async (req, res) => {
 // Conversation list for ONE channel (?channel=proof|sales, default proof).
 // Grouping is per channel too: the same customer on both numbers is two
 // separate conversations, which is the whole point.
-app.get("/api/whatsapp/conversations", async (req, res) => {
+app.get("/api/whatsapp/conversations", requireHubForSales, async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
   const channel = waChannelParam(req.query.channel);
   // Interpolated into the HAVING below, never into a value position — it is a
@@ -12673,7 +12693,7 @@ app.get("/api/whatsapp/media/:mediaId", async (req, res) => {
 });
 
 // Full message thread for one customer number.
-app.get("/api/whatsapp/conversations/:phone/messages", async (req, res) => {
+app.get("/api/whatsapp/conversations/:phone/messages", requireHubForSales, async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
   const channel = waChannelParam(req.query.channel);
   try {
@@ -12695,7 +12715,7 @@ app.get("/api/whatsapp/conversations/:phone/messages", async (req, res) => {
 });
 
 // Mark all inbound messages from a customer as read.
-app.post("/api/whatsapp/conversations/:phone/read", async (req, res) => {
+app.post("/api/whatsapp/conversations/:phone/read", requireHubForSales, async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
   const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
   try {
@@ -12715,7 +12735,7 @@ app.post("/api/whatsapp/conversations/:phone/read", async (req, res) => {
 // Dismiss a conversation — stamps every current row for the peer so it
 // drops out of the conversation list (and the Unmatched panel). A later
 // inbound message has dismissed_at NULL, so the conversation resurfaces.
-app.post("/api/whatsapp/conversations/:phone/dismiss", async (req, res) => {
+app.post("/api/whatsapp/conversations/:phone/dismiss", requireHubForSales, async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
   const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
   try {
@@ -12737,7 +12757,7 @@ app.post("/api/whatsapp/conversations/:phone/dismiss", async (req, res) => {
 // Dismissing was one-way, which is fine for a proof chat you are finished with
 // and wrong for an archive — archiving something you cannot get back is just
 // deleting it with extra steps.
-app.post("/api/whatsapp/conversations/:phone/restore", async (req, res) => {
+app.post("/api/whatsapp/conversations/:phone/restore", requireHubForSales, async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
   const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
   try {
@@ -12760,7 +12780,7 @@ app.post("/api/whatsapp/conversations/:phone/restore", async (req, res) => {
 // read_at on every inbound would put a badge of 47 on a long conversation,
 // when what the person meant was "there is something here to come back to".
 // WhatsApp shows a plain dot for this; one is the closest honest count.
-app.post("/api/whatsapp/conversations/:phone/unread", async (req, res) => {
+app.post("/api/whatsapp/conversations/:phone/unread", requireHubForSales, async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
   const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
   try {
@@ -14601,7 +14621,9 @@ app.post('/api/quote-chase/stop', async (req, res) => {
 
 // Dashboard feed: everything currently in "Quote sent", backlog included so the
 // quotes deliberately not being chased are still visible to work manually.
-app.get('/api/quote-chase/list', async (req, res) => {
+// Only the Sales Hub page reads this, and it is the whole quote pipeline with
+// customer names and values in it — so it needs a signed-in person.
+app.get('/api/quote-chase/list', (req, res, next) => app.locals.requireHubUser(req, res, next), async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
   try {
     const q = await pool.query(
