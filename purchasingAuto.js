@@ -108,7 +108,15 @@ export const SUPPLIERS = {
   // 483239 — which is why that PO looked like it had no costs at all — and where it did exist it
   // matched Launch exactly. Sampled before the switch: Snickers and Blaklader identical on both,
   // Portwest DX411BKRS 6.95→7.50, Uneek 25599/25672/25670 2.90→2.70 and 27777 12.00→11.50.
-  SNICKERS:     { contactId: 331,   costList: 20, poField: 'PCF_SNICKPO', detect: (n) => /snickers|solid\s*gear|hellberg|toe\s*guard|hultafors|\bemma\b|\bclc\b/i.test(n || '') },
+  // HELLBERG IS NOT ORDERED HERE ANY MORE (2026-09-16). It clears customs separately and takes about
+  // two weeks, so a single Hellberg line on a Snickers order holds up everything else on it. It goes
+  // on its own PO now, emailed rather than placed through the portal.
+  //
+  // `excludeIf` is a HARD veto rather than just dropping "hellberg" from the detect below, because
+  // the detect is not the only route in: these products carry Hultafors-shaped codes (41502-001) and
+  // Brightpearl still lists Snickers as their primary supplier, so supplierOwned would claim them
+  // anyway. Both are removed — the name no longer matches, and the veto catches the rest.
+  SNICKERS:     { contactId: 331,   costList: 20, poField: 'PCF_SNICKPO', excludeIf: (n) => /hellberg/i.test(n || ''), detect: (n) => /snickers|solid\s*gear|toe\s*guard|hultafors|\bemma\b|\bclc\b/i.test(n || '') },
   BLAKLADER:    { contactId: 323,   costList: 20, poField: 'PCF_BLAKLPO', detect: (n) => /bl[åa]kl[äa]der/i.test(n || '') },
   PORTWEST:     { contactId: 298,   costList: 20, poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') }, // low-inv ON (min-stock data sorted 2026-08-14): SO demand + reorder
   // The 20 "HI VIS WAISTCOAT" products are Uneek UC801 (user, 2026-08-19) but sit under Future
@@ -1322,8 +1330,9 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // Opt-in per supplier. OWN-BRAND suppliers (Chadwick) set it; DISTRIBUTORS (PenCarrie) must not.
     const brandNeedsOwnSupplier = !!(SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].brandNeedsOwnSupplier);
     const notOurs = (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].notOurs) || null;
+    const excludeIf = (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].excludeIf) || null;
     const belongsHere = (r) => belongsToSupplier(String(r.productId), {
-      sku: r.productSku, nameDetect: !!detect(r.productName, r.productSku), supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier, notOurs,
+      sku: r.productSku, name: r.productName, nameDetect: !!detect(r.productName, r.productSku), supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier, notOurs, excludeIf,
     });
     let candidateRows = (singleSupplier && !hasBrandDetect)
       ? orderableRows
@@ -1335,8 +1344,15 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       const kept = new Set(candidateRows.map(([rowId]) => String(rowId)));
       for (const [rowId, r] of orderableRows) {
         const pid = String(r.productId);
-        if (kept.has(String(rowId)) || !brandOwned.has(pid)) continue;   // kept, or never a brand-only row
-        const why = (brandNeedsOwnSupplier && foreignSupplier.has(pid))
+        // excludeIf lines are recorded even though they are not brand-only — a line held back on
+        // purpose is still one a human asked for and will not see on the PO, which is the whole
+        // reason this audit exists.
+        const vetoed = !!(excludeIf && excludeIf(String(r.productName || ''), String(r.productSku || '')));
+        if (!vetoed && (kept.has(String(rowId)) || !brandOwned.has(pid))) continue;  // kept, or never a brand-only row
+        if (vetoed && kept.has(String(rowId))) continue;
+        const why = vetoed
+          ? `it is held back from ${supplierKey} deliberately — it goes on its own order`
+          : (brandNeedsOwnSupplier && foreignSupplier.has(pid))
           ? `Brightpearl names supplier ${foreignSupplier.get(pid)} as its primary`
           : (notOurs && notOurs.test(String(r.productSku || '')) ? `its SKU is another supplier's code shape` : null);
         if (!why) continue;                                             // dropped by something else
@@ -1600,8 +1616,14 @@ async function writeDemandLog(pool, poId, supplierKey, demandAudit) {
 // The three stronger signals win outright either way: our own name/code detect, BP naming THIS
 // supplier, and claimProductIds — which exists precisely for products BP attributes elsewhere that
 // we do buy here, so a wrong attribution stays correctable without weakening this rule.
-export function belongsToSupplier(pid, { sku, nameDetect, supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier = false, notOurs = null }) {
+export function belongsToSupplier(pid, { sku, name, nameDetect, supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier = false, notOurs = null, excludeIf = null }) {
   const k = String(pid);
+  // A HARD veto, before any of the claims below. `notOurs` cannot do this job: it reads the SKU
+  // only, and it is consulted in the brand-only branch, so it can never overrule a name match or a
+  // Brightpearl supplier attribution. Hellberg needs exactly that — the products carry
+  // Hultafors-shaped codes (41502-001) and BP still lists Snickers as their supplier, so nothing
+  // weaker would keep them off the Snickers order.
+  if (excludeIf && excludeIf(String(name || ''), String(sku || ''))) return false;
   if (nameDetect) return true;
   if (supplierOwned.has(k)) return true;
   if (claimed.has(k)) return true;

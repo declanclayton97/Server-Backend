@@ -1450,6 +1450,25 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
 
   if (!blocking.length) {
     if (!resolved.length) throw stepErr('resolve', `no Performance Brands lines could be resolved — PO#${poId} left for review`, { poId, failed: failedLines });
+    // ── PACK MINIMUMS ───────────────────────────────────────────────────────────────────────────
+    // Performance Brands sell some lines in fixed multiples only. Unlike Hultafors they REFUSE the
+    // line and say why ("supplier minimum is 20 (in steps of 20), this line wants 5") rather than
+    // dropping it in silence — but a refused line still fails the basket check and strands the
+    // whole order, which is what PO 489405 did on 2026-09-16 over two helmet lines.
+    //
+    // Round UP to the multiple, exactly as the Snickers path does. Ordering 20 of something we
+    // wanted 5 of is a stock decision; leaving seven other lines unordered is not one at all.
+    const pbPacks = performanceBrandsPackMultiples();
+    const packApplied = [];
+    for (const l of resolved) {
+      const p = Number(pbPacks[String(l.sku).toUpperCase()]);
+      if (p > 1 && l.qty % p !== 0) {
+        const q = Math.ceil(l.qty / p) * p;
+        packApplied.push({ sku: l.sku, demand: l.qty, ordered: q, packOf: p });
+        l.qty = q;
+      }
+    }
+    if (packApplied.length) steps.packRounding = packApplied;
     const wr = await workerPlaceOrder({
       supplier: 'PERFORMANCE BRANDS', ref: poId, execute: live,
       lines: resolved.map((l) => ({ sku: l.sku, url: l.url, pid: l.pid, qty: l.qty })),
@@ -1829,6 +1848,24 @@ const SNICKERS_PACK_MULTIPLES = {
   // The DROP IS SILENT, so every pack-only code has to be listed here before it bites. Extend
   // without a deploy via SNICKERS_PACK_MULTIPLES='{"<code>":<n>}' on Render.
 };
+// PACK MINIMUMS — Performance Brands lines sold only in fixed multiples.
+// They REFUSE the line and name the rule, so unlike Hultafors these surface immediately rather than
+// vanishing — but a refusal still fails the basket check and strands every other line on the order.
+// Extend without a deploy via PERFORMANCE_BRANDS_PACK_MULTIPLES='{"<sku>":<n>}' on Render.
+const PERFORMANCE_BRANDS_PACK_MULTIPLES = {
+  'H1C-BLK': 20,   // Y Shield H1C DS3 slip-ratchet helmet, black — "supplier minimum is 20 (in steps of 20)"
+  'H1C-WHT': 20,   // …and white. PO 489405 (2026-09-16) asked for 5 and 9, both refused, and the
+  // seven other lines — including the PB1C boot that had already cost a day — went unordered with
+  // them. £330 of stock held over two lines nobody could have known were pack-only until it failed.
+};
+function performanceBrandsPackMultiples() {
+  let env = {};
+  try { env = JSON.parse(process.env.PERFORMANCE_BRANDS_PACK_MULTIPLES || '{}'); } catch { /* bad JSON → built-ins only, never blocks a run */ }
+  const out = {};
+  for (const [k, v] of Object.entries(PERFORMANCE_BRANDS_PACK_MULTIPLES)) out[String(k).toUpperCase()] = v;
+  for (const [k, v] of Object.entries(env)) { const n = Number(v); if (n > 1) out[String(k).toUpperCase()] = n; }
+  return out;
+}
 function snickersPackMultiples() {
   let env = {};
   try { env = JSON.parse(process.env.SNICKERS_PACK_MULTIPLES || '{}'); } catch { /* bad JSON → built-ins only, never blocks a run */ }
