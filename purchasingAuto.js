@@ -116,7 +116,11 @@ export const SUPPLIERS = {
   // the detect is not the only route in: these products carry Hultafors-shaped codes (41502-001) and
   // Brightpearl still lists Snickers as their primary supplier, so supplierOwned would claim them
   // anyway. Both are removed — the name no longer matches, and the veto catches the rest.
-  SNICKERS:     { contactId: 331,   costList: 20, poField: 'PCF_SNICKPO', excludeIf: (n) => /hellberg/i.test(n || ''), detect: (n) => /snickers|solid\s*gear|toe\s*guard|hultafors|\bemma\b|\bclc\b/i.test(n || '') },
+  // sharesContactWith cuts BOTH ways. Hellberg writes into PCF_SNICKPO on contact 331 too, so
+  // without this a Hellberg PO from the 15:20 run would tell the next morning's Snickers run that
+  // the order was already placed, and the SNICKERS lines would go unbought — the same silent skip,
+  // pointing the other way. Each lane now confirms the PO carries its own goods.
+  SNICKERS:     { contactId: 331,   costList: 20, poField: 'PCF_SNICKPO', sharesContactWith: 'HELLBERG', excludeIf: (n) => /hellberg/i.test(n || ''), detect: (n) => /snickers|solid\s*gear|toe\s*guard|hultafors|\bemma\b|\bclc\b/i.test(n || '') },
   BLAKLADER:    { contactId: 323,   costList: 20, poField: 'PCF_BLAKLPO', detect: (n) => /bl[åa]kl[äa]der/i.test(n || '') },
   PORTWEST:     { contactId: 298,   costList: 20, poField: 'PCF_PORTWPO', detect: (n) => /portwest/i.test(n || '') }, // low-inv ON (min-stock data sorted 2026-08-14): SO demand + reorder
   // The 20 "HI VIS WAISTCOAT" products are Uneek UC801 (user, 2026-08-19) but sit under Future
@@ -207,6 +211,16 @@ export const SUPPLIERS = {
   // Buckler Boots — email supplier, 641 products, all brand 149. PCF_BUCKPO is their own PO-number
   // field and already in use on orders raised by hand, so the automation writes the same one rather
   // than the shared PCF_STOCKPO.
+  // Split out of SNICKERS on 2026-09-16 — see the note on that entry. Same commercial supplier
+  // (contact 331, cost list 20), separated only because Hellberg clears customs on its own and
+  // takes about two weeks, which was delaying every other line it shared a PO with.
+  //
+  // It writes its PO number into PCF_SNICKPO alongside Snickers' own — one supplier, one box, which
+  // is how it reads on the order. That is only safe because of `sharesContactWith`: the dedupe guard
+  // matches on CONTACT id, and these two share 331, so a Snickers PO would otherwise answer "already
+  // ordered" for Hellberg and the whole order would be skipped in silence. With the flag set, the
+  // guard goes on to check the PO actually carries Hellberg goods. See poFieldHasSupplierPo.
+  HELLBERG: { contactId: 331, costList: 20, poField: 'PCF_SNICKPO', lowInvSupplierId: 331, sharesContactWith: 'SNICKERS', detect: (n) => /hellberg/i.test(n || '') },
   BUCKLER: { contactId: 8981, costList: 20, poField: 'PCF_BUCKPO', lowInvSupplierId: 8981, brandIds: [149], detect: (n) => /buckler|buckbootz/i.test(n || '') },
   // PULSAR UK (contact 11807, brand 168 "PULSAR®"). 1,130 live products; SKUs are code-colour-size
   // (P487-YEL-2XL). The registry entry only makes Pulsar RESOLVABLE — for tag routing, previews and
@@ -485,11 +499,40 @@ async function poSupplierContactId(poId, get) {
 }
 // "Does this SO already have a PO from THIS supplier?" — which is NOT the same question as "is the
 // field non-empty" once the field can carry several suppliers' numbers.
+// Does PO `poId` actually carry THIS supplier's goods? Only asked when two lanes share one contact,
+// where the contact id alone cannot tell their POs apart. Uses the same name detect the demand read
+// uses, so there is one definition of "a Hellberg line" rather than two that can drift.
+const _poGoodsCache = new Map();
+async function poCarriesSupplierGoods(poId, sup, get) {
+  const k = `${poId}|${sup.key || sup.contactId}`;
+  if (_poGoodsCache.has(k)) return _poGoodsCache.get(k);
+  let carries = false;
+  try {
+    const o = (await get('GET', `/order-service/order/${poId}`))[0];
+    const rows = Object.values((o && o.orderRows) || {});
+    carries = rows.some((r) => sup.detect && sup.detect(r.productName, r.productSku));
+  } catch {
+    // Unreadable → say YES, which SKIPS the order. Re-ordering something already bought is the
+    // worse failure of the two, and the run reports the skip rather than silently short-ordering.
+    carries = true;
+  }
+  _poGoodsCache.set(k, carries);
+  return carries;
+}
 async function poFieldHasSupplierPo(value, sup, get) {
   const nums = poNumbersOf(value);
   if (!nums.length) return false;
   if (!sup.contactId) return true; // can't tell whose it is — keep the old, cautious behaviour
-  for (const n of nums) if (await poSupplierContactId(n, get) === Number(sup.contactId)) return true;
+  for (const n of nums) {
+    if (await poSupplierContactId(n, get) !== Number(sup.contactId)) continue;
+    // The contact matches — but that is only conclusive while one contact means one lane.
+    // HELLBERG is bought from Snickers (contact 331) and was split out purely for customs, so it
+    // reads its own PO number out of PCF_SNICKPO alongside Snickers' own. Without the check below,
+    // the 10:00 Snickers PO would answer this question for Hellberg and the 15:20 run would skip
+    // the whole order — no error, nothing logged, the Hellberg lines simply never bought.
+    if (!sup.sharesContactWith) return true;
+    if (await poCarriesSupplierGoods(n, sup, get)) return true;
+  }
   return false;
 }
 // A PCF_SUPPLIER token may carry a trailing note in parens — e.g. "HELLY HANSEN (BACK ORDER)"

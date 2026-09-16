@@ -1211,6 +1211,25 @@ const EMAIL_SUPPLIER_CONFIG = {
     carriageNet: () => Number(process.env.V12_CARRIAGE_CHARGE || 6.95),
     freeOver: () => Number(process.env.V12_FREESHIP_THRESHOLD || 200),
   },
+  // ── HELLBERG ────────────────────────────────────────────────────────────────────────────────
+  // Split out of Snickers on 2026-09-16. Hellberg clears customs separately and takes about two
+  // weeks, so one Hellberg line on a Snickers portal order held up everything else on it. Its own
+  // PO now, EMAILED rather than placed through the Hultafors portal, at 15:20.
+  //
+  // It is the same supplier commercially — the PO goes to the Snickers order desk on contact 331 —
+  // so the address is read from Brightpearl at run time rather than written here. If it changes on
+  // the contact record, this follows it; there is no second copy to forget. PO_EMAIL_HELLBERG
+  // overrides when the desk ever differs.
+  //
+  // NO MINIMUM ORDER, hence no carriage and no free-delivery threshold: the run places whatever
+  // demand exists on the day rather than accumulating, which is the whole point of separating it.
+  HELLBERG: {
+    label: 'Hellberg', contactId: 331,
+    email: () => process.env.PO_EMAIL_HELLBERG || null,   // null → resolved from the BP contact below
+    emailFromSupplier: 'SNICKERS',
+    carriageNet: () => 0,
+    freeOver: () => 0,
+  },
   BUCKLER: {
     label: 'Buckler Boots', contactId: 8981,
     email: () => process.env.PO_EMAIL_BUCKLER || 'orders@bucklerboots.com',
@@ -1225,7 +1244,16 @@ const EMAIL_SUPPLIER_CONFIG = {
 async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const cfg = EMAIL_SUPPLIER_CONFIG[supplierKey];
   if (!cfg) throw stepErr('create-po', `no email-supplier config for ${supplierKey}`);
-  const to = cfg.email();
+  // A config may name ANOTHER supplier's order desk instead of carrying its own address — Hellberg
+  // is ordered from Snickers commercially and only separated for customs. Reading it from
+  // Brightpearl keeps one copy of the truth: change the contact, and this follows.
+  let to = cfg.email();
+  if (!to && cfg.emailFromSupplier) {
+    to = await bp.supplierEmailOf(cfg.emailFromSupplier).catch(() => null);
+    if (!to) throw stepErr('email', `no order email for ${supplierKey}: Brightpearl holds none for `
+      + `${cfg.emailFromSupplier} either. Set PO_EMAIL_${supplierKey} or put the address on the contact.`);
+  }
+  if (!to) throw stepErr('email', `no order email configured for ${supplierKey} — set PO_EMAIL_${supplierKey}`);
   const carriageNet = cfg.carriageNet();
   const freeOver = cfg.freeOver();
   const steps = {};
@@ -1298,6 +1326,7 @@ async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToTh
 
 const placeV12Order = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('V12', pool, altItemsUrl, opts);
 const placeBucklerOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('BUCKLER', pool, altItemsUrl, opts);
+const placeHellbergOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('HELLBERG', pool, altItemsUrl, opts);
 
 
 // ── Scruffs placement chain (email supplier) ─────────────────────────────────
@@ -3234,6 +3263,10 @@ const SCHEDULED_SUPPLIERS = {
   'PERFORMANCE BRANDS': { supplierKey: 'PERFORMANCE BRANDS', stateId: 12, placeFn: placePerformanceBrandsOrder, threshold: Number(process.env.PERFORMANCE_BRANDS_FREESHIP_THRESHOLD || 200) }, // WooCommerce trade shop; free delivery @ £200 ex-VAT (user), else £7.00 flat. Needs PERFORMANCE_BRANDS_USER/PASS on Alt-Items
   MASCOT: { supplierKey: 'MASCOT', stateId: 13, placeFn: placeMascotOrder, threshold: Number(process.env.MASCOT_FREESHIP_THRESHOLD || 250) }, // b2b.mascot.dk two-stage SAP commit (CreateOrder then ReleaseOrder); free carriage @ £250 ex-VAT. Basket shows LIST price (~1.695x our cost) — never threshold-test on it
   V12: { supplierKey: 'V12', stateId: 15, placeFn: placeV12Order, threshold: Number(process.env.V12_FREESHIP_THRESHOLD || 200) }, // V12 Footwear — email supplier; free carriage @ £200 ex-VAT, £6.95 below it and the charge goes ON the PO (owner, 2026-09-07)
+  // threshold 0 — Hellberg has NO minimum order, so every day's demand goes rather than accumulating.
+  // That is the point of the split: these take ~2 weeks through customs, so holding them back to reach
+  // a carriage threshold would add a fortnight to a line that is already the slowest on the order.
+  HELLBERG: { supplierKey: 'HELLBERG', stateId: 19, placeFn: placeHellbergOrder, threshold: 0 },
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
@@ -3286,6 +3319,7 @@ const WINDOW_DISPLAY = {
   UNEEK: { at: '16:00' },
   V12: { at: '12:20' },
   BUCKLER: { at: '12:30' },
+  HELLBERG: { at: '15:20' },
   CHADWICK: { at: '12:40' },
   // The reorder halves of the split suppliers. Deliberately last in the day: replenishment is not
   // customer-urgent, and by running after every other window they see the day's orders already on
@@ -3890,7 +3924,14 @@ async function sendReportEmail(report) {
              + (report.ordered.net == null
                ? ` on PO ${report.ordered.poId} — value not shown because at least one row carries no cost, so any total would understate the order.`
                : Number(report.ordered.net) !== Number(report.netValue)
-                 ? ` — this differs from the demand value above because the order filled PO ${report.ordered.poId}, which already held rows. <em>This figure is the one to reconcile against the invoice.</em>`
+                 // Say THAT they differ and which to trust. Do NOT assert why: the first version of
+                 // this named a pre-existing PO as the cause, and the very first live run it
+                 // described (Snickers 489574, 2026-09-16) was a PO created fresh by that same run —
+                 // the gap was the price heal correcting 23 costs upward between the demand being
+                 // valued and the PO being read back. A confident wrong reason is worse than none.
+                 ? ` on PO ${report.ordered.poId} — <em>reconcile against this figure, not the demand value.</em>`
+                   + ` The two differ when the PO already held rows, when a pack minimum rounds a line up,`
+                   + ` or when a cost is healed after the demand was valued.`
                  : '')
              + `</li>`
            : ''}
