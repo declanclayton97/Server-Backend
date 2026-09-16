@@ -62,19 +62,52 @@ export function detectIntent(text) {
 
 // Brightpearl order numbers as they appear in customer emails. They quote all
 // sorts: "order 489373", "SO489373", "#489373", "your ref 489373".
-const ORDER_NUMBER_RE = /(?:\b(?:order|ord|so|inv|invoice|ref(?:erence)?)\s*[:#]?\s*|#)(\d{4,8})\b/i;
-const BARE_NUMBER_RE = /\b(\d{6})\b/;
+//
+// WEB orders are the catch. A customer who ordered through the website quotes
+// the number on THEIR confirmation — "000121305" — which is not a Brightpearl
+// order id at all; it is the order's reference. Brightpearl can find it
+// (customerRef), but only if we stop throwing the leading zeros away first.
+const ORDER_NUMBER_RE = /(?:\b(?:order|ord|so|inv|invoice|ref(?:erence)?)\s*[:#]?\s*|#)(\d{4,12})\b/i;
+// A zero-padded web reference. TWO or more leading zeros, deliberately: a UK
+// mobile in an email signature (07960158931) has exactly one, and matching
+// that would send us looking up somebody's phone number as an order.
+const WEB_REF_RE = /\b(0{2,}\d{4,10})\b/;
+const BARE_NUMBER_RE = /\b(\d{6})\b/g;
 
-// Pull an order number out of a pasted email. Prefers a number that is
-// introduced by a word like "order", and only then falls back to any 6-digit
-// number, so a phone number or a postcode does not win.
+/**
+ * Pull an order number out of a pasted email.
+ *
+ * Order of preference:
+ *   1. a number introduced by "order" / "ref" / "#" — they told us what it is
+ *   2. a zero-padded web reference, which cannot be anything else
+ *   3. any bare six-digit number, which is the shape of a Brightpearl id
+ *
+ * Returned as a STRING, zeros intact. The caller works out whether it is an id
+ * or a reference; guessing here would mean guessing twice.
+ */
 export function extractOrderNumber(text) {
   const s = String(text || "");
   const tagged = s.match(ORDER_NUMBER_RE);
   if (tagged) return tagged[1];
-  const bare = s.match(BARE_NUMBER_RE);
-  return bare ? bare[1] : null;
+  const web = s.match(WEB_REF_RE);
+  if (web) return web[1];
+
+  // Any bare six digits — but not the back half of a phone number. "Call the
+  // office on 01924 123123" was handing back 123123, and a signature with a
+  // landline in it is the most ordinary thing in a customer email.
+  BARE_NUMBER_RE.lastIndex = 0;
+  let m;
+  while ((m = BARE_NUMBER_RE.exec(s)) !== null) {
+    const before = s.slice(Math.max(0, m.index - 12), m.index);
+    if (/\d{4,}[\s)\-.]*$/.test(before)) continue;   // preceded by a dialling code
+    return m[1];
+  }
+  return null;
 }
+
+// Does this look like a Brightpearl order id, or like a reference somebody was
+// given by the website? Leading zeros are never an id.
+export const looksLikeOrderId = (token) => /^[1-9]\d{3,8}$/.test(String(token || "").trim());
 
 // A pasted email usually carries its own date in the headers. Getting this
 // right is what makes the stale check trustworthy - if we cannot find it, say
@@ -514,7 +547,14 @@ function formatDay(when) {
  * are finding out. A salesperson can always add detail - they cannot un-send a
  * date that was never real.
  */
-export function buildSalesReply({ intent, order, po, blockedLines = [], salesperson, tone = "warm" }) {
+/**
+ * signedBy is the person WRITING the reply — whoever is signed into the hub —
+ * and it beats the order's salesperson. The order may have been raised weeks
+ * ago by someone who is on holiday; the customer should hear from the person
+ * who actually answered them, and that person should not be signing a
+ * colleague's name to their own words.
+ */
+export function buildSalesReply({ intent, order, po, blockedLines = [], salesperson, signedBy, tone = "warm" }) {
   // Same rule as the subject: quote the NUMBER to the customer, never the
   // internal reference. Fall back to the reference only if there is no id.
   const ref = order?.id || order?.reference;
@@ -569,7 +609,9 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
   }
 
   lines.push("If there is a date you need this by, tell me and I will do what I can to work to it.");
-  lines.push(`Kind regards,<br>${esc(salesperson?.name || "")}`);
+  // Whoever is signed in signs it; the order's salesperson is only a fallback
+  // for a draft built outside the hub.
+  lines.push(`Kind regards,<br>${esc(String(signedBy || "").trim() || salesperson?.name || "")}`);
 
   const html =
     `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;line-height:1.55;">` +

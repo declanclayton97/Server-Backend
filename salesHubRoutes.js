@@ -10,6 +10,7 @@ import {
   SALES_INTENTS,
   detectIntent,
   extractOrderNumber,
+  looksLikeOrderId,
   extractSentDate,
   notesSince,
   classifyNote,
@@ -38,6 +39,48 @@ export function registerSalesHubRoutes(app, deps) {
   // unavailable the page still opens, with that panel saying so - a salesperson
   // waiting on a customer should not be blocked by a reporting table.
   // ---------------------------------------------------------------------
+  /**
+   * Turn whatever the customer quoted into a Brightpearl order id.
+   *
+   * A web customer quotes the number on their own confirmation — "000121305" —
+   * which is the order's REFERENCE, not its id. Brightpearl can search that
+   * (customerRef), so try the id first when the token looks like one, and fall
+   * back to a reference search either way.
+   *
+   * Returns { id, via } so the UI can say how it found the order, or null.
+   */
+  async function resolveOrderId(token) {
+    const raw = String(token || "").trim();
+    if (!raw) return null;
+
+    if (looksLikeOrderId(raw)) {
+      try {
+        const r = await bpLive("GET", `/order-service/order/${raw}`);
+        const o = Array.isArray(r) ? r[0] : r;
+        if (o && o.id) return { id: o.id, via: "id" };
+      } catch (e) { /* not an id, or gone — try it as a reference */ }
+    }
+
+    try {
+      const s = await bpLive("GET", `/order-service/order-search?customerRef=${encodeURIComponent(raw)}&pageSize=20`);
+      const md = s && s.metaData;
+      if (!md) return null;
+      const ix = {};
+      (md.columns || []).forEach((c, i) => { ix[c.name] = i; });
+      const rows = (s.results || [])
+        // SALES orders only. The same reference can appear on a credit, and
+        // answering a customer about their credit note is not the question
+        // they asked.
+        .filter((r) => Number(r[ix.orderTypeId]) === 1)
+        .sort((a, b) => new Date(b[ix.createdOn]) - new Date(a[ix.createdOn]));
+      if (!rows.length) return null;
+      return { id: rows[0][ix.orderId], via: "reference", alsoMatched: rows.length - 1 };
+    } catch (e) {
+      console.error("[sales-hub] reference lookup failed:", e.message);
+      return null;
+    }
+  }
+
   async function gatherOrder(orderId) {
     const resp = await bpLive("GET", `/order-service/order/${orderId}`);
     const order = Array.isArray(resp) ? resp[0] : resp;
@@ -285,7 +328,9 @@ export function registerSalesHubRoutes(app, deps) {
       const raw = String((req.body && req.body.query) || "").trim();
       if (!raw) return res.status(400).json({ error: "Nothing to look up" });
 
-      const looksLikeBareNumber = /^\d{4,8}$/.test(raw);
+      // A bare number typed into the box — which may be a Brightpearl id OR a
+      // zero-padded web reference, so do not strip anything off it.
+      const looksLikeBareNumber = /^\d{4,12}$/.test(raw);
       const orderNumber = looksLikeBareNumber ? raw : extractOrderNumber(raw);
       if (!orderNumber) {
         return res.json({
@@ -296,8 +341,16 @@ export function registerSalesHubRoutes(app, deps) {
         });
       }
 
-      const order = await gatherOrder(orderNumber);
-      if (!order) return res.json({ found: false, reason: `Order ${orderNumber} does not exist in Brightpearl.` });
+      const resolved = await resolveOrderId(orderNumber);
+      if (!resolved) {
+        return res.json({
+          found: false,
+          reason: `Nothing in Brightpearl matches ${orderNumber} — not as an order number, nor as a web order reference.`,
+        });
+      }
+
+      const order = await gatherOrder(resolved.id);
+      if (!order) return res.json({ found: false, reason: `Order ${resolved.id} could not be loaded.` });
 
       // The email's own date drives the whole "have we already told them" check.
       // If we cannot find one, say so rather than assuming now() — assuming now
@@ -313,6 +366,9 @@ export function registerSalesHubRoutes(app, deps) {
         intent,
         emailDate,
         emailDateSource: req.body.emailDate ? "given" : parsedDate ? "parsed" : "unknown",
+        matchedBy: resolved.via,          // "id" or "reference"
+        matchedOn: orderNumber,
+        alsoMatched: resolved.alsoMatched || 0,
         intents: SALES_INTENTS.map((i) => ({ key: i.key, label: i.label })),
       });
     } catch (err) {
@@ -342,6 +398,8 @@ export function registerSalesHubRoutes(app, deps) {
         intent, order, po,
         blockedLines: order.blockedLines,
         salesperson: order.salesperson,
+        // Whoever is signed into the hub, not whoever raised the order.
+        signedBy: (req.body && req.body.sentBy) || "",
       });
 
       const assessment = assessDuplication({
@@ -394,7 +452,7 @@ export function registerSalesHubRoutes(app, deps) {
         auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
       });
 
-      const fromName = salesperson.name || "Tuffshop Sales";
+      const fromName = String(b.sentBy || "").trim() || salesperson.name || "Tuffshop Sales";
       const fromAddress = process.env.SALES_SENDER_EMAIL || process.env.SENDER_EMAIL || "sales@tuffshop.co.uk";
 
       await transporter.sendMail({

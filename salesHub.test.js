@@ -4,6 +4,7 @@
 import {
   detectIntent,
   extractOrderNumber,
+  looksLikeOrderId,
   extractSentDate,
   datesMentioned,
   dateKeys,
@@ -41,6 +42,26 @@ assertEq("bare 6-digit fallback", extractOrderNumber("your 489448 hasn't arrived
 assertEq("no number", extractOrderNumber("Where is my stuff?"), null);
 // A phone number must not beat a tagged order number.
 assertEq("tagged beats phone", extractOrderNumber("call me on 01924 123456 re order 489373"), "489373");
+
+// --- WEB order references ---------------------------------------------------
+// A website customer quotes the number on THEIR confirmation, which is the
+// order's reference and not a Brightpearl id at all. 000121305 is order 486086.
+assertEq("zero-padded web reference survives intact",
+  extractOrderNumber("Hi, chasing my order 000121305 please"), "000121305");
+assertEq("web reference with no introducing word",
+  extractOrderNumber("Morning,\n\n000121305 still not here\n\nThanks"), "000121305");
+assertEq("leading zeros are NOT stripped", extractOrderNumber("order 000122226"), "000122226");
+// The trap: a UK mobile in a signature has ONE leading zero. Matching that
+// would send us looking up somebody's phone number as an order.
+assertEq("a mobile number is not an order",
+  extractOrderNumber("Thanks\nJack\n07960158931\njack@example.com"), null);
+assertEq("a landline is not an order either",
+  extractOrderNumber("Call the office on 01924 123123"), null);
+// Which shape is which.
+assertTrue("a plain id looks like an id", looksLikeOrderId("489373"));
+assertFalse("a zero-padded ref does not", looksLikeOrderId("000121305"));
+assertFalse("nor does an empty string", looksLikeOrderId(""));
+assertFalse("nor does something non-numeric", looksLikeOrderId("SO489373"));
 
 // --- sent date --------------------------------------------------------------
 assertTrue("parses Sent: header", extractSentDate("From: bob@x.com\nSent: 14 September 2026 09:12\nTo: sales") instanceof Date);
@@ -286,6 +307,16 @@ const delayed = buildSalesReply({
 });
 assertTrue("blocked-line delay offers a way out", /alternative|refund/i.test(delayed.text));
 assertEq("blocked-line delay promises NO date", delayed.proposedDates, []);
+
+// The person SIGNED IN signs the reply, not whoever raised the order weeks ago.
+const signed = buildSalesReply({ intent:"eta", order, salesperson:{ name:"Daniel Ford" }, signedBy:"Nicky Everall" });
+assertTrue("signed by whoever is logged in", signed.html.includes("Nicky Everall"));
+assertFalse("not by the order owner", signed.html.includes("Daniel Ford"));
+// With nobody signed in, fall back to the order owner rather than signing blank.
+const unsigned = buildSalesReply({ intent:"eta", order, salesperson:{ name:"Daniel Ford" } });
+assertTrue("falls back to the order owner", unsigned.html.includes("Daniel Ford"));
+const blankish = buildSalesReply({ intent:"eta", order, salesperson:{ name:"Daniel Ford" }, signedBy:"   " });
+assertTrue("whitespace is not a signature", blankish.html.includes("Daniel Ford"));
 
 const proof = buildSalesReply({ intent: "proof_approval", order, salesperson: { name: "Bob" } });
 assertTrue("proof mail asks for approval", /approval|approve/i.test(proof.text));
