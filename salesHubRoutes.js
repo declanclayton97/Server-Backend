@@ -13,6 +13,7 @@ import {
   extractSentDate,
   notesSince,
   classifyNote,
+  classifyOrderRow,
   lastContact,
   assessDuplication,
   buildSalesReply,
@@ -81,13 +82,20 @@ export function registerSalesHubRoutes(app, deps) {
           // A Brightpearl path id-list must be ASCENDING or it 400s (CMNC-006).
           const poResp = (await bpLive("GET", `/order-service/order/${poIds.join(",")}`)) || [];
           const bySupplier = Object.fromEntries(r.rows.map((x) => [String(x.po_id), x.supplier]));
-          pos = poResp.map((p) => ({
-            id: p.id,
-            supplier: bySupplier[String(p.id)] || (p.parties && p.parties.supplier && p.parties.supplier.companyName) || "",
-            status: (p.orderStatus && p.orderStatus.name) || "",
-            placedOn: p.placedOn || p.createdOn || null,
-            expectedDate: (p.delivery && p.delivery.deliveryDate) || null,
-          }));
+          pos = poResp
+            .map((p) => ({
+              id: p.id,
+              supplier: bySupplier[String(p.id)] || (p.parties && p.parties.supplier && p.parties.supplier.companyName) || "",
+              status: (p.orderStatus && p.orderStatus.name) || "",
+              placedOn: p.placedOn || p.createdOn || null,
+              expectedDate: (p.delivery && p.delivery.deliveryDate) || null,
+            }))
+            // A CANCELLED PO is not a commitment to anything. demand_log keeps a
+            // row for every attempt, so a rebuilt order leaves the abandoned PO
+            // behind: 487877 listed 488023 "Placed with supplier" AND 487979
+            // "PO Cancelled", and the cancelled one can win the ETA because the
+            // draft takes the latest expected date.
+            .filter((p) => !/cancel/i.test(p.status));
         }
       } catch (e) { console.error("[sales-hub] demand_log/PO lookup failed:", e.message); }
     }
@@ -116,6 +124,37 @@ export function registerSalesHubRoutes(app, deps) {
           [order.id]
         );
         const myPos = new Set(poRows.rows.map((x) => Number(x.po_id)));
+
+        // WHOSE line is it? A PO carries demand from many sales orders, so
+        // "this line failed on a PO your order is also on" is not the same as
+        // "your item failed". Order 487877 was shown 12180400006 as stuck when
+        // its only garment is 60730400005 - somebody else's problem, on the
+        // shared PO 488023.
+        //
+        // Ask demand_log who each SKU on these POs belongs to:
+        //   ours      -> show it
+        //   theirs    -> drop it, it is not this customer's concern
+        //   unknown   -> KEEP it, flagged. A blocked line often carries the
+        //                supplier's own code where the PO row carries ours, and
+        //                silently dropping one of those would let us promise a
+        //                date for goods nobody has ordered.
+        const owner = new Map();                       // SKU -> Set(so_id)
+        if (myPos.size) {
+          const dl = await getPool().query(
+            `SELECT sku, so_id FROM demand_log WHERE po_id = ANY($1::int[]) AND sku IS NOT NULL`,
+            [[...myPos]]
+          );
+          for (const d of dl.rows) {
+            const k = String(d.sku).toUpperCase().trim();
+            if (!owner.has(k)) owner.set(k, new Set());
+            owner.get(k).add(Number(d.so_id));
+          }
+        }
+        const mine = (sku) => {
+          const k = String(sku || "").toUpperCase().trim();
+          if (!k || !owner.has(k)) return { ours: true, confirmed: false };   // unknown -> keep, flagged
+          return { ours: owner.get(k).has(Number(order.id)), confirmed: true };
+        };
         if (myPos.size) {
           const errs = await getPool().query(
             `SELECT id, supplier, step, message, context, created_at
@@ -137,10 +176,15 @@ export function registerSalesHubRoutes(app, deps) {
             for (const l of extractBlockedLines(row)) {
               const key = String(l.sku || l.name || "").toUpperCase().trim();
               if (!key) continue;
+              const own = mine(l.sku);
+              if (!own.ours) continue;                 // another customer's line on a shared PO
               const entry = {
                 sku: l.sku, name: l.name, want: l.want,
                 reason: l.reason, supplier: row.supplier,
                 step: row.step, since: row.created_at, poId,
+                // false = we could not tie this SKU to any sales order, so it
+                // is shown but should not be stated as fact to the customer.
+                confirmed: own.confirmed,
               };
               const prev = seen.get(key);
               if (!prev || new Date(entry.since) < new Date(prev.since)) seen.set(key, entry);
@@ -168,15 +212,42 @@ export function registerSalesHubRoutes(app, deps) {
       } catch (e) { console.error("[sales-hub] email log failed:", e.message); }
     }
 
-    const rows = Object.values(order.orderRows || {}).map((r) => ({
-      name: r.productName,
-      sku: r.productSku,
-      quantity: Number((r.quantity && r.quantity.magnitude) || 0),
+    // Which rows are actually GOODS. Needs the product records, so one batch
+    // lookup for the handful of distinct products on the order.
+    const rawRows = Object.values(order.orderRows || {});
+    const rowMeta = {};
+    try {
+      const ids = [...new Set(rawRows.map((r) => Number(r.productId)).filter(Boolean))].sort((a, b) => a - b);
+      if (ids.length) {
+        // Ascending, or Brightpearl 400s on the id-list (CMNC-006).
+        const prods = (await bpLive("GET", `/product-service/product/${ids.join(",")}`)) || [];
+        for (const p of prods) {
+          rowMeta[p.id] = { stockTracked: !!(p.stock && p.stock.stockTracked), brandId: p.brandId };
+        }
+      }
+    } catch (e) {
+      // Unresolved products fall through as goods, which shows one row too many
+      // rather than hiding something the customer paid for.
+      console.error("[sales-hub] product lookup failed:", e.message);
+    }
+
+    const allRows = rawRows.map((r) => {
+      const qty = Number((r.quantity && r.quantity.magnitude) || 0);
       // Brightpearl exposes what has shipped per row as a magnitude too; where
       // it is absent treat it as nothing shipped rather than guessing.
-      shipped: Number((r.quantity && r.quantity.shipped) || 0),
-      outstanding: Math.max(0, Number((r.quantity && r.quantity.magnitude) || 0) - Number((r.quantity && r.quantity.shipped) || 0)),
-    }));
+      const shipped = Number((r.quantity && r.quantity.shipped) || 0);
+      return {
+        name: r.productName,
+        sku: r.productSku,
+        quantity: qty,
+        shipped,
+        outstanding: Math.max(0, qty - shipped),
+        kind: classifyOrderRow(r, rowMeta[Number(r.productId)]),
+      };
+    });
+    // `lines` is what the CUSTOMER thinks they bought. Decoration, carriage and
+    // the instruction rows staff type onto an order are not items.
+    const rows = allRows.filter((r) => r.kind === "goods");
 
     return {
       id: order.id,
@@ -193,6 +264,8 @@ export function registerSalesHubRoutes(app, deps) {
       total: (order.totalValue && order.totalValue.total) || null,
       salesperson,
       lines: rows,
+      // Everything on the order, kinds included, for the UI to show in full.
+      allRows,
       pos,
       blockedLines,
       automatedEmails,

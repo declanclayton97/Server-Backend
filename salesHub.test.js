@@ -10,6 +10,7 @@ import {
   notesSince,
   lastContact,
   classifyNote,
+  classifyOrderRow,
   assessDuplication,
   etaSentence,
   buildSalesReply,
@@ -235,6 +236,27 @@ assertTrue("a Wednesday stays Wednesday", /Wednesday 23 September/.test(weekday.
 const withDate = etaSentence({ supplier: "Blaklader", expectedDate: "2026-09-25" });
 assertTrue("PO with a date names the supplier", withDate.text.includes("Blaklader"));
 assertTrue("PO with a date proposes one", withDate.dates.length > 0);
+
+// --- what is actually ON the order -----------------------------------------
+// Real rows and real product records from order 487877, where the customer
+// bought ONE overall and the hub reported "4 items".
+const G = { stockTracked: true, brandId: 99 };          // 334405
+const NS = { stockTracked: false, brandId: 74 };        // 1000 / 1001 / 316547
+assertEq("a stocked garment is goods",
+  classifyOrderRow({ productName: "Snickers 6073 Durable Service Overalls (Black)-M Regular" }, G), "goods");
+assertEq("embroidery is a service, not an item",
+  classifyOrderRow({ productName: "Embroider Right Breast" }, NS), "service");
+assertEq("carriage is shipping",
+  classifyOrderRow({ productName: "Shipping: Delivery - Mainland UK including Lowland Scotland" }, NS), "shipping");
+assertEq("an instruction row is text",
+  classifyOrderRow({ productName: "+++PLEASE PUT TO PROOF REQUIRED ONCE ORDERED+++" }, NS), "text");
+// Unresolved product: show it rather than hide something they paid for.
+assertEq("unknown product falls through to goods",
+  classifyOrderRow({ productName: "Mystery item" }, undefined), "goods");
+// A stocked product whose NAME mentions embroidery is still a garment - this is
+// the trap that cost £58k of phantom decoration cost in the margin reports.
+assertEq("a garment named after its decoration is still goods",
+  classifyOrderRow({ productName: "Blaklader 3332 T-Shirt - INC LEFT BREAST EMBROIDERY" }, G), "goods");
 
 // --- drafting ---------------------------------------------------------------
 const order = { id: 489373, reference: "489373", customerName: "Dave Smith", contactName: "Dave Smith", lines: [] };

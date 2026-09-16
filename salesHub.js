@@ -413,6 +413,43 @@ function formatWhen(when) {
 }
 
 // ---------------------------------------------------------------------------
+// What is actually ON the order.
+//
+// A Brightpearl order row is not the same thing as an item the customer bought.
+// Order 487877 has FOUR rows and the customer bought ONE overall:
+//
+//   334405  stockTracked  brand 99   Snickers 6073 Overalls        <- goods
+//   316547  non-stocked   brand 74   Embroider Right Breast        <- decoration
+//   1001    non-stocked   brand 74   Shipping: Delivery            <- carriage
+//   1000    non-stocked   brand 74   +++PLEASE PUT TO PROOF...+++  <- an instruction
+//
+// Telling a customer their order has four items when they bought one overall
+// is the sort of thing that makes them stop trusting the rest of the email.
+// The split is structural - stockTracked separates real goods from everything
+// else - with the name only used to tell the non-stocked kinds apart.
+// ---------------------------------------------------------------------------
+const SHIPPING_ROW_RE = /shipping|carriage|delivery|postage|courier|p\s*&\s*p/i;
+const SERVICE_ROW_RE = /embroider|\bprint\b|sticker|set ?-? ?up|personalis|personaliz|banner|dtf|digitis|digitiz|badge|transfer|vinyl|heat ?seal|artwork|origination|logo/i;
+
+/**
+ * "goods" | "service" | "shipping" | "text"
+ *
+ * meta is { stockTracked, brandId } from the product record, or undefined if we
+ * could not look it up - in which case the row is treated as GOODS, because
+ * hiding something the customer paid for is worse than showing one row too many.
+ */
+export function classifyOrderRow(row, meta) {
+  const name = String((row && row.productName) || "");
+  if (!meta) return "goods";
+  if (meta.stockTracked) return "goods";
+  if (SHIPPING_ROW_RE.test(name)) return "shipping";
+  if (SERVICE_ROW_RE.test(name)) return "service";
+  // Non-stocked, no recognisable purpose: a note somebody typed onto the order,
+  // like "+++PLEASE PUT TO PROOF REQUIRED ONCE ORDERED+++".
+  return "text";
+}
+
+// ---------------------------------------------------------------------------
 // Drafting
 // ---------------------------------------------------------------------------
 
