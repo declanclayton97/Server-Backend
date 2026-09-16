@@ -12572,6 +12572,9 @@ app.post("/api/whatsapp/send-document", async (req, res) => {
 app.get("/api/whatsapp/conversations", async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
   const channel = waChannelParam(req.query.channel);
+  // Interpolated into the HAVING below, never into a value position — it is a
+  // boolean derived here, not anything the caller supplies.
+  const archived = String(req.query.archived || '') === '1';
   try {
     const r = await pool.query(`
       SELECT m.peer_number,
@@ -12607,7 +12610,10 @@ app.get("/api/whatsapp/conversations", async (req, res) => {
         FROM whatsapp_messages m
        WHERE m.channel = $1
        GROUP BY m.peer_number
-      HAVING bool_or(m.dismissed_at IS NULL)   -- hide fully-dismissed convos
+      -- Normally hide fully-dismissed conversations. ?archived=1 asks for
+      -- exactly those instead, so the UI can offer an Archived view rather
+      -- than archiving being a one-way trip into nowhere.
+      HAVING ${archived ? 'NOT bool_or(m.dismissed_at IS NULL)' : 'bool_or(m.dismissed_at IS NULL)'}
        ORDER BY last_at DESC
     `, [channel]);
     const now = Date.now();
@@ -12721,6 +12727,60 @@ app.post("/api/whatsapp/conversations/:phone/dismiss", async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("[whatsapp/dismiss] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Un-archive: bring a dismissed conversation back into the list.
+//
+// Dismissing was one-way, which is fine for a proof chat you are finished with
+// and wrong for an archive — archiving something you cannot get back is just
+// deleting it with extra steps.
+app.post("/api/whatsapp/conversations/:phone/restore", async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
+  try {
+    const r = await pool.query(
+      `UPDATE whatsapp_messages
+          SET dismissed_at = NULL
+        WHERE peer_number = $1 AND channel = $2 AND dismissed_at IS NOT NULL`,
+      [req.params.phone, channel]
+    );
+    res.json({ success: true, restored: r.rowCount });
+  } catch (err) {
+    console.error("[whatsapp/restore] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mark a conversation UNREAD again — "I have not really dealt with this."
+//
+// Only the most recent inbound message is un-read, deliberately. Clearing
+// read_at on every inbound would put a badge of 47 on a long conversation,
+// when what the person meant was "there is something here to come back to".
+// WhatsApp shows a plain dot for this; one is the closest honest count.
+app.post("/api/whatsapp/conversations/:phone/unread", async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: "Database not configured" });
+  const channel = waChannelParam(req.query.channel || (req.body || {}).channel);
+  try {
+    const r = await pool.query(
+      `UPDATE whatsapp_messages
+          SET read_at = NULL
+        WHERE id = (
+          SELECT id FROM whatsapp_messages
+           WHERE peer_number = $1 AND channel = $2 AND direction = 'in'
+             AND dismissed_at IS NULL
+           ORDER BY created_at DESC LIMIT 1
+        )`,
+      [req.params.phone, channel]
+    );
+    if (!r.rowCount) {
+      // Nothing inbound to un-read: an outbound-only chat cannot be unread.
+      return res.status(409).json({ error: "Nothing from the customer to mark unread" });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[whatsapp/unread] error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
