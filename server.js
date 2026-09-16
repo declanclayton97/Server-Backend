@@ -11287,6 +11287,76 @@ app.get('/api/whatsapp/number-status', async (req, res) => {
   }
 });
 
+// POST /api/whatsapp/register-number  { channel, pin, confirm: true }
+//
+// Finishes Cloud API setup for a number that is verified but never registered —
+// the state WhatsApp Manager shows as "Pending" with no button, because it
+// expects this step to be done through the API.
+//
+// SAFETY: this backend has no admin auth, and registering sets the number's
+// two-step PIN. Left open, anyone could set a PIN we do not know and lock us
+// out of our own number. So it REFUSES once the number is already on the Cloud
+// API — it works exactly once, for the number it was written for, and is inert
+// from then on. Re-registering (a PIN change, say) is deliberately not possible
+// here; do that from Meta's own tools where it belongs.
+app.post('/api/whatsapp/register-number', express.json(), async (req, res) => {
+  const b = req.body || {};
+  const channel = WA_CHANNELS.includes(String(b.channel)) ? String(b.channel) : 'sales';
+  const pin = String(b.pin == null ? '' : b.pin);
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = waPhoneNumberId(channel);
+  const graphVersion = process.env.WHATSAPP_GRAPH_VERSION || 'v21.0';
+
+  if (b.confirm !== true) return res.status(400).json({ error: 'Pass confirm:true — this changes the number on Meta.' });
+  // Six digits exactly. Meta rejects anything else, but with a vaguer message.
+  if (!/^\d{6}$/.test(pin)) return res.status(400).json({ error: 'pin must be exactly 6 digits' });
+  if (!token) return res.status(400).json({ error: 'WHATSAPP_TOKEN is not set' });
+  if (!phoneNumberId) return res.status(400).json({ error: `No phone number id configured for channel "${channel}"` });
+
+  const readStatus = async () => {
+    const r = await fetch(
+      `https://graph.facebook.com/${graphVersion}/${phoneNumberId}?fields=display_phone_number,verified_name,platform_type,status,code_verification_status,quality_rating`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    return r.json();
+  };
+
+  try {
+    const before = await readStatus();
+    if (before && before.platform_type === 'CLOUD_API') {
+      return res.status(409).json({
+        error: 'Already registered on the Cloud API. This endpoint only does the first registration; change a PIN in Meta\'s tools.',
+        current: before,
+      });
+    }
+
+    const r = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/register`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messaging_product: 'whatsapp', pin }),
+    });
+    const body = await r.json();
+    if (!r.ok) {
+      // Meta's message is the useful part here ("pin mismatch", "already
+      // registered", "number in use on the WhatsApp app"). Pass it through —
+      // but never the pin itself, which is not echoed and is not logged.
+      console.error('[whatsapp] register failed for', channel, '->', (body && body.error && body.error.message) || r.status);
+      return res.status(r.status).json({
+        registered: false,
+        error: (body && body.error && body.error.message) || 'Graph rejected the registration',
+        graph: body,
+        before,
+      });
+    }
+    const after = await readStatus();
+    console.log('[whatsapp] registered', channel, 'number', (after && after.display_phone_number) || phoneNumberId,
+                '-> platform_type', (after && after.platform_type) || '?');
+    res.json({ registered: true, graph: body, before, after });
+  } catch (e) {
+    res.status(500).json({ registered: false, error: e.message });
+  }
+});
+
 function waPhoneNumberId(channel) {
   return channel === "sales"
     ? process.env.WHATSAPP_SALES_PHONE_NUMBER_ID || null
