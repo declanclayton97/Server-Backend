@@ -28,6 +28,7 @@ import {
   decideAction, groupQuotesForChase, quotesToAdvance, setBankHolidays,
   buildChaseEmail, buildResponseEmail, buildHandoverEmail, buildBpNote,
 } from './quoteChase.js';
+import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -14687,6 +14688,10 @@ app.get('/api/quote-chase/list', async (req, res) => {
 // Sales Hub — "answer this customer email" endpoints. Kept in their own module
 // because this file is edited by several sessions at once; dependencies are
 // passed in rather than reached for, so the module stays testable.
+// Who is using the Sales Hub. Identification only — every other /api/* route
+// stays open, because the purchasing hub and the React app share this backend.
+registerHubAuthRoutes(app, { pool, useDatabase });
+
 registerSalesHubRoutes(app, {
   bpLive,
   postBpOrderNote,
