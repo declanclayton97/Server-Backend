@@ -163,6 +163,24 @@ export function decideAction(row, now, cfg = QUOTE_CHASE_CONFIG) {
   // already answered.
   if (row.stopped) return { action: "none", reason: "stopped manually" };
 
+  // A WhatsApp reply is an answer too, even though it never touched a button in
+  // the email. Quotes now go out over WhatsApp as well, and a customer answers
+  // on whichever channel is in front of them — so without this we would send a
+  // second and third chase to somebody who has already written back. That is
+  // the most irritating thing this system could do, and the customer cannot
+  // tell that the two channels do not talk to each other.
+  //
+  // Any inbound message since the quote went out counts. It might be about
+  // something else entirely, and stopping is still the right call: a person
+  // then looks at it, which is the failure we can afford. The dashboard shows
+  // these as replied-on-WhatsApp rather than silently going quiet.
+  if (row.waRepliedAt) {
+    const since = row.enteredStatusAt;
+    if (!since || new Date(row.waRepliedAt) >= new Date(since)) {
+      return { action: "none", reason: "customer replied on WhatsApp" };
+    }
+  }
+
   if (!row.customerEmail) return { action: "none", reason: "no customer email" };
 
   const stage = Number(row.stage) || 0;

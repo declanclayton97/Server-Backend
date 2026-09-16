@@ -294,5 +294,32 @@ const grid = buildRefreshEmail([old1], rq).html;
 assertEq("refresh: one button table, not four", (grid.match(/<table role="presentation"[^>]*cellspacing="6"/g) || []).length, 1);
 assertEq("refresh: four button cells in it", (grid.match(/<td bgcolor/g) || []).length, 4);
 
+// --- a WhatsApp reply is an answer --------------------------------------------
+// Quotes go out over WhatsApp too, and people answer on whichever channel is in
+// front of them. Chasing somebody who has already written back is the most
+// irritating thing this system can do, and they cannot tell that our two
+// channels do not talk to each other.
+const waBase = {
+  enteredStatusAt: new Date("2026-09-10T09:00:00Z"),
+  stage: 0, customerEmail: "bob@x.com", stillQuoteSent: true,
+};
+const waNow = new Date("2026-09-16T10:00:00Z");
+assertEq("no whatsapp reply -> still chases",
+  decideAction({ ...waBase }, waNow).action, "chase");
+assertEq("replied on whatsapp -> stop",
+  decideAction({ ...waBase, waRepliedAt: "2026-09-15T12:00:00Z" }, waNow).action, "none");
+assertEq("and says why",
+  decideAction({ ...waBase, waRepliedAt: "2026-09-15T12:00:00Z" }, waNow).reason,
+  "customer replied on WhatsApp");
+// A message from BEFORE the quote went out is not a reply to it.
+assertEq("older chat does not block a new quote",
+  decideAction({ ...waBase, waRepliedAt: "2026-09-01T12:00:00Z" }, waNow).action, "chase");
+// A reply the same moment the quote was sent still counts - the boundary should
+// fail safe towards not chasing.
+assertEq("boundary favours not chasing",
+  decideAction({ ...waBase, waRepliedAt: "2026-09-10T09:00:00Z" }, waNow).action, "none");
+assertEq("null is ignored",
+  decideAction({ ...waBase, waRepliedAt: null }, waNow).action, "chase");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

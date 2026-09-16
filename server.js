@@ -13852,11 +13852,38 @@ async function pollQuoteChase() {
     [QUOTE_CHASE_CONFIG.stageWorkingDays.length, quoteExcludedChannelsParam()]
   );
 
+  // Has the customer already answered on WhatsApp? The chase emails carry the
+  // sales number, so people reply there instead of clicking — and a chase sent
+  // to somebody who has already written back is the worst thing this can do.
+  //
+  // One query for every phone in play rather than one per quote. Sales channel
+  // only: a proof conversation is a different number and a different subject.
+  const waReplyAt = new Map();
+  try {
+    const phones = [...new Set(open.rows.map((r) => r.customer_phone).filter(Boolean))];
+    if (phones.length) {
+      const wa = await pool.query(
+        `SELECT peer_number, MAX(created_at) AS last_in
+           FROM whatsapp_messages
+          WHERE direction = 'in' AND channel = 'sales' AND peer_number = ANY($1::text[])
+          GROUP BY peer_number`,
+        [phones]
+      );
+      for (const w of wa.rows) waReplyAt.set(String(w.peer_number), w.last_in);
+    }
+  } catch (e) {
+    // If this lookup fails we must NOT chase blind — a chase we cannot check is
+    // exactly the one that annoys a customer who already replied.
+    console.error('[quote-chase] WhatsApp reply check failed, skipping this poll:', e.message);
+    return;
+  }
+
   // One email per CUSTOMER, not per quote. Whoever holds several open quotes
   // would otherwise get one email each, every stage.
   const groups = groupQuotesForChase(open.rows.map((r) => ({
     ...quoteRowToView(r),
     stage: r.stage,
+    waRepliedAt: r.customer_phone ? waReplyAt.get(String(r.customer_phone)) || null : null,
     row: r,
   })));
 
@@ -13867,6 +13894,7 @@ async function pollQuoteChase() {
   const dueNow = groups.filter((gr) => decideAction({
     enteredStatusAt: gr.driver.enteredStatusAt, stage: gr.driver.stage,
     responded: !!gr.driver.row.responded_at, stopped: !!gr.driver.row.stopped_at,
+    waRepliedAt: gr.driver.waRepliedAt,
     seeded: gr.driver.row.seeded, customerEmail: gr.driver.customerEmail,
     stillQuoteSent: gr.driver.row.still_quote_sent,
   }, now).action !== 'none').length;
@@ -13885,6 +13913,7 @@ async function pollQuoteChase() {
       stage: driver.stage,
       responded: !!driver.row.responded_at,
       stopped: !!driver.row.stopped_at,
+      waRepliedAt: driver.waRepliedAt,
       seeded: driver.row.seeded,
       customerEmail: driver.customerEmail,
       stillQuoteSent: driver.row.still_quote_sent,
@@ -14625,6 +14654,10 @@ async function attachSalesWhatsApp(quotes) {
           lastAt: row.last_at,
           lastBody: row.last_body,
           lastDirection: row.last_direction,
+          // When they last wrote TO US. The chase treats this as an answer, so
+          // the dashboard has to show it or a quote just goes quiet with no
+          // visible reason.
+          lastInAt: row.last_in_at || null,
           windowOpen: lastIn ? lastIn + 24 * 3600 * 1000 > now : false,
         };
       }
