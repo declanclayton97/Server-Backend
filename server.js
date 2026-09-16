@@ -28,6 +28,7 @@ import {
   decideAction, groupQuotesForChase, quotesToAdvance, setBankHolidays,
   buildChaseEmail, buildResponseEmail, buildHandoverEmail, buildBpNote,
 } from './quoteChase.js';
+import { registerSalesHubRoutes } from './salesHubRoutes.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
 import { printJobsFromRows, extractLogoUrls, extractPrintedGarments } from './printLines.js';
@@ -14463,6 +14464,17 @@ app.get('/api/quote-chase/list', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Sales Hub — "answer this customer email" endpoints. Kept in their own module
+// because this file is edited by several sessions at once; dependencies are
+// passed in rather than reached for, so the module stays testable.
+registerSalesHubRoutes(app, {
+  bpLive,
+  postBpOrderNote,
+  pool,
+  useDatabase,
+  resolveSalesperson,
 });
 
 // Whether the SALES WhatsApp number is set up, so the dashboard can say why
