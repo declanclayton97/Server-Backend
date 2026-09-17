@@ -1836,8 +1836,33 @@ export async function createComboPOLive(opts = {}) {
   const { fetchLowInventory } = await import('./lowInventory.js');
   let statusIds = []; try { statusIds = await liveSalesOrderStatusIds(excludeStatusIds); } catch { /* report default */ }
   const li = includeLowInv ? await fetchLowInventory({ supplierId: lowInvSupplierId, statusIds }) : { rows: [] };   // numResults omitted on purpose: 10000 silently got us 50 (see lowInventory.js)
+  // ── THE REORDER READ MUST BE FILTERED BY BRAND, NOT JUST BY SUPPLIER ID ─────────────────────
+  // The low-inventory report is fetched per Brightpearl SUPPLIER, and until now every row it
+  // returned went straight onto the PO. That is fine while one supplier id means one lane. It is
+  // catastrophic the moment two lanes share a contact: HELLBERG reads low-inventory under
+  // Snickers' id 331, so its first run (2026-09-17 15:21, PO 490020) swept up the ENTIRE Snickers
+  // reorder — 83 Snickers lines, £4,194 — and emailed it to the Snickers desk as a placed order.
+  // Only two of the 85 lines were Hellberg.
+  //
+  // detect() has always gated the CUSTOMER lines. It gates these now too, and the excludeIf veto
+  // applies the same way, so a lane only ever replenishes what its own detect says is its own.
+  // Suppliers whose detect is broad by design are unaffected — a Snickers row still matches the
+  // Snickers detect — but a lane can no longer buy another lane's stock by sharing its contact.
+  const ownsRow = (d) => {
+    const name = String(d.name || ''), sku = String(d.sku || '');
+    if (reg.excludeIf && reg.excludeIf(name, sku)) return false;
+    return !!detect(name, sku);
+  };
+  const lowRowsAll = li.rows || [];
+  const lowRowsOwn = lowRowsAll.filter(ownsRow);
+  const lowRowsForeign = lowRowsAll.length - lowRowsOwn.length;
+  if (lowRowsForeign) {
+    // Not an error: a shared contact returns the other lane's rows every time. Recorded on the plan
+    // so the run report shows how much was read and how much was ours.
+    console.log(`[low-inv] ${supplierKey}: ${lowRowsForeign} of ${lowRowsAll.length} low-inventory rows are not this lane's products (shared supplier id ${lowInvSupplierId}) — ignored`);
+  }
   const lowLines = [];
-  for (const d of li.rows) {
+  for (const d of lowRowsOwn) {
     // WHICH REPLENISHMENT FIGURE THIS RUN IS ENTITLED TO.
     //
     // The report's orderQty is minStock + openSO - onPO - onHand: it covers customer orders AND
