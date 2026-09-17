@@ -3745,7 +3745,37 @@ async function ensureDropNoticeTable(pool) {
 //           picked up again on the next run, so this is a heads-up, not a task.
 // Telling someone "nothing will chase this" about a line that retries in the morning is how a
 // warning stops being read.
-export async function notifyDroppedLines(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true, placed = true } = {}) {
+// ── EVERY OUTCOME IS RECORDED ─────────────────────────────────────────────────────────────────
+// This function was silent on 2026-09-15 and again on the 17th: two Fristads drops, both with a
+// customer waiting on SO 488357, and no email reached them. Every step in it is defensive — an
+// unreadable dedupe table tells them twice, an unreadable order falls back to sales — so it should
+// not be ABLE to go quiet, and yet nobody could say whether it ran, sent, skipped or threw, because
+// the only trace was console.error on a Render box. A notification whose own delivery is
+// unobservable is not a notification.
+//
+// So the wrapper below writes an 'info' row to the error log on EVERY exit — sent, skipped
+// with the reason, or threw — carrying the recipients and the lines. It reads on the hub like any
+// other row, and "did the salesperson get told?" becomes a query rather than an inference.
+export async function notifyDroppedLines(pool, opts = {}) {
+  let out;
+  try { out = await notifyDroppedLinesInner(pool, opts); }
+  catch (e) { out = { sent: 0, error: e.message, threw: true }; }
+  try {
+    if (pool && Array.isArray(opts.dropped) && opts.dropped.length) {
+      const who = (out.detail || []).map((x) => x.to + (x.error ? ' ✗ ' + x.error : x.skipped ? ' (skipped: ' + x.skipped + ')' : ' ✓')).join('; ');
+      const what = opts.dropped.map((d) => `${d.qty != null ? d.qty : d.want} × ${d.sku}`).join(', ');
+      await pool.query(
+        `INSERT INTO purchasing_error_log (supplier, step, message, context, severity) VALUES ($1,$2,$3,$4,$5)`,
+        [opts.supplier || '?', 'dropped-line-notice',
+          out.sent ? `Told ${out.sent} recipient(s) about dropped line(s) ${what}: ${who}`
+            : `Dropped-line notice NOT sent for ${what} — ${out.error || out.reason || 'unknown'}${who ? ': ' + who : ''}`,
+          JSON.stringify({ poId: opts.poId || null, sent: out.sent, reason: out.reason || null, error: out.error || null, detail: out.detail || null, dropped: opts.dropped }),
+          'info']);
+    }
+  } catch { /* recording the outcome must never mask it */ }
+  return out;
+}
+async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true, placed = true } = {}) {
   if (!Array.isArray(dropped) || !dropped.length) return { sent: 0, reason: 'nothing dropped' };
   const label = supplier.charAt(0) + supplier.slice(1).toLowerCase();
 

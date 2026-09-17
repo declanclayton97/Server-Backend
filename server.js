@@ -9892,6 +9892,34 @@ app.get('/api/purchasing/force-run-safety', async (req, res) => {
 // off by hand is the same call. Deliberately refuses to re-claim a row that is already handled —
 // two passes racing the same error is exactly how the same fix gets applied twice.
 // body: { by, note, force }
+// Re-fire the dropped-line notice for an error row, from that row's OWN stored context — the
+// dropped lines, PO and (where the run carried it) linesByOrder are all in there, so nothing is
+// invented. ?dry=1 resolves recipients and reports without sending. The outcome is recorded as an
+// 'info' row either way, so the result is readable on the hub afterwards.
+// Built for 2026-09-17: two Fristads drops on SO 488357 reached no one, and the only way to find
+// out what the notifier would do was to make it run again in the open.
+app.post('/api/purchasing/error-log/:id/notify', express.json(), async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'id required' });
+  try {
+    await purchasingSchedule.ensureErrorTable(pool);
+    const r = await pool.query(`SELECT id, supplier, step, message, context FROM purchasing_error_log WHERE id = $1`, [id]);
+    const row = r.rows[0];
+    if (!row) return res.status(404).json({ error: `no error row ${id}` });
+    const c = row.context || {};
+    const { extractBlockedLines } = await import('./blockedLines.js');
+    const lines = (Array.isArray(c.dropped) && c.dropped.length) ? c.dropped : extractBlockedLines(row);
+    if (!lines.length) return res.json({ id, sent: 0, reason: 'that row names no dropped line' });
+    const dry = req.query.dry === '1' || (req.body && req.body.dry === true);
+    const out = await purchasingSchedule.notifyDroppedLines(pool, {
+      supplier: row.supplier, poId: c.poId || null, dropped: lines, linesByOrder: c.linesByOrder || {},
+      placed: /-dropped$/.test(String(row.step)), execute: !dry,
+    });
+    res.json({ id, supplier: row.supplier, step: row.step, poId: c.poId || null, dry, lines: lines.length, ...out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/purchasing/error-log/:id/handled', express.json(), async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   const id = parseInt(req.params.id, 10);
