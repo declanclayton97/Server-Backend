@@ -14107,8 +14107,10 @@ app.post('/api/quote-chase/respond', async (req, res) => {
     if (q.rowCount === 0) return res.status(404).json({ error: 'not found' });
     const r = q.rows[0];
 
-    await recordQuoteResponse(r, { action, reason, note, via: (req.body || {}).via });
-    res.json({ success: true });
+    const out = await recordQuoteResponse(r, { action, reason, note, via: (req.body || {}).via });
+    // The page uses this to say "we already have this" rather than thanking
+    // them again as though something just happened.
+    res.json({ success: true, duplicate: !!(out && out.duplicate) });
   } catch (e) {
     console.error('[quote-chase] respond failed:', e.message);
     res.status(500).json({ error: e.message });
@@ -14119,18 +14121,39 @@ app.post('/api/quote-chase/respond', async (req, res) => {
 // order. Shared by the scripted path, the no-script fallback and the full form,
 // so all three behave identically.
 //
-// A second answer is allowed to overwrite the first — someone who clicks "more
-// time" and then decides to go ahead should not be stuck — and the salesperson is
-// emailed again, so the latest word always reaches them.
+// A CHANGE of answer is still allowed and still notifies — somebody who clicks
+// "more time" and then decides to go ahead must not be stuck, and adding a
+// reason or a note to an answer already given is new information too.
+//
+// But the SAME answer twice tells the salesperson nothing and was mailing them
+// every time. That is not only double-clicking: the landing page posts on load,
+// so re-opening the email and pressing the button again fires it afresh, and a
+// customer pressing two different buttons to see what they do sent two emails.
+//
+// The UPDATE itself decides. Its WHERE only matches when something actually
+// differs, so rowCount tells us whether this was news — and because Postgres
+// re-checks that WHERE against the updated row after a concurrent write, two
+// clicks landing together cannot both come back as a change.
 async function recordQuoteResponse(r, { action, reason, note, via }) {
   const cleanNote = String(note || '').slice(0, 2000);
-  await pool.query(
+  const upd = await pool.query(
     `UPDATE quote_chase
         SET responded_at = NOW(), response_action = $2, response_reason = $3, response_note = $4,
             response_via = $5, last_checked_at = NOW()
-      WHERE order_id = $1`,
+      WHERE order_id = $1
+        AND (responded_at IS NULL
+             OR response_action IS DISTINCT FROM $2
+             OR response_reason IS DISTINCT FROM $3
+             OR response_note   IS DISTINCT FROM $4)`,
     [r.order_id, action, reason || null, cleanNote || null, String(via || 'form').slice(0, 20)]
   );
+  if (upd.rowCount === 0) {
+    // Same answer as we already hold. Record that they came back, so the
+    // dashboard still shows recent activity, but tell nobody.
+    await pool.query(`UPDATE quote_chase SET last_checked_at = NOW() WHERE order_id = $1`, [r.order_id]);
+    console.log(`[quote-chase] SO${r.order_id} pressed "${action}" again — already recorded, nobody emailed`);
+    return { duplicate: true };
+  }
 
   const detail = { action, reason: reason || '', note: cleanNote, stage: r.stage };
   const mail = buildResponseEmail(quoteRowToView(r), detail);
@@ -14139,6 +14162,7 @@ async function recordQuoteResponse(r, { action, reason, note, via }) {
   if (!quoteChaseDryRun() && !r.is_test) await postBpOrderNote(r.order_id, buildBpNote('response', detail));
 
   console.log(`[quote-chase] SO${r.order_id} answered "${action}"${reason ? ' / ' + reason : ''} via ${via || 'form'} -> ${to}`);
+  return { duplicate: false };
 }
 
 // Send one real chase email to an internal address, so the whole customer path
@@ -14827,7 +14851,7 @@ function quoteAutoConfirmPage(r, action) {
 
     <div id="done" style="display:none;">
       <p style="font-size:16px;"><strong>Thanks &mdash; that is logged.</strong></p>
-      <p>We have told ${quoteEsc(r.salesperson_name || 'your account manager')} that you chose
+      <p id="donetext">We have told ${quoteEsc(r.salesperson_name || 'your account manager')} that you chose
          &ldquo;${quoteEsc(label)}&rdquo; for quote SO${r.order_id}.</p>
       ${action === 'cancel' ? `
       <div id="extrawrap" style="margin:18px 0;padding:16px;background:#fafafa;border-radius:6px;">
@@ -14875,7 +14899,17 @@ function quoteAutoConfirmPage(r, action) {
         fetch('/api/quote-chase/respond', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ token:TOKEN, action:ACTION, via:'click' })
-        }).then(function(res){ if(!res.ok) throw new Error(); show('done'); })
+        }).then(function(res){ if(!res.ok) throw new Error(); return res.json().catch(function(){ return {}; }); })
+          .then(function(j){
+            // Pressing the same button again is not news. Say we already have
+            // it, so nobody keeps pressing hoping something will happen.
+            if (j && j.duplicate) {
+              var t = document.getElementById('donetext');
+              if (t) t.textContent = 'We already had this answer for quote SO' + ${JSON.stringify(String(r.order_id))} +
+                ', so there is nothing more you need to do. If you meant to change it, use a different button in the email.';
+            }
+            show('done');
+          })
           .catch(function(){ show('failed'); });
       }
       send();
