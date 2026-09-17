@@ -2870,12 +2870,32 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   // same code) on top — the caller form is kept so portwestPrepare / portwestPlaceExisting still work.
   const packLines = portwestPackLines();
   const theirsToOurs = new Map();   // Portwest code → our PO sku, so the cart read-back matches the PO row
+  // A PO row does not always carry the product's SKU. When a product has a SUPPLIER SKU set in
+  // Brightpearl, that is what BP writes onto the row of a PO for that supplier — product 106648
+  // (BIZ2NVRXXL) rowed as "biz2", B303RERL as "B303", FR26NARL as "FR26". Portwest's portal only
+  // knows the real code, so the upload sent "biz2", Portwest rejected it, and the reconcile
+  // dropped the customer line — SO 487261 lost its jacket four runs in a row (2026-09-08 → 09-17)
+  // and the row read as a reorder line nobody was waiting for. Send the product's real SKU and
+  // translate the cart back to the row's code, exactly as a pack line is.
+  const skuRepaired = [];
+  try {
+    const real = await bp.liveSkusOf(cartLines.map((l) => l.productId));
+    cartLines = cartLines.map((l) => {
+      const s = real.get(String(l.productId));
+      if (!s || s.toUpperCase() === String(l.sku).toUpperCase()) return l;
+      skuRepaired.push({ productId: l.productId, rowSku: l.sku, sentAs: s, name: l.name });
+      theirsToOurs.set(s.toUpperCase(), String(l.sku).toUpperCase());
+      return { ...l, sku: s };
+    });
+  } catch (e) { steps.skuRepairWarn = e.message; }
+  if (skuRepaired.length) steps.skuRepaired = skuRepaired;
   cartLines = cartLines.map((l) => {
     const rule = packLines[String(l.sku).toUpperCase()];
     if (!rule) return l;
     const q = Math.max(1, Math.ceil(l.qty / rule.pack));
     packApplied.push({ sku: l.sku, sentAs: rule.theirs, demandUnits: l.qty, packs: q, packOf: rule.pack });
-    theirsToOurs.set(String(rule.theirs).toUpperCase(), String(l.sku).toUpperCase());
+    // Chain through any SKU repair above so the cart still lands on the PO ROW's code.
+    theirsToOurs.set(String(rule.theirs).toUpperCase(), theirsToOurs.get(String(l.sku).toUpperCase()) || String(l.sku).toUpperCase());
     return { ...l, sku: rule.theirs, qty: q };
   });
   if (packSizes && Object.keys(packSizes).length) {

@@ -416,6 +416,30 @@ async function liveSkuOf(productId) {
   return sku;
 }
 
+// Batch form of liveSkuOf — one GET per 200 ids, ASCENDING (Brightpearl 400s on an unsorted
+// id-set, CMNC-006). Same cache. Returns Map<String(productId), sku|null>; an unreadable chunk
+// simply leaves its ids out, so a caller falls back to whatever code it already had.
+export async function liveSkusOf(productIds) {
+  const out = new Map(); const need = [];
+  for (const id of productIds || []) {
+    if (id == null) continue;
+    const k = String(id);
+    if (_liveSku.has(k)) out.set(k, _liveSku.get(k)); else need.push(Number(id));
+  }
+  need.sort((a, b) => a - b);
+  for (let i = 0; i < need.length; i += 200) {
+    const chunk = need.slice(i, i + 200);
+    let prods = [];
+    try { prods = (await liveGet(`/product-service/product/${chunk.join(',')}`)) || []; } catch { continue; }
+    for (const p of prods) {
+      if (!p || p.id == null) continue;
+      const sku = (p.identity && p.identity.sku) ? String(p.identity.sku) : null;
+      _liveSku.set(String(p.id), sku); out.set(String(p.id), sku);
+    }
+  }
+  return out;
+}
+
 export async function getProductIdentityLive(productId) {
   const resp = await liveGet(`/product-service/product/${productId}`);
   const p = Array.isArray(resp) ? resp[0] : resp;
