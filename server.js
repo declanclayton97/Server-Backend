@@ -14276,9 +14276,14 @@ app.post('/api/quote-chase/respond', async (req, res) => {
     const r = q.rows[0];
 
     const out = await recordQuoteResponse(r, { action, reason, note, via: (req.body || {}).via });
-    // The page uses this to say "we already have this" rather than thanking
+    // The page uses these to say what we actually hold, rather than thanking
     // them again as though something just happened.
-    res.json({ success: true, duplicate: !!(out && out.duplicate) });
+    res.json({
+      success: true,
+      duplicate: !!(out && out.duplicate),
+      heldAction: (out && out.heldAction) || null,
+      heldLabel: (QUOTE_ACTIONS.find((a) => a.key === (out && out.heldAction)) || {}).label || null,
+    });
   } catch (e) {
     console.error('[quote-chase] respond failed:', e.message);
     res.status(500).json({ error: e.message });
@@ -14289,38 +14294,50 @@ app.post('/api/quote-chase/respond', async (req, res) => {
 // order. Shared by the scripted path, the no-script fallback and the full form,
 // so all three behave identically.
 //
-// A CHANGE of answer is still allowed and still notifies — somebody who clicks
-// "more time" and then decides to go ahead must not be stuck, and adding a
-// reason or a note to an answer already given is new information too.
+// FIRST PRESS WINS. Customers press all four buttons to see what they do, and
+// every press used to email the salesperson.
 //
-// But the SAME answer twice tells the salesperson nothing and was mailing them
-// every time. That is not only double-clicking: the landing page posts on load,
-// so re-opening the email and pressing the button again fires it afresh, and a
-// customer pressing two different buttons to see what they do sent two emails.
+// So the first answer is the answer. A later press of anything — the same
+// button or a different one — changes nothing and tells nobody. The customer is
+// told we already have their answer and to reply if it was wrong, which is a
+// human reading a sentence rather than four contradictory emails landing in a
+// salesperson's inbox.
 //
-// The UPDATE itself decides. Its WHERE only matches when something actually
-// differs, so rowCount tells us whether this was news — and because Postgres
-// re-checks that WHERE against the updated row after a concurrent write, two
-// clicks landing together cannot both come back as a change.
+// ONE exception: after pressing Cancel the page asks "if you don't mind saying
+// why", and that posts the SAME action carrying a reason or a note. That is not
+// a second answer, it is detail on the first, and the customer had to type it
+// deliberately — so it is accepted and does reach the salesperson. Losing the
+// reason somebody took the trouble to write would be the wrong kind of strict.
+//
+// The UPDATE itself decides, rather than a read-then-check in JavaScript. Its
+// WHERE matches only on a first answer or on added detail for the SAME action,
+// so rowCount says whether this was news. That is also what makes a true
+// double-click safe: Postgres re-evaluates the WHERE against the updated row
+// after a concurrent write, so of two presses landing together only the first
+// can come back as news.
 async function recordQuoteResponse(r, { action, reason, note, via }) {
   const cleanNote = String(note || '').slice(0, 2000);
   const upd = await pool.query(
     `UPDATE quote_chase
-        SET responded_at = NOW(), response_action = $2, response_reason = $3, response_note = $4,
+        SET responded_at = COALESCE(responded_at, NOW()), response_action = $2,
+            response_reason = COALESCE($3, response_reason),
+            response_note = COALESCE(NULLIF($4,''), response_note),
             response_via = $5, last_checked_at = NOW()
       WHERE order_id = $1
         AND (responded_at IS NULL
-             OR response_action IS DISTINCT FROM $2
-             OR response_reason IS DISTINCT FROM $3
-             OR response_note   IS DISTINCT FROM $4)`,
+             OR (response_action = $2
+                 AND ($3 IS NOT NULL OR NULLIF($4,'') IS NOT NULL)
+                 AND (response_reason IS DISTINCT FROM $3
+                      OR response_note IS DISTINCT FROM NULLIF($4,''))))`,
     [r.order_id, action, reason || null, cleanNote || null, String(via || 'form').slice(0, 20)]
   );
   if (upd.rowCount === 0) {
-    // Same answer as we already hold. Record that they came back, so the
-    // dashboard still shows recent activity, but tell nobody.
+    // Already answered. Note that they came back so the dashboard still shows
+    // activity, but nobody is emailed and the recorded answer does not move.
     await pool.query(`UPDATE quote_chase SET last_checked_at = NOW() WHERE order_id = $1`, [r.order_id]);
-    console.log(`[quote-chase] SO${r.order_id} pressed "${action}" again — already recorded, nobody emailed`);
-    return { duplicate: true };
+    const held = r.response_action || '';
+    console.log(`[quote-chase] SO${r.order_id} pressed "${action}" but "${held}" is already recorded — locked, nobody emailed`);
+    return { duplicate: true, locked: true, heldAction: held };
   }
 
   const detail = { action, reason: reason || '', note: cleanNote, stage: r.stage };
@@ -15012,7 +15029,23 @@ function quoteAutoConfirmPage(r, action) {
     <label style="display:block;margin:5px 0;"><input type="radio" name="reason" value="${x.key}" style="margin-right:8px;">${quoteEsc(x.label)}</label>`).join('');
 
   return quotePage(`Quote SO${r.order_id}`, `
-    <div id="working">
+    <!-- Nothing is recorded until a person presses this.
+         Email security scanners (Barracuda, Mimecast, Defender Safe Links)
+         fetch every link in a message to check it, and the aggressive ones
+         render the page with JavaScript. This page used to answer on load, so
+         a scanner visiting all four buttons could record an answer — possibly
+         "Cancel" — before the customer had even opened the email. A button
+         that must be pressed is the one check those scanners do not pass. -->
+    <div id="confirm">
+      <p style="font-size:16px;margin-bottom:4px;">You chose <strong>${quoteEsc(label)}</strong></p>
+      <p style="color:#777;font-size:13px;margin-top:0;">Quote SO${r.order_id}</p>
+      <button id="confirmbtn" style="background:#0073e6;color:#fff;border:0;padding:14px 26px;border-radius:6px;font-size:16px;font-weight:bold;cursor:pointer;margin-top:10px;">
+        Confirm
+      </button>
+      <p style="color:#777;font-size:13px;margin-top:14px;">One press is all we need &mdash; we will pass it to your account manager.</p>
+    </div>
+
+    <div id="working" style="display:none;">
       <p style="font-size:15px;">Recording your answer&hellip;</p>
       <p style="color:#777;font-size:13px;">${quoteEsc(label)} &middot; quote SO${r.order_id}</p>
     </div>
@@ -15060,7 +15093,7 @@ function quoteAutoConfirmPage(r, action) {
 
     <script>
       var TOKEN = ${JSON.stringify(r.token)}, ACTION = ${JSON.stringify(action)};
-      function show(id){ ['working','done','failed'].forEach(function(x){
+      function show(id){ ['confirm','working','done','failed'].forEach(function(x){
         var el=document.getElementById(x); if(el) el.style.display = (x===id?'block':'none'); }); }
       function send(){
         show('working');
@@ -15069,18 +15102,34 @@ function quoteAutoConfirmPage(r, action) {
           body: JSON.stringify({ token:TOKEN, action:ACTION, via:'click' })
         }).then(function(res){ if(!res.ok) throw new Error(); return res.json().catch(function(){ return {}; }); })
           .then(function(j){
-            // Pressing the same button again is not news. Say we already have
-            // it, so nobody keeps pressing hoping something will happen.
+            // First press wins. Say plainly what we hold — a different button
+            // appearing to do nothing is what makes people press all of them.
             if (j && j.duplicate) {
               var t = document.getElementById('donetext');
-              if (t) t.textContent = 'We already had this answer for quote SO' + ${JSON.stringify(String(r.order_id))} +
-                ', so there is nothing more you need to do. If you meant to change it, use a different button in the email.';
+              var held = j.heldLabel || 'your answer';
+              if (t) t.textContent = 'We already have your answer for quote SO' +
+                ${JSON.stringify(String(r.order_id))} + ': "' + held + '". ' +
+                'That is what has gone to your account manager, and pressing another button will not change it. ' +
+                'If it is wrong, just reply to the email and we will sort it.';
+              // The cancel-reason box belongs to a fresh cancellation, not to
+              // somebody revisiting an answer already given.
+              var x = document.getElementById('extrawrap'); if (x) x.style.display = 'none';
             }
             show('done');
           })
           .catch(function(){ show('failed'); });
       }
-      send();
+      // NOT called on load. A scanner rendering this page must not be able to
+      // answer for the customer.
+      //
+      // isTrusted is false for a click produced by script — which is how a
+      // detonation sandbox that DOES interact with pages would press this. A
+      // real finger or a keyboard Enter gives true. Cheap, and it costs a real
+      // customer nothing.
+      document.getElementById('confirmbtn').addEventListener('click', function(ev){
+        if (ev && ev.isTrusted === false) return;
+        send();
+      });
       var retry=document.getElementById('retry'); if(retry) retry.addEventListener('click', send);
       var extra=document.getElementById('extra');
       if (extra) extra.addEventListener('submit', function(ev){
