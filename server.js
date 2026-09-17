@@ -9904,10 +9904,10 @@ app.get('/api/purchasing/dropped-line-notices', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   try {
     const where = [], args = [];
-    if (req.query.so) { args.push(Number(req.query.so)); where.push(`so_id = ${args.length}`); }
-    if (req.query.po) { args.push(Number(req.query.po)); where.push(`po_id = ${args.length}`); }
-    if (req.query.supplier) { args.push(String(req.query.supplier).toUpperCase()); where.push(`upper(supplier) = ${args.length}`); }
-    const days = Math.min(parseInt(req.query.days, 10) || 14, 90); args.push(days); where.push(`last_notified > now() - (${args.length} || ' days')::interval`);
+    if (req.query.so) { args.push(Number(req.query.so)); where.push(`so_id = $${args.length}`); }
+    if (req.query.po) { args.push(Number(req.query.po)); where.push(`po_id = $${args.length}`); }
+    if (req.query.supplier) { args.push(String(req.query.supplier).toUpperCase()); where.push(`upper(supplier) = $${args.length}`); }
+    const days = Math.min(parseInt(req.query.days, 10) || 14, 90); args.push(days); where.push(`last_notified > now() - ($${args.length} || ' days')::interval`);
     const r = await pool.query(`SELECT so_id, product_id, supplier, sku, po_id, notified_to, first_seen, last_notified
       FROM dropped_line_notice WHERE ${where.join(' AND ')} ORDER BY last_notified DESC LIMIT 200`, args);
     res.json({ count: r.rows.length, rows: r.rows });
