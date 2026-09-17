@@ -88,9 +88,6 @@ export const orderNeedsProof = (order) => { const i = orderStatusInstruction(ord
 const SKIP_SKU_FIELD = process.env.SKIP_SKU_FIELD || 'PCF_SKIPSKU';
 const PENDING_PO_STATUS = 6; // (informational — POs default to this on create)
 const WAREHOUSE_ID = 2;
-// The order page in the Brightpearl UI. A note containing this renders as a link, which is how a
-// back-order PO and its parent point at each other.
-const BP_WEB_ORDER_URL = process.env.BP_WEB_ORDER_URL || 'https://euw1.brightpearlapp.com/patt-op.php?scode=invoice&oID=';
 
 // Supplier registry. Each entry: BP supplier contactId, the supplier's cost
 // price list id, the per-supplier PO custom-field code, and a line detector
@@ -2235,19 +2232,19 @@ export async function createBackorderPoLive({ supplierKey, parentPoId, lines = [
     await pause(150);
   }
   await liveWrite("PUT", `/order-service/order/${poId}/status`, { orderStatusId: PO_BACKORDER_STATUS });
-  // Two notes, one on each end, each linking to the other. Brightpearl renders a URL in a note as
-  // a link, so the ORIGINAL PO gets a clickable line per back-ordered item with its expected date —
-  // that is where someone looking at the placed order needs to see it — and the back-order PO gets
-  // the reason and a link back to its parent. patt-op.php?scode=invoice&oID= is the order page.
-  const link = (id) => `${BP_WEB_ORDER_URL}${id}`;
+  // Two notes, one on each end, each pointing at the other. Brightpearl links "PO#nnnn" in a note
+  // by itself — the same form every existing "ordered via PO#nnnn" note uses — so that IS the
+  // link; a raw URL beside it is noise. The ORIGINAL PO gets a line per back-ordered item with its
+  // expected date, which is where someone looking at the placed order needs to see it; the
+  // back-order PO gets the reason and a pointer back to its parent.
   const dateOf = (l) => l.deldate ? ` — expected ${l.deldate}` : '';
   const itemLine = (l) => `${l.qty} × ${l.sku || l.productId}${l.name ? ` ${l.name}` : ''}${dateOf(l)}`;
   const boNote = (note ? note + '\n\n' : '')
-    + `BACK ORDER PO#${poId} — split from PO#${parentPoId || '?'}` + (parentPoId ? ` ${link(parentPoId)}` : '') + '\n'
+    + `BACK ORDER PO#${poId} — split from PO#${parentPoId || '?'}\n`
     + priced.map(itemLine).join('\n');
   await addOrderNoteLive(poId, boNote, sup.contactId).catch(() => {});
   if (parentPoId) {
-    const parentNote = `ON BACK ORDER — moved to PO#${poId} ${link(poId)}\n` + priced.map(itemLine).join('\n')
+    const parentNote = `ON BACK ORDER — moved to PO#${poId}\n` + priced.map(itemLine).join('\n')
       + `\nThese were not supplied on this order. Receive them against PO#${poId} when they arrive.`;
     await addOrderNoteLive(parentPoId, parentNote, sup.contactId).catch(() => {});
   }
