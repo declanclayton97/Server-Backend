@@ -6175,6 +6175,11 @@ async function fetchWhatsAppTemplates() {
       bodyText,
       bodyParamCount: nums.length ? Math.max(...nums) : 0,
       headerFormat: header?.format || null,               // TEXT | IMAGE | DOCUMENT | null
+      // The header's own wording, so the hub can show what the variable lands
+      // INSIDE. order_update's header is "SO{{1}}", and filling it with
+      // "Order SO490003" rendered "SOOrder SO490003" — invisible until it was
+      // on a customer's phone, because nothing here showed the surrounding text.
+      headerText: header?.format === 'TEXT' ? (header.text || '') : null,
       headerHasParam: !!(header && header.format === 'TEXT' && /\{\{\d+\}\}/.test(header.text || '')),
       buttons: (comps.find((c) => c.type === 'BUTTONS')?.buttons || []).map((b) => ({ type: b.type, text: b.text })),
     };
