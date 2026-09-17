@@ -9920,6 +9920,21 @@ app.get('/api/purchasing/dropped-line-notices', async (req, res) => {
 // lines in context, so the sales notice fires, the Stuck items tab lists it, and triage can see it.
 // Scruffs, 2026-09-17: "T55476 is currently unavailable and has been removed from your order" —
 // two customer lines, two POs, no record anywhere. body: { supplier, poId, lines:[{sku,qty,deldate}], note }
+// LIVE: put lines a supplier could not supply on their own "On Back Order" PO (status 45), as a
+// child of the original, so they stay visibly on order until the restock date rather than
+// disappearing when the drop step removed them. Dry-run unless execute:true.
+// body: { supplier, parentPoId, lines:[{productId|sku, qty, cost?}], note, execute }
+app.post('/api/purchasing/backorder-po-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    res.json(await purchasingAuto.createBackorderPoLive({
+      supplierKey: b.supplier, parentPoId: b.parentPoId, lines: Array.isArray(b.lines) ? b.lines : [],
+      note: b.note || '', execute: b.execute === true,
+    }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.post('/api/purchasing/supplier-dropped-lines', express.json(), async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   const b = req.body || {};

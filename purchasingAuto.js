@@ -2182,6 +2182,62 @@ export async function stampPoFieldLive({ orderIds = [], supplierKey, poField, po
 // Refuses if the SKU already has a row (use setPoRowCostLive to change one) and reads the PO back
 // rather than trusting the write. Dry-run unless { execute: true }.
 // body: { poId, sku, qty, unitCost, execute }
+// LIVE: a separate "On Back Order" PO for lines a supplier could not supply, so they stay visibly
+// on order until the restock date instead of vanishing from the PO. Child of the original (BP shows
+// it under the parent), status 45, one note naming the reason and the date.
+//
+// Why a NEW PO and not the original: the drop step has already deleted the row from the placed PO
+// so that PO matches what the supplier actually accepted — and it has to, or the receipt never
+// reconciles. Putting the line back there would re-break that. A child PO on 45 is what the old
+// prepare-supplier-order path did, and it is the shape Brightpearl reports as "on back order".
+//
+// createSupplierPO looks like the tool for this and is NOT: it writes through api(), the TEST
+// account. This is the live client throughout. Rows are priced from list 20 the same way the run
+// prices them; the rows are read back after writing, because a POST that returned is not a row
+// that landed.
+export async function createBackorderPoLive({ supplierKey, parentPoId, lines = [], note = "", execute = false } = {}) {
+  const sup = SUPPLIERS[String(supplierKey || "").toUpperCase()];
+  if (!sup || !sup.contactId) throw new Error(`unknown supplier ${supplierKey}`);
+  if (!Array.isArray(lines) || !lines.length) throw new Error("lines[{productId|sku, qty}] required");
+  const priced = [];
+  for (const l of lines) {
+    let productId = l.productId;
+    if (!productId && l.sku) {
+      const search = await liveGet(`/product-service/product-search?SKU=${encodeURIComponent(l.sku)}`);
+      const cols = ((search && search.metaData && search.metaData.columns) || []).map((c) => c.name);
+      const row = ((search && search.results) || [])[0];
+      productId = row ? row[cols.indexOf("productId")] : null;
+    }
+    if (!productId) return { created: false, reason: `no Brightpearl product for ${l.sku}` };
+    const cost = l.cost != null ? Number(l.cost) : await costOfLive(productId, sup.costList != null ? sup.costList : 20);
+    priced.push({ productId, sku: l.sku || null, qty: Number(l.qty) || 1, cost: Number(cost) || 0 });
+  }
+  const plan = { supplierKey: sup.key || supplierKey, parentPoId: parentPoId || null, status: PO_BACKORDER_STATUS, lines: priced, net: Number(priced.reduce((a, l) => a + l.qty * l.cost, 0).toFixed(2)) };
+  if (!execute) return { dryRun: true, ...plan };
+  const poId = await liveWrite("POST", "/order-service/order", {
+    orderTypeCode: "PO", reference: `Auto-PO ${sup.key || supplierKey} BACK ORDER`,
+    ...(parentPoId ? { parentOrderId: Number(parentPoId) } : {}),
+    priceListId: sup.costList != null ? sup.costList : 20, priceModeCode: "EXC",
+    warehouseId: WAREHOUSE_ID, currency: { orderCurrencyCode: "GBP" },
+    parties: { supplier: { contactId: sup.contactId } },
+  });
+  for (const l of priced) {
+    const code = await productTaxCodeLive(l.productId);
+    const rate = taxRate(code);
+    const net = l.cost * l.qty;
+    await liveWrite("POST", `/order-service/order/${poId}/row`, {
+      productId: l.productId, quantity: { magnitude: String(l.qty) },
+      rowValue: { taxCode: code, rowNet: { currency: "GBP", value: net.toFixed(2) }, rowTax: { currency: "GBP", value: (net * rate).toFixed(2) } },
+    });
+    await pause(150);
+  }
+  await liveWrite("PUT", `/order-service/order/${poId}/status`, { orderStatusId: PO_BACKORDER_STATUS });
+  if (note) await addOrderNoteLive(poId, note, sup.contactId).catch(() => {});
+  const after = (await liveGet(`/order-service/order/${poId}`))[0];
+  const landed = Object.values((after && after.orderRows) || {}).length;
+  return { created: true, poId, rowsLanded: landed, rowsWanted: priced.length, status: after && after.orderStatus && after.orderStatus.orderStatusId, ...plan };
+}
+
 export async function addPoProductRowLive({ poId, sku, qty, unitCost, execute = false } = {}) {
   if (!poId || !sku || !(Number(qty) > 0) || !(Number(unitCost) >= 0)) throw new Error('poId, sku, qty>0 and unitCost required');
   const q = Number(qty), cost = Number(unitCost);
