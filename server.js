@@ -13689,6 +13689,10 @@ async function initializeQuoteChaseTable() {
       -- "no phone on the order" is not re-fetched from Brightpearl every poll.
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS customer_phone TEXT;
       ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS phone_checked_at TIMESTAMPTZ;
+      -- Stamped once the chase address has been re-read from Brightpearl, so a
+      -- row is corrected to the delivery contact exactly once rather than being
+      -- re-fetched on every pass.
+      ALTER TABLE quote_chase ADD COLUMN IF NOT EXISTS email_checked_at TIMESTAMPTZ;
     `);
     console.log('✅ quote_chase table initialized');
   } catch (err) {
@@ -13812,11 +13816,80 @@ async function sendQuoteMail({ to, replyTo, subject, html, text, force }) {
 // The number sales would WhatsApp for a quote. Prefer a UK mobile from either
 // party field (the order's Telephone often holds the mobile — eBay and most
 // hand-keyed orders), otherwise whatever is in Mobile if it normalises.
+/**
+ * Who to chase about a quote.
+ *
+ * The DELIVERY contact, falling back to the invoice one. On a sample of 40
+ * recent orders the two matched 36 times — but where they differed, the
+ * invoice address was finance and the delivery address was the person who
+ * actually buys:
+ *
+ *   accounts.tissuemed@bd.com        vs  dan.jackson@bd.com
+ *   accounts@partingtons.com         vs  buying@partingtons.com
+ *   bradtool@bradfordtoolgroup.co.uk vs  michael.sheldon@bradfordtoolgroup.co.uk
+ *
+ * Chasing a quote into an accounts inbox is chasing somebody who cannot answer
+ * it, and the chase email carries buttons that only the buyer can meaningfully
+ * press.
+ *
+ * Deliberately ONE recipient, not both. Two people who can each press "go
+ * ahead" is how you get two answers to the same question.
+ */
+function quoteChaseEmail(o) {
+  const parties = (o && o.parties) || {};
+  const delivery = String((parties.delivery && parties.delivery.email) || '').trim();
+  const invoice = String((parties.customer && parties.customer.email) || '').trim();
+  return delivery || invoice || '';
+}
+
 function quoteCustomerWhatsApp(cust) {
   if (!cust) return null;
   const m = ukMobileNumber(cust.mobileTelephone) || ukMobileNumber(cust.telephone);
   if (m) return normaliseWhatsAppNumber(m);
   return normaliseWhatsAppNumber(cust.mobileTelephone) || null;
+}
+
+/**
+ * Quotes tracked before the switch to the delivery contact still hold the
+ * invoice address, which on some accounts is finance rather than the buyer.
+ * Re-read the open ones a batch at a time and correct them.
+ *
+ * Only quotes still in play: a quote already answered or stopped does not need
+ * its address fixing, and rewriting it would muddy the record of who was
+ * actually chased.
+ */
+async function backfillQuoteEmails() {
+  if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+  const r = await pool.query(
+    `SELECT order_id, customer_email FROM quote_chase
+      WHERE still_quote_sent = TRUE AND responded_at IS NULL AND stopped_at IS NULL
+        AND is_test = FALSE AND email_checked_at IS NULL
+      ORDER BY entered_status_at DESC LIMIT 200`
+  );
+  if (!r.rowCount) return;
+  const had = Object.fromEntries(r.rows.map((x) => [Number(x.order_id), x.customer_email || '']));
+  // Brightpearl rejects a path id-set that is not ascending (CMNC-006).
+  const ids = r.rows.map((x) => Number(x.order_id)).sort((a, b) => a - b);
+  const orders = await bpLive('GET', `/order-service/order/${ids.join(',')}`) || [];
+  let changed = 0;
+  for (const o of orders) {
+    const better = quoteChaseEmail(o);
+    if (better && better.toLowerCase() !== String(had[o.id] || '').toLowerCase()) {
+      changed++;
+      console.log(`[quote-chase] SO${o.id} chase address corrected: ${had[o.id] || '(none)'} -> ${better}`);
+    }
+    await pool.query(
+      `UPDATE quote_chase SET customer_email = COALESCE(NULLIF($2,''), customer_email), email_checked_at = NOW()
+        WHERE order_id = $1`,
+      [o.id, better]
+    );
+  }
+  // Stamp any we could not read back, so they are not retried every pass.
+  await pool.query(
+    `UPDATE quote_chase SET email_checked_at = NOW() WHERE order_id = ANY($1::bigint[]) AND email_checked_at IS NULL`,
+    [ids]
+  );
+  console.log(`[quote-chase] chase-address back-fill: ${ids.length} checked, ${changed} corrected to the delivery contact`);
 }
 
 // Rows inserted before customer_phone existed have no number. Fill them from
@@ -13936,7 +14009,7 @@ async function pollQuoteChase() {
             isFirstRun || (enteredAt && enteredAt < QUOTE_CHASE_SEED_BEFORE),
            QUOTE_CHASE_LIVE_STATUS[o.id] || null,
            cust.contactName || cust.addressFullName || '', cust.companyName || '',
-           cust.email || '', parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
+           quoteChaseEmail(o), parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
            o.reference || '', o.createdById || null, sp.name, sp.email,
            quoteChannelOf(o) || null, channels[quoteChannelOf(o)] || null,
            quoteCustomerWhatsApp(cust)]
@@ -14682,7 +14755,7 @@ app.get('/api/quote-chase/list', (req, res, next) => app.locals.requireHubUser(r
           customerPhone: quoteCustomerWhatsApp(cust),
           customerName: cust.contactName || cust.addressFullName || '',
           companyName: cust.companyName || '',
-          customerEmail: cust.email || '',
+          customerEmail: quoteChaseEmail(o),   // delivery contact, not accounts
           netValue: parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
           reference: o.reference || '',
           salespersonName: sp.name,
@@ -14997,6 +15070,10 @@ if (process.env.QUOTE_CHASE_ENABLED === 'true' && BRIGHTPEARL_API_TOKEN && BRIGH
 // Deliberately NOT gated on QUOTE_CHASE_ENABLED — the Quote Sent page shows
 // tracked rows (and their WhatsApp buttons) whether or not the chase runs.
 if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
+  // Offset from the phone back-fill so the two are not hitting Brightpearl at
+  // the same moment.
+  setTimeout(() => backfillQuoteEmails().catch((e) => console.error('Quote chase-address back-fill failed:', e.message)), 6 * 60 * 1000);
+  setInterval(() => backfillQuoteEmails().catch((e) => console.error('Quote chase-address back-fill failed:', e.message)), 30 * 60 * 1000);
   setTimeout(() => backfillQuotePhones().catch((e) => console.error('Quote phone back-fill failed:', e.message)), 5 * 60 * 1000);
   setInterval(() => backfillQuotePhones().catch((e) => console.error('Quote phone back-fill failed:', e.message)), 30 * 60 * 1000);
 }
