@@ -9914,6 +9914,42 @@ app.get('/api/purchasing/dropped-line-notices', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// A supplier told us AFTER accepting the order that a line is gone — by email, by phone, on the
+// delivery note. Nothing in the run can see that, so until now it lived in an inbox and went no
+// further. This records it exactly as an automated drop is recorded: an error row with the dropped
+// lines in context, so the sales notice fires, the Stuck items tab lists it, and triage can see it.
+// Scruffs, 2026-09-17: "T55476 is currently unavailable and has been removed from your order" —
+// two customer lines, two POs, no record anywhere. body: { supplier, poId, lines:[{sku,qty,deldate}], note }
+app.post('/api/purchasing/supplier-dropped-lines', express.json(), async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  const b = req.body || {};
+  const supplier = String(b.supplier || '').toUpperCase();
+  const poId = parseInt(b.poId, 10);
+  const lines = Array.isArray(b.lines) ? b.lines.filter((l) => l && l.sku) : [];
+  if (!supplier || !poId || !lines.length) return res.status(400).json({ error: 'supplier, poId and lines[{sku,qty}] required' });
+  try {
+    // Resolve productId from the PO so the notice can match on it — the exact match, never the
+    // near miss (see reference: order rows freeze the sku).
+    const poLines = await purchasingAuto.getOrderCartLines(poId).catch(() => []);
+    const byCode = new Map(poLines.map((l) => [String(l.sku).toUpperCase(), l]));
+    const dropped = lines.map((l) => {
+      const hit = byCode.get(String(l.sku).toUpperCase());
+      return { sku: l.sku, qty: Number(l.qty) || (hit && hit.qty) || null, productId: hit ? hit.productId : null,
+        name: hit ? hit.name : null, size: hit ? hit.size : null, deldate: l.deldate || null, reason: b.note || 'removed by the supplier after the order was accepted' };
+    });
+    const unmatched = dropped.filter((d) => d.productId == null).map((d) => d.sku);
+    const detail = dropped.map((d) => `${d.qty != null ? d.qty : '?'} × ${d.sku}${d.deldate ? ` (back ${d.deldate})` : ''}`).join('; ');
+    await purchasingSchedule.logPurchasingError(pool, {
+      supplier, step: 'supplier-removed-line', severity: 'error', placed: true,
+      message: `${supplier} removed ${dropped.length} line(s) from PO#${poId} AFTER accepting the order${b.note ? ` — ${b.note}` : ''}: ${detail}. `
+        + `The PO is placed without them and nothing will chase them — source elsewhere, back-order with the customer, or credit.`
+        + (unmatched.length ? ` ⚠ ${unmatched.join(', ')} not found on the PO rows — check the code.` : ''),
+      context: { poId, dropped, source: 'supplier-notified', unmatched },
+    });
+    res.json({ ok: true, supplier, poId, recorded: dropped.length, unmatched });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/purchasing/error-log/:id/notify', express.json(), async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   const id = parseInt(req.params.id, 10);
