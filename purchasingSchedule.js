@@ -236,6 +236,7 @@ export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = '
         await notifyDroppedLines(pool, {
           supplier, poId: c.poId || null, dropped: lines, linesByOrder: c.linesByOrder || {},
           placed: /-dropped$/.test(String(step)) || placed === true,
+          backorderPoId: c.backorderPoId || null,
           execute: !c.dryRun,
         });
       }
@@ -1099,8 +1100,74 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
 
   // resolve each PO line (EAN -> search/colour/size); skip service lines; abort on genuinely-unresolved
   const { resolveSterlingLine, isNonSterlingOrderable } = await import('./sterlingResolve.js');
-  const poLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000');
+  let poLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000');
   const unresolved = [], skipped = [];
+
+  // ── STOCK PRE-FLIGHT: SPLIT WHAT STERLING CANNOT SHIP ONTO A BACK-ORDER PO ──────────────────
+  // Sterling's shop accepts a zero-stock line without a word and simply holds it — so an order
+  // with one out-of-stock item ships late in full, and nothing on our side says why. The feed
+  // knew all along: 5055160050803 (Dewalt Easton tee, Black L, SO 489794) went onto PO 489978 on
+  // 2026-09-17 while supplier_stock said avail 0, due 20/9, refreshed at 08:37 that morning. The
+  // run never asked.
+  //
+  // Same shape as the Fristads pre-flight, different consequence. Fristads REFUSES the line, so
+  // it must come off. Sterling would TAKE it and delay everything else, so it comes off the order
+  // that ships and goes on its own PO at "On Back Order", noted both ends with the date. The
+  // in-stock lines ship now; the short one is visibly on order until the feed says otherwise.
+  //
+  // FAIL OPEN. An unreadable feed (null) leaves the line ON the order — that is today's
+  // behaviour, and a stale feed must never be allowed to strand a line the supplier would have
+  // shipped. Only a confident "0 available" is acted on.
+  const sterlingShort = [];
+  {
+    const probe = async (l) => {
+      try {
+        const j = await (await fetch(`${altItemsUrl}/api/feed-stock?supplier=Sterling&code=${encodeURIComponent(l.sku)}`, { signal: AbortSignal.timeout(20000) })).json();
+        // j.avail == null must be null here, not 0: Number(null) is 0, and 0 is the one value that
+        // moves a line onto back order. A feed row with no figure says nothing and must act like it.
+        if (!j || j.found !== true || j.avail == null || !Number.isFinite(Number(j.avail))) return null;
+        return { avail: Number(j.avail), deldate: j.deldate || null };
+      } catch { return null; }
+    };
+    const STERLING_STOCK_CONCURRENCY = 6;
+    for (let i = 0; i < poLines.length; i += STERLING_STOCK_CONCURRENCY) {
+      const batch = poLines.slice(i, i + STERLING_STOCK_CONCURRENCY);
+      const got = await Promise.all(batch.map(probe));
+      batch.forEach((l, n) => { if (got[n] && got[n].avail === 0) sterlingShort.push({ ...l, avail: 0, deldate: got[n].deldate }); });
+    }
+    steps.stockCheck = { checked: poLines.length, short: sterlingShort.map((s) => ({ sku: s.sku, qty: s.qty, deldate: s.deldate })) };
+    if (sterlingShort.length) {
+      const shortPids = new Set(sterlingShort.map((s) => String(s.productId)));
+      const remaining = poLines.filter((l) => !shortPids.has(String(l.productId)));
+      if (!remaining.length) {
+        throw stepErr('cart', `every line on PO#${poId} is out of stock at Sterling — nothing to order now: `
+          + sterlingShort.map((s) => `${s.sku} (due ${s.deldate || '?'})`).join('; '), { poId, dropped: sterlingShort });
+      }
+      // Take the short rows off the placed PO — it must match what Sterling ship — and put them
+      // on their own back-order PO, child of this one, noted both ends. Best-effort per row.
+      for (const s of sterlingShort) { await bp.removePoRowLive({ poId, sku: s.sku, execute: true }).catch(() => {}); }
+      const bo = await bp.createBackorderPoLive({
+        supplierKey: 'STERLING', parentPoId: poId, execute: true,
+        lines: sterlingShort.map((s) => ({ productId: s.productId, sku: s.sku, name: s.name, qty: s.qty, deldate: s.deldate })),
+        note: `Out of stock at Sterling when PO#${poId} was placed on ${new Date().toISOString().slice(0, 10)}.`,
+      }).catch((e) => ({ created: false, error: e.message }));
+      steps.backorder = bo;
+      // The SO note and finalise must not claim these were ordered on THIS PO.
+      for (const id of Object.keys(linesByOrder)) {
+        linesByOrder[id] = linesByOrder[id].filter((x) => !sterlingShort.some((s) => String(s.sku).toUpperCase() === String(x.sku).toUpperCase()));
+        if (!linesByOrder[id].length) delete linesByOrder[id];
+      }
+      poLines = remaining;
+      await logPurchasingError(pool, {
+        supplier: 'STERLING', step: 'out-of-stock-dropped', severity: 'error', placed: true,
+        message: `${sterlingShort.length} line(s) are out of stock at Sterling and were moved OFF PO#${poId}`
+          + (bo.created ? ` onto back-order PO#${bo.poId}` : ' (back-order PO could NOT be created: ' + (bo.error || bo.reason) + ')')
+          + ` so the rest could ship now:\n`
+          + sterlingShort.map((s) => `      ${s.qty} × ${s.sku} ${s.name || ''} — Sterling have 0${s.deldate ? `, due ${s.deldate}` : ''}`).join('\n'),
+        context: { poId, dropped: sterlingShort, backorderPoId: bo.created ? bo.poId : null, linesByOrder },
+      }).catch(() => {});
+    }
+  }
   // Merge lines that resolve to the SAME shop variant (search|colour|size) into ONE add,
   // summing qty. The PO can carry two rows for the same variant (e.g. two SOs both needing
   // Mercury Black 11); the shop's basket merges duplicate adds and keeps the LAST qty, not
@@ -3775,7 +3842,7 @@ export async function notifyDroppedLines(pool, opts = {}) {
   } catch { /* recording the outcome must never mask it */ }
   return out;
 }
-async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true, placed = true, force = false } = {}) {
+async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true, placed = true, force = false, backorderPoId = null } = {}) {
   if (!Array.isArray(dropped) || !dropped.length) return { sent: 0, reason: 'nothing dropped' };
   const label = supplier.charAt(0) + supplier.slice(1).toLowerCase();
 
@@ -3881,7 +3948,7 @@ async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = nul
     const count = orders.reduce((a, x) => a + x.lines.length, 0);
     const plural = count === 1 ? '' : 's';
     const subject = label + ' could not supply ' + count + ' line' + plural
-      + (placed ? '' : ' (order not placed)') + ' — ' + orders.map((x) => 'SO ' + x.soId).join(', ');
+      + (backorderPoId ? ' — on back order, PO#' + backorderPoId : placed ? '' : ' (order not placed)') + ' — ' + orders.map((x) => 'SO ' + x.soId).join(', ');
     const blocks = orders.map((x) => {
       const head = '<p><strong>SO ' + esc(x.soId) + '</strong>'
         + (x.ref ? ' — ' + esc(x.ref) : '') + (x.customer ? ' — ' + esc(x.customer) : '') + '</p>';
@@ -3893,7 +3960,17 @@ async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = nul
         + '</li>').join('');
       return head + '<ul>' + items + '</ul>';
     }).join('');
-    const html = (placed
+    // Three cases, three messages, because each asks something different of the reader:
+    //   backorderPoId — the line is ON ORDER, on its own PO, with a date. Tell the customer; no action.
+    //   placed        — the order went through WITHOUT it and nothing will chase it. Act.
+    //   not placed    — the run stopped; it retries. A heads-up.
+    const html = (backorderPoId
+      ? '<p><strong>' + label + ' cannot supply the line' + plural + ' below yet, so '
+        + (count === 1 ? 'it has' : 'they have') + ' been moved onto back-order PO#' + esc(backorderPoId)
+        + ' and the rest of PO#' + esc(poId) + ' is shipping now.</strong></p>'
+        + '<p>' + (count === 1 ? 'It is' : 'They are') + ' still on order — the expected date is against each line below. '
+        + 'Nothing to do unless the customer cannot wait that long, in which case source it elsewhere or credit.</p>'
+      : placed
       ? '<p><strong>' + label + ' would not supply the line' + plural + ' below, so '
         + (count === 1 ? 'it was' : 'they were') + ' left off PO#' + esc(poId) + '.</strong> '
         + 'The rest of the order went through as normal.</p>'
