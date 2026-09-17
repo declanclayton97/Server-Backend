@@ -3738,7 +3738,18 @@ const RETRY_SAFE_STEPS = new Set(['preflight', 'create-po', 'resolve']);
 // retry gets further and then fails at 'cart' or later, the step is no longer retry-safe and the
 // sweep stops considering it at all.
 const RETRY_ATTEMPTS_PER_DAY = 3;
+// The in-process map is only the same-process race guard (two sweeps cannot both claim an attempt).
+// The COUNT that enforces the budget comes from the error log: on 2026-09-17 three deploys between
+// 14:40 and 16:04 each restarted the process, each restart zeroed this map, and PenCarrie was
+// retried four times on the same unresolvable code. Every attempt writes a 'retry-sweep' row, so
+// counting today's rows survives any number of restarts.
 const _retriedToday = new Map();
+async function retrySweepAttemptsToday(pool, key, ukDate) {
+  const q = await pool.query(
+    "SELECT count(*)::int AS n FROM purchasing_error_log WHERE upper(supplier) = $1 AND step = 'retry-sweep' AND (created_at AT TIME ZONE 'Europe/London')::date = $2::date",
+    [String(key).toUpperCase(), ukDate]);
+  return (q.rows[0] && q.rows[0].n) || 0;
+}
 
 export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true } = {}) {
   const uk = ukNow();
@@ -3750,7 +3761,11 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
     catch (e) { suppliers.push({ supplier: key, skipped: 'state unreadable: ' + e.message }); continue; }
     if (!state.last_run_date || ukDateStr(state.last_run_date) !== uk.date) continue;   // never ran today
     const res = state.last_result || {};
-    const spent = (() => { const r = _retriedToday.get(key); return r && r.date === uk.date ? r.count : 0; })();
+    const spentMem = (() => { const r = _retriedToday.get(key); return r && r.date === uk.date ? r.count : 0; })();
+    let spentDb = 0;
+    try { spentDb = await retrySweepAttemptsToday(pool, key, uk.date); }
+    catch (e) { suppliers.push({ supplier: key, skipped: 'retry count unreadable: ' + e.message }); continue; }  // cannot prove the budget -> do not spend it
+    const spent = Math.max(spentMem, spentDb);
     const already = spent >= RETRY_ATTEMPTS_PER_DAY;
 
     // NO threshold re-evaluation here. A run that WAITED under the free-carriage threshold is
@@ -3818,6 +3833,12 @@ export async function retrySafeFailuresToday({ pool, altItemsUrl, execute = true
       }).catch(() => {});
     } catch (e) {
       suppliers.push({ supplier: key, retried: true, afterStep: res.step, placed: false, error: e.message });
+      // An attempt that threw still spent budget — record it, or the DB count would hand it back.
+      await logPurchasingError(pool, {
+        supplier: key, step: 'retry-sweep', severity: 'review', placed: false,
+        message: 'Retried after the "' + res.step + '" failure earlier today and the retry itself threw: ' + e.message,
+        context: { afterStep: res.step, retryOf: String(res.error).slice(0, 300), thrown: e.message },
+      }).catch(() => {});
     }
   }
   return { ran: uk.date, ukTime: uk.weekday + ' ' + uk.hour + ':' + String(uk.minute).padStart(2, '0'), execute, suppliers };
