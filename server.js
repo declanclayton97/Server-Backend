@@ -9929,6 +9929,25 @@ app.get('/api/purchasing/dropped-line-notices', async (req, res) => {
 // child of the original, so they stay visibly on order until the restock date rather than
 // disappearing when the drop step removed them. Dry-run unless execute:true.
 // body: { supplier, parentPoId, lines:[{productId|sku, qty, cost?}], note, execute }
+// LIVE: set a PO's reference and/or add a note WITHOUT touching its status. mark-po-placed-live
+// bundles a move to Placed(7), which is wrong for a back-order PO: status 45 is what makes it read
+// as "On Back Order", and placing it at the supplier does not change that. This records the
+// supplier's reservation/order number and the fact of placement while leaving the status alone.
+// body: { poId, reference?, note?, noteContactId?, execute }
+app.post('/api/purchasing/annotate-po-live', express.json(), async (req, res) => {
+  if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
+  try {
+    const b = req.body || {};
+    if (!b.poId) return res.status(400).json({ error: 'poId required' });
+    if (!b.reference && !b.note) return res.status(400).json({ error: 'reference or note required' });
+    if (b.execute !== true) return res.json({ dryRun: true, poId: b.poId, reference: b.reference || null, note: b.note || null });
+    const out = { poId: b.poId };
+    if (b.reference) { try { await purchasingAuto.setOrderReferenceLive(b.poId, b.reference); out.refWritten = true; } catch (e) { out.refWritten = false; out.refWarn = e.message; } }
+    if (b.note) { try { await purchasingAuto.addOrderNoteLive(b.poId, b.note, b.noteContactId || 1); out.noted = true; } catch (e) { out.noted = false; out.noteWarn = e.message; } }
+    res.json(out);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.post('/api/purchasing/backorder-po-live', express.json(), async (req, res) => {
   if (!purchasingAuto.isLiveConfigured()) return res.status(503).json({ error: 'Live BP creds not configured' });
   try {
