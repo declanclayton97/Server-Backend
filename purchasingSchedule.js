@@ -849,7 +849,7 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. push PO lines to the Castle basket (SKU-direct; size ignored by Castle).
@@ -1095,7 +1095,7 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // resolve each PO line (EAN -> search/colour/size); skip service lines; abort on genuinely-unresolved
@@ -1239,7 +1239,7 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. EMAIL Brightpearl's real PO PDF to Uneek's order desk (only email_to_0 = the order
@@ -1333,7 +1333,7 @@ async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToTh
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // createPo returns NONE of netValue, soNet or lowNet — it never has — so this read 0 on every
@@ -1416,7 +1416,7 @@ async function placeScruffsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {})
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // 2. EMAIL Brightpearl's real PO PDF to the Scruffs order desk. Only email_to_0 is set —
@@ -1493,7 +1493,7 @@ async function placePerformanceBrandsOrder(pool, altItemsUrl, { padToThreshold =
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // name is sent as well as sku because a few of our products carry a Brightpearl-internal SKU with
@@ -1676,7 +1676,7 @@ async function placeMascotOrder(pool, altItemsUrl, { padToThreshold = 0, live = 
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // name is sent because the EAN resolver narrows the catalogue by the style code parsed out of the
@@ -1732,7 +1732,7 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // Chadwick key on their ITEM CODE, which most of our SKUs already are (882-01-A-L). Some products
@@ -2265,7 +2265,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // Worker lines = the PO's SKUs (skip the =====LOW INV==== separator productId 1000), summed
@@ -2724,7 +2724,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [], priceOverridesApplied: po.priceOverridesApplied || [] };
 
   // Take the excluded SKUs off the PO before anything is built from it. The basket below is
@@ -2799,7 +2799,29 @@ const PORTWEST_SUPPLIER_CONTACT = 298;
 // outcome, but by luck rather than by the guard — had Portwest accepted that code we would have
 // bought 48 loose masks against an explicit instruction not to. An exclusion has to be expressed in
 // the code the PO ROW carries, so BOTH spellings are listed until the box product replaces it.
-const PORTWEST_TEMP_EXCLUDE = ['P351WHR', '196109'];
+// PACK LINES — a Brightpearl SKU that is a MULTIPLE of what Portwest sell as one item.
+//   ours: the BP sku on the PO row.   theirs: the Portwest item code.   pack: our units per their item.
+// P351WHR-20 is a 20-pack of the P351 respirator on our side; Portwest sell P351WHR singly in boxes
+// of 20. So 48 of ours = ceil(48/20) = 3 boxes of theirs, sent under THEIR code. The quantity half
+// of this rule has existed (packSizes) since the day this file mentioned "P351WHR IS a box of 20
+// masks" as its worked example — and no scheduled run ever passed a packSizes, so it never fired
+// once. P351WHR sat in PORTWEST_TEMP_EXCLUDE as "handled manually" instead, which also never
+// matched the PO row, because the row is P351WHR-20. 48 masks dropped on 2026-09-17 with 5,485 in
+// stock at Portwest. Extend without a deploy via PORTWEST_PACK_LINES='{"OURSKU":{"theirs":"X","pack":20}}'.
+const PORTWEST_PACK_LINES = {
+  'P351WHR-20': { theirs: 'P351WHR', pack: 20 },   // P351 FFP3 Dolomite fold-flat respirator, white
+};
+function portwestPackLines() {
+  let env = {};
+  try { env = JSON.parse(process.env.PORTWEST_PACK_LINES || '{}'); } catch { /* bad JSON → built-ins only, never blocks a run */ }
+  const out = {};
+  for (const [k, v] of Object.entries(PORTWEST_PACK_LINES)) out[String(k).toUpperCase()] = v;
+  for (const [k, v] of Object.entries(env)) if (v && v.theirs && Number(v.pack) > 1) out[String(k).toUpperCase()] = { theirs: String(v.theirs), pack: Number(v.pack) };
+  return out;
+}
+// Codes to leave OFF the Portwest order entirely. 196109 is an internal code with no Portwest
+// equivalent yet. P351WHR used to sit here as "handled manually" — it is a pack line now, above.
+const PORTWEST_TEMP_EXCLUDE = ['196109'];
 async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verifyOnly = false, poId: existingPoId = null, packSizes = {}, excludeSkus = [] } = {}) {
   const steps = {};
   let poId, soIds, linesByOrder;
@@ -2822,13 +2844,17 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
     poId = po.poId;
     soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
     linesByOrder = {};
-    for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+    for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
     steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
   }
   // Upload lines = the ACTUAL PO ROWS (canonical Portwest codes, e.g. P351WHR — the SO demand
   // may carry a different internal SKU like 196109 that Portwest's portal doesn't recognise).
   let poRowLines;
-  try { poRowLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty) })); }
+  // productId and name ride along so a dropped line can be matched to its customer EXACTLY. A
+  // dropped line was recorded by sku alone, and on 2026-09-17 that sku was "biz2" — which matched
+  // nothing in demand_log, so BIZ2NVRXXL for SO 487261 was reported as "no customer waiting" on
+  // its FOURTH silent drop. The productId is the one identifier nothing along the way can mangle.
+  try { poRowLines = (await bp.getOrderCartLines(poId)).filter((l) => l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), productId: l.productId, name: l.name })); }
   catch (e) { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); }
   // Upload starts from the PO rows. packSizes[sku] = how many of OUR units make ONE Portwest
   // order item (e.g. P351WHR IS a box of 20 masks). The Portwest order qty is therefore
@@ -2840,10 +2866,22 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   let cartLines = poRowLines.filter((l) => !excl.has(String(l.sku).toUpperCase())).map((l) => ({ ...l }));
   if (excl.size) steps.excluded = [...excl];
   const packApplied = [];
+  // Built-in pack lines first (code AND quantity), then any caller-supplied packSizes (quantity only,
+  // same code) on top — the caller form is kept so portwestPrepare / portwestPlaceExisting still work.
+  const packLines = portwestPackLines();
+  const theirsToOurs = new Map();   // Portwest code → our PO sku, so the cart read-back matches the PO row
+  cartLines = cartLines.map((l) => {
+    const rule = packLines[String(l.sku).toUpperCase()];
+    if (!rule) return l;
+    const q = Math.max(1, Math.ceil(l.qty / rule.pack));
+    packApplied.push({ sku: l.sku, sentAs: rule.theirs, demandUnits: l.qty, packs: q, packOf: rule.pack });
+    theirsToOurs.set(String(rule.theirs).toUpperCase(), String(l.sku).toUpperCase());
+    return { ...l, sku: rule.theirs, qty: q };
+  });
   if (packSizes && Object.keys(packSizes).length) {
     cartLines = cartLines.map((l) => { const p = Number(packSizes[String(l.sku).toUpperCase()]); if (p > 1) { const q = Math.max(1, Math.ceil(l.qty / p)); if (q !== l.qty) { packApplied.push({ sku: l.sku, demandUnits: l.qty, packs: q, packOf: p }); return { ...l, qty: q }; } } return l; });
-    if (packApplied.length) steps.packConversion = packApplied;
   }
+  if (packApplied.length) steps.packConversion = packApplied;
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   if (!cartLines.length) throw stepErr('cart', 'no orderable Portwest lines');
 
@@ -2862,11 +2900,22 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   // 2026-08-21 — the cart code counted as an unexpected extra AND the PO row counted as dropped —
   // and aborted PO 483845 over a cart that was entirely correct.
   const nk = (s) => String(s).toUpperCase().replace(/\//g, '');
-  const got = new Map(); for (const l of cart) got.set(nk(l.sku), (got.get(nk(l.sku)) || 0) + (Number(l.qty) || 0));
+  // A pack line comes back from the cart under PORTWEST's code, in PACKS. Translate it to our PO
+  // row's sku and back into our units before the diff, or the PO row reads as dropped and the cart
+  // line reads as an unexpected extra — the same double miscount the slash fix above describes.
+  const got = new Map();
+  for (const l of cart) {
+    const theirs = String(l.sku).toUpperCase();
+    const ours = theirsToOurs.get(theirs);
+    const rule = ours ? packLines[ours] : null;
+    const key = nk(ours || l.sku);
+    const units = rule ? (Number(l.qty) || 0) * rule.pack : (Number(l.qty) || 0);
+    got.set(key, (got.get(key) || 0) + units);
+  }
   // Diff the CART against the ORIGINAL PO ROWS (not the pack-adjusted upload) so BOTH Portwest's
   // carton rounding and our own pack rounding surface as bumps to apply to the PO.
   const bumped = [], droppedLines = [], matched = [];
-  for (const l of poRowLines) { const g = got.get(nk(l.sku)) || 0; if (g === 0) droppedLines.push({ sku: l.sku, want: l.qty }); else if (g !== l.qty) bumped.push({ sku: l.sku, from: l.qty, to: g }); else matched.push(l.sku); }
+  for (const l of poRowLines) { const g = got.get(nk(l.sku)) || 0; if (g === 0) droppedLines.push({ sku: l.sku, want: l.qty, productId: l.productId, name: l.name }); else if (g !== l.qty) bumped.push({ sku: l.sku, from: l.qty, to: g }); else matched.push(l.sku); }
   const extra = [...got.keys()].filter((s) => !poRowLines.some((l) => nk(l.sku) === s));
   const cartUnits = [...got.values()].reduce((a, b) => a + b, 0);
   steps.verify = { poLineCount: poRowLines.length, cartLineCount: cart.length, matched: matched.length, bumped, dropped: droppedLines, extra };
@@ -2985,7 +3034,7 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // Order lines from the PO rows, carrying name + colour + size so /api/pencarrie-order can
@@ -3119,7 +3168,7 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name }); }
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // Order lines = the PO rows (BP SKU = Blåkläder part number, exact — no resolver).
@@ -3852,8 +3901,13 @@ async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = nul
   // our SKU directly and carries no productId on a dropped line, where matching on SKU is exact.
   // Never fall back to SKU when a productId was supplied — that is how a near-miss becomes a
   // confident wrong answer.
+  // Match on productId when BOTH sides have one — the one identifier nothing along the way can
+  // mangle. Portwest's cart reads BIZ2NVRXXL back as "biz2"; matched on sku that is nothing, and
+  // SO 487261 was reported as "no customer waiting" on its fourth silent drop (2026-09-17). Only
+  // when a side lacks a productId does sku decide, and never as a fallback from a productId that
+  // simply did not match — that near-miss is what makes demandMatched unreliable on the tab.
   const sosFor = (d) => Object.keys(linesByOrder || {}).filter((id) => (linesByOrder[id] || []).some((x) => (
-    d.productId != null
+    (d.productId != null && x.productId != null)
       ? String(x.productId) === String(d.productId)
       : String(x.sku || '').toUpperCase() === String(d.sku || '').toUpperCase())));
 
