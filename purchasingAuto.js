@@ -88,6 +88,9 @@ export const orderNeedsProof = (order) => { const i = orderStatusInstruction(ord
 const SKIP_SKU_FIELD = process.env.SKIP_SKU_FIELD || 'PCF_SKIPSKU';
 const PENDING_PO_STATUS = 6; // (informational — POs default to this on create)
 const WAREHOUSE_ID = 2;
+// The order page in the Brightpearl UI. A note containing this renders as a link, which is how a
+// back-order PO and its parent point at each other.
+const BP_WEB_ORDER_URL = process.env.BP_WEB_ORDER_URL || 'https://euw1.brightpearlapp.com/patt-op.php?scode=invoice&oID=';
 
 // Supplier registry. Each entry: BP supplier contactId, the supplier's cost
 // price list id, the per-supplier PO custom-field code, and a line detector
@@ -2210,7 +2213,7 @@ export async function createBackorderPoLive({ supplierKey, parentPoId, lines = [
     }
     if (!productId) return { created: false, reason: `no Brightpearl product for ${l.sku}` };
     const cost = l.cost != null ? Number(l.cost) : await costOfLive(productId, sup.costList != null ? sup.costList : 20);
-    priced.push({ productId, sku: l.sku || null, qty: Number(l.qty) || 1, cost: Number(cost) || 0 });
+    priced.push({ productId, sku: l.sku || null, name: l.name || null, deldate: l.deldate || null, qty: Number(l.qty) || 1, cost: Number(cost) || 0 });
   }
   const plan = { supplierKey: sup.key || supplierKey, parentPoId: parentPoId || null, status: PO_BACKORDER_STATUS, lines: priced, net: Number(priced.reduce((a, l) => a + l.qty * l.cost, 0).toFixed(2)) };
   if (!execute) return { dryRun: true, ...plan };
@@ -2232,10 +2235,25 @@ export async function createBackorderPoLive({ supplierKey, parentPoId, lines = [
     await pause(150);
   }
   await liveWrite("PUT", `/order-service/order/${poId}/status`, { orderStatusId: PO_BACKORDER_STATUS });
-  if (note) await addOrderNoteLive(poId, note, sup.contactId).catch(() => {});
+  // Two notes, one on each end, each linking to the other. Brightpearl renders a URL in a note as
+  // a link, so the ORIGINAL PO gets a clickable line per back-ordered item with its expected date —
+  // that is where someone looking at the placed order needs to see it — and the back-order PO gets
+  // the reason and a link back to its parent. patt-op.php?scode=invoice&oID= is the order page.
+  const link = (id) => `${BP_WEB_ORDER_URL}${id}`;
+  const dateOf = (l) => l.deldate ? ` — expected ${l.deldate}` : '';
+  const itemLine = (l) => `${l.qty} × ${l.sku || l.productId}${l.name ? ` ${l.name}` : ''}${dateOf(l)}`;
+  const boNote = (note ? note + '\n\n' : '')
+    + `BACK ORDER PO#${poId} — split from PO#${parentPoId || '?'}` + (parentPoId ? ` ${link(parentPoId)}` : '') + '\n'
+    + priced.map(itemLine).join('\n');
+  await addOrderNoteLive(poId, boNote, sup.contactId).catch(() => {});
+  if (parentPoId) {
+    const parentNote = `ON BACK ORDER — moved to PO#${poId} ${link(poId)}\n` + priced.map(itemLine).join('\n')
+      + `\nThese were not supplied on this order. Receive them against PO#${poId} when they arrive.`;
+    await addOrderNoteLive(parentPoId, parentNote, sup.contactId).catch(() => {});
+  }
   const after = (await liveGet(`/order-service/order/${poId}`))[0];
   const landed = Object.values((after && after.orderRows) || {}).length;
-  return { created: true, poId, rowsLanded: landed, rowsWanted: priced.length, status: after && after.orderStatus && after.orderStatus.orderStatusId, ...plan };
+  return { created: true, poId, rowsLanded: landed, rowsWanted: priced.length, status: after && after.orderStatus && after.orderStatus.orderStatusId, parentNoted: !!parentPoId, ...plan };
 }
 
 export async function addPoProductRowLive({ poId, sku, qty, unitCost, execute = false } = {}) {
