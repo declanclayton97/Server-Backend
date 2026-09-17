@@ -9898,6 +9898,22 @@ app.get('/api/purchasing/force-run-safety', async (req, res) => {
 // 'info' row either way, so the result is readable on the hub afterwards.
 // Built for 2026-09-17: two Fristads drops on SO 488357 reached no one, and the only way to find
 // out what the notifier would do was to make it run again in the open.
+// Who has been told about a dropped line, and when. The dedupe table is the only record of a
+// notice having gone out; until this route existed nothing could read it back.
+app.get('/api/purchasing/dropped-line-notices', async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  try {
+    const where = [], args = [];
+    if (req.query.so) { args.push(Number(req.query.so)); where.push(`so_id = ${args.length}`); }
+    if (req.query.po) { args.push(Number(req.query.po)); where.push(`po_id = ${args.length}`); }
+    if (req.query.supplier) { args.push(String(req.query.supplier).toUpperCase()); where.push(`upper(supplier) = ${args.length}`); }
+    const days = Math.min(parseInt(req.query.days, 10) || 14, 90); args.push(days); where.push(`last_notified > now() - (${args.length} || ' days')::interval`);
+    const r = await pool.query(`SELECT so_id, product_id, supplier, sku, po_id, notified_to, first_seen, last_notified
+      FROM dropped_line_notice WHERE ${where.join(' AND ')} ORDER BY last_notified DESC LIMIT 200`, args);
+    res.json({ count: r.rows.length, rows: r.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/purchasing/error-log/:id/notify', express.json(), async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   const id = parseInt(req.params.id, 10);
@@ -9914,7 +9930,7 @@ app.post('/api/purchasing/error-log/:id/notify', express.json(), async (req, res
     const dry = req.query.dry === '1' || (req.body && req.body.dry === true);
     const out = await purchasingSchedule.notifyDroppedLines(pool, {
       supplier: row.supplier, poId: c.poId || null, dropped: lines, linesByOrder: c.linesByOrder || {},
-      placed: /-dropped$/.test(String(row.step)), execute: !dry,
+      placed: /-dropped$/.test(String(row.step)), execute: !dry, force: req.query.force === '1' || !!(req.body && req.body.force),
     });
     res.json({ id, supplier: row.supplier, step: row.step, poId: c.poId || null, dry, lines: lines.length, ...out });
   } catch (e) { res.status(500).json({ error: e.message }); }

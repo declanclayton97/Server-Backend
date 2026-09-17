@@ -3775,7 +3775,7 @@ export async function notifyDroppedLines(pool, opts = {}) {
   } catch { /* recording the outcome must never mask it */ }
   return out;
 }
-async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true, placed = true } = {}) {
+async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = null, dropped = [], linesByOrder = {}, execute = true, placed = true, force = false } = {}) {
   if (!Array.isArray(dropped) || !dropped.length) return { sent: 0, reason: 'nothing dropped' };
   const label = supplier.charAt(0) + supplier.slice(1).toLowerCase();
 
@@ -3828,6 +3828,9 @@ async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = nul
   const fresh = new Map();
   try {
     await ensureDropNoticeTable(pool);
+    // force: a re-fire for a notice known to have gone astray. The dedupe exists to stop the same
+    // line being re-told daily, not to stop a human deliberately telling it again.
+    if (force) throw Object.assign(new Error('forced re-notify'), { forced: true });
     for (const [soId, lines] of perSo) {
       const keep = [];
       for (const d of lines) {
@@ -3910,8 +3913,15 @@ async function notifyDroppedLinesInner(pool, { supplier = 'FRISTADS', poId = nul
       continue;
     }
     try {
-      await transporter().sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to, subject, html, text: subject });
-      sent.push({ to, orders: orders.map((x) => x.soId), lines: count });
+      // Keep what the SMTP relay actually SAID. "sendMail resolved" only means the relay accepted
+      // the message; it says nothing about delivery — and noreply@tuffshop.co.uk goes out via
+      // smtp2go, which sits in neither SPF nor DKIM under a p=quarantine DMARC, so an accepted
+      // message can still be quarantined at the far end. The message-id and the relay's response
+      // are the only evidence there is that anything left the building.
+      const info = await transporter().sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to, subject, html, text: subject });
+      sent.push({ to, orders: orders.map((x) => x.soId), lines: count,
+        messageId: info && info.messageId, response: info && String(info.response || '').slice(0, 120),
+        accepted: info && info.accepted, rejected: info && info.rejected });
       for (const x of orders) {
         for (const d of x.lines) {
           await pool.query(
