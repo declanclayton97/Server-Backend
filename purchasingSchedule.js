@@ -504,11 +504,16 @@ async function jfetch(step, url, opts) {
 // Non-fatal. ON by default since 2026-08-19 (user); set PRICE_HEAL_ENABLED=false to put it back to
 // it's switched on, and the run report still shows what it would have done. Anything outside the
 // auto-heal band is raised as a price-heal error for a human rather than written.
-async function healPrices(steps, { supplierKey, poId, changes, pool }) {
-  if (!changes || !changes.length) return;
+// silent: write the rows (the hub, the cost-decision list and force-run-safety all read them) but
+// send no email — the caller is folding the outcome into ONE price notice for the order instead of
+// the three-email pattern (price-check review, then "cost updated", then one review per escalation)
+// that made every order look like a problem when most had already been corrected. Returns the heal
+// result so the caller can say what was fixed and what still needs a person.
+async function healPrices(steps, { supplierKey, poId, changes, pool, silent = false }) {
+  if (!changes || !changes.length) return null;
   try {
     const r = await bp.healSupplierCosts({ supplierKey, poId, changes, pool, execute: process.env.PRICE_HEAL_ENABLED !== 'false' });
-    if (r.skipped && !Array.isArray(r.skipped)) { steps.priceHeal = r; return; }        // e.g. "no cost list of its own"
+    if (r.skipped && !Array.isArray(r.skipped)) { steps.priceHeal = r; return r; }        // e.g. "no cost list of its own"
     steps.priceHeal = { listId: r.listId, dryRun: !!r.dryRun, applied: (r.applied || []).length, escalated: (r.escalated || []).length, skipped: (r.skipped || []).length, changes: (r.applied || []).map((a) => `${a.sku} £${Number(a.was).toFixed(2)}->£${Number(a.now).toFixed(2)}`) };
     // Healing fixes the PRODUCT cost; the PO still carries the cost it snapshotted when it was
     // created, so it stays wrong until re-priced — that needed doing by hand three times before this
@@ -522,7 +527,7 @@ async function healPrices(steps, { supplierKey, poId, changes, pool }) {
     if (r.applied && r.applied.length && !r.dryRun) {
       const list = r.applied.map((a) => `${a.sku} £${Number(a.was).toFixed(2)} → £${Number(a.now).toFixed(2)}`).join('; ');
       await logPurchasingError(pool, {
-        supplier: supplierKey, step: 'price-heal-applied', severity: 'info',
+        supplier: supplierKey, step: 'price-heal-applied', severity: 'info', notify: !silent,
         message: `${r.applied.length} cost price(s) corrected on list ${r.listId} from what ${supplierKey} actually charged: ${list}`,
         context: { poId, listId: r.listId, applied: r.applied },
       }).catch(() => {});
@@ -544,12 +549,48 @@ async function healPrices(steps, { supplierKey, poId, changes, pool }) {
     }
     for (const e of (r.escalated || [])) {
       await logPurchasingError(pool, {
-        supplier: supplierKey, step: 'price-heal', severity: 'review',
+        supplier: supplierKey, step: 'price-heal', severity: 'review', notify: !silent,
         message: `${e.sku}: supplier charges £${Number(e.now).toFixed(2)} but BP cost (list ${r.listId}) is £${Number(e.was).toFixed(2)} — ${e.reason}`,
         context: { poId, ...e },
       }).catch(() => {});
     }
-  } catch (e) { steps.priceHealWarn = e.message; }
+    return r;
+  } catch (e) { steps.priceHealWarn = e.message; return null; }
+}
+
+// ONE price notice per order. Heals first (silently), then logs a single 'price-check' row whose
+// severity says whether anyone needs to act: 'info' when every named difference was corrected on
+// the product's cost in Brightpearl and the PO re-priced — nothing to do — and 'review' only when
+// something was NOT corrected (outside the ±20%/£10 band, a SKU that could not be pinned to one
+// product, or a difference the supplier's data could not name). Until 2026-09-18 the review row
+// went out BEFORE the heal ran, so every order emailed "prices don't match" about lines that were
+// fixed thirty seconds later, and the fixes went out as a second email — Dec was re-keying costs
+// by hand that were already right. The message keeps the "SKU ours £X vs theirs £Y" form: the
+// cost-decision list in server.js parses it.
+const fx = (n) => Number(n).toFixed(2);
+async function logPriceCheck(pool, steps, { supplierKey, poId, message, context = {}, changes = [], ambiguous = [] }) {
+  const r = await healPrices(steps, { supplierKey, poId, pool, changes, silent: true });
+  const applied = (r && Array.isArray(r.applied)) ? r.applied : [];
+  const escalated = (r && Array.isArray(r.escalated)) ? r.escalated : [];
+  const notApplied = (r && Array.isArray(r.skipped)) ? r.skipped.filter((x) => x.reason !== 'already correct') : [];
+  const healerOff = !r || r.dryRun || (r.skipped && !Array.isArray(r.skipped));
+  const outstanding = [
+    ...escalated.map((e) => `${e.sku} ours £${fx(e.was)} vs theirs £${fx(e.now)} — ${e.reason}`),
+    ...notApplied.map((x) => `${x.sku} — ${x.reason}`),
+    ...ambiguous.map((x) => `article ${x.article} ours £${fx(x.ourUnit)} vs theirs £${fx(x.theirUnit)} (spans ${(x.skus || []).join(', ')} — size not pinned)`),
+  ];
+  // Nothing named at all (a total-only gap) or the healer could not run → a person has to look.
+  const allFixed = changes.length > 0 && !healerOff && !outstanding.length;
+  const severity = allFixed ? 'info' : 'review';
+  const tail = (applied.length ? `\nCorrected automatically on list ${r.listId} (product cost + PO re-priced): ${applied.map((a) => `${a.sku} £${fx(a.was)} → £${fx(a.now)}`).join('; ')}.` : '')
+    + (outstanding.length ? `\nSTILL NEEDS A HUMAN: ${outstanding.join('; ')}.` : '')
+    + (changes.length && healerOff ? '\nNot corrected automatically (price heal off or unavailable) — check these by hand.' : '');
+  await logPurchasingError(pool, {
+    supplier: supplierKey, step: 'price-check', severity, placed: true,
+    message: message + tail,
+    context: { ...context, healed: applied.length, outstanding: outstanding.length },
+  }).catch(() => {});
+  return r;
 }
 
 // Ask the Fristads portal what it can actually supply for ONE line. Returns null when the answer
@@ -838,15 +879,13 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     const named = parts.length
       ? ` Offending line(s): ${parts.join("; ")}.`
       : `${lineNote ? " " + lineNote + "." : " Couldn't pin it to a line."}`;
-    await logPurchasingError(pool, {
-      supplier: 'FRISTADS', step: 'price-check', severity: 'review',
-      message: `Prices don't match: Fristads order total £${fristadsTotal} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}).${named} A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${orderNo} still placed.`,
-      context: { poId, orderNo, fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap, changes, ambiguous, poLines: breakdown },
-    }).catch(() => {});
-
     // Fristads quote TRADE prices — the £4.25 insole proves it — not list like the Elastic
-    // portals, so a difference pinned to a single SKU is safe to heal.
-    if (changes.length) await healPrices(steps, { supplierKey: 'FRISTADS', poId, pool, changes });
+    // portals, so a difference pinned to a single SKU is safe to heal. One notice, after healing.
+    await logPriceCheck(pool, steps, {
+      supplierKey: 'FRISTADS', poId, changes, ambiguous,
+      message: `Prices don't match: Fristads order total £${fristadsTotal} vs our PO net £${poNet.toFixed(2)} (diff £${priceGap}).${named} Order ${orderNo} still placed.`,
+      context: { poId, orderNo, fristadsTotal, poNet: +poNet.toFixed(2), gap: priceGap, changes, ambiguous, poLines: breakdown },
+    });
   }
 
   // 5. mark the PO placed + link the Fristads order. Status → Placed FIRST (guaranteed via
@@ -1972,11 +2011,14 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
           ? ` Offending line(s): ${changes.map((c) => `${c.sku} ours £${c.was.toFixed(2)} vs theirs £${c.now.toFixed(2)}`).join('; ')}.`
           : ' Could not pin it to a line from their price file.';
         steps.priceCheck.changes = changes;
-        await logPurchasingError(pool, {
-          supplier: 'CHADWICK', step: 'price-check', severity: 'review',
+        // Chadwick's price file is what they invoice (order total = sum of it), so a pinned line
+        // is safe to heal — and until 2026-09-18 Chadwick never was, which is why 865-39/39 at
+        // £9.35 vs £9.15 came back on the 11th, 15th and 17th.
+        await logPriceCheck(pool, steps, {
+          supplierKey: 'CHADWICK', poId, changes,
           message: `Prices don't match: Chadwick order total £${landed.value.toFixed(2)} vs our PO net £${poNet.toFixed(2)} (diff £${gap}).${named} A Brightpearl cost price (Launch/list 20) may need adjusting. Order ${landed.orderNo || orderNo || '(number unknown)'} still placed.`,
           context: { poId, orderNo: landed.orderNo || orderNo, theirs: landed.value, poNet: +poNet.toFixed(2), gap, changes, theirLines: landed.lines },
-        }).catch(() => {});
+        });
       }
     } else if (landed && !landed.found) {
       steps.priceCheck = { skipped: `their order list has no order carrying PO ${poId} (scanned ${landed.scanned})` };
@@ -2578,13 +2620,14 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   }
   steps.priceCheck = { cartTotal: cartTotal || null, orderedNet, gap, lineGaps };
   if (lineGaps.length || (cartTotal && Math.abs(gap) > 0.50)) {
-    await logPurchasingError(pool, {
-      supplier: 'SNICKERS', step: 'price-check', severity: 'review',
+    // Heals from what Hultafors actually charges (their unit price vs our cost), then ONE notice.
+    await logPriceCheck(pool, steps, {
+      supplierKey: 'SNICKERS', poId, changes: lineGaps.map((g) => ({ sku: g.sku, was: g.ours, now: g.theirs })),
       message: `Prices don't match: Hultafors basket £${cartTotal || '?'} vs our PO net £${orderedNet} (diff £${gap}).`
-        + (lineGaps.length ? ` Brightpearl cost (Snickers/list 10) looks wrong on: ${lineGaps.map((g) => `${g.sku} ours £${g.ours} vs theirs £${g.theirs}`).join('; ')}.` : '')
+        + (lineGaps.length ? ` Offending line(s): ${lineGaps.map((g) => `${g.sku} ours £${g.ours} vs theirs £${g.theirs}`).join('; ')}.` : '')
         + ` Order ${orderNo} still placed.`,
       context: { poId, orderNo, cartTotal, orderedNet, gap, lineGaps, packRounding: packApplied },
-    }).catch(() => {});
+    });
   }
 
   // If a pack multiple bumped a line, the PO must show what we will actually RECEIVE (10 badge
@@ -2674,8 +2717,6 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
       steps.parkedForDiscontinued = parked;
     } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising the discontinued-affected SOs failed: ${e.message}`); }
   }
-  // heal BP costs from what Hultafors actually charges (lineGaps = their unit price vs our cost)
-  await healPrices(steps, { supplierKey: 'SNICKERS', poId, changes: lineGaps.map((g) => ({ sku: g.sku, was: g.ours, now: g.theirs })), pool });
   return { poId, orderNo, steps };
 }
 
