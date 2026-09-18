@@ -9729,11 +9729,17 @@ app.get('/api/purchasing/error-log', async (req, res) => {
     if (req.query.includeInfo !== '1' && !req.query.severity) where.push(`(severity IS DISTINCT FROM 'info')`);
     if (req.query.sinceHours) { args.push(Number(req.query.sinceHours)); where.push(`created_at > now() - ($${args.length} || ' hours')::interval`); }
     args.push(limit);
-    const r = await pool.query(`SELECT id, created_at, supplier, step, message, context, severity, handled_at, handled_by, handled_note FROM purchasing_error_log`
+    // triage_* columns ride along so a session can see whether another one is ALREADY on a row
+    // (claimed within the last 90 minutes and not yet handled) before it starts the same work.
+    const r = await pool.query(`SELECT id, created_at, supplier, step, message, context, severity, handled_at, handled_by, handled_note,
+        triage_sig, triage_fired_at, triage_claimed_at, triage_claimed_by,
+        (handled_at IS NULL AND triage_claimed_at > now() - interval '90 minutes') AS being_worked
+      FROM purchasing_error_log`
       + (where.length ? ` WHERE ${where.join(' AND ')}` : '') + ` ORDER BY id DESC LIMIT $${args.length}`, args);
     res.json({
       count: r.rows.length,
       filtered: { supplier: req.query.supplier || null, step: req.query.step || null, severity: req.query.severity || null, unhandled: req.query.unhandled === '1', sinceHours: req.query.sinceHours || null },
+      note: 'being_worked:true = another session claimed this failure in the last 90 minutes and has not finished. Do not start on it; POST /error-log/:id/claim first and stop on 409.',
       errors: r.rows,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -10011,6 +10017,21 @@ app.post('/api/purchasing/error-log/:id/notify', express.json(), async (req, res
       backorderPoId: Number(req.query.backorderPoId || (req.body && req.body.backorderPoId)) || c.backorderPoId || null,
     });
     res.json({ id, supplier: row.supplier, step: row.step, poId: c.poId || null, dry, lines: lines.length, ...out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Claim a failure before working it. Covers EVERY unhandled row of the same failure (same
+// signature, last 36h), so the scheduled run and its retry-sweep re-fires are one claim. 200 =
+// yours, with the ids it covers; 409 = another session holds it (or it is already handled) — stop
+// and say so. A claim expires after 90 minutes so a session that died does not lock the failure.
+// body: { by }  (default "triage-routine"; put the session/run id in it if you have one)
+app.post('/api/purchasing/error-log/:id/claim', express.json(), async (req, res) => {
+  if (!pool) return res.status(503).json({ error: 'DB not available' });
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'numeric id required' });
+  try {
+    const r = await purchasingSchedule.claimTriageRows(pool, { id, by: String((req.body && req.body.by) || 'triage-routine').slice(0, 120) });
+    res.status(r.ok ? 200 : (r.status || 409)).json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

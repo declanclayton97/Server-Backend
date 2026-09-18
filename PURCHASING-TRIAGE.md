@@ -92,7 +92,7 @@ These are not preferences. Breaking one costs real money or real stock.
 
     GET /api/purchasing/error-log?unhandled=1&limit=50
 
-Returns only errors nobody has claimed. Each row:
+Returns only errors nobody has finished with. Each row:
 
 | field | meaning |
 |---|---|
@@ -100,7 +100,25 @@ Returns only errors nobody has claimed. Each row:
 | `step` | where it broke — `resolve`, `cart`, `checkout`, `preflight`, `verify`, `price-check`, `finalize` |
 | `context` | the useful part: PO id, SKUs, portal response |
 
-Claim a row only once you have actually finished with it:
+**Before you touch a failure, claim it.** Several sessions can be awake at once — the fire for the
+scheduled run, the fires for its retry-sweep re-runs, a scheduled backstop — and until 2026-09-18
+three of them worked the same Carhartt preflight failure side by side, because "unhandled" only
+said nobody had *finished*, not that nobody had *started*.
+
+    POST /api/purchasing/error-log/<id>/claim   { "by": "triage-routine <run id if you have one>" }
+
+- **200** — it is yours. The response lists every row of the same failure it covers (the scheduled
+  run's row and the retry-sweep re-fires are ONE failure); you do not need to claim them separately.
+- **409 `another session is working this failure`** — **stop.** Report who holds it and since when,
+  and do nothing else this run. Do not "help"; two sessions pushing fixes for one failure is how a
+  half-fix gets deployed twice.
+- **409 `already handled`** — something else finished it. Stop and say so.
+
+A claim expires after 90 minutes, so a session that dies mid-way does not lock the failure. The
+work-queue listing shows `being_worked: true` on any row under a live claim — treat that the same
+as a 409. Claiming is not finishing: the row stays in the queue until you mark it handled.
+
+Mark a row handled only once you have actually finished with it:
 
     POST /api/purchasing/error-log/<id>/handled   { "by": "triage", "note": "what you did" }
 

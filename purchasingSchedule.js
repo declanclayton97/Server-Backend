@@ -183,9 +183,61 @@ export async function ensureErrorTable(pool) {
     ADD COLUMN IF NOT EXISTS handled_by text,
     ADD COLUMN IF NOT EXISTS handled_note text,
     ADD COLUMN IF NOT EXISTS triage_sig text,
-    ADD COLUMN IF NOT EXISTS triage_fired_at timestamptz`);
+    ADD COLUMN IF NOT EXISTS triage_fired_at timestamptz,
+    ADD COLUMN IF NOT EXISTS triage_claimed_at timestamptz,
+    ADD COLUMN IF NOT EXISTS triage_claimed_by text`);
   await pool.query(`CREATE INDEX IF NOT EXISTS purchasing_error_log_triage_idx
     ON purchasing_error_log(triage_sig, triage_fired_at)`);
+}
+
+// ── ONE SESSION PER FAILURE ──────────────────────────────────────────────────────────────────
+// handled_at says a failure is FINISHED. Nothing said a failure was BEING WORKED, so between a
+// session starting and it marking the row handled — twenty minutes, on a good day — every other
+// session that woke saw the same unhandled row and started on it too. On 2026-09-18 three sessions
+// worked the same Carhartt preflight failure (rows 411/413/416: the 12:39 run and two retry-sweep
+// re-fires) at once. The cooldown in triageAlreadyChasing only stops US firing the routine again;
+// it cannot stop a session the routine started on its own schedule, or one already running.
+//
+// A claim is per SIGNATURE, not per row: the three rows above are one failure, and a session that
+// claims any of them takes all of them. It expires after TRIAGE_CLAIM_MINUTES so a session that
+// died mid-way does not lock the failure forever, and it never blocks a human — the hub does not
+// claim, it reads. Atomic: the UPDATE's WHERE is the check, so two sessions claiming in the same
+// second cannot both win.
+const TRIAGE_CLAIM_MINUTES = 90;
+export async function claimTriageRows(pool, { id, by = 'triage-routine' } = {}) {
+  await ensureErrorTable(pool);
+  const cur = await pool.query('SELECT id, supplier, step, message, context, severity, handled_at, triage_sig, triage_claimed_at, triage_claimed_by FROM purchasing_error_log WHERE id = $1', [id]);
+  const row = cur.rows[0];
+  if (!row) return { ok: false, status: 404, error: `no error row ${id}` };
+  if (row.handled_at) return { ok: false, status: 409, error: 'already handled', handledAt: row.handled_at };
+  const { extractBlockedLines } = await import('./blockedLines.js');
+  const sigOf = (r) => r.triage_sig || triageSignature(r, extractBlockedLines(r));
+  const sig = sigOf(row);
+  // Every unhandled row of the SAME failure in the last 36h (same supplier + step, then the full
+  // signature computed per row — a stored sig only exists on rows the routine was fired for).
+  const cands = await pool.query(
+    `SELECT id, supplier, step, message, context, triage_sig, triage_claimed_at, triage_claimed_by FROM purchasing_error_log
+      WHERE handled_at IS NULL AND created_at > now() - interval '36 hours' AND upper(supplier) = upper($1) AND step = $2`, [row.supplier, row.step]);
+  const same = cands.rows.filter((r) => r.id === id || sigOf(r) === sig);
+  // Is someone else on it right now? (Re-claiming under the same `by` is fine — a session re-reading its own claim.)
+  const live = same.filter((r) => r.triage_claimed_at && r.triage_claimed_by !== by
+    && (Date.now() - new Date(r.triage_claimed_at).getTime()) < TRIAGE_CLAIM_MINUTES * 60000)
+    .sort((a, b) => new Date(b.triage_claimed_at) - new Date(a.triage_claimed_at));
+  if (live.length) {
+    const h = live[0];
+    return { ok: false, status: 409, error: 'another session is working this failure', claimedBy: h.triage_claimed_by, claimedAt: h.triage_claimed_at,
+      minutesAgo: Math.round((Date.now() - new Date(h.triage_claimed_at).getTime()) / 60000), expiresAfterMinutes: TRIAGE_CLAIM_MINUTES, sig, rows: same.map((r) => r.id) };
+  }
+  const ids = same.map((r) => r.id);
+  // The WHERE repeats the check so two sessions claiming in the same second cannot both win.
+  const upd = await pool.query(
+    `UPDATE purchasing_error_log SET triage_claimed_at = now(), triage_claimed_by = $2, triage_sig = COALESCE(triage_sig, $3)
+      WHERE id = ANY($1::int[]) AND handled_at IS NULL
+        AND (triage_claimed_at IS NULL OR triage_claimed_at < now() - ($4 || ' minutes')::interval OR triage_claimed_by = $2)
+      RETURNING id`, [ids, by, sig, String(TRIAGE_CLAIM_MINUTES)]);
+  const won = upd.rows.map((r) => r.id);
+  if (!won.includes(id)) return { ok: false, status: 409, error: 'lost the race — another session claimed it first', sig, rows: ids };
+  return { ok: true, claimed: won, by, sig, expiresAfterMinutes: TRIAGE_CLAIM_MINUTES };
 }
 
 // What makes two failures "the same failure" for the purpose of not re-triaging one. The supplier

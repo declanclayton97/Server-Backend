@@ -118,6 +118,10 @@ curl -s 'https://server-backend-1i47.onrender.com/api/purchasing/error-log?unhan
 Ignore anything older than 36 hours — there is an older backlog that is not yours to work.
 If the failure is already marked handled, stop and say so; something else dealt with it.
 
+1b. CLAIM IT BEFORE YOU DO ANYTHING ELSE. Other sessions may be awake for the same failure (the retry sweep re-fires it, and a scheduled backstop may be running):
+curl -s -X POST 'https://server-backend-1i47.onrender.com/api/purchasing/error-log/<id>/claim' -H 'Content-Type: application/json' -d '{"by":"triage-routine"}'
+200 = yours (the response lists every row of this failure the claim covers — do not claim them again). 409 "another session is working this failure" = STOP, report who holds it and since when, and end the run without changing anything. 409 "already handled" = stop and say so. Any row in the queue showing being_worked:true belongs to someone else — leave it.
+
 2. Check severity. You are only fired for 'error', meaning the run STOPPED and nothing was ordered. A 'review' row USUALLY means the order went through — but READ ITS context.placed before believing that. A row carrying placed:false means NOTHING was placed: 'tagged-but-nothing-to-order' is logged straight after the demand is valued, BEFORE the run has decided whether to place at all. Treat only a review row WITHOUT placed:false as evidence an order went out. On 2026-08-24 that distinction mattered: PenCarrie placed nothing, and both the alert email and force-run-safety claimed an order had gone through because severity alone was being read as proof.
 
 3. Reproduce read-only before changing anything, using the probe endpoints in the runbook. Confirm the failure is real and current.
