@@ -3150,13 +3150,46 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   // VIA SC#487468") was gathered with toOrder 1 on 7 Sept and again on 11 Sept, dropped both times
   // because Portwest do not stock that colour, and finalised both times as ordered. Eight days, two
   // runs, no error row anywhere, and a customer waiting on it. Found only because someone asked.
-  const soOf = (sku) => Object.entries(linesByOrder || {})
-    .filter(([, items]) => (items || []).some((x) => String(x.sku || '').toUpperCase() === String(sku).toUpperCase()))
+  // Match on productId when both sides carry one — the PO row's code can differ from the SO row's
+  // (see the supplier-SKU note in placePortwestOrder) and a SKU-only match then finds nobody.
+  const sameLine = (d, x) => (d.productId != null && x.productId != null)
+    ? String(d.productId) === String(x.productId)
+    : String(x.sku || '').toUpperCase() === String(d.sku || '').toUpperCase();
+  const soOf = (d) => Object.entries(linesByOrder || {})
+    .filter(([, items]) => (items || []).some((x) => sameLine(d, x)))
     .map(([id]) => id);
+  // WHY would Portwest not take it? Their order grid answers: no row for the code means they do
+  // not list that size/colour at all (S594 Orange is Medium-only, 2026-09-18); a row with 0 means
+  // out of stock. "Would not take" on its own sent sales looking for a stock problem that was a
+  // range problem. Best-effort, one probe per dropped line; unknown stays unknown.
+  const whyDropped = async (d) => {
+    try {
+      const r = await fetch(`${altItemsUrl}/api/portwest-stock?name=${encodeURIComponent(d.name || 'Portwest')}&sku=${encodeURIComponent(d.sku)}`, { signal: AbortSignal.timeout(20000) });
+      const j = await r.json();
+      if (j && j.found === true) return Number(j.avail) === 0 ? `out of stock at Portwest${j.deldate ? `, due ${j.deldate}` : ''}` : `Portwest show ${j.avail} in stock — rejected for another reason`;
+      if (j && j.found === false && !j.reason) return 'Portwest do not list this size/colour on their order grid';
+    } catch { /* unknown */ }
+    return 'reason not known';
+  };
   const droppedForCustomers = [];
   for (const d of (steps.verify && steps.verify.dropped) || []) {
-    const sos = soOf(d.sku);
+    d.reason = await whyDropped(d);
+    const sos = soOf(d);
     if (sos.length) droppedForCustomers.push({ ...d, soIds: sos });
+  }
+  // The SALES ORDER must say so too. Its finalise note listed every demanded line under "Ordered
+  // on PO#…" and its tag was cleared — so SO 490069 read as fully ordered while 2 × S594ORRL had
+  // been taken off the PO and only an email said otherwise (2026-09-18). The line is marked in the
+  // finalise note, and each affected SO gets its own note naming what was NOT ordered and why.
+  for (const d of droppedForCustomers) {
+    for (const id of d.soIds) for (const x of (linesByOrder[id] || [])) if (sameLine(d, x)) x.name = `NOT ORDERED (${d.reason}) — ${x.name || x.sku}`;
+  }
+  const bySo = {};
+  for (const d of droppedForCustomers) for (const id of d.soIds) (bySo[id] = bySo[id] || []).push(d);
+  for (const [id, ds] of Object.entries(bySo)) {
+    await bp.addOrderNoteLive(Number(id), `NOT ORDERED from Portwest on PO#${poId} (${ref}):\n`
+      + ds.map((d) => `  ${d.want} × ${d.sku} ${d.name || ''} — ${d.reason}`).join('\n')
+      + `\nThe rest of the Portwest lines on this order were placed. The salesperson has been emailed; this line needs another size, another source, or a credit.`, PORTWEST_SUPPLIER_CONTACT).catch(() => {});
   }
   if ((steps.verify && steps.verify.dropped || []).length) {
     await logPurchasingError(pool, {
@@ -3166,10 +3199,10 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
       message: `Portwest would not take ${steps.verify.dropped.length} line(s); they were removed from PO#${poId} so it matches the order actually placed (${ref}). `
         + (droppedForCustomers.length
           ? `⚠ ${droppedForCustomers.length} of them are CUSTOMER lines — those sales orders are NOT fully ordered and nothing will chase them: `
-            + droppedForCustomers.map((d) => `${d.want} × ${d.sku} (SO ${d.soIds.join(', ')})`).join('; ')
+            + droppedForCustomers.map((d) => `${d.want} × ${d.sku} (SO ${d.soIds.join(', ')}) — ${d.reason}`).join('; ')
             + `. Source them elsewhere or credit the customer.`
           : `All were reorder lines, so no customer is waiting: `
-            + steps.verify.dropped.map((d) => `${d.want} × ${d.sku}`).join('; ')),
+            + steps.verify.dropped.map((d) => `${d.want} × ${d.sku} — ${d.reason}`).join('; ')),
       context: { poId, orderNo, dropped: steps.verify.dropped, droppedForCustomers },
     }).catch(() => {});
   }
