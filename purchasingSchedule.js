@@ -295,6 +295,10 @@ async function fireTriageRoutine({ pool, supplier, step, message, context, sever
   const url = process.env.TRIAGE_ROUTINE_URL, token = process.env.TRIAGE_ROUTINE_TOKEN;
   if (!url || !token) return;                 // not configured yet
   if (severity !== 'error') return;
+  // A line already moved to a back-order PO is an expected outcome with a notice on its way to
+  // sales, not a failure for a bot to chase — the row is severity error only so the notice fires
+  // and the hub shows it. Everything else on 'error' still escalates.
+  if (context && context.backorderPoId && /-dropped$/.test(String(step))) return;
 
   let sig = null;
   try {
@@ -659,20 +663,49 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
       linesByOrder[id] = linesByOrder[id].filter((x) => !droppedPids.has(String(x.productId)));
       if (!linesByOrder[id].length) delete linesByOrder[id];
     }
-    const stranded = soIds.filter((id) => !linesByOrder[id]);
-    soIds = soIds.filter((id) => !!linesByOrder[id]);
-    steps.stockCheck.stranded = stranded;
-    // severity ERROR, not review: these are lines a CUSTOMER is waiting for, the SOs are already
-    // stamped with this PO (so no later run will pick them up again — see purchasingAuto:689), and
-    // finalise clears their tags when this order places. Nothing else will chase them.
+    // The lines are NOT lost. Fristads DO take a back order: the portal's status 3 on a zero-stock
+    // size is a phase-out question ("alternative, or the original?"), not a refusal, and
+    // fristadsAddToBasket answers it with the original — see fristadsAnswerPhaseOut. They still
+    // cannot share the POST with the in-stock sizes (the whole group comes back as a question), so
+    // they go as a SEPARATE Fristads order once this one is through. Brightpearl-side they move to
+    // a child PO at status 45 NOW, noted both ends, so the parent matches the goods that will
+    // arrive first and the back order is visible even if the main placement below then fails.
+    // This replaces the 2026-09-15 behaviour of dropping the line and telling someone to buy it
+    // by hand — which is what PO 490183 did on 2026-09-18 with the Airtech Large for SO 490142.
+    const bo = await bp.createBackorderPoLive({
+      supplierKey: 'FRISTADS', parentPoId: poId, execute: true,
+      lines: shortLines.map((s) => ({ productId: s.productId, sku: s.sku, name: s.name, qty: s.qty, deldate: s.deldate })),
+      note: `Out of stock at Fristads on ${new Date().toISOString().slice(0, 10)}, split from PO#${poId} so the rest could go. Placed with Fristads as a separate back order — see the note below.`,
+    }).catch((e) => ({ created: false, error: e.message }));
+    steps.backorder = { ...bo, fristads: null };
+    // An SO whose only line is on back order is still ORDERED — finalise it like the rest, with
+    // the line named against the back-order PO in its note rather than dropped from it.
+    if (bo.created) {
+      for (const id of Object.keys(linesByOrder)) {
+        for (const x of linesByOrder[id]) if (droppedPids.has(String(x.productId))) x.name = `${x.name || x.sku} (ON BACK ORDER — PO#${bo.poId})`;
+      }
+      // droppedPids is still used for the PRICE CHECK below, which must value the main order only.
+    } else {
+      for (const id of Object.keys(linesByOrder)) {
+        linesByOrder[id] = linesByOrder[id].filter((x) => !droppedPids.has(String(x.productId)));
+        if (!linesByOrder[id].length) delete linesByOrder[id];
+      }
+      const stranded = soIds.filter((id) => !linesByOrder[id]);
+      soIds = soIds.filter((id) => !!linesByOrder[id]);
+      steps.stockCheck.stranded = stranded;
+    }
+    // severity ERROR still: a customer is waiting and the line has left the order they will look
+    // at. With backorderPoId set the notice goes out as "on back order, PO#…" rather than "not
+    // ordered", and triage is not summoned for it — see fireTriageRoutine.
     await logPurchasingError(pool, {
       supplier: 'FRISTADS', step: 'out-of-stock-dropped', severity: 'error',
       message: `${shortLines.length} line(s) are out of stock at Fristads and were taken OFF PO#${poId} so the rest of the order could go through. `
-        + `Fristads add every size of one garment in a single POST, so leaving them in loses the in-stock sizes too. `
-        + `These are NOT ordered and nothing will chase them automatically — back-order them or find another source:\n`
+        + (bo.created
+          ? `They are on back-order PO#${bo.poId} and will be placed with Fristads as a separate back order once this order is through:\n`
+          : `The back-order PO could NOT be created (${bo.error || bo.reason}) — these are NOT ordered and nothing will chase them automatically:\n`)
         + shortLines.map((s) => `      ${s.qty} × ${s.sku} (${s.size || '?'}) ${s.name || ''} — Fristads have ${s.avail}`
           + (s.deldate ? `, next delivery ${s.deldate}` : '')).join('\n'),
-      context: { poId, dropped: shortLines, removedRows },
+      context: { poId, dropped: shortLines, removedRows, backorderPoId: bo.created ? bo.poId : null },
     }).catch(() => {});
   }
 
@@ -829,6 +862,49 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Fristads — order ${orderNo || '(order# pending indexing)'} (reservation ${reservationNo}). Reference-set failed: ${e.message}`, FRISTADS_SUPPLIER_CONTACT).catch(() => {}); }
   if (!orderNo) await bp.addOrderNoteLive(poId, `Placed with Fristads (reservation ${reservationNo}). Order# had not indexed yet, so the reference is the reservation no — our PO#${poId} is on the Fristads order (ExternalVerificationNo); backfill the real order# when it appears in history.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
   steps.link = { reference: poRef, refWritten, reservationNo, orderNo: orderNo || null, orderNoPending: !orderNo, status: 7 };
+
+  // 5b. The out-of-stock lines, as their own Fristads BACK ORDER. Only now — after the main order
+  // is confirmed — so a failure here can never cost the in-stock lines their order. Same basket +
+  // checkout as the main order with the back-order PO# as the reference; the basket answers the
+  // phase-out question for each zero-stock size. Proven by hand on POs 489968/489969 (2026-09-17).
+  // Non-fatal: the main order is placed and linked; a back order that did not go through is logged
+  // as its own error so someone places it, and the BO PO stays at 45 with no "PLACED" note.
+  if (steps.backorder && steps.backorder.created) {
+    const boPoId = steps.backorder.poId;
+    const boLines = shortLines.map((s) => ({ sku: s.sku, size: s.size, qty: s.qty }));
+    const boUnits = boLines.reduce((a, l) => a + l.qty, 0);
+    try {
+      const bcart = await jfetch('backorder-cart', `${altItemsUrl}/api/fristads-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: boLines }) });
+      const brefused = (bcart.results || []).filter((r) => !r.ok);
+      if ((bcart.unresolved || []).length || bcart.cartCount !== boUnits) {
+        throw new Error(`basket holds ${bcart.cartCount}, expected ${boUnits}` + (brefused.length ? `; refused: ${brefused.map((r) => `${r.key} — ${JSON.stringify(r.resp && r.resp.messages || r.reason || r.status)}`).join('; ').slice(0, 300)}` : ''));
+      }
+      const bco = await jfetch('backorder-checkout', `${altItemsUrl}/api/fristads-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goodsMark: 'WORKWEAR', orderRef: String(boPoId), execute: true }) });
+      if (!bco.placed) throw new Error(`checkout not confirmed (status ${bco.status}, messageType ${bco.messageType}, confirmed ${bco.confirmed})`);
+      const boRes = bco.reservationNo;
+      steps.backorder.fristads = { placed: true, reservationNo: boRes, cartCount: bcart.cartCount, backOrdered: (bcart.results || []).filter((r) => r.backOrdered).length };
+      // Reference = the reservation for now (the order# indexes later, same as the main order);
+      // status stays 45 On Back Order — that is the point of the PO.
+      await bp.setOrderReferenceLive(boPoId, `Fristads reservation ${boRes}`).catch((e) => { steps.backorder.fristads.refWarn = e.message; });
+      await bp.addOrderNoteLive(boPoId, `PLACED at Fristads on back order ${new Date().toISOString().slice(0, 10)} — reservation ${boRes}, our PO#${boPoId} on the order as ExternalVerificationNo. `
+        + shortLines.map((s) => `${s.qty} × ${s.sku} (${s.size || '?'})${s.deldate ? ` expected ${s.deldate}` : ''}`).join('; ')
+        + `. Order number will index at Fristads shortly. Status left at On Back Order deliberately.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
+      await logPurchasingError(pool, {
+        supplier: 'FRISTADS', step: 'back-order-placed', severity: 'info', placed: true,
+        message: `Back order placed with Fristads for PO#${boPoId} (reservation ${boRes}): ` + shortLines.map((s) => `${s.qty} × ${s.sku}${s.deldate ? ` due ${s.deldate}` : ''}`).join(', '),
+        context: { poId: boPoId, parentPoId: poId, reservationNo: boRes, lines: boLines },
+      }).catch(() => {});
+    } catch (e) {
+      steps.backorder.fristads = { placed: false, error: e.message };
+      await bp.addOrderNoteLive(boPoId, `NOT YET PLACED at Fristads — the automatic back order failed: ${e.message}. Place this PO with Fristads by hand (basket answers the phase-out prompt with "add the original").`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
+      await logPurchasingError(pool, {
+        supplier: 'FRISTADS', step: 'back-order-not-placed', severity: 'error', placed: false,
+        message: `Main order PO#${poId} placed, but the back order PO#${boPoId} did NOT place with Fristads: ${e.message}. Place it by hand — `
+          + shortLines.map((s) => `${s.qty} × ${s.sku} (${s.size || '?'})`).join(', '),
+        context: { poId: boPoId, parentPoId: poId, lines: boLines, backorderPoId: boPoId },
+      }).catch(() => {});
+    }
+  }
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
