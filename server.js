@@ -13998,7 +13998,9 @@ async function backfillQuoteEmails() {
       console.log(`[quote-chase] SO${o.id} chase address corrected: ${had[o.id] || '(none)'} -> ${better}`);
     }
     await pool.query(
-      `UPDATE quote_chase SET customer_email = COALESCE(NULLIF($2,''), customer_email), email_checked_at = NOW()
+      // $2 cast for the same reason as QUOTE_RESPONSE_SQL: an uncast parameter
+      // inside NULLIF has nothing to take its type from.
+      `UPDATE quote_chase SET customer_email = COALESCE(NULLIF($2::text,''), customer_email), email_checked_at = NOW()
         WHERE order_id = $1`,
       [o.id, better]
     );
@@ -14339,20 +14341,48 @@ app.post('/api/quote-chase/respond', async (req, res) => {
 // double-click safe: Postgres re-evaluates the WHERE against the updated row
 // after a concurrent write, so of two presses landing together only the first
 // can come back as news.
+// The UPDATE decides whether this answer is news, rather than a read-then-check
+// in JavaScript: its WHERE matches only a FIRST answer, or added detail on the
+// same answer. rowCount then says whether to email the salesperson. That also
+// makes a genuine double-click safe, because Postgres re-evaluates the WHERE
+// against the updated row after a concurrent write.
+//
+// Every parameter is cast. Without ::text on $3, "$3 IS NOT NULL" gives the
+// planner nothing to infer a type from, and the whole statement fails to
+// prepare with "could not determine data type of parameter $3" — so no answer
+// could be recorded at all. It threw on the customer's click, not at boot,
+// which is why it shipped: see quoteResponseSqlSelfCheck below.
+const QUOTE_RESPONSE_SQL = `
+  UPDATE quote_chase
+     SET responded_at = COALESCE(responded_at, NOW()), response_action = $2::text,
+         response_reason = COALESCE($3::text, response_reason),
+         response_note = COALESCE(NULLIF($4::text,''), response_note),
+         response_via = $5::text, last_checked_at = NOW()
+   WHERE order_id = $1::bigint
+     AND (responded_at IS NULL
+          OR (response_action = $2::text
+              AND ($3::text IS NOT NULL OR NULLIF($4::text,'') IS NOT NULL)
+              AND (response_reason IS DISTINCT FROM $3::text
+                   OR response_note IS DISTINCT FROM NULLIF($4::text,''))))`;
+
+// Prove the statement parses at BOOT, not on a customer's click. order_id -1
+// matches nothing, so this writes nothing and returns rowCount 0 — but Postgres
+// still parses, type-checks and plans it, which is the half that was broken.
+// A malformed query now fails in the deploy log instead of silently turning
+// every "Go ahead" into "Sorry, we could not record that automatically."
+async function quoteResponseSqlSelfCheck() {
+  if (!useDatabase) return;
+  try {
+    await pool.query(QUOTE_RESPONSE_SQL, [-1, 'selfcheck', null, null, 'selfcheck']);
+    console.log('[quote-chase] response SQL self-check ok');
+  } catch (e) {
+    console.error(`[quote-chase] RESPONSE SQL IS BROKEN — customers cannot answer a chase: ${e.message}`);
+  }
+}
+
 async function recordQuoteResponse(r, { action, reason, note, via }) {
   const cleanNote = String(note || '').slice(0, 2000);
-  const upd = await pool.query(
-    `UPDATE quote_chase
-        SET responded_at = COALESCE(responded_at, NOW()), response_action = $2,
-            response_reason = COALESCE($3, response_reason),
-            response_note = COALESCE(NULLIF($4,''), response_note),
-            response_via = $5, last_checked_at = NOW()
-      WHERE order_id = $1
-        AND (responded_at IS NULL
-             OR (response_action = $2
-                 AND ($3 IS NOT NULL OR NULLIF($4,'') IS NOT NULL)
-                 AND (response_reason IS DISTINCT FROM $3
-                      OR response_note IS DISTINCT FROM NULLIF($4,''))))`,
+  const upd = await pool.query(QUOTE_RESPONSE_SQL,
     [r.order_id, action, reason || null, cleanNote || null, String(via || 'form').slice(0, 20)]
   );
   if (upd.rowCount === 0) {
@@ -15245,6 +15275,11 @@ if (BRIGHTPEARL_API_TOKEN && BRIGHTPEARL_ACCOUNT_ID) {
   setTimeout(() => backfillQuotePhones().catch((e) => console.error('Quote phone back-fill failed:', e.message)), 5 * 60 * 1000);
   setInterval(() => backfillQuotePhones().catch((e) => console.error('Quote phone back-fill failed:', e.message)), 30 * 60 * 1000);
 }
+
+// Not gated on BRIGHTPEARL creds or QUOTE_CHASE_ENABLED: a chase already sent
+// can still be answered whether or not the sender is running, so the statement
+// that records the answer must be checked on every boot.
+setTimeout(() => quoteResponseSqlSelfCheck(), 10 * 1000);
 
 app.listen(PORT, () => {
   console.log(`✅ SFTP Proxy running on port ${PORT}`);
