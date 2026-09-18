@@ -10006,6 +10006,9 @@ app.post('/api/purchasing/error-log/:id/notify', express.json(), async (req, res
     const out = await purchasingSchedule.notifyDroppedLines(pool, {
       supplier: row.supplier, poId: c.poId || null, dropped: lines, linesByOrder: c.linesByOrder || {},
       placed: /-dropped$/.test(String(row.step)), execute: !dry, force: req.query.force === '1' || !!(req.body && req.body.force),
+      // ?backorderPoId= / body.backorderPoId: the line was back-ordered AFTER the row was logged
+      // (by hand), so send the "on back order, PO#…" wording rather than repeat "not ordered".
+      backorderPoId: Number(req.query.backorderPoId || (req.body && req.body.backorderPoId)) || c.backorderPoId || null,
     });
     res.json({ id, supplier: row.supplier, step: row.step, poId: c.poId || null, dry, lines: lines.length, ...out });
   } catch (e) { res.status(500).json({ error: e.message }); }
