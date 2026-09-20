@@ -8,6 +8,20 @@ estate grew inside it until it was straining under load during busy periods.
 in parallel on dry runs. Delete only when the new service has been ordering for real, unaided, and
 the hub and triage runbook point at it.
 
+## STATUS — cut over 2026-09-20 (Sunday night, no windows)
+
+- Step 3 is DONE, but by a gate rather than a delete: `PURCHASING_POLLERS_HERE = false` in
+  server.js (just above the first poller) switches off every poller and sweep below it in one place,
+  and `MASTER_ENABLED = true` went live on Purchasing-Automation in the same hour. Flip the gate
+  back to true ONLY with the master switch off there first — never both at once.
+- Step 2 is DONE: the hub, both deploy-window scripts, watch-runs and the triage runbook/prompt point
+  at `purchasing-automation.onrender.com`.
+- Steps 1/4 remain: the routes and helpers here still answer (harmless duplicates — nothing points
+  at them) and can be deleted once a full week has ordered from the new service. Re-run the line
+  mapping before deleting; the numbers below are from 2026-09-15.
+- The purchasing files listed under "What does NOT move" must stay byte-identical in both repos
+  until the routes here are deleted: fix in Purchasing-Automation, copy here.
+
 ## ORDER OF OPERATIONS — the one irreversible step
 
 `MASTER_ENABLED = true` on the new service and removing the pollers HERE must be the SAME change.

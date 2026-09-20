@@ -13,7 +13,7 @@
 //
 // Exit code: 0 = nothing to flag, 1 = at least one FLAG. So it can drive a scheduled task.
 
-const BASE = process.env.WATCH_BASE || 'https://server-backend-1i47.onrender.com';
+const BASE = process.env.WATCH_BASE || 'https://purchasing-automation.onrender.com';
 const args = process.argv.slice(2);
 const asJson = args.includes('--json');
 const dateArg = (args.find((a) => a.startsWith('--date=')) || '').split('=')[1] || null;

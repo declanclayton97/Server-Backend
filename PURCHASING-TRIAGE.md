@@ -4,9 +4,17 @@ For an **unattended** run that picks up purchasing failures and fixes them while
 A human following this by hand is fine too, but every rule below is written for the unattended case,
 where there is no one to catch a bad call.
 
-Live services: `server-backend-1i47.onrender.com` (this repo, the purchasing brain) and
-`alternate-items.onrender.com` (`Alternate-Items` repo, the supplier portal adapters).
-**A push to `main` deploys.** There is no separate deploy step and no staging.
+Live services: `purchasing-automation.onrender.com` (`Purchasing-Automation` repo — the purchasing
+brain: the schedule, every `/api/purchasing/*` route, the error log) and `alternate-items.onrender.com`
+(`Alternate-Items` repo, the supplier portal adapters). **A push to `main` deploys.** There is no
+separate deploy step and no staging.
+
+**Since 2026-09-20 the schedule runs on Purchasing-Automation, not Server-Backend.** The purchasing
+files (`purchasingSchedule.js`, `purchasingAuto.js`, `blockedLines.js`, `bpWebSession.js`, …) exist in
+both repos; **Purchasing-Automation is the one that orders — fix it there, and mirror the same file
+to Server-Backend byte-for-byte** (its routes still read the copies until they are deleted). A fix
+pushed only to Server-Backend changes nothing a supplier will see. `node scripts/deploy-window.mjs
+--live` exists in both repos and asks Purchasing-Automation what is in flight.
 
 ---
 

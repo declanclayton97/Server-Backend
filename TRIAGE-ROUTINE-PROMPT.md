@@ -22,7 +22,8 @@ At [claude.ai/code/routines](https://claude.ai/code/routines) → **New routine*
 - **Name**: Purchasing triage
 - **Prompt**: the block at the bottom of this file
 - **Model**: Opus
-- **Repositories**: `declanclayton97/Server-Backend`, `declanclayton97/Alternate-Items` and
+- **Repositories**: `declanclayton97/Purchasing-Automation` (the purchasing brain since 2026-09-20),
+  `declanclayton97/Server-Backend` (still carries a copy of the purchasing files), `declanclayton97/Alternate-Items` and
   `declanclayton97/Sterling-Worker`
 
   The worker is in scope because that is where the portal automation lives: over half of all
@@ -41,8 +42,9 @@ On the routine's edit form, click the environment (e.g. **Default**) → setting
 **Network access: Custom** → add:
 
 ```
-server-backend-1i47.onrender.com
+purchasing-automation.onrender.com
 alternate-items.onrender.com
+server-backend-1i47.onrender.com
 ```
 
 Tick *"Also include default list of common package managers"* so `npm` etc. still work.
@@ -55,7 +57,7 @@ retrieved later.
 
 ### 4. Give the server the URL and token
 
-On the **Server-Backend** service in Render, add two environment variables:
+On the **Purchasing-Automation** service in Render (the service that logs purchasing failures since 2026-09-20), add two environment variables:
 
 ```
 TRIAGE_ROUTINE_URL    = <the URL you copied>
@@ -67,7 +69,7 @@ what caused the August duplicate. Anything after 16:45 UK, or a weekend, is safe
 
 ### 5. Prove it works
 
-    curl -X POST https://server-backend-1i47.onrender.com/api/purchasing/triage-fire-test
+    curl -X POST https://purchasing-automation.onrender.com/api/purchasing/triage-fire-test
 
 That sends a clearly-labelled test fire telling the routine to change nothing and just report what
 the work queue contains. A session should appear at claude.ai/code within a minute or so.
@@ -102,7 +104,9 @@ If the payload says it is a TEST, do exactly what the test asks and nothing else
 
 THE GOAL IS THAT THE STOCK GETS ORDERED. A failure you diagnose but leave unplaced is still a failure.
 
-FIRST: read PURCHASING-TRIAGE.md at the root of the Server-Backend repo. It is the authoritative runbook and overrides anything here. Follow it, including the hard limits.
+FIRST: read PURCHASING-TRIAGE.md at the root of the Purchasing-Automation repo (the same file is at the root of Server-Backend). It is the authoritative runbook and overrides anything here. Follow it, including the hard limits.
+
+WHERE THE CODE LIVES (since 2026-09-20): the purchasing schedule and every /api/purchasing route run on purchasing-automation.onrender.com from the Purchasing-Automation repo. purchasingSchedule.js, purchasingAuto.js, blockedLines.js and bpWebSession.js exist in BOTH Purchasing-Automation and Server-Backend and must stay byte-identical: make the fix in Purchasing-Automation, then copy the same file to Server-Backend and push both. A fix pushed only to Server-Backend changes nothing a supplier will see.
 
 The four that matter most:
 
@@ -114,12 +118,12 @@ The four that matter most:
 STEPS:
 
 1. Get the full record. The payload gives you an error log id; the detail is at:
-curl -s 'https://server-backend-1i47.onrender.com/api/purchasing/error-log?unhandled=1&sinceHours=36&limit=50'
+curl -s 'https://purchasing-automation.onrender.com/api/purchasing/error-log?unhandled=1&sinceHours=36&limit=50'
 Ignore anything older than 36 hours — there is an older backlog that is not yours to work.
 If the failure is already marked handled, stop and say so; something else dealt with it.
 
 1b. CLAIM IT BEFORE YOU DO ANYTHING ELSE. Other sessions may be awake for the same failure (the retry sweep re-fires it, and a scheduled backstop may be running):
-curl -s -X POST 'https://server-backend-1i47.onrender.com/api/purchasing/error-log/<id>/claim' -H 'Content-Type: application/json' -d '{"by":"triage-routine"}'
+curl -s -X POST 'https://purchasing-automation.onrender.com/api/purchasing/error-log/<id>/claim' -H 'Content-Type: application/json' -d '{"by":"triage-routine"}'
 200 = yours (the response lists every row of this failure the claim covers — do not claim them again). 409 "another session is working this failure" = STOP, report who holds it and since when, and end the run without changing anything. 409 "already handled" = stop and say so. Any row in the queue showing being_worked:true belongs to someone else — leave it.
 
 2. Check severity. You are only fired for 'error', meaning the run STOPPED and nothing was ordered. A 'review' row USUALLY means the order went through — but READ ITS context.placed before believing that. A row carrying placed:false means NOTHING was placed: 'tagged-but-nothing-to-order' is logged straight after the demand is valued, BEFORE the run has decided whether to place at all. Treat only a review row WITHOUT placed:false as evidence an order went out. On 2026-08-24 that distinction mattered: PenCarrie placed nothing, and both the alert email and force-run-safety claimed an order had gone through because severity alone was being read as proof.
@@ -132,7 +136,7 @@ curl -s -X POST 'https://server-backend-1i47.onrender.com/api/purchasing/error-l
 
 5. `node scripts/deploy-window.mjs --live` — run it BARE and read its exit code ($? / errorlevel). NEVER pipe it: a pipe returns the exit status of the LAST command in the pipeline, so `... | head` reports 0 and a refusal reads as permission to deploy. If clear, PUSH DIRECTLY TO MAIN. Render deploys from main, and nothing you leave on a branch will ever reach a supplier.
 
-   YOU HAVE EXPLICIT PERMISSION TO PUSH TO MAIN on Server-Backend, Alternate-Items and Sterling-Worker. The owner has granted it for this routine specifically. Do not open a pull request as a matter of course and do not treat a default "work on a branch" habit as a reason not to push — an unmerged PR means the stock does not get ordered, which is a failed run, not a cautious one.
+   YOU HAVE EXPLICIT PERMISSION TO PUSH TO MAIN on Purchasing-Automation, Server-Backend, Alternate-Items and Sterling-Worker. The owner has granted it for this routine specifically. Do not open a pull request as a matter of course and do not treat a default "work on a branch" habit as a reason not to push — an unmerged PR means the stock does not get ordered, which is a failed run, not a cautious one.
 
    A pull request is the LAST resort, only if the push is genuinely rejected by the remote. If that happens: say plainly in your report that the fix is NOT live and needs a merge, and LEAVE THE ERROR ROW UNHANDLED (see step 8). Never claim something is deployed when it is sitting on a branch.
 
@@ -142,12 +146,12 @@ curl -s -X POST 'https://server-backend-1i47.onrender.com/api/purchasing/error-l
    Never report "verified" for the second kind.
 
 7. GET THE ORDER PLACED. If you ran a basket-filling rehearsal in step 6, clear it first (POST /api/purchasing/clear-supplier-basket {"supplier":"X"}) and confirm it reads empty. Then call force-run-safety for that supplier. If safeToForceRun is true:
-POST https://server-backend-1i47.onrender.com/api/purchasing/supplier-scheduled-run  {"supplier":"X","force":true}
+POST https://purchasing-automation.onrender.com/api/purchasing/supplier-scheduled-run  {"supplier":"X","force":true}
 force is required because the failed run already claimed the day, which is what stops the poller retrying by itself. Then confirm in Brightpearl that a PO for that supplier reached status Placed, and report the PO and order numbers.
 If safeToForceRun is false, do not re-run — say which blocker stopped you. The supplier's own run picks it up next morning.
 
 8. Mark the error handled:
-POST https://server-backend-1i47.onrender.com/api/purchasing/error-log/<id>/handled
+POST https://purchasing-automation.onrender.com/api/purchasing/error-log/<id>/handled
 body: {"by":"triage-routine","note":"<what broke, what you changed, whether it is live, whether it got ordered>"}
 The note is what the owner reads when back — write it for a person. Do not mark anything handled that you did not resolve; leaving it unhandled is the right outcome for something you could not fix.
 

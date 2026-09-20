@@ -80,7 +80,7 @@ const pad = (n) => String(n).padStart(2, '0');
 // is harmless. Falls back to the strict clock rule if the service can't be reached — an unreachable
 // service is not permission to deploy blind.
 const live = process.argv.includes('--live');
-const API = process.env.PURCHASING_API || 'https://server-backend-1i47.onrender.com';
+const API = process.env.PURCHASING_API || 'https://purchasing-automation.onrender.com';   // the service that OWNS the schedule since 2026-09-20
 let claimed = null, runInFlight = null, liveError = null;
 if (live) {
   try {

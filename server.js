@@ -9771,7 +9771,7 @@ app.post('/api/purchasing/triage-fire-test', express.json(), async (req, res) =>
       },
       body: JSON.stringify({
         text: 'THIS IS A TEST FIRE, not a real failure. No supplier has failed and there is nothing to fix. '
-          + 'Confirm you can reach https://server-backend-1i47.onrender.com/api/purchasing/error-log?unhandled=1&sinceHours=36 '
+          + 'Confirm you can reach https://purchasing-automation.onrender.com/api/purchasing/error-log?unhandled=1&sinceHours=36 '
           + 'and report what the work queue contains. Do NOT change any code, do NOT push, and do NOT re-run any supplier.',
       }),
       signal: AbortSignal.timeout(20000),
@@ -9786,6 +9786,13 @@ app.post('/api/purchasing/triage-fire-test', express.json(), async (req, res) =>
 // A deploy is dangerous while a run is IN FLIGHT (the 2026-08-19 duplicate came from restarting
 // mid-run so the day-claim never saved). It is NOT dangerous for a supplier that has already
 // claimed today, because the claim stops it firing again whatever happens to the process.
+// Env parity for the purchasing cutover: which of the variables the purchasing code reads are SET
+// here. Names only, never values. Purchasing-Automation reports the same list on /health.
+app.get('/api/purchasing/env-report', async (req, res) => {
+  try { const { envReport } = await import('./purchasingEnv.js'); res.json(envReport()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/purchasing/run-state', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   try { res.json(await purchasingSchedule.schedulerState(pool)); }
@@ -10067,9 +10074,21 @@ app.post('/api/purchasing/error-log/:id/handled', express.json(), async (req, re
 });
 // ⚠ END PURCHASING [ROUTES: 33 purchasing route(s)] — DELETE AFTER CUTOVER
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//  THE PURCHASING SCHEDULE NO LONGER RUNS HERE. Cut over to Purchasing-Automation on 2026-09-20
+//  (purchasing-automation.onrender.com, MASTER_ENABLED = true there in the same change). Every
+//  poller and sweep below is gated on this ONE constant, so there is no eighteenth block that can
+//  quietly keep firing. Two services polling the same windows both claim the same day and place
+//  the same order twice (2026-08-19, £539.85) — flip this back to true ONLY with MASTER_ENABLED
+//  set false there first, never both at once. The routes stay for now (manual triggers, the hub
+//  during the changeover); see PURCHASING-MIGRATION.md for what gets deleted next.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+const PURCHASING_POLLERS_HERE = false;
+if (!PURCHASING_POLLERS_HERE) console.log('⏸️  PURCHASING POLLERS OFF IN THIS SERVICE — the schedule is owned by purchasing-automation.onrender.com (cut over 2026-09-20)');
+
 // Poller: every 5 min check UK local time; run the Fristads purchase once at ~10:30
 // on weekdays. The once-per-day guard (last_run_date) keeps it to a single run.
-if (process.env.FRISTADS_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.FRISTADS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10089,7 +10108,7 @@ if (process.env.FRISTADS_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CASTLE]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.CASTLE_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.CASTLE_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10110,7 +10129,7 @@ if (process.env.CASTLE_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CASTLE]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10132,7 +10151,7 @@ if (process.env.STERLING_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: STERLING]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10155,7 +10174,7 @@ if (process.env.UNEEK_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: UNEEK]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10177,7 +10196,7 @@ if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: SNICKERS]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.CARHARTT_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.CARHARTT_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10200,7 +10219,7 @@ if (process.env.CARHARTT_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CARHARTT]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10223,7 +10242,7 @@ if (process.env.HELLYHANSEN_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: HELLY HANSEN]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10247,7 +10266,7 @@ if (process.env.PORTWEST_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: PORTWEST]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.PENCARRIE_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.PENCARRIE_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10272,7 +10291,7 @@ if (process.env.PENCARRIE_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: PENCARRIE]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10311,7 +10330,7 @@ const REORDER_SPLIT_ENABLED = true;
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: BLAKLADER_LOW (reorder half)]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10331,7 +10350,7 @@ if (process.env.BLAKLADER_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: SNICKERS_LOW (reorder half)]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.SNICKERS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10365,7 +10384,7 @@ app.get('/api/purchasing/tag-audit', async (req, res) => {
 // 17:30 is after the retry sweep and clear of every supplier window, so it cannot compete for the
 // run lock. severity 'review': nothing failed and no order is stuck — but orders are being missed,
 // which is worth an alert rather than a line in a report nobody opens.
-if (process.env.TAG_AUDIT_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.TAG_AUDIT_ENABLED !== 'false') {
   let lastTagAudit = null;
   setInterval(() => {
     try {
@@ -10425,7 +10444,7 @@ app.get('/api/purchasing/blaklader-cart-probe', async (req, res) => {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: V12]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.V12_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.V12_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10452,7 +10471,7 @@ if (process.env.V12_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: BUCKLER]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.BUCKLER_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.BUCKLER_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10483,7 +10502,7 @@ if (process.env.BUCKLER_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CHADWICK]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.CHADWICK_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.CHADWICK_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10505,7 +10524,7 @@ if (process.env.CHADWICK_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: CHADWICK]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.SCRUFFS_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.SCRUFFS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10528,7 +10547,7 @@ if (process.env.SCRUFFS_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: SCRUFFS]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.PERFORMANCE_BRANDS_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.PERFORMANCE_BRANDS_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10553,7 +10572,7 @@ if (process.env.PERFORMANCE_BRANDS_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: PERFORMANCE BRANDS]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.MASCOT_SCHEDULE_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.MASCOT_SCHEDULE_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10581,7 +10600,7 @@ if (process.env.MASCOT_SCHEDULE_ENABLED !== 'false') {
 // ⚠ PURCHASING — MOVED TO PURCHASING-AUTOMATION — DELETE AFTER CUTOVER [POLLER: RETRY SWEEP]
 // See PURCHASING-MIGRATION.md. Pollers go in the SAME commit that sets MASTER_ENABLED=true there,
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
-if (process.env.RETRY_SWEEP_ENABLED !== 'false') {
+if (PURCHASING_POLLERS_HERE && process.env.RETRY_SWEEP_ENABLED !== 'false') {
   setInterval(() => {
     try {
       if (!pool) return;
@@ -10612,6 +10631,7 @@ if (process.env.RETRY_SWEEP_ENABLED !== 'false') {
 // or both services claim the same day and the order is placed twice (19 Aug 2026, £539.85).
 setInterval(() => {
   try {
+    if (!PURCHASING_POLLERS_HERE) return;
     if (!pool) return;
     const uk = purchasingSchedule.ukNow();
     if (!purchasingSchedule.isUkWeekday(uk.weekday)) return;
