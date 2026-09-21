@@ -55,5 +55,29 @@
     "sku": "Skyrock M",
     "brand": "DeWalt",
     "_why": "DeWalt Skyrock Polo Shirt, M. Absent from the Sterling product-data workbook entirely — not one Skyrock EAN appears in sterlingProducts.json, so this is the whole product line never having been ingested (same pattern as the Wilbury entries above). Blocked PO 489105 (error id 280, 2026-09-14). Verified against the live site with a read-only worker inspect() (no basket add): searching \"Skyrock\" returns a single unambiguous result, styleid=SKYROCK (\"skyrock dewalt polo shirt\", score 100, no colour conflict), with a single-colour S/M/L/XL/XXL grid at £9.91 each and M showing 1062 in stock. Colour kept as Brightpearl has it (\"Black/Grey\") since the portal has no separate colour variant to match against. Only M is added here — that is the only size currently on order; if another Skyrock size blocks a future run, verify and add it the same way. If Sterling ship a workbook that contains this EAN, delete this entry."
+  },
+  "5063777008599": {
+    "search": "Foundry Wheat",
+    "colour": "Wheat",
+    "size": "10",
+    "sku": "Foundry Wheat 10",
+    "brand": "DeWalt",
+    "_why": "DeWalt Foundry Wheat Steel/Steel Waterproof BOA Boot, size 10 (BP 359505). A NEW line absent from the 2026-01-08 workbook (0 occurrences of Foundry), which blocked the whole Sterling run on 2026-09-21 (error 440). Confirmed on sterling.famlive.net via a worker inspect dry-run: styleid FOUNDRY+WHEAT (Gunsmoke is the other colour, a separate product), sizes 6-12, £62.99; the stock feed shows 656 under this barcode."
+  },
+  "5063777009282": {
+    "search": "Shellback",
+    "colour": "Dijon",
+    "size": "L",
+    "sku": "Shellback L",
+    "brand": "DeWalt",
+    "_why": "DeWalt Shellback Heavyweight Hoody 380gsm, Dijon (BP spells it Djion), size L (BP 359483). New line, absent from the workbook; blocked the Sterling run 2026-09-21 (error 440). Confirmed via worker inspect: single styleid SHELLBACK (one colour), sizes S-XXL, £18.95; feed shows 1306 under this barcode."
+  },
+  "5063777009220": {
+    "search": "Skyrock",
+    "colour": "Black/Grey",
+    "size": "XXL",
+    "sku": "Skyrock XXL",
+    "brand": "DeWalt",
+    "_why": "DeWalt Skyrock Polo Shirt, Black/Grey, XXL (BP 359489). New line, absent from the workbook; blocked the Sterling run 2026-09-21 (error 440). Confirmed via worker inspect: single styleid SKYROCK (one colour), sizes S-XXL, £9.91; feed shows 418 under this barcode."
   }
 }

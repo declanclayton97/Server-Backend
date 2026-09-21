@@ -10414,5 +10414,26 @@
     "size": "M",
     "sku": "Skyrock M",
     "brand": "DeWalt"
+  },
+  "5063777008599": {
+    "search": "Foundry Wheat",
+    "colour": "Wheat",
+    "size": "10",
+    "sku": "Foundry Wheat 10",
+    "brand": "DeWalt"
+  },
+  "5063777009282": {
+    "search": "Shellback",
+    "colour": "Dijon",
+    "size": "L",
+    "sku": "Shellback L",
+    "brand": "DeWalt"
+  },
+  "5063777009220": {
+    "search": "Skyrock",
+    "colour": "Black/Grey",
+    "size": "XXL",
+    "sku": "Skyrock XXL",
+    "brand": "DeWalt"
   }
 }

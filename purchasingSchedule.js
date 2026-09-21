@@ -1347,6 +1347,7 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
 
   // 2. EMAIL Brightpearl's real PO PDF to Uneek's order desk (only email_to_0 = the order
   // address; BP's pre-filled supplier/account rows are cleared inside emailOrderDocument).
+  steps.skuCheck = await assertPoRowSkusAreProductSkus(poId, 'Uneek');
   const mail = await emailOrderDocument(poId, { contactId: UNEEK_SUPPLIER_CONTACT, to: UNEEK_ORDER_EMAIL, send: true });
   if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${UNEEK_ORDER_EMAIL}: ${JSON.stringify(mail).slice(0, 200)}`);
   steps.email = { to: UNEEK_ORDER_EMAIL, sent: true, status: mail.status };
@@ -1412,6 +1413,23 @@ const EMAIL_SUPPLIER_CONFIG = {
   },
 };
 
+// Every row's SKU must be its product's SKU before a PO is EMAILED (see the guard's comment at its
+// first call site). Returns the check for the run report; throws at step 'sku-check' otherwise.
+async function assertPoRowSkusAreProductSkus(poId, label) {
+  let rows = [];
+  try { rows = (await bp.getOrderCartLines(poId)).filter((l) => l.productId && String(l.productId) !== '1000'); }
+  catch (e) { throw stepErr('sku-check', `couldn't read PO ${poId} rows before emailing: ${e.message}`, { poId }); }
+  const real = await bp.liveSkusOf(rows.map((l) => l.productId));
+  const wrong = rows.filter((l) => { const s = real.get(String(l.productId)); return s && s.toUpperCase() !== String(l.sku || '').toUpperCase(); })
+    .map((l) => ({ productId: l.productId, rowSku: l.sku, productSku: real.get(String(l.productId)), name: l.name, qty: l.qty }));
+  if (wrong.length) {
+    throw stepErr('sku-check', `NOT emailed: ${wrong.length} row(s) on PO#${poId} carry a supplier SKU that is not the product's SKU, and ${label} would receive the wrong code — `
+      + wrong.map((w) => `"${w.rowSku}" is really ${w.productSku} (${String(w.name || '').slice(0, 40)}, product ${w.productId})`).join('; ')
+      + `. Clear the ${label} supplier SKU on those products in Brightpearl (product → Suppliers), rebuild the rows on the PO, then re-run.`, { poId, wrong });
+  }
+  return { rows: rows.length, wrong: [] };
+}
+
 async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   const cfg = EMAIL_SUPPLIER_CONFIG[supplierKey];
   if (!cfg) throw stepErr('create-po', `no email-supplier config for ${supplierKey}`);
@@ -1438,6 +1456,16 @@ async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToTh
   const linesByOrder = {};
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // SUPPLIER-SKU GUARD. An emailed PO is Brightpearl's own template, which prints each row's SKU
+  // as stored — and when a product carries a per-supplier SKU, BP writes THAT on the row, not the
+  // product's SKU (see placePortwestOrder's repair). Buckler PO 490824 went out on 2026-09-21 with
+  // six DIFFERENT Blitz boots all coded "BLITZ BK-10": six products cloned from the Black 10 with
+  // its supplier code still on them. A portal lane can translate on the way in; an email cannot be
+  // recalled. So before sending, every row's SKU must match its product's, or the run STOPS here
+  // with the PO built and the products named — a human clears the supplier SKU, rebuilds the rows
+  // and re-runs. A wrong code in a supplier's inbox is the one failure that is not recoverable.
+  if (live) steps.skuCheck = await assertPoRowSkusAreProductSkus(poId, cfg.label);
 
   // createPo returns NONE of netValue, soNet or lowNet — it never has — so this read 0 on every
   // run since it was written, and 0 satisfies no branch below: not "under the threshold, add
@@ -1526,6 +1554,7 @@ async function placeScruffsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {})
   // emailOrderDocument clears BP's pre-filled rows, which for this contact include
   // "SalesOrders@Scruffs.com / CS@scruffs.com" stored as ONE address and two of our own
   // sales@tuffshop.co.uk rows. Sending those unedited would bounce and CC ourselves.
+  steps.skuCheck = await assertPoRowSkusAreProductSkus(poId, 'Scruffs');
   const mail = await emailOrderDocument(poId, { contactId: SCRUFFS_SUPPLIER_CONTACT, to: SCRUFFS_ORDER_EMAIL, subject: `Purchase Order: #${poId}`, send: true });
   if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${SCRUFFS_ORDER_EMAIL}: ${JSON.stringify(mail).slice(0, 200)}`);
   steps.email = { to: SCRUFFS_ORDER_EMAIL, sent: true, status: mail.status };
