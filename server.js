@@ -8373,8 +8373,13 @@ async function liveGetIdentity(productId) {
 }
 async function liveSetIdentity(productId, changes) {
   const cur = await liveGetIdentity(productId);
+  // `barcode` is a real identity field in Brightpearl but is deliberately NOT in
+  // IDENTITY_KEYS_LIVE, so it is only ever sent when a caller is actually changing it.
+  // Adding it to the standing list would put it in EVERY identity PUT, which would change
+  // the behaviour of callers that have nothing to do with barcodes.
+  const keys = ('barcode' in changes) ? [...IDENTITY_KEYS_LIVE, 'barcode'] : IDENTITY_KEYS_LIVE;
   const put = {};
-  for (const k of IDENTITY_KEYS_LIVE) {
+  for (const k of keys) {
     const v = (k in changes) ? changes[k] : cur[k];
     if (v != null && String(v).trim() !== '') put[k] = String(v).trim();
   }
@@ -8387,18 +8392,20 @@ async function liveSetIdentity(productId, changes) {
 app.post('/api/purchasing/product-identity-live', async (req, res) => {
   if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
   if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
-  const { productId, ean, sku, mpn } = req.body || {};
+  const { productId, ean, sku, mpn, barcode } = req.body || {};
   if (!productId) return res.status(400).json({ error: 'productId required' });
   const changes = {};
   if (ean !== undefined) changes.ean = ean;
   if (sku !== undefined) changes.sku = sku;
   if (mpn !== undefined) changes.mpn = mpn;
-  if (!Object.keys(changes).length) return res.status(400).json({ error: 'ean, sku or mpn required' });
+  if (barcode !== undefined) changes.barcode = barcode;
+  if (!Object.keys(changes).length) return res.status(400).json({ error: 'ean, sku, mpn or barcode required' });
   try {
     const before = await liveGetIdentity(productId);
     await liveSetIdentity(productId, changes);
     const after = await liveGetIdentity(productId);
-    res.json({ productId, changes, before, after, skuPreserved: after.sku === before.sku, eanSet: after.ean || null });
+    res.json({ productId, changes, before, after, skuPreserved: after.sku === before.sku,
+      eanSet: after.ean || null, barcodeSet: after.barcode || null });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
