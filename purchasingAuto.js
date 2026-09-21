@@ -702,9 +702,21 @@ const sizeEq = (a, b) => {
 // Those two readings share one syntax, so the caller decides between them on evidence rather than
 // guessing here — see the scope application, which only takes the list reading when the AND reading
 // matches nothing AND every group names a product code.
+// "(+ 1x T53545)", "(+ T53545)", "(+T53545 x2)" → { sku: 'T53545', qty: 1|1|2 }; null when the note is not
+// a "+" note. The opposite of a scope: it ADDS that quantity of that SKU to the order for this SO,
+// for the case where the SO's own rows read as fulfilled (a re-order after shipping, a replacement)
+// and so cannot ask for anything. Deliberately one SKU per note — several would be several tags.
+export function parseTagPlus(tag) {
+  const m = /\(\s*\+\s*(?:(\d+)\s*[x×]\s*)?([A-Za-z0-9][A-Za-z0-9_\-./]*)(?:\s*[x×]\s*(\d+))?\s*\)\s*$/.exec(String(tag || ''));
+  if (!m) return null;
+  const qty = Number(m[1] || m[3] || 1);
+  return qty > 0 ? { sku: m[2].toUpperCase(), qty } : null;
+}
+
 export function parseTagScope(tag) {
   const m = /\(([^)]*)\)\s*$/.exec(String(tag || ''));
   if (!m) return null;
+  if (/^\s*\+/.test(m[1])) return null;   // "(+ 1x SKU)" is an addition, not a scope — see parseTagPlus
   const terms = []; const groups = []; let qty = null;
   for (const chunk of m[1].toUpperCase().split(/[,;]+/)) {
     const toks = chunk.split(/\s+/).filter(Boolean);
@@ -1433,6 +1445,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // satisfies them all — otherwise the note is left alone and nothing is filtered.
     const ourTag = allTags.find((t) => groupHasSupplier(t, supplierKey));
     const scope = parseTagScope(ourTag);
+    const plus = parseTagPlus(ourTag);   // "(+ 1x SKU)" — an ADDITION for this SO; applied after the row arithmetic below
     let scopeCap = null, scopeListReading = null;
     if (scope && scope.terms.length) {
       // A TAG-ONLY supplier (no brand regex) sharing an order with other suppliers would otherwise
@@ -1542,7 +1555,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // orders (d950468, 7–17 Aug) and every multi-supplier PenCarrie order until its detect existed.
     // Record why, per row, so a miss is queryable in demand_log instead of vanishing. Only when the
     // order contributes nothing — a partially-matched order isn't suspicious and would just be noise.
-    if (!entries.length) {
+    if (!entries.length && !plus) {
       for (const [rowId, r] of orderableRows) {
         demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName,
           ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0,
@@ -1567,7 +1580,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       try { alloc = await getOrderAllocations(id, { client: process.env.BP_WEB_CLIENT_ID || 'tuffworkwear' }); }
       catch { /* keep the empty read and let the retries run out */ }
     }
-    if (!Object.keys(alloc).length) {
+    if (!Object.keys(alloc).length && !plus) {   // a "+" order is EXPECTED to be fully fulfilled — that is why it needs the tag
       // Still empty after retries. Might be genuine (all fulfilled) or a persistent read failure —
       // record it so a silently-dropped order is at least queryable afterwards.
       tagFlags.push({ soId: id, tag, reason: 'the order page returned no allocation rows after 3 reads — every row will be treated as fulfilled, so this order contributes nothing. If that is wrong, the page read is failing',
@@ -1607,6 +1620,24 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: a.allocated || 0, fulfilled: a.fulfilled || 0, onOrder: a.onOrder || 0, inStock: a.inStock || 0, toOrder, ...(skipQty ? { skipped: skipQty, note: `${skipQty} withheld via ${SKIP_SKU_FIELD}` } : {}) });
       if (toOrder <= 0) continue; // fully allocated / already ordered — skip
       rows.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty: toOrder, orderedQty: ordered, allocation: a, itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0, taxCode: (r.rowValue && r.rowValue.taxCode) || null });
+    }
+    // "+" TAG — order something for this SO that its rows cannot ask for: "SCRUFFS (+ 1x T53545)".
+    // The rows read as fulfilled (shipped, allocated) so the arithmetic above orders nothing, and
+    // "(ONLY 1x T53545)" can only narrow, never add — SO 479368 sat tagged and unordered that way
+    // (2026-09-21). A "+" note is an ADDITION: that quantity of that SKU goes on the order as this
+    // SO's line, and finalise then clears the tag and notes the SO like any other. The SKU is taken
+    // from the SO's own row when it has one (cost, tax code and name come with it); otherwise it is
+    // looked up. A SKU that resolves to nothing is reported on the plan, not silently dropped.
+    if (plus) {
+      const own = entries.find(([, r]) => String(r.productSku || '').toUpperCase() === plus.sku);
+      const productId = own ? own[1].productId : await skuToProductId(plus.sku);
+      if (productId) {
+        const r = own ? own[1] : null;
+        rows.push({ productId, sku: r ? r.productSku : plus.sku, name: r ? r.productName : plus.sku, qty: plus.qty, orderedQty: plus.qty, allocation: {}, itemCost: r && r.itemCost ? parseFloat(r.itemCost.value) : 0, taxCode: (r && r.rowValue && r.rowValue.taxCode) || null, viaPlusTag: true });
+        demandAudit.push({ soId: id, rowId: own ? own[0] : null, productId, sku: plus.sku, name: r ? r.productName : plus.sku, ordered: plus.qty, allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: plus.qty, note: `added by the tag "(+ ${plus.qty}x ${plus.sku})" — the order's own rows already read as fulfilled` });
+      } else {
+        tagFlags.push({ soId: id, tag, rows: entries.length, reason: `the tag asks for "+ ${plus.qty}x ${plus.sku}" but no Brightpearl product has that SKU — nothing added` });
+      }
     }
     if (!rows.length) continue;
     contributors.push({
@@ -1852,6 +1883,32 @@ export async function createComboPOLive(opts = {}) {
     const k = String(l.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + l.qty;
   }
 
+  // 1b. CARRY-FORWARD LINES — things owed that no demand scan can see (see pendingLines.js): a
+  // re-order for a sales order that already shipped, the odd pieces of a partial pack. They ride
+  // as ordinary SO-block lines so every lane treats them like any other — PO row, basket, price
+  // check, threshold — and they are RESERVED against the PO once it exists, then consumed by the
+  // run only when that PO actually places. Unresolvable SKUs are reported on the plan, never
+  // silently dropped, and never abort the order (the rest of the demand is real).
+  // Blaklader keeps its own older path (pieces straight to the cart, raw), so it is skipped here —
+  // otherwise its lines would go on twice, once as a PO row and once raw.
+  const carryLines = [], carryUnresolved = [];
+  if (opts.logPool && includeSalesOrders && supplierKey !== 'BLAKLADER') {
+    const { listPendingLines } = await import('./pendingLines.js');
+    const pend = await listPendingLines(opts.logPool, supplierKey).catch(() => []);
+    for (const p of pend) {
+      const productId = await skuToProductId(p.sku);
+      if (!productId) { carryUnresolved.push({ id: p.id, sku: p.sku, qty: p.qty, note: p.note }); continue; }
+      const cost = await costOfLive(productId, priceListId, 0);
+      const name = await liveGet(`/product-service/product/${productId}`)
+        .then((r) => { const pr = (r || [])[0]; const sc = pr && pr.salesChannels && pr.salesChannels[0]; return (sc && sc.productName) || null; })
+        .catch(() => null) || p.sku;
+      const line = { productId, sku: p.sku, name, qty: Math.round(Number(p.qty) || 0), cost, order: null, carry: true, pendingId: p.id, soId: p.so_id || null, note: p.note || null };
+      if (line.qty <= 0) continue;
+      soLines.push(line); carryLines.push(line);
+      const k = String(p.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + line.qty;
+    }
+  }
+
   // 2. low-inventory replenishment (deduped against SO qty for the same SKU).
   // includeLowInv=false (per-supplier via registry, or per-call via opts) orders ONLY
   // sales-order demand and skips the reorder entirely — used when a supplier's min-stock
@@ -1995,6 +2052,7 @@ export async function createComboPOLive(opts = {}) {
       ? adopted.cleared.filter((c) => ![...soLines, ...lowLines].some((l) => String(l.sku || '').toUpperCase() === c.sku)).map((c) => c.sku)
       : [],
     soLines, separator: '=====LOW INV====', lowLines, padInfo, includeLowInv, includeSalesOrders,
+    carryLines: carryLines.map((l) => ({ pendingId: l.pendingId, sku: l.sku, qty: l.qty, cost: l.cost, soId: l.soId, note: l.note })), carryUnresolved,
     priceOverridesApplied,                                          // portal-price overrides applied to line costs (Elastic suppliers)
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
@@ -2058,6 +2116,8 @@ export async function createComboPOLive(opts = {}) {
     // Same order as the rows below it — a note listing the jobs oldest-first above rows grouped
     // newest-first is the same mismatch this change exists to remove, just moved onto the note.
     if (soLines.length) { nl.push('Order demand from:'); for (const c of orderedContributors) nl.push(`  SO#${c.id} (${c.ref}): ` + c.lines.map((l) => `${l.sku} x${l.qty}`).join(', ')); }
+    if (carryLines.length) { nl.push('Carry-forward (added by hand — see the purchasing hub):'); for (const l of carryLines) nl.push(`  ${l.sku} x${l.qty}${l.soId ? ` for SO#${l.soId}` : ''}${l.note ? ` — ${l.note}` : ''}`); }
+    if (carryUnresolved.length) { nl.push('⚠ CARRY-FORWARD NOT ORDERED — SKU not found in Brightpearl:'); for (const l of carryUnresolved) nl.push(`  ${l.sku} x${l.qty}${l.note ? ` — ${l.note}` : ''}`); }
     if (lowLines.length) { nl.push('Low-inventory replenishment:'); for (const l of lowLines) nl.push(`  ${l.sku} x${l.qty}`); }
     if (skippedBundles.length) { nl.push('⚠ SKIPPED — bundles (cannot add to a PO; order the components manually):'); for (const b of skippedBundles) nl.push(`  ${b.sku || b.productId} x${b.qty} (${b.name || ''})`); }
     const addedOn = new Date().toISOString().replace('Z', '+00:00');
@@ -2084,6 +2144,9 @@ export async function createComboPOLive(opts = {}) {
 
   // audit trail: persist the per-line demand decision for this PO (best-effort, non-fatal)
   if (opts.logPool) { try { await writeDemandLog(opts.logPool, poId, supplierKey, demandAudit); } catch (e) { /* logging must never break a PO */ } }
+  // Carry-forward lines are on this PO now — reserve them against it, so the run consumes exactly
+  // these when THIS PO places and a retry that mints a fresh PO picks them up again if it did not.
+  if (opts.logPool && carryLines.length) { try { const { reservePendingLines } = await import('./pendingLines.js'); await reservePendingLines(opts.logPool, carryLines.map((l) => l.pendingId), poId); } catch (e) { /* never break a PO */ } }
 
   return { created: true, poId, skippedBundles, demandAudit, ...plan };
 }

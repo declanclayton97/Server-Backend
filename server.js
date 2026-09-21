@@ -7754,18 +7754,23 @@ app.get('/api/purchasing/detect-compare', async (req, res) => {
 // Carry-forward lines for a supplier's NEXT order — things owed that BP demand will never ask for
 // again because the sales order is already finalised. GET to list, POST to add.
 // POST { supplier, sku, qty, note }   qty is in the SUPPLIER'S units and is sent RAW.
+// Carry-forward lines (pendingLines.js). ?supplier=X lists one supplier; no supplier lists every
+// open line for the hub. ?all=1 includes consumed ones. POST { supplier, sku, qty, note?, soId?,
+// addedBy? } — qty in Brightpearl units (Blaklader: pieces, raw). PATCH { qty | note | remove |
+// consumedPoId } — remove only for a line added in error; a line bought by hand gets consumedPoId.
 app.get('/api/purchasing/pending-lines', async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   try {
-    res.json({ supplier: (req.query.supplier || 'BLAKLADER').toString().toUpperCase(),
-      lines: await purchasingSchedule.listPendingLines(pool, req.query.supplier || 'BLAKLADER', { includeConsumed: req.query.all != null }) });
+    if (!req.query.supplier) return res.json({ supplier: null, lines: await purchasingSchedule.listAllPendingLines(pool, { includeConsumed: req.query.all != null }) });
+    res.json({ supplier: String(req.query.supplier).toUpperCase(),
+      lines: await purchasingSchedule.listPendingLines(pool, req.query.supplier, { includeConsumed: req.query.all != null }) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/purchasing/pending-lines', express.json(), async (req, res) => {
   if (!pool) return res.status(503).json({ error: 'DB not available' });
   const b = req.body || {};
   if (!b.supplier || !b.sku || !(Number(b.qty) > 0)) return res.status(400).json({ error: 'supplier, sku and qty>0 required' });
-  try { res.json(await purchasingSchedule.addPendingLine(pool, b)); }
+  try { res.json(await purchasingSchedule.addPendingLine(pool, { supplier: b.supplier, sku: b.sku, qty: b.qty, note: b.note, soId: b.soId, addedBy: b.addedBy || req.get('x-hub-user') || 'api' })); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -58,75 +58,11 @@ export const isUkWeekday = (wd) => !['Sat', 'Sun'].includes(wd);
 
 // ── state ────────────────────────────────────────────────────────────────────
 // ── Carry-forward lines ───────────────────────────────────────────────────────
-// Things that must go on a supplier's NEXT order but which BP demand will never produce again,
-// because the sales order they belong to was already finalised. First case: PO 483480 bought ONE
-// 3625 shirt where the BP unit is a 5-pack, so four are owed to SO 483415 — and that SO is closed,
-// so no future demand scan will ever ask for them.
-//
-// A note in a PO or an email does not order anything. This does: the next run for that supplier
-// appends these lines to the cart, and only marks them consumed once the order is actually placed.
-// If the run aborts they stay pending and go on the run after.
-//
-// qty is in the SUPPLIER'S OWN UNITS and is sent RAW — no multipack multiplication. The 3625 case is
-// four PIECES, which is not a whole BP pack, and that is exactly the shape these will usually take.
-async function ensurePendingTable(pool) {
-  await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_pending_lines (
-    id serial PRIMARY KEY,
-    supplier text NOT NULL,
-    sku text NOT NULL,
-    qty int NOT NULL,
-    note text,
-    created_at timestamptz DEFAULT now(),
-    consumed_at timestamptz,
-    consumed_po int
-  )`);
-}
-
-export async function addPendingLine(pool, { supplier, sku, qty, note }) {
-  if (!pool) return { error: 'no database' };
-  await ensurePendingTable(pool);
-  const r = await pool.query(
-    `INSERT INTO purchasing_pending_lines (supplier, sku, qty, note) VALUES ($1,$2,$3,$4) RETURNING *`,
-    [String(supplier).toUpperCase(), String(sku), Math.round(Number(qty) || 0), note || null],
-  );
-  return r.rows[0];
-}
-
-export async function listPendingLines(pool, supplier, { includeConsumed = false } = {}) {
-  if (!pool) return [];
-  await ensurePendingTable(pool);
-  const r = await pool.query(
-    `SELECT * FROM purchasing_pending_lines WHERE supplier=$1 ${includeConsumed ? '' : 'AND consumed_at IS NULL'} ORDER BY id`,
-    [String(supplier).toUpperCase()],
-  );
-  return r.rows;
-}
-
-export async function updatePendingLine(pool, id, { qty, note, remove, consumedPoId } = {}) {
-  if (!pool) return { error: "no database" };
-  await ensurePendingTable(pool);
-  // Mark a line FULFILLED rather than deleting it. When PO 483751 was placed by hand the only
-  // option was `remove`, which threw away the record of what was owed and why; consumed_at +
-  // consumed_po keep it. `remove` stays for lines added in error.
-  if (consumedPoId) {
-    const c = await pool.query(
-      "UPDATE purchasing_pending_lines SET consumed_at=now(), consumed_po=$2 WHERE id=$1 AND consumed_at IS NULL RETURNING *",
-      [id, consumedPoId],
-    );
-    return c.rows[0] || { error: "not found or already consumed" };
-  }
-  if (remove) { await pool.query("DELETE FROM purchasing_pending_lines WHERE id=$1 AND consumed_at IS NULL", [id]); return { removed: id }; }
-  const r = await pool.query(
-    "UPDATE purchasing_pending_lines SET qty=COALESCE($2,qty), note=COALESCE($3,note) WHERE id=$1 AND consumed_at IS NULL RETURNING *",
-    [id, qty != null ? Math.round(Number(qty)) : null, note != null ? String(note) : null],
-  );
-  return r.rows[0] || { error: "not found or already consumed" };
-}
-
-async function consumePendingLines(pool, ids, poId) {
-  if (!pool || !ids.length) return;
-  await pool.query(`UPDATE purchasing_pending_lines SET consumed_at=now(), consumed_po=$2 WHERE id = ANY($1::int[])`, [ids, poId]);
-}
+// Moved to pendingLines.js on 2026-09-21 so createPo (purchasingAuto) can append them to EVERY
+// supplier's order without importing this module back (a cycle). Re-exported here because the
+// routes and the Blaklader lane call them by these names.
+export { addPendingLine, listPendingLines, listAllPendingLines, updatePendingLine, consumePendingLines, consumeReservedPendingLines } from './pendingLines.js';
+import { listPendingLines, consumePendingLines, consumeReservedPendingLines } from './pendingLines.js';
 
 async function ensureTable(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS fristads_purchase_schedule (
@@ -3799,6 +3735,21 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
         placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo, excludeSkus, ...splitOpts });
         decision = `placed — ${reason}` + (lineMode === 'so' ? ' (customer orders)' : lineMode === 'low' ? ' (reorder)' : '');
         newWaitDays = 0;
+        // The order placed: the carry-forward lines createPo reserved against this PO are bought.
+        // Only now — a placeFn that threw above leaves them pending for the next run. Best-effort:
+        // a bookkeeping failure must never turn a placed order into a failed run. (Blaklader
+        // consumes its own raw-cart lines inside its lane; reserved_po is never set for those.)
+        if (placement && placement.poId) {
+          try {
+            const done = await consumeReservedPendingLines(pool, placement.poId);
+            if (done.length) placement.carryForwardConsumed = done.map((d) => `${d.sku} x${d.qty}${d.so_id ? ` (SO ${d.so_id})` : ''}`);
+            // The sales order it was owed to gets told — that is where someone will look for it.
+            for (const d of done) {
+              if (!d.so_id) continue;
+              await bp.addOrderNoteLive(Number(d.so_id), `RE-ORDERED from ${cfg.supplierKey} on PO#${placement.poId}: ${d.qty} × ${d.sku}${d.note ? ` — ${d.note}` : ''}. Added by hand as a carry-forward line (this order's own rows already read as fulfilled).`, SUPPLIER_CONTACT[cfg.supplierKey] || 1).catch(() => {});
+            }
+          } catch (e) { placement.carryForwardWarn = e.message; }
+        }
       }
     }
 
