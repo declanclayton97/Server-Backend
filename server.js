@@ -21,6 +21,7 @@ import { SIGNATURE_HTML, SIGNATURE_TEXT } from './emailSignature.js';
 import { attachFileToOrder as bpAttachFileToOrder, login as bpWebLogin, invalidateSession as bpWebInvalidate, fetchAuthed as bpWebFetch, exportCookies as bpWebExportCookies, updateOrderReference as bpUpdateOrderReference, lockedValidateOrder as bpLockedValidateOrder, orderAjaxPost as bpOrderAjaxPost, BP_HOST as BP_WEB_HOST } from './bpWebSession.js';
 import * as purchasingAuto from './purchasingAuto.js';
 import * as purchasingSchedule from './purchasingSchedule.js';
+import { bpFetchThrottled as bpFetchThrottledBase } from './bpThrottle.js';
 import { convertDesignToPng } from './wilcomClient.js';
 import {
   QUOTE_CHASE_CONFIG, QUOTE_ACTIONS, QUOTE_CANCEL_REASONS,
@@ -3042,12 +3043,16 @@ function operatorEmailFor(operator) {
   return OPERATOR_EMAIL_MAP[operator] || OPERATOR_EMAIL_MAP['Dec'] || 'dec@tuffshop.co.uk';
 }
 
+// Wrapper so call sites read the same as before and the module stays testable
+// without a live Brightpearl. See bpThrottle.js for why 503 is not a failure.
+const bpFetchThrottled = (url, init, opts = {}) => bpFetchThrottledBase(url, init, { sleepImpl: sleep, ...opts });
+
 async function postBpOrderNote(orderId, noteText) {
   const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1'
     ? 'https://euw1.brightpearlconnect.com'
     : 'https://use1.brightpearlconnect.com';
   const url = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/note`;
-  const r = await fetch(url, {
+  const r = await bpFetchThrottled(url, {
     method: 'POST',
     headers: {
       'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF,
@@ -3059,7 +3064,7 @@ async function postBpOrderNote(orderId, noteText) {
       text: noteText,
       addedOn: new Date().toISOString(),
     }),
-  });
+  }, { label: 'bp-note' });
   if (!r.ok) {
     const err = await r.text();
     console.error(`[proof-chase] BP note post failed for ${orderId}: ${r.status} ${err}`);
@@ -3180,24 +3185,38 @@ async function transitionBpStatusProofRequiredToSent(orderId, noteText = 'Proof 
     'Content-Type': 'application/json',
   };
 
+  // The proof has ALREADY gone to the customer by the time this runs, and the
+  // operator has already been told it sent. So a failure here must never leave
+  // Brightpearl silent: if the status cannot be read or moved, the note is what
+  // stops somebody sending the same proof again. Post it on every exit path.
+  const noteOnly = async (why) => {
+    const posted = await postBpOrderNote(orderId, noteText).catch(() => false);
+    console.error(
+      `[bp-status] order ${orderId} NOT moved to ${BP_STATUS_PROOF_SENT} (${why}) — ` +
+      (posted ? 'note posted, set the status by hand' : 'AND THE NOTE FAILED TOO — nothing recorded in BP')
+    );
+    return posted;
+  };
+
   // Probe current status. BP shapes the response slightly differently
   // depending on endpoint version — try both common locations.
   let currentStatusId = null;
   try {
-    const getRes = await fetch(
+    const getRes = await bpFetchThrottled(
       `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}`,
-      { headers }
+      { headers },
+      { label: 'bp-status' }
     );
     if (!getRes.ok) {
       console.warn(`[bp-status] GET order ${orderId} returned ${getRes.status}`);
-      return { ok: false, reason: 'get-failed', status: getRes.status };
+      return { ok: false, reason: 'get-failed', status: getRes.status, notePosted: await noteOnly(`GET ${getRes.status}`) };
     }
     const data = await getRes.json();
     const order = Array.isArray(data.response) ? data.response[0] : data.response;
     currentStatusId = order?.orderStatus?.orderStatusId ?? order?.orderStatusId ?? null;
   } catch (err) {
     console.error(`[bp-status] GET order ${orderId} error:`, err.message);
-    return { ok: false, reason: 'get-error', error: err.message };
+    return { ok: false, reason: 'get-error', error: err.message, notePosted: await noteOnly(`GET threw: ${err.message}`) };
   }
 
   if (currentStatusId !== BP_STATUS_PROOF_REQUIRED) {
@@ -3214,7 +3233,7 @@ async function transitionBpStatusProofRequiredToSent(orderId, noteText = 'Proof 
   }
 
   try {
-    const putRes = await fetch(
+    const putRes = await bpFetchThrottled(
       `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/status`,
       {
         method: 'PUT',
@@ -3223,18 +3242,21 @@ async function transitionBpStatusProofRequiredToSent(orderId, noteText = 'Proof 
           orderStatusId: BP_STATUS_PROOF_SENT,
           orderNote: { text: noteText, isPublic: false },
         }),
-      }
+      },
+      { label: 'bp-status' }
     );
     if (!putRes.ok) {
       const errBody = await putRes.text();
       console.error(`[bp-status] PUT ${orderId} status returned ${putRes.status}: ${errBody.slice(0, 300)}`);
-      return { ok: false, reason: 'put-failed', status: putRes.status, body: errBody };
+      // The note rides along INSIDE the PUT body, so a failed PUT posted no note
+      // either. Post it separately rather than leaving the send unrecorded.
+      return { ok: false, reason: 'put-failed', status: putRes.status, body: errBody, notePosted: await noteOnly(`PUT ${putRes.status}`) };
     }
     console.log(`[bp-status] order ${orderId} transitioned ${BP_STATUS_PROOF_REQUIRED} → ${BP_STATUS_PROOF_SENT}`);
     return { ok: true, transitioned: true };
   } catch (err) {
     console.error(`[bp-status] PUT ${orderId} status error:`, err.message);
-    return { ok: false, reason: 'put-error', error: err.message };
+    return { ok: false, reason: 'put-error', error: err.message, notePosted: await noteOnly(`PUT threw: ${err.message}`) };
   }
 }
 
