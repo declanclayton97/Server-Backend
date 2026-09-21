@@ -2060,6 +2060,7 @@ export async function createComboPOLive(opts = {}) {
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
     unresolvedSkus: lowLines.filter((l) => l.unresolved).map((l) => l.sku),
+    demandAudit,   // per-line decisions, so a dry run can say why a line is or is not in the plan
     tagFlags,                                                       // on the PLAN, not just the created PO: the daily value-check is a dry run, and a supplier that never reaches its threshold (Uneek) would otherwise never report
   };
 

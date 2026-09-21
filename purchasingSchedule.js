@@ -3821,6 +3821,18 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       } catch (e) { ordered = { poId: placement.poId, unreadable: e.message }; }
     }
     const report = { supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun, netValue, units, threshold, decision, reason, workingDaysWaited: newWaitDays, placement, ordered };
+    // A dry run is the only way to see what a run WOULD gather without ordering; give it the plan's
+    // evidence (which SOs, which lines, what was flagged, what the carry-forward added) so "why is
+    // SO N not in it?" can be answered from the response rather than by placing an order to find out.
+    if (dryRun && plan) {
+      report.plan = {
+        soIds: [...new Set((plan.soLines || []).map((l) => l.order).filter(Boolean))],
+        soLines: (plan.soLines || []).map((l) => ({ so: l.order, sku: l.sku, qty: l.qty, cost: l.cost, carry: !!l.carry, viaPlusTag: !!l.viaPlusTag })),
+        lowLines: (plan.lowLines || []).map((l) => ({ sku: l.sku, qty: l.qty })),
+        tagFlags: plan.tagFlags || [], carryLines: plan.carryLines || [], carryUnresolved: plan.carryUnresolved || [],
+        demandAudit: (plan.demandAudit || []).map((a) => ({ so: a.soId, sku: a.sku, ordered: a.ordered, allocated: a.allocated, fulfilled: a.fulfilled, toOrder: a.toOrder, note: a.note || null })),
+      };
+    }
     if (!dryRun) await saveState(pool, { id: cfg.stateId, workingDaysWaited: newWaitDays, lastRunDate: uk.date, result: report });
     if (notify) await sendReportEmail(report).catch(() => {});
     return report;
