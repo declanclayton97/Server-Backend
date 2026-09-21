@@ -145,7 +145,10 @@ export const SUPPLIERS = {
   // a bomber sourced from one of the other three codes computes to zero rather than double-ordering.
   UNEEK:        { contactId: 322,   costList: 20, poField: 'PCF_UNEEKPO', detect: (n) => /uneek/i.test(n || ''),
     claimProductIds: [53344, 53345, 53346, 53347, 53348, 53349, 53350, 53351, 53352, 53353, 53354, 53355, 53356, 53357, 53358, 53359, 53360, 53361, 56975, 56976,
-      19454, 19455, 19456, 19457, 19458, 19459, 19460, 19461, 19462, 19463, 19464, 19465, 19466, 19467] },
+      19454, 19455, 19456, 19457, 19458, 19459, 19460, 19461, 19462, 19463, 19464, 19465, 19466, 19467,
+      // Generic "Hi Vis Long Sleeved Jerkin (UC802 / PKJENG)" — unbranded like the waistcoats above, so the
+      // name detect never sees it. SO 488267 sat tagged UNEEK with 2 jerkins nobody ordered (2026-09-21).
+      45188, 45189, 45190, 45193, 45194, 45195, 45196, 45197, 45198, 45199, 45200, 45201, 45202, 45203, 45204, 45205] },
   'HELLY HANSEN': { contactId: 214, costList: 20, portalPriceIsPreDiscount: true, supplierDiscountPct: 0.42,  poField: 'PCF_HELLYPO', detect: (n) => /helly\s*hansen|hh\s*workwear/i.test(n || '') },
   // Launch(20) IS populated for Mascot — the null here was a config gap, not missing data (sampled
   // from PO 476715: EAN 5711074495160 → list20 9.41, EAN 5711074486861 → 11.77). Without it, costs
