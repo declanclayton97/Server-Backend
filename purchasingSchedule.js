@@ -1420,14 +1420,29 @@ async function assertPoRowSkusAreProductSkus(poId, label) {
   try { rows = (await bp.getOrderCartLines(poId)).filter((l) => l.productId && String(l.productId) !== '1000'); }
   catch (e) { throw stepErr('sku-check', `couldn't read PO ${poId} rows before emailing: ${e.message}`, { poId }); }
   const real = await bp.liveSkusOf(rows.map((l) => l.productId));
-  const wrong = rows.filter((l) => { const s = real.get(String(l.productId)); return s && s.toUpperCase() !== String(l.sku || '').toUpperCase(); })
-    .map((l) => ({ productId: l.productId, rowSku: l.sku, productSku: real.get(String(l.productId)), name: l.name, qty: l.qty }));
-  if (wrong.length) {
-    throw stepErr('sku-check', `NOT emailed: ${wrong.length} row(s) on PO#${poId} carry a supplier SKU that is not the product's SKU, and ${label} would receive the wrong code — `
-      + wrong.map((w) => `"${w.rowSku}" is really ${w.productSku} (${String(w.name || '').slice(0, 40)}, product ${w.productId})`).join('; ')
-      + `. Clear the ${label} supplier SKU on those products in Brightpearl (product → Suppliers), rebuild the rows on the PO, then re-run.`, { poId, wrong });
+  // A row SKU that differs from the product's is NORMAL for the emailed suppliers, not a fault:
+  // Buckler products are coded ML071220053 internally and carry the real Buckler code
+  // (BBZ8000BKOR-08) as the supplier SKU — clearing it would send Buckler our internal number —
+  // and 700+ Uneek products carry the bare style (UC301) with colour and size only in the name,
+  // which is how every Uneek order this year has gone. So a mismatch is counted, never refused.
+  const mismatched = rows.filter((l) => { const s = real.get(String(l.productId)); return s && s.toUpperCase() !== String(l.sku || '').toUpperCase(); });
+  // The fault on PO 490824 was a different shape: six DIFFERENT boots all coded "BLITZ BK-10" —
+  // products cloned from the Black 10 with its SIZED supplier code still on them, so Buckler
+  // would have read six of one size. That is what gets refused: one row code that carries a
+  // size, sitting on two or more different products. A bare style shared by a whole size run
+  // (UC301, B1990SM) has no size in it and stays allowed.
+  const SIZED = /[-\s_/](?:\d{1,2}(?:[.,]5)?|[3-9]XL|XXL|XXXL|XS|S|M|L|XL)$/i;
+  const byCode = new Map();
+  for (const l of rows) { const k = String(l.sku || '').toUpperCase(); if (k) (byCode.get(k) || byCode.set(k, []).get(k)).push(l); }
+  const clashes = [...byCode.entries()]
+    .filter(([code, ls]) => SIZED.test(code) && new Set(ls.map((l) => String(l.productId))).size > 1)
+    .map(([code, ls]) => ({ code, products: ls.map((l) => ({ productId: l.productId, productSku: real.get(String(l.productId)), name: l.name, qty: l.qty })) }));
+  if (clashes.length) {
+    throw stepErr('sku-check', `NOT emailed: PO#${poId} has the same SIZED code on different products, so ${label} would read one size for all of them — `
+      + clashes.map((c) => `"${c.code}" on ${c.products.length} products (${c.products.map((p) => p.productSku || p.productId).join(', ')})`).join('; ')
+      + `. Fix the ${label} supplier SKU on those products in Brightpearl (product → Suppliers), rebuild the rows on the PO, then re-run.`, { poId, clashes });
   }
-  return { rows: rows.length, wrong: [] };
+  return { rows: rows.length, mismatched: mismatched.length, clashes: 0 };
 }
 
 async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
