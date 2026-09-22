@@ -1241,36 +1241,14 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
       batch.forEach((l, n) => { if (got[n] && got[n].avail === 0) sterlingShort.push({ ...l, avail: 0, deldate: got[n].deldate }); });
     }
     steps.stockCheck = { checked: poLines.length, short: sterlingShort.map((s) => ({ sku: s.sku, qty: s.qty, deldate: s.deldate })) };
-    if (sterlingShort.length) {
-      // Move the short rows to a back-order PO, child of this one, noted both ends. The rows come
-      // off THIS PO only so that it matches the goods that will actually arrive on the first
-      // delivery; the units themselves are still in the basket and still ordered. Best-effort per
-      // row, and if the back-order PO cannot be created the rows are LEFT on this PO — a line that
-      // is ordered but sits on the wrong PO beats one that has vanished from both.
-      const bo = await bp.createBackorderPoLive({
-        supplierKey: 'STERLING', parentPoId: poId, execute: true,
-        lines: sterlingShort.map((s) => ({ productId: s.productId, sku: s.sku, name: s.name, qty: s.qty, deldate: s.deldate })),
-        note: `Ordered from Sterling on PO#${poId} (${new Date().toISOString().slice(0, 10)}) but out of stock their end — held on back order by Sterling. Cancel with them or leave it, as the customer needs.`,
-      }).catch((e) => ({ created: false, error: e.message }));
-      steps.backorder = bo;
-      if (bo.created) {
-        for (const s of sterlingShort) { await bp.removePoRowLive({ poId, sku: s.sku, execute: true }).catch(() => {}); }
-        // The SO note and finalise name the PO the goods are ON — the back-order one for these.
-        for (const id of Object.keys(linesByOrder)) {
-          linesByOrder[id] = linesByOrder[id].filter((x) => !sterlingShort.some((s) => String(s.sku).toUpperCase() === String(x.sku).toUpperCase()));
-          if (!linesByOrder[id].length) delete linesByOrder[id];
-        }
-      }
-      await logPurchasingError(pool, {
-        supplier: 'STERLING', step: 'out-of-stock-dropped', severity: 'error', placed: true,
-        message: `${sterlingShort.length} line(s) on PO#${poId} are out of stock at Sterling — STILL ORDERED and held on back order by Sterling`
-          + (bo.created ? `, moved to back-order PO#${bo.poId} in Brightpearl` : ' (back-order PO could NOT be created, so they remain on this PO: ' + (bo.error || bo.reason) + ')')
-          + `. The rest of the order ships now:
-`
-          + sterlingShort.map((s) => `      ${s.qty} × ${s.sku} ${s.name || ''} — Sterling have 0${s.deldate ? `, due ${s.deldate}` : ''}`).join('\n'),
-        context: { poId, dropped: sterlingShort, backorderPoId: bo.created ? bo.poId : null, linesByOrder },
-      }).catch(() => {});
-    }
+    // The SPLIT is deliberately NOT done here — see splitSterlingBackorder below, called only once
+    // the worker has confirmed the order. Doing it here announced "STILL ORDERED and held on back
+    // order by Sterling — the rest of the order ships now" and minted a status-45 PO BEFORE the
+    // checkout that was supposed to make that true. On 2026-09-22 the checkout then failed (their
+    // trade site had moved and login found no form), so PO 491128 sat claiming Sterling were
+    // holding a Dewalt Fargo that had never been ordered, the notice said the rest was shipping,
+    // and every retry would have minted another one. Fristads splits early ON PURPOSE and words it
+    // in the future tense; Sterling's wording is a claim of fact, so it waits for the fact.
   }
   // Merge lines that resolve to the SAME shop variant (search|colour|size) into ONE add,
   // summing qty. The PO can carry two rows for the same variant (e.g. two SOs both needing
@@ -1313,6 +1291,13 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   if (!orderNo) { try { orderNo = await pullSterlingOrderNo(poId); } catch { /* leave null → Placed-<poId> marker */ } }
   steps.checkout = { placed: true, orderNo, orderNoSource: wr.orderNo ? 'place' : (orderNo ? 'order-status' : 'none'), cartCount: wr.cartCount, added: wr.added };
 
+  // NOW the out-of-stock lines can be split off: the order is placed, so "still ordered, held on
+  // back order by Sterling" is a true statement. Best-effort — a failure here leaves every line on
+  // the placed PO, which is untidy but honest, and never loses an ordered unit.
+  if (sterlingShort.length) {
+    steps.backorder = await splitSterlingBackorder(pool, { poId, orderNo, short: sterlingShort, linesByOrder });
+  }
+
   // link + finalise (order# onto PO ref if known, else a marker) + restore tax + status 7
   const ref = orderNo || `Placed-${poId}`;
   await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
@@ -1323,6 +1308,37 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
 
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'STERLING', poId, noteContactId: STERLING_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
   return { poId, orderNo, steps };
+}
+
+// Move Sterling's out-of-stock lines onto a child back-order PO, AFTER the order is placed.
+// The units are in the order either way — Sterling hold what they cannot ship — so this is
+// bookkeeping: the parent PO ends up matching the goods on the first delivery, and the short
+// lines get their own PO with a due date. `linesByOrder` is edited in place so the SO notes and
+// finalise name the PO each line is actually on.
+async function splitSterlingBackorder(pool, { poId, orderNo, short, linesByOrder }) {
+  const bo = await bp.createBackorderPoLive({
+    supplierKey: 'STERLING', parentPoId: poId, execute: true,
+    lines: short.map((s) => ({ productId: s.productId, sku: s.sku, name: s.name, qty: s.qty, deldate: s.deldate })),
+    note: `Ordered from Sterling on PO#${poId}${orderNo ? ` (order ${orderNo})` : ''} on ${new Date().toISOString().slice(0, 10)} but out of stock their end — held on back order by Sterling. Cancel with them or leave it, as the customer needs.`,
+  }).catch((e) => ({ created: false, error: e.message }));
+  if (bo.created) {
+    // Rows come off the PARENT only. If a removal fails the line is on both POs — visible and
+    // fixable — where dropping it first would risk it being on neither.
+    for (const s of short) { await bp.removePoRowLive({ poId, sku: s.sku, execute: true }).catch(() => {}); }
+    for (const id of Object.keys(linesByOrder)) {
+      linesByOrder[id] = linesByOrder[id].filter((x) => !short.some((s) => String(s.sku).toUpperCase() === String(x.sku).toUpperCase()));
+      if (!linesByOrder[id].length) delete linesByOrder[id];
+    }
+  }
+  await logPurchasingError(pool, {
+    supplier: 'STERLING', step: 'out-of-stock-dropped', severity: 'error', placed: true,
+    message: `${short.length} line(s) on PO#${poId} are out of stock at Sterling — STILL ORDERED and held on back order by Sterling`
+      + (bo.created ? `, moved to back-order PO#${bo.poId} in Brightpearl` : ' (back-order PO could NOT be created, so they remain on this PO: ' + (bo.error || bo.reason) + ')')
+      + `. The rest of the order ships now:\n`
+      + short.map((s) => `      ${s.qty} × ${s.sku} ${s.name || ''} — Sterling have 0${s.deldate ? `, due ${s.deldate}` : ''}`).join('\n'),
+    context: { poId, dropped: short, backorderPoId: bo.created ? bo.poId : null, linesByOrder },
+  }).catch(() => {});
+  return bo;
 }
 
 // ── Uneek placement chain (EMAIL supplier) ───────────────────────────────────
