@@ -9633,14 +9633,16 @@ app.get('/api/purchasing/sterling-portal', async (req, res) => {
     // `trace` runs BEFORE any login attempt on purpose: it is the tool for working out why login
     // fails, so it must not be behind the thing it is diagnosing. It posts no credentials.
     if (step === 'trace') return res.json({ step, ...(await sp.sterlingLoginTrace()) });
-    const jar = await sp.sterlingLogin({ force: req.query.force === '1' });
+    const loginTrace = [];
+    const jar = await sp.sterlingLogin({ force: req.query.force === '1', trace: loginTrace })
+      .catch((e) => { const err = new Error(e.message); err.loginTrace = loginTrace; throw err; });
     if (step === 'login') return res.json({ ok: true, step, cookies: Object.keys(jar), ourPostcode: sp.STERLING_OUR_POSTCODE });
     if (step === 'basket') return res.json({ ok: true, step, ...(await sp.sterlingBasket({ jar })) });
     if (step === 'trace') return res.json({ step, ...(await sp.sterlingLoginTrace()) });
     if (step === 'diag') return res.json({ step, ...(await sp.sterlingDiag(req.query.path ? [String(req.query.path)] : undefined, { jar })) });
     if (step === 'checkout') return res.json({ step, ...(await sp.sterlingCheckout({ orderRef: req.query.ref || 'PREVIEW', jar, execute: false })) });
     res.status(400).json({ error: 'step must be login | basket | checkout' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: e.message, loginTrace: e.loginTrace || undefined }); }
 });
 app.post('/api/purchasing/sterling-portal/basket', express.json({ limit: '2mb' }), async (req, res) => {
   try {

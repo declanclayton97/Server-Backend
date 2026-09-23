@@ -150,7 +150,7 @@ const hasAuthCookie = (jar) => Object.keys(jarFor(jar, BASE)).some((n) => /^\.As
 let session = { jar: null, at: 0 };
 const TTL = 15 * 60 * 1000;
 
-export async function sterlingLogin({ force = false } = {}) {
+export async function sterlingLogin({ force = false, trace = null } = {}) {
   if (!force && session.jar && Date.now() - session.at < TTL) return session.jar;
   const user = process.env.STERLING_USER, pass = process.env.STERLING_PASS;
   if (!user || !pass) throw new Error('STERLING_USER / STERLING_PASS are not set on this service');
@@ -160,7 +160,7 @@ export async function sterlingLogin({ force = false } = {}) {
   // the sort — the first version of this posted the credentials into that page's form and then
   // reported success on an empty cookie jar. /SignIn is the app's OIDC challenge and bounces to
   // login.sterlingsafetywear.co.uk/connect/authorize → /Account/Login?ReturnUrl=…
-  const start = await hopAuto(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar);
+  const start = await hopAuto(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar, { trace });
   const loginUrl = start.finalUrl || '';
   const html = start.pageHtml;
   // Read the field names off the form itself — IdentityServer calls them Username/Password while
@@ -203,7 +203,7 @@ export async function sterlingLogin({ force = false } = {}) {
   const res = await hopAuto(loginUrl, {
     method: 'POST', body: body.toString(),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: loginUrl },
-  }, jar);
+  }, jar, { trace });
   // The authorize endpoint answers with another form_post page; hopAuto replays it, which is what
   // hands the authorization code to the app and finally sets the session cookie.
   const after = res.pageHtml;
@@ -216,6 +216,9 @@ export async function sterlingLogin({ force = false } = {}) {
       || (after.match(/field-validation-error[^>]*>([^<]+)</i) || [])[1]
       || (after.match(/class="[^"]*alert[^"]*"[^>]*>\s*([^<]{4,160})/i) || [])[1]
       || (after.match(/<div[^>]*validation-summary[^>]*>[\s\S]{0,200}?([A-Z][^<]{6,160})/i) || [])[1];
+    if (trace) trace.push({ stoppedOn: (res.finalUrl || '').slice(0, 120), bytes: after.length,
+      formAction: formActionOf(after) || null, autoPostFields: [...autoPostBody(after).keys()].slice(0, 10),
+      isAutoPost: isAutoPost(after), hasPasswordBox: hasPasswordBox(after) });
     throw new Error(`Sterling login refused${err ? `: "${err.trim().replace(/\s+/g, ' ')}"` : ' (no message on the page)'}`
       + ` — landed on ${(res.finalUrl || '').replace(LOGIN_BASE, 'login:').replace(BASE, 'b2b:').slice(0, 80)}`
       + `, no .AspNetCore.Cookies auth cookie`);
