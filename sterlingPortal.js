@@ -111,10 +111,10 @@ async function hopAuto(url, opts, jar, { maxForms = 4, trace = null } = {}) {
   let res = await hop(url, opts, jar, { trace });
   for (let i = 0; i < maxForms; i++) {
     const html = await res.text();
-    if (!isAutoPost(html)) return Object.assign(res, { body: html });
+    if (!isAutoPost(html)) return Object.assign(res, { pageHtml: html });
     const action = (html.match(/<form[^>]*action="([^"]+)"/i) || [])[1];
     const body = autoPostBody(html);
-    if (!action || ![...body.keys()].length) return Object.assign(res, { body: html });
+    if (!action || ![...body.keys()].length) return Object.assign(res, { pageHtml: html });
     const next = new URL(action.replace(/&amp;/g, '&'), res.finalUrl || url).toString();
     if (trace) trace.push({ kind: 'auto-form', to: next.replace(BASE, 'b2b:').replace(LOGIN_BASE, 'login:').slice(0, 140), fields: [...body.keys()].slice(0, 12) });
     res = await hop(next, {
@@ -122,7 +122,7 @@ async function hopAuto(url, opts, jar, { maxForms = 4, trace = null } = {}) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: res.finalUrl || url },
     }, jar, { trace });
   }
-  return Object.assign(res, { body: await res.text() });
+  return Object.assign(res, { pageHtml: await res.text() });
 }
 
 // The ONLY cookie that means "authenticated". Everything else on this host is handshake state.
@@ -143,7 +143,7 @@ export async function sterlingLogin({ force = false } = {}) {
   // login.sterlingsafetywear.co.uk/connect/authorize → /Account/Login?ReturnUrl=…
   const start = await hopAuto(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar);
   const loginUrl = start.finalUrl || '';
-  const html = start.body;
+  const html = start.pageHtml;
   const passField = (html.match(/<input[^>]*type="password"[^>]*name="([^"]+)"/i) || [])[1]
     || (html.match(/<input[^>]*name="([^"]+)"[^>]*type="password"/i) || [])[1];
   if (!passField) {
@@ -175,7 +175,7 @@ export async function sterlingLogin({ force = false } = {}) {
   }, jar);
   // The authorize endpoint answers with another form_post page; hopAuto replays it, which is what
   // hands the authorization code to the app and finally sets the session cookie.
-  const after = res.body;
+  const after = res.pageHtml;
   // Trust the SESSION, not the status code: a refused login re-renders the form with a 200.
   if (!hasAuthCookie(jar) || /type="password"/i.test(after)) {
     const err = (after.match(/validation-summary-errors[\s\S]{0,300}?<li>([^<]+)</i) || [])[1]
@@ -206,7 +206,7 @@ async function appGet(path, jar) {
 export async function sterlingLoginTrace() {
   const jar = {}, trace = [];
   const res = await hopAuto(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar, { trace });
-  const html = res.body || '';
+  const html = res.pageHtml || '';
   return {
     trace,
     landedOn: (res.finalUrl || '').replace(BASE, 'b2b:').replace(LOGIN_BASE, 'login:').slice(0, 160),
