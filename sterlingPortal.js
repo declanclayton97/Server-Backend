@@ -60,7 +60,24 @@ function readCookies(res, jar, url) {
   }
 }
 const cookieHeader = (jar, url) => Object.values(jarFor(jar, url)).join('; ');
-const tokenFrom = (html) => (String(html).match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/i) || [])[1] || null;
+
+// ATTRIBUTES COME IN BOTH QUOTE STYLES. The Razor pages use double quotes, but IdentityServer's
+// form_post callback is emitted with SINGLE quotes:
+//   <form method='post' action='https://b2b…/signin-oidc'><input type='hidden' name='code' value='…'/>
+// Double-quote-only regexes read that page as "no form, no fields", so the authorization code was
+// never handed back and the session never completed — while every hop before it looked healthy.
+const attr = (tag, name) => {
+  const m = String(tag).match(new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'));
+  return m ? (m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]) : undefined;
+};
+const formTagOf = (html) => (String(html).match(/<form\b[^>]*>/i) || [])[0] || null;
+const formActionOf = (html) => { const t = formTagOf(html); return t ? attr(t, 'action') : undefined; };
+const tokenFrom = (html) => {
+  for (const m of String(html).matchAll(/<input\b[^>]*>/gi)) {
+    if (attr(m[0], 'name') === '__RequestVerificationToken') return attr(m[0], 'value') || null;
+  }
+  return null;
+};
 
 // Follow 302s by hand so every hop's Set-Cookie lands in one jar — the OIDC dance crosses two
 // hosts and `redirect: "follow"` would drop the cookies set on the intermediate hops.
@@ -89,22 +106,24 @@ async function hop(url, opts, jar, { max = 12, trace = null } = {}) {
 // same way (response_mode=form_post) as a form posting to b2b…/signin-oidc. A redirect-follower
 // stops dead on both, which is why the first attempts collected Nonce/Correlation cookies — the
 // handshake had started — and never an authentication cookie.
-const isAutoPost = (html) => /<form[^>]*action="[^"]+"/i.test(html) && !/type="password"/i.test(html)
-  && (/Working\.\.\./i.test(html) || /document\.forms\[0\]\.submit|onload="document\.forms/i.test(html) || /<title>\s*Working/i.test(html));
-
+// An auto-post page is: one form with an action, no password box for a human to fill, and hidden
+// fields to carry. Deliberately NOT keyed on the words "Working..." — the challenge page says that,
+// the callback page says nothing at all, and both must be followed.
 function autoPostBody(html) {
   const body = new URLSearchParams();
-  for (const m of html.matchAll(/<input\b[^>]*>/gi)) {
+  for (const m of String(html).matchAll(/<input\b[^>]*>/gi)) {
     const tag = m[0];
-    const type = ((tag.match(/type="([^"]*)"/i) || [])[1] || '').toLowerCase();
+    const type = String(attr(tag, 'type') || '').toLowerCase();
     if (type === 'submit' || type === 'button' || type === 'password') continue;
-    const name = (tag.match(/name="([^"]+)"/i) || [])[1];
+    const name = attr(tag, 'name');
     if (!name) continue;
-    const value = (tag.match(/value="([^"]*)"/i) || [])[1];
-    body.set(name, value != null ? value.replace(/&amp;/g, '&') : '');
+    const value = attr(tag, 'value');
+    body.set(name, value != null ? String(value).replace(/&amp;/g, '&') : '');
   }
   return body;
 }
+const hasPasswordBox = (html) => /<input\b[^>]*type\s*=\s*['"]?password/i.test(html);
+const isAutoPost = (html) => !!formActionOf(html) && !hasPasswordBox(html) && [...autoPostBody(html).keys()].length > 0;
 
 // Follow redirects AND auto-submitting forms until a real page comes back.
 async function hopAuto(url, opts, jar, { maxForms = 4, trace = null } = {}) {
@@ -112,7 +131,7 @@ async function hopAuto(url, opts, jar, { maxForms = 4, trace = null } = {}) {
   for (let i = 0; i < maxForms; i++) {
     const html = await res.text();
     if (!isAutoPost(html)) return Object.assign(res, { pageHtml: html });
-    const action = (html.match(/<form[^>]*action="([^"]+)"/i) || [])[1];
+    const action = formActionOf(html);
     const body = autoPostBody(html);
     if (!action || ![...body.keys()].length) return Object.assign(res, { pageHtml: html });
     const next = new URL(action.replace(/&amp;/g, '&'), res.finalUrl || url).toString();
@@ -144,8 +163,17 @@ export async function sterlingLogin({ force = false } = {}) {
   const start = await hopAuto(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar);
   const loginUrl = start.finalUrl || '';
   const html = start.pageHtml;
-  const passField = (html.match(/<input[^>]*type="password"[^>]*name="([^"]+)"/i) || [])[1]
-    || (html.match(/<input[^>]*name="([^"]+)"[^>]*type="password"/i) || [])[1];
+  // Read the field names off the form itself — IdentityServer calls them Username/Password while
+  // ASP.NET Identity templates use Input.Email/Input.Password, and a wrong name silently re-renders
+  // the form with a 200 that looks like success.
+  let passField = null, userField = null;
+  for (const m of String(html).matchAll(/<input\b[^>]*>/gi)) {
+    const t = String(attr(m[0], 'type') || '').toLowerCase();
+    const n = attr(m[0], 'name');
+    if (!n) continue;
+    if (t === 'password' && !passField) passField = n;
+    if (!userField && /^(?:[^.]*\.)?(?:Username|UserName|Email)$/i.test(n)) userField = n;
+  }
   if (!passField) {
     // No password box means this is not the login form, whatever it returned. NEVER post
     // credentials into a page we have not positively identified.
@@ -159,9 +187,12 @@ export async function sterlingLogin({ force = false } = {}) {
     throw new Error(`Sterling login: landed on ${loginUrl.slice(0, 120)} with no password field and no auth cookie `
       + `(held: ${Object.keys(jarFor(jar, BASE)).map((n) => n.replace(/\.CfDJ8.*/, '')).join(', ') || 'none'}) — not posting credentials`);
   }
-  const userField = (html.match(/<input[^>]*name="((?:[^"]*\.)?(?:Username|UserName|Email)[^"]*)"/i) || [])[1] || 'Username';
+  userField = userField || 'Username';
   const token = tokenFrom(html);
-  const returnUrl = (html.match(/name="ReturnUrl"[^>]*value="([^"]*)"/i) || [])[1];
+  let returnUrl = null;
+  for (const m of String(html).matchAll(/<input\b[^>]*>/gi)) {
+    if (attr(m[0], 'name') === 'ReturnUrl') { returnUrl = attr(m[0], 'value'); break; }
+  }
   const body = new URLSearchParams();
   if (token) body.set('__RequestVerificationToken', token);
   if (returnUrl) body.set('ReturnUrl', returnUrl.replace(/&amp;/g, '&'));
@@ -177,7 +208,7 @@ export async function sterlingLogin({ force = false } = {}) {
   // hands the authorization code to the app and finally sets the session cookie.
   const after = res.pageHtml;
   // Trust the SESSION, not the status code: a refused login re-renders the form with a 200.
-  if (!hasAuthCookie(jar) || /type="password"/i.test(after)) {
+  if (!hasAuthCookie(jar) || hasPasswordBox(after)) {
     // Report SterlingS OWN words. IdentityServer renders the reason in an alert/validation block,
     // and "invalid credentials" needs a very different response from "your password must be reset"
     // — which their move notice says existing passwords may require on first use of the new site.
@@ -218,7 +249,7 @@ export async function sterlingLoginTrace() {
     landedOn: (res.finalUrl || '').replace(BASE, 'b2b:').replace(LOGIN_BASE, 'login:').slice(0, 160),
     bytes: html.length,
     title: (html.match(/<title>([^<]*)</i) || [])[1] || null,
-    hasPasswordField: /type="password"/i.test(html),
+    hasPasswordField: hasPasswordBox(html),
     hasToken: /__RequestVerificationToken/.test(html),
     formAction: (html.match(/<form[^>]*action="([^"]{0,140})"/i) || [])[1] || null,
     fieldNames: [...html.matchAll(/<input[^>]*name="([^"]+)"/gi)].map((m) => m[1]).filter((n) => !/Verification/i.test(n)).slice(0, 14),
