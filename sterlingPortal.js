@@ -332,7 +332,7 @@ export async function sterlingBasket({ jar = null, ...opts } = {}) {
   const lines = [];
   for (const m of html.matchAll(/data-barcode="(\d+)"[\s\S]{0,400}?data-quantity="(\d+)"/gi)) lines.push({ barcode: m[1], qty: Number(m[2]) });
   const total = (html.match(/(?:basket|cart)[^£]{0,40}£\s*([\d,]+\.\d{2})/i) || [])[1] || null;
-  return { lines, count: lines.length, units: lines.reduce((a, l) => a + l.qty, 0), total, raw: html.length, sample: opts && opts.sample ? html.slice(0, 2500) : undefined };
+  return { lines, count: lines.length, units: lines.reduce((a, l) => a + l.qty, 0), total, raw: html.length, sample: opts && opts.sample ? html.slice(Number(opts.from) || 0, (Number(opts.from) || 0) + 3000) : undefined };
 }
 
 // CHECKOUT. Reads the form, checks WHERE it is addressed, and only then posts it.
