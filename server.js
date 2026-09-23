@@ -9616,6 +9616,46 @@ app.get('/api/purchasing/sterling-resolve-po', async (req, res) => {
 // Fire a Sterling worker DRY-RUN (execute:false) with an explicit deduped lines[] payload,
 // using the server-side worker URL/secret. Returns the async jobId; poll with the job route
 // below. Used to verify per-line qty staging before a real placement. Never places.
+// ── NEW STERLING B2B PORTAL (b2b.sterlingsafetywear.co.uk) ───────────────────
+// Built here on purpose: this service no longer owns the schedule, so it can be deployed and
+// re-deployed freely while the shapes are being proved against the live site. Once each step is
+// confirmed, sterlingPortal.js is copied to Purchasing-Automation byte-for-byte like every other
+// purchasing file. Nothing here is wired into a lane yet.
+//
+// GET  /api/purchasing/sterling-portal?step=login|basket|checkout
+// POST /api/purchasing/sterling-portal/basket   { lines:[{barcode|sku, qty}] }
+// POST /api/purchasing/sterling-portal/checkout { orderRef, orderText, execute:true }
+//      — execute defaults to FALSE and returns exactly what would be posted.
+app.get('/api/purchasing/sterling-portal', async (req, res) => {
+  try {
+    const sp = await import('./sterlingPortal.js');
+    const step = String(req.query.step || 'login');
+    const jar = await sp.sterlingLogin({ force: req.query.force === '1' });
+    if (step === 'login') return res.json({ ok: true, step, cookies: Object.keys(jar), ourPostcode: sp.STERLING_OUR_POSTCODE });
+    if (step === 'basket') return res.json({ ok: true, step, ...(await sp.sterlingBasket({ jar })) });
+    if (step === 'checkout') return res.json({ step, ...(await sp.sterlingCheckout({ orderRef: req.query.ref || 'PREVIEW', jar, execute: false })) });
+    res.status(400).json({ error: 'step must be login | basket | checkout' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/purchasing/sterling-portal/basket', express.json({ limit: '2mb' }), async (req, res) => {
+  try {
+    const sp = await import('./sterlingPortal.js');
+    const lines = Array.isArray(req.body && req.body.lines) ? req.body.lines : null;
+    if (!lines || !lines.length) return res.status(400).json({ error: 'lines[] required — [{barcode|sku, qty}]' });
+    const jar = await sp.sterlingLogin();
+    const add = await sp.sterlingAddToBasket(lines, { jar });
+    res.json({ ...add, basket: await sp.sterlingBasket({ jar }).catch((e) => ({ error: e.message })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/purchasing/sterling-portal/checkout', express.json(), async (req, res) => {
+  try {
+    const sp = await import('./sterlingPortal.js');
+    const b = req.body || {};
+    const jar = await sp.sterlingLogin();
+    res.json(await sp.sterlingCheckout({ orderRef: b.orderRef, orderText: b.orderText, jar, execute: b.execute === true }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/purchasing/sterling-worker-dry', express.json({ limit: '2mb' }), async (req, res) => {
   try {
     const url = process.env.STERLING_WORKER_URL || 'https://portal-order-worker.onrender.com';
