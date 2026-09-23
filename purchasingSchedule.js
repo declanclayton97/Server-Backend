@@ -3122,7 +3122,24 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
   const extra = [...got.keys()].filter((s) => !poRowLines.some((l) => nk(l.sku) === s));
   const cartUnits = [...got.values()].reduce((a, b) => a + b, 0);
   steps.verify = { poLineCount: poRowLines.length, cartLineCount: cart.length, matched: matched.length, bumped, dropped: droppedLines, extra };
-  if (!cart.length || cartUnits === 0) throw stepErr('verify', `Portwest cart is empty after upload — aborting. PO#${poId} left for review.`, { poId });
+  // "EMPTY" AND "UNREADABLE" ARE NOT THE SAME THING, and this message used to say only the first.
+  // On 2026-09-23 the run aborted with "cart is empty after upload" while the cart actually held
+  // 21 lines / 74 units — Portwest were mid-deployment and briefly served a page this parser could
+  // not read. It cost an hour to establish that the cart was fine, because the one number that
+  // would have said so instantly (the portal's OWN cart counter, which never stopped working) was
+  // not in the error. Portwest's counters come back independently of the line parse, so quote them:
+  // counter 0 means a genuinely empty cart, counter >0 with no parsed lines means we cannot read
+  // the page and the goods are sitting there.
+  const counter = { cartUnits: (up.checkout && up.checkout.cartUnits) ?? null, totalQty: (up.checkout && up.checkout.totalQty) ?? null,
+    uploadedUnits: (up.upload && up.upload.units) ?? null, uploadedRows: (up.upload && up.upload.rows) ?? null };
+  if (!cart.length || cartUnits === 0) {
+    const unreadable = Number(counter.totalQty) > 0 || Number(counter.cartUnits) > 0;
+    throw stepErr('verify', unreadable
+      ? `Portwest cart could NOT BE READ — no lines parsed, but Portwest's own counter says ${counter.totalQty ?? counter.cartUnits} unit(s) are in the cart. `
+        + `The goods are probably sitting in the basket: check the portal before re-running, and do not assume nothing was uploaded. PO#${poId} left for review.`
+      : `Portwest cart is empty after upload (their counter agrees: ${JSON.stringify(counter)}) — aborting. PO#${poId} left for review.`,
+      { poId, counter, parsedLines: cart.length, uploaded: up.upload || null });
+  }
   if (extra.length) throw stepErr('verify', `Portwest cart has ${extra.length} line(s) NOT on the PO (${extra.slice(0, 8).join(', ')}) — aborting for review. PO#${poId}.`, { poId, extra });
   if (droppedLines.length > Math.max(3, Math.ceil(poRowLines.length * 0.25))) throw stepErr('verify', `${droppedLines.length} of ${poRowLines.length} lines dropped from the Portwest cart — too many, aborting for review. PO#${poId}.`, { poId, dropped: droppedLines });
 
