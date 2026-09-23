@@ -176,9 +176,17 @@ async function appGet(path, jar) {
 // widget uses for the non-product pages, so it works for a bulk add.
 export async function sterlingAddToBasket(items, { jar = null, page = '_' } = {}) {
   const j = jar || (await sterlingLogin());
-  const { html } = await appGet(`/detail/${encodeURIComponent(page)}`, j);
-  const token = tokenFrom(html);
-  if (!token) throw new Error('no antiforgery token on the detail page — cannot add to basket');
+  // The token is per-page and NOT on every page: /detail/_ is a 1.5KB stub with none, while the
+  // home page carries one. The HAR's add was posted from a real product page, which also has one.
+  // Try in order and use the first that actually yields a token rather than assuming.
+  let token = null, tokenFromPage = null;
+  for (const p of [`/detail/${encodeURIComponent(page)}`, '/', '/Checkout']) {
+    try {
+      const got = tokenFrom((await appGet(p, j)).html);
+      if (got) { token = got; tokenFromPage = p; break; }
+    } catch { /* try the next page */ }
+  }
+  if (!token) throw new Error('no antiforgery token on /detail, / or /Checkout — cannot add to basket');
   const body = items.map((i) => ({ barcode: String(i.barcode || i.sku), quantity: Math.round(Number(i.qty ?? i.quantity) || 0), isSale: false }))
     .filter((i) => i.barcode && i.quantity > 0);
   if (!body.length) return { ok: false, reason: 'no lines with a barcode and a quantity' };
@@ -192,7 +200,7 @@ export async function sterlingAddToBasket(items, { jar = null, page = '_' } = {}
   });
   readCookies(res, j, BASE);
   const text = (await res.text()).trim();
-  return { ok: res.ok, status: res.status, sent: body, response: text.slice(0, 200) };
+  return { ok: res.ok, status: res.status, sent: body, tokenFrom: tokenFromPage, response: text.slice(0, 200) };
 }
 
 // Read the basket back. Their cart accepts codes it cannot resolve, so what was ASKED FOR is never
