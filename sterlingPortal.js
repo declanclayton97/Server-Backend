@@ -152,6 +152,9 @@ async function hopAuto(url, opts, jar, { maxForms = 4, trace = null } = {}) {
 const showsSignedIn = (html) => /action\s*=\s*['"]?\/SignOut/i.test(String(html)) || /\/SignOut\b/i.test(String(html));
 // Handshake cookies (.AspNetCore.OpenIdConnect.Nonce / .Correlation) are set before any credential
 // is checked, so "we hold a cookie" never meant "we are authenticated".
+// After a completed order the app's own cookies are .AspNetCore.idsrv (+ idsrvC1/C2 chunks) and
+// .AspNetCore.Session, with .AspNetCore.Identity.Application on the login host — NOT the
+// .AspNetCore.Cookies this originally tested for.
 const isHandshakeCookie = (n) => /^\.AspNetCore\.(OpenIdConnect\.Nonce|Correlation|Antiforgery)/i.test(n);
 const hasSessionCookie = (jar) => Object.keys(jarFor(jar, BASE)).some((n) => !isHandshakeCookie(n));
 
@@ -452,8 +455,11 @@ export async function sterlingCheckout({ orderRef, orderText = '', jar = null, e
   // A 302 away from /Checkout is the success shape; a 200 means it re-rendered the form, which is a
   // validation failure however healthy the status code looks.
   const placed = !!(loc && !/\/Checkout$/i.test(loc));
-  const orderNo = (loc && (loc.match(/(?:order|confirmation)\/?([A-Z0-9-]+)/i) || [])[1])
+  // Sterling redirect on success: /Account/OrderConfirmation/6080578?trackingId=…
+  const orderNo = (loc && (String(loc).match(/OrderConfirmation\/(\d+)/i) || [])[1])
+    || (loc && (String(loc).match(/\/(\d{5,})(?:[/?#]|$)/) || [])[1])
     || (text.match(/Order\s*(?:number|ref(?:erence)?)\s*[:#]?\s*([A-Z0-9-]{4,})/i) || [])[1] || null;
-  return { ok: placed, sent: true, status: res.status, location: loc, orderNo, ...preview,
+  const trackingId = (loc && (String(loc).match(/trackingId=([A-Za-z0-9-]+)/i) || [])[1]) || null;
+  return { ok: placed, sent: true, status: res.status, location: loc, orderNo, trackingId, ...preview,
     ...(placed ? {} : { reason: 'the checkout did not redirect — treat as NOT placed and check the portal', bodySample: String(text).slice(0, 400) }) };
 }
