@@ -9654,6 +9654,15 @@ app.post('/api/purchasing/sterling-portal/basket', express.json({ limit: '2mb' }
     res.json({ ...add, basket: await sp.sterlingBasket({ jar }).catch((e) => ({ error: e.message })) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+app.post('/api/purchasing/sterling-portal/remove', express.json(), async (req, res) => {
+  try {
+    const sp = await import('./sterlingPortal.js');
+    const b = req.body || {};
+    const codes = Array.isArray(b.barcodes) ? b.barcodes : (b.barcode ? [b.barcode] : null);
+    if (!codes || !codes.length) return res.status(400).json({ error: 'barcodes[] required' });
+    res.json(await sp.sterlingRemoveFromBasket(codes));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.post('/api/purchasing/sterling-portal/checkout', express.json(), async (req, res) => {
   try {
     const sp = await import('./sterlingPortal.js');

@@ -324,15 +324,71 @@ export async function sterlingAddToBasket(items, { jar = null, page = '_' } = {}
   return { ok: res.ok, status: res.status, sent: body, tokenFrom: tokenFromPage, response: text.slice(0, 200) };
 }
 
-// Read the basket back. Their cart accepts codes it cannot resolve, so what was ASKED FOR is never
-// proof of what is in it — every other lane here learned that the expensive way.
+// Read the basket back. Their cart accepts codes it cannot resolve, so what was ASKED FOR is
+// never proof of what is in it — every other lane here learned that the expensive way.
+//
+// Each line is <li class="basket-line" data-lineCount="N"> and carries its BARCODE as the id on the
+// remove/delete buttons (data-basket-id), which is the only place the code appears in the markup —
+// the visible text is the style name, size and colour.
 export async function sterlingBasket({ jar = null, ...opts } = {}) {
   const j = jar || (await sterlingLogin());
   const { html } = await appGet('/detail/_?handler=BasketPartial', j);
   const lines = [];
-  for (const m of html.matchAll(/data-barcode="(\d+)"[\s\S]{0,400}?data-quantity="(\d+)"/gi)) lines.push({ barcode: m[1], qty: Number(m[2]) });
-  const total = (html.match(/(?:basket|cart)[^£]{0,40}£\s*([\d,]+\.\d{2})/i) || [])[1] || null;
-  return { lines, count: lines.length, units: lines.reduce((a, l) => a + l.qty, 0), total, raw: html.length, sample: opts && opts.sample ? html.slice(Number(opts.from) || 0, (Number(opts.from) || 0) + 3000) : undefined };
+  for (const m of String(html).matchAll(/<li\b[^>]*class="[^"]*basket-line[^"]*"[^>]*>([\s\S]*?)<\/li>/gi)) {
+    const block = m[1];
+    const barcode = (block.match(/data-basket-id\s*=\s*['"]?(\d{6,14})/i) || [])[1] || null;
+    const qty = Number((m[0].match(/data-lineCount\s*=\s*['"]?(\d+)/i) || [])[1] || 0);
+    const style = (block.match(/basket-line-style"[^>]*>([^<]*)</i) || [])[1];
+    const name = (block.match(/basket-line-name"[^>]*>([^<]*)</i) || [])[1];
+    lines.push({
+      barcode, qty,
+      name: name ? name.replace(/&nbsp;/g, ' ').trim() : null,
+      style: style ? style.replace(/&nbsp;/g, ' ').trim() : null,
+    });
+  }
+  return {
+    lines, count: lines.length, units: lines.reduce((a, l) => a + (l.qty || 0), 0),
+    total: (html.match(/(?:basket|cart|total)[^£]{0,40}£\s*([\d,]+\.\d{2})/i) || [])[1] || null,
+    raw: html.length,
+    sample: opts && opts.sample ? html.slice(Number(opts.from) || 0, (Number(opts.from) || 0) + 3000) : undefined,
+  };
+}
+
+// Remove lines from the basket. The delete control is script-driven, so the handler name is not in
+// the markup — the candidates below are tried in turn and the one that actually changes the basket
+// is reported, so this stops being guesswork the first time it runs.
+export async function sterlingRemoveFromBasket(barcodes, { jar = null } = {}) {
+  const j = jar || (await sterlingLogin());
+  const want = (Array.isArray(barcodes) ? barcodes : [barcodes]).map(String);
+  const before = await sterlingBasket({ jar: j });
+  let token = null;
+  for (const page of ['/detail/_', '/']) {
+    try { token = tokenFrom((await appGet(page, j)).html); if (token) break; } catch { /* next */ }
+  }
+  if (!token) return { ok: false, reason: 'no antiforgery token — cannot change the basket' };
+  const attempts = [];
+  for (const attempt of [
+    { handler: 'Basket', body: want.map((b) => ({ barcode: b, quantity: 0, isSale: false })) },
+    { handler: 'RemoveBasketLine', body: want.map((b) => ({ barcode: b })) },
+    { handler: 'DeleteBasketLine', body: want.map((b) => ({ barcode: b })) },
+    { handler: 'RemoveFromBasket', body: want.map((b) => ({ barcode: b })) },
+  ]) {
+    const res = await fetch(`${BASE}/detail/_?handler=${attempt.handler}`, {
+      method: 'POST',
+      headers: {
+        'User-Agent': UA, 'Content-Type': 'application/json', Accept: '*/*',
+        requestverificationtoken: token, Cookie: cookieHeader(j, BASE), Referer: `${BASE}/detail/_`,
+      },
+      body: JSON.stringify(attempt.body),
+    });
+    readCookies(res, j, BASE);
+    const text = (await res.text()).trim().slice(0, 80);
+    const now = await sterlingBasket({ jar: j });
+    const gone = want.filter((b) => !now.lines.some((l) => l.barcode === b));
+    attempts.push({ handler: attempt.handler, status: res.status, response: text, linesNow: now.count, removed: gone });
+    if (gone.length === want.length) return { ok: true, handler: attempt.handler, removed: gone, before: before.count, after: now.count, attempts };
+  }
+  return { ok: false, reason: 'none of the candidate handlers removed the line', before: before.count, attempts };
 }
 
 // CHECKOUT. Reads the form, checks WHERE it is addressed, and only then posts it.
