@@ -171,6 +171,37 @@ async function appGet(path, jar) {
   return { status: res.status, url: at, html };
 }
 
+// Trace the OIDC challenge WITHOUT posting credentials: every hop, where it ended, and whether a
+// password box is there at the end. Needed because "login succeeded" was being decided by the
+// presence of any app cookie, and the OIDC handshake sets Nonce/Correlation cookies before any
+// authentication happens — so a challenge that never reached the login form looked like a session.
+export async function sterlingLoginTrace() {
+  const jar = {};
+  const trace = [];
+  let current = `${BASE}/SignIn?returnUrl=%2F`;
+  for (let i = 0; i < 12; i++) {
+    const res = await fetch(current, {
+      redirect: 'manual',
+      headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', Cookie: cookieHeader(jar, current) },
+    });
+    readCookies(res, jar, current);
+    const loc = res.headers.get('location');
+    trace.push({ hop: i, status: res.status, url: current.replace(BASE, 'b2b:').replace(LOGIN_BASE, 'login:').slice(0, 150), to: loc ? String(loc).slice(0, 150) : null });
+    if (!loc) {
+      const html = await res.text();
+      trace.push({
+        final: true, bytes: html.length, title: (html.match(/<title>([^<]*)</i) || [])[1] || null,
+        hasPasswordField: /type="password"/i.test(html), hasToken: /__RequestVerificationToken/.test(html),
+        formAction: (html.match(/<form[^>]*action="([^"]{0,120})"/i) || [])[1] || null,
+        fieldNames: [...html.matchAll(/<input[^>]*name="([^"]+)"/gi)].map((m) => m[1]).filter((n) => !/Verification/i.test(n)).slice(0, 12),
+      });
+      break;
+    }
+    current = new URL(loc, current).toString();
+  }
+  return { trace, cookies: Object.fromEntries(Object.entries(jar).map(([h, b]) => [h, Object.keys(b).map((k) => k.replace(/\.CfDJ8.*/, '.<id>'))])) };
+}
+
 // What does the site actually hand US? Facts only — where the request ended up, how big the page
 // is, and which markers it carries — because "no antiforgery token" has at least three causes
 // (not signed in, signed in but a different page, or the markup changed) and they look identical
