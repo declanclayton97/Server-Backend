@@ -178,10 +178,16 @@ export async function sterlingLogin({ force = false } = {}) {
   const after = res.pageHtml;
   // Trust the SESSION, not the status code: a refused login re-renders the form with a 200.
   if (!hasAuthCookie(jar) || /type="password"/i.test(after)) {
+    // Report SterlingS OWN words. IdentityServer renders the reason in an alert/validation block,
+    // and "invalid credentials" needs a very different response from "your password must be reset"
+    // — which their move notice says existing passwords may require on first use of the new site.
     const err = (after.match(/validation-summary-errors[\s\S]{0,300}?<li>([^<]+)</i) || [])[1]
-      || (after.match(/field-validation-error[^>]*>([^<]+)</i) || [])[1];
-    throw new Error(`Sterling login refused${err ? `: ${err.trim()}` : ''} — no .AspNetCore.Cookies auth cookie came back `
-      + `(held: ${Object.keys(jarFor(jar, BASE)).map((n) => n.replace(/\.CfDJ8.*/, '')).join(', ') || 'none'})`);
+      || (after.match(/field-validation-error[^>]*>([^<]+)</i) || [])[1]
+      || (after.match(/class="[^"]*alert[^"]*"[^>]*>\s*([^<]{4,160})/i) || [])[1]
+      || (after.match(/<div[^>]*validation-summary[^>]*>[\s\S]{0,200}?([A-Z][^<]{6,160})/i) || [])[1];
+    throw new Error(`Sterling login refused${err ? `: "${err.trim().replace(/\s+/g, ' ')}"` : ' (no message on the page)'}`
+      + ` — landed on ${(res.finalUrl || '').replace(LOGIN_BASE, 'login:').replace(BASE, 'b2b:').slice(0, 80)}`
+      + `, no .AspNetCore.Cookies auth cookie`);
   }
   session = { jar, at: Date.now() };
   return jar;
