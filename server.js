@@ -9630,6 +9630,9 @@ app.get('/api/purchasing/sterling-portal', async (req, res) => {
   try {
     const sp = await import('./sterlingPortal.js');
     const step = String(req.query.step || 'login');
+    // `trace` runs BEFORE any login attempt on purpose: it is the tool for working out why login
+    // fails, so it must not be behind the thing it is diagnosing. It posts no credentials.
+    if (step === 'trace') return res.json({ step, ...(await sp.sterlingLoginTrace()) });
     const jar = await sp.sterlingLogin({ force: req.query.force === '1' });
     if (step === 'login') return res.json({ ok: true, step, cookies: Object.keys(jar), ourPostcode: sp.STERLING_OUR_POSTCODE });
     if (step === 'basket') return res.json({ ok: true, step, ...(await sp.sterlingBasket({ jar })) });
