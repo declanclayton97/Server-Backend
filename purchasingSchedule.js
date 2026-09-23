@@ -10,6 +10,7 @@
 
 import nodemailer from 'nodemailer';
 import * as bp from './purchasingAuto.js';
+import * as sterlingPortal from './sterlingPortal.js';
 import { updateOrderReference, emailOrderDocument } from './bpWebSession.js';
 
 const THRESHOLD_NET = Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300); // £ ex-VAT
@@ -1202,7 +1203,8 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
   // resolve each PO line (EAN -> search/colour/size); skip service lines; abort on genuinely-unresolved
-  const { resolveSterlingLine, isNonSterlingOrderable } = await import('./sterlingResolve.js');
+  // Only the not-orderable filter is still needed: the barcode path below replaces the resolver.
+  const { isNonSterlingOrderable } = await import('./sterlingResolve.js');
   let poLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000');
   const unresolved = [], skipped = [];
 
@@ -1250,47 +1252,63 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
     // and every retry would have minted another one. Fristads splits early ON PURPOSE and words it
     // in the future tense; Sterling's wording is a claim of fact, so it waits for the fact.
   }
-  // Merge lines that resolve to the SAME shop variant (search|colour|size) into ONE add,
-  // summing qty. The PO can carry two rows for the same variant (e.g. two SOs both needing
-  // Mercury Black 11); the shop's basket merges duplicate adds and keeps the LAST qty, not
-  // the sum — so adding them separately silently drops units. One deduped add avoids that.
-  const byVariant = new Map();
+  // ORDER ON THE NEW B2B PORTAL, keyed by BARCODE.
+  // Sterling moved off sterling.famlive.net on 2026-09-23 (the old host 503s and serves a "site has
+  // moved" notice), taking the Playwright worker's whole search → result-click → size-box flow with
+  // it. The replacement portal's basket takes a barcode and a quantity, and Brightpearl already
+  // stores Sterling products with the EAN AS THE SKU (119066 = "5055160056461"), so a PO row maps
+  // straight through with no resolver at all. sterlingResolve.js — and the class of failure it had,
+  // three unknown DeWalt codes stopping a whole order on 2026-09-18 — is simply not in the path.
+  const barcodeLines = [];
+  const notBarcodes = [];
   for (const l of poLines) {
     if (isNonSterlingOrderable(l.sku)) { skipped.push(l.sku); continue; }
-    const r = await resolveSterlingLine({ sku: l.sku, productId: l.productId });
-    if (!r.resolved) { unresolved.push(l.sku); continue; }
-    const key = [r.search, r.colour || '', r.size].map((s) => String(s).trim().toLowerCase()).join('|');
-    if (byVariant.has(key)) byVariant.get(key).qty += Math.round(l.qty);
-    else byVariant.set(key, { search: r.search, colour: r.colour, size: r.size, qty: Math.round(l.qty), leg: r.leg, waist: r.waist, legIndex: r.legIndex, legCount: r.legCount });
+    const code = String(l.sku || '').trim();
+    // A Sterling SKU is a 13-digit EAN. Anything else is a product whose SKU was never migrated,
+    // and guessing at it is how the wrong garment gets ordered — refuse and name it.
+    if (!/^\d{12,14}$/.test(code)) { notBarcodes.push(l.sku); continue; }
+    const at = barcodeLines.find((x) => x.barcode === code);
+    if (at) at.qty += Math.round(l.qty);          // same variant on several rows → ONE basket line
+    else barcodeLines.push({ barcode: code, qty: Math.round(l.qty), name: l.name });
   }
-  const lines = [...byVariant.values()];
-  if (unresolved.length) throw stepErr('resolve', `Sterling lines not in the product-data file (order NOT placed): ${unresolved.join(', ')}. Update the Sterling product-data file / ingest.`);
-  if (!lines.length) throw stepErr('resolve', 'no resolvable Sterling lines to order');
-  steps.resolve = { lines: lines.length, skipped };
-
-  // drive the headless worker (async job + poll) to place the order on the shop
-  const wr = await workerPlaceOrder({ ref: poId, lines, execute: true });
-  // WHY it failed, before WHAT was in the basket. `wr.results` is the (large) per-line add log, so
-  // `wr.results || wr.error` always picked it and every field that explains a failure — was the
-  // confirm button still there, what did the page say, did the delivery address and customer ref
-  // land — was discarded at the one moment it mattered. Two Sterling runs on 1 and 2 Sept failed
-  // identically at confirm and taught us nothing: error #118 and #120 are 4kB of "ok":true adds.
-  // Diagnostics FIRST because the log truncates, and the lines array is long enough to push them
-  // out of every view that reads it.
-  if (!wr || !wr.placed) {
-    const why = wr ? {
-      stillOnConfirm: wr.stillOnConfirm, confirmText: wr.confirmText, url: wr.url,
-      delAddr: wr.delAddr, refSet: wr.refSet, cartCount: wr.cartCount,
-      added: wr.added, expected: wr.expected, units: wr.units, ready: wr.ready,
-      orderNo: wr.orderNo, cleared: wr.cleared, error: wr.error,
-      hasScreenshot: !!wr.screenshot, results: wr.results,
-    } : wr;
-    throw stepErr('checkout', `Sterling worker did not confirm placement: ${JSON.stringify(why)}`);
+  if (notBarcodes.length) {
+    throw stepErr('resolve', `${notBarcodes.length} Sterling line(s) have no barcode SKU, so they cannot be added to the portal basket `
+      + `(order NOT placed): ${notBarcodes.join(', ')}. Set the EAN as the product SKU in Brightpearl.`, { poId, notBarcodes });
   }
-  let orderNo = wr.orderNo || null;
-  if (!orderNo) { try { orderNo = await pullSterlingOrderNo(poId); } catch { /* leave null → Placed-<poId> marker */ } }
-  steps.checkout = { placed: true, orderNo, orderNoSource: wr.orderNo ? 'place' : (orderNo ? 'order-status' : 'none'), cartCount: wr.cartCount, added: wr.added };
+  if (!barcodeLines.length) throw stepErr('resolve', 'no orderable Sterling lines');
+  steps.resolve = { lines: barcodeLines.length, units: barcodeLines.reduce((a, l) => a + l.qty, 0), skipped, via: 'barcode' };
 
+  // EMPTY FIRST. Anything left in the basket — a half-finished run, someone browsing — would ride
+  // along into our order, which is the guarantee clearFirst gives every other lane here.
+  const jar = await sterlingPortal.sterlingLogin();
+  steps.basketCleared = await sterlingPortal.sterlingEmptyBasket({ jar });
+  const add = await sterlingPortal.sterlingAddToBasket(barcodeLines, { jar });
+  if (!add.ok) throw stepErr('cart', `Sterling basket add failed: ${JSON.stringify(add).slice(0, 200)}`, { poId, add });
+
+  // VERIFY WHAT IS IN THE BASKET, never what was asked for. Their basket accepts codes it cannot
+  // resolve; an unverified basket is how a short order gets placed without anyone knowing.
+  const basket = await sterlingPortal.sterlingBasket({ jar });
+  const missing = barcodeLines.filter((l) => {
+    const got = basket.lines.find((b) => b.barcode === l.barcode);
+    return !got || got.qty !== l.qty;
+  }).map((l) => ({ barcode: l.barcode, want: l.qty, got: (basket.lines.find((b) => b.barcode === l.barcode) || {}).qty ?? 0, name: l.name }));
+  steps.cart = { lines: basket.count, units: basket.units, expected: barcodeLines.length };
+  if (missing.length) {
+    throw stepErr('cart', `the Sterling basket does not hold what was asked for — NOT ordering. PO#${poId} left for review: `
+      + missing.map((m) => `${m.barcode} wanted ${m.want}, basket has ${m.got}`).join('; '), { poId, missing, basket: basket.lines });
+  }
+
+  // CHECK OUT. sterlingCheckout refuses to submit unless the form is addressed to OUR postcode —
+  // the saved-address picker on that page lists customers of ours, and Blaklader demonstrated on
+  // the same day what copying somebody else's delivery details costs.
+  const co = await sterlingPortal.sterlingCheckout({ orderRef: String(poId), orderText: `Tuff Workwear PO ${poId}`, jar, execute: true });
+  if (!co.ok) throw stepErr('checkout', `Sterling did not confirm the order: ${co.reason || JSON.stringify(co).slice(0, 200)}`, { poId, checkout: co });
+  const orderNo = co.orderNo || null;
+  // A confirmed order EMPTIES the basket — the same second signal Portwest needed after a 3xx was
+  // read as success and PO 490275 never reached them.
+  const after = await sterlingPortal.sterlingBasket({ jar }).catch(() => null);
+  steps.checkout = { placed: true, orderNo, trackingId: co.trackingId || null, via: 'b2b-portal',
+    basketEmptied: after ? after.count === 0 : null, units: basket.units };
   // NOW the out-of-stock lines can be split off: the order is placed, so "still ordered, held on
   // back order by Sterling" is a true statement. Best-effort — a failure here leaves every line on
   // the placed PO, which is untidy but honest, and never loses an ordered unit.
