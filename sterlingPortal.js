@@ -82,25 +82,45 @@ async function hop(url, opts, jar, { max = 12 } = {}) {
   return Object.assign(res, { finalUrl: current });
 }
 
-// OIDC hands the authorization code back as a SELF-SUBMITTING FORM (response_mode=form_post), not
-// as a redirect: the callback page is a <form action="…/signin-oidc"> full of hidden inputs that the
-// browser posts on load. Nothing follows that automatically here, so it is replayed by hand.
-async function postBackForm(html, fromUrl, jar) {
-  const action = (html.match(/<form[^>]*action="([^"]+)"/i) || [])[1];
-  if (!action) return null;
+// THIS OIDC FLOW MOVES BY SELF-SUBMITTING FORMS, NOT REDIRECTS — in BOTH directions.
+// `GET /SignIn` answers 200 with a page titled "Working..." holding a form that posts client_id,
+// nonce, state, code_challenge… to login…/connect/authorize; the authorization code comes back the
+// same way (response_mode=form_post) as a form posting to b2b…/signin-oidc. A redirect-follower
+// stops dead on both, which is why the first attempts collected Nonce/Correlation cookies — the
+// handshake had started — and never an authentication cookie.
+const isAutoPost = (html) => /<form[^>]*action="[^"]+"/i.test(html) && !/type="password"/i.test(html)
+  && (/Working\.\.\./i.test(html) || /document\.forms\[0\]\.submit|onload="document\.forms/i.test(html) || /<title>\s*Working/i.test(html));
+
+function autoPostBody(html) {
   const body = new URLSearchParams();
-  for (const m of html.matchAll(/<input[^>]*type="hidden"[^>]*>/gi)) {
+  for (const m of html.matchAll(/<input\b[^>]*>/gi)) {
     const tag = m[0];
+    const type = ((tag.match(/type="([^"]*)"/i) || [])[1] || '').toLowerCase();
+    if (type === 'submit' || type === 'button' || type === 'password') continue;
     const name = (tag.match(/name="([^"]+)"/i) || [])[1];
+    if (!name) continue;
     const value = (tag.match(/value="([^"]*)"/i) || [])[1];
-    if (name) body.set(name, value != null ? value.replace(/&amp;/g, '&') : '');
+    body.set(name, value != null ? value.replace(/&amp;/g, '&') : '');
   }
-  if (![...body.keys()].length) return null;
-  const url = new URL(action.replace(/&amp;/g, '&'), fromUrl).toString();
-  return hop(url, {
-    method: 'POST', body: body.toString(),
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: fromUrl },
-  }, jar);
+  return body;
+}
+
+// Follow redirects AND auto-submitting forms until a real page comes back.
+async function hopAuto(url, opts, jar, { maxForms = 4 } = {}) {
+  let res = await hop(url, opts, jar);
+  for (let i = 0; i < maxForms; i++) {
+    const html = await res.text();
+    if (!isAutoPost(html)) return Object.assign(res, { body: html });
+    const action = (html.match(/<form[^>]*action="([^"]+)"/i) || [])[1];
+    const body = autoPostBody(html);
+    if (!action || ![...body.keys()].length) return Object.assign(res, { body: html });
+    const next = new URL(action.replace(/&amp;/g, '&'), res.finalUrl || url).toString();
+    res = await hop(next, {
+      method: 'POST', body: body.toString(),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: res.finalUrl || url },
+    }, jar);
+  }
+  return Object.assign(res, { body: await res.text() });
 }
 
 let session = { jar: null, at: 0 };
@@ -116,9 +136,9 @@ export async function sterlingLogin({ force = false } = {}) {
   // the sort — the first version of this posted the credentials into that page's form and then
   // reported success on an empty cookie jar. /SignIn is the app's OIDC challenge and bounces to
   // login.sterlingsafetywear.co.uk/connect/authorize → /Account/Login?ReturnUrl=…
-  const start = await hop(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar);
+  const start = await hopAuto(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar);
   const loginUrl = start.finalUrl || '';
-  const html = await start.text();
+  const html = start.body;
   const passField = (html.match(/<input[^>]*type="password"[^>]*name="([^"]+)"/i) || [])[1]
     || (html.match(/<input[^>]*name="([^"]+)"[^>]*type="password"/i) || [])[1];
   if (!passField) {
@@ -140,14 +160,13 @@ export async function sterlingLogin({ force = false } = {}) {
   body.set(passField, pass);
   body.set('RememberLogin', 'false');
   body.set('button', 'login');
-  const res = await hop(loginUrl, {
+  const res = await hopAuto(loginUrl, {
     method: 'POST', body: body.toString(),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: loginUrl },
   }, jar);
-  let after = await res.text();
-  // The authorize endpoint answers with a form_post page; replay it to hand the code to the app.
-  const back = await postBackForm(after, res.finalUrl || loginUrl, jar);
-  if (back) after = await back.text();
+  // The authorize endpoint answers with another form_post page; hopAuto replays it, which is what
+  // hands the authorization code to the app and finally sets the session cookie.
+  const after = res.body;
   // Trust the SESSION, not the status code: a refused login re-renders the form with a 200.
   const appCookies = Object.keys(jarFor(jar, BASE));
   if (!appCookies.length || /type="password"/i.test(after)) {
