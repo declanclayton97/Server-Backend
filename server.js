@@ -9637,7 +9637,7 @@ app.get('/api/purchasing/sterling-portal', async (req, res) => {
     const jar = await sp.sterlingLogin({ force: req.query.force === '1', trace: loginTrace })
       .catch((e) => { const err = new Error(e.message); err.loginTrace = loginTrace; throw err; });
     if (step === 'login') return res.json({ ok: true, step, cookies: Object.keys(jar), ourPostcode: sp.STERLING_OUR_POSTCODE });
-    if (step === 'basket') return res.json({ ok: true, step, ...(await sp.sterlingBasket({ jar })) });
+    if (step === 'basket') return res.json({ ok: true, step, ...(await sp.sterlingBasket({ jar, sample: req.query.raw === '1' })) });
     if (step === 'trace') return res.json({ step, ...(await sp.sterlingLoginTrace()) });
     if (step === 'diag') return res.json({ step, ...(await sp.sterlingDiag(req.query.path ? [String(req.query.path)] : undefined, { jar })) });
     if (step === 'checkout') return res.json({ step, ...(await sp.sterlingCheckout({ orderRef: req.query.ref || 'PREVIEW', jar, execute: false })) });
