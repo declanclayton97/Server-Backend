@@ -354,41 +354,44 @@ export async function sterlingBasket({ jar = null, ...opts } = {}) {
   };
 }
 
-// Remove lines from the basket. The delete control is script-driven, so the handler name is not in
-// the markup — the candidates below are tried in turn and the one that actually changes the basket
-// is reported, so this stops being guesswork the first time it runs.
+// Change the basket. The handler names are not in the markup — they are chosen in site.min.js by
+// which button was clicked, and every one of them is a GET with the barcode as a query parameter:
+//   .add-button    → IncrementItem      .remove-button → DecrementItem
+//   .delete-button → DeleteItem         "empty basket" → EmptyBasket
+// (Guessing "RemoveBasketLine"/"DeleteBasketLine" against the JSON add-handler returned 200 and
+// the whole page while changing nothing, which is why the names now come from their own script.)
+const BASKET_HANDLER = { delete: 'DeleteItem', increment: 'IncrementItem', decrement: 'DecrementItem' };
+
+async function basketHandler(handler, { barcode = null, jar, page = '_' } = {}) {
+  const url = `${BASE}/detail/${encodeURIComponent(page)}?handler=${handler}`
+    + (barcode ? `&barcode=${encodeURIComponent(barcode)}` : '');
+  const res = await hop(url, { method: 'GET', headers: { 'X-Requested-With': 'XMLHttpRequest' } }, jar);
+  const html = await res.text();
+  return { status: res.status, bytes: html.length };
+}
+
 export async function sterlingRemoveFromBasket(barcodes, { jar = null } = {}) {
   const j = jar || (await sterlingLogin());
   const want = (Array.isArray(barcodes) ? barcodes : [barcodes]).map(String);
   const before = await sterlingBasket({ jar: j });
-  let token = null;
-  for (const page of ['/detail/_', '/']) {
-    try { token = tokenFrom((await appGet(page, j)).html); if (token) break; } catch { /* next */ }
-  }
-  if (!token) return { ok: false, reason: 'no antiforgery token — cannot change the basket' };
-  const attempts = [];
-  for (const attempt of [
-    { handler: 'Basket', body: want.map((b) => ({ barcode: b, quantity: 0, isSale: false })) },
-    { handler: 'RemoveBasketLine', body: want.map((b) => ({ barcode: b })) },
-    { handler: 'DeleteBasketLine', body: want.map((b) => ({ barcode: b })) },
-    { handler: 'RemoveFromBasket', body: want.map((b) => ({ barcode: b })) },
-  ]) {
-    const res = await fetch(`${BASE}/detail/_?handler=${attempt.handler}`, {
-      method: 'POST',
-      headers: {
-        'User-Agent': UA, 'Content-Type': 'application/json', Accept: '*/*',
-        requestverificationtoken: token, Cookie: cookieHeader(j, BASE), Referer: `${BASE}/detail/_`,
-      },
-      body: JSON.stringify(attempt.body),
-    });
-    readCookies(res, j, BASE);
-    const text = (await res.text()).trim().slice(0, 80);
-    const now = await sterlingBasket({ jar: j });
-    const gone = want.filter((b) => !now.lines.some((l) => l.barcode === b));
-    attempts.push({ handler: attempt.handler, status: res.status, response: text, linesNow: now.count, removed: gone });
-    if (gone.length === want.length) return { ok: true, handler: attempt.handler, removed: gone, before: before.count, after: now.count, attempts };
-  }
-  return { ok: false, reason: 'none of the candidate handlers removed the line', before: before.count, attempts };
+  const steps = [];
+  for (const b of want) steps.push({ barcode: b, ...(await basketHandler(BASKET_HANDLER.delete, { barcode: b, jar: j })) });
+  // Verify against the basket itself rather than the handler's response — the same lesson as every
+  // other supplier here: what was asked for is not what is in the cart.
+  const after = await sterlingBasket({ jar: j });
+  const left = want.filter((b) => after.lines.some((l) => l.barcode === b));
+  return { ok: left.length === 0, removed: want.filter((b) => !left.includes(b)), stillThere: left,
+    before: before.count, after: after.count, lines: after.lines, steps };
+}
+
+// Empty the basket completely. Used before building a fresh order so nothing rides along — the
+// same guarantee clearFirst gives the other lanes.
+export async function sterlingEmptyBasket({ jar = null } = {}) {
+  const j = jar || (await sterlingLogin());
+  const before = await sterlingBasket({ jar: j });
+  const r = await basketHandler('EmptyBasket', { jar: j });
+  const after = await sterlingBasket({ jar: j });
+  return { ok: after.count === 0, before: before.count, after: after.count, lines: after.lines, status: r.status };
 }
 
 // CHECKOUT. Reads the form, checks WHERE it is addressed, and only then posts it.

@@ -9659,8 +9659,8 @@ app.post('/api/purchasing/sterling-portal/remove', express.json(), async (req, r
     const sp = await import('./sterlingPortal.js');
     const b = req.body || {};
     const codes = Array.isArray(b.barcodes) ? b.barcodes : (b.barcode ? [b.barcode] : null);
-    if (!codes || !codes.length) return res.status(400).json({ error: 'barcodes[] required' });
-    res.json(await sp.sterlingRemoveFromBasket(codes));
+    if (b.empty !== true && (!codes || !codes.length)) return res.status(400).json({ error: 'barcodes[] required (or { empty: true })' });
+    res.json(b.empty === true ? await sp.sterlingEmptyBasket() : await sp.sterlingRemoveFromBasket(codes));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/purchasing/sterling-portal/checkout', express.json(), async (req, res) => {
