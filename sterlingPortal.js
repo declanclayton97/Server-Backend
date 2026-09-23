@@ -171,6 +171,29 @@ async function appGet(path, jar) {
   return { status: res.status, url: at, html };
 }
 
+// What does the site actually hand US? Facts only — where the request ended up, how big the page
+// is, and which markers it carries — because "no antiforgery token" has at least three causes
+// (not signed in, signed in but a different page, or the markup changed) and they look identical
+// from the call site. Cookie NAMES only, never values.
+export async function sterlingDiag(paths = ['/', '/detail/_', '/Checkout', '/Account/Manage'], { jar = null } = {}) {
+  const j = jar || (await sterlingLogin());
+  const out = [];
+  for (const p of paths) {
+    try {
+      const res = await hop(`${BASE}${p}`, { method: 'GET' }, j);
+      const html = await res.text();
+      out.push({
+        path: p, status: res.status, endedAt: (res.finalUrl || '').replace(BASE, '').slice(0, 120), bytes: html.length,
+        hasToken: /__RequestVerificationToken/.test(html),
+        looksSignedIn: /\/SignOut|Logout|Sign\s*out/i.test(html),
+        looksLoggedOut: /\/SignIn\b|Sign\s*in<|type="password"/i.test(html),
+        title: (html.match(/<title>([^<]*)</i) || [])[1] || null,
+      });
+    } catch (e) { out.push({ path: p, error: e.message }); }
+  }
+  return { cookies: Object.fromEntries(Object.entries(j).map(([host, bag]) => [host, Object.keys(bag)])), pages: out };
+}
+
 // BASKET — add barcodes. `[{ barcode, quantity, isSale:false }]`, answered with the new line count.
 // The style in the path is only the page the handler hangs off; "_" is what the site's own basket
 // widget uses for the non-product pages, so it works for a bulk add.

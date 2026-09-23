@@ -9633,6 +9633,7 @@ app.get('/api/purchasing/sterling-portal', async (req, res) => {
     const jar = await sp.sterlingLogin({ force: req.query.force === '1' });
     if (step === 'login') return res.json({ ok: true, step, cookies: Object.keys(jar), ourPostcode: sp.STERLING_OUR_POSTCODE });
     if (step === 'basket') return res.json({ ok: true, step, ...(await sp.sterlingBasket({ jar })) });
+    if (step === 'diag') return res.json({ step, ...(await sp.sterlingDiag(req.query.path ? [String(req.query.path)] : undefined, { jar })) });
     if (step === 'checkout') return res.json({ step, ...(await sp.sterlingCheckout({ orderRef: req.query.ref || 'PREVIEW', jar, execute: false })) });
     res.status(400).json({ error: 'step must be login | basket | checkout' });
   } catch (e) { res.status(500).json({ error: e.message }); }
