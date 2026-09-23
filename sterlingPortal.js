@@ -41,39 +41,66 @@ export const STERLING_OUR_POSTCODE = process.env.STERLING_DELIVERY_POSTCODE || '
 const zipKey = (z) => String(z || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
 export const sterlingShipsToUs = (zip) => !!zipKey(zip) && zipKey(zip) === zipKey(STERLING_OUR_POSTCODE);
 
-function readCookies(res, jar) {
+// PER-HOST cookie jars. The login runs across TWO hosts — the IdentityServer at
+// login.sterlingsafetywear.co.uk and the app at b2b… — and each sets its own session cookie.
+// One flat jar would send each host the other's session, which is both wrong and needless
+// exposure of a session identifier.
+const jarFor = (jar, url) => (jar[new URL(url).host] = jar[new URL(url).host] || {});
+function readCookies(res, jar, url) {
+  const bag = jarFor(jar, url);
   const set = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [res.headers.get('set-cookie')].filter(Boolean);
   for (const s of set) {
     const m = String(s).match(/^\s*([^=;]+)=([^;]*)/);
     if (!m) continue;
     const name = m[1].trim();
     // An empty value is a DELETION (sign-out clears the cookie by setting it empty + expired);
-    // storing it would keep sending a dead session and every later call would 302 to login.
-    if (m[2] === '' || /expires=thu, 01 jan 1970/i.test(String(s))) delete jar[name];
-    else jar[name] = `${name}=${m[2]}`;
+    // storing it would keep sending a dead session and every later call would bounce to login.
+    if (m[2] === '' || /expires=thu, 01 jan 1970/i.test(String(s))) delete bag[name];
+    else bag[name] = `${name}=${m[2]}`;
   }
 }
-const cookieHeader = (jar) => Object.values(jar).join('; ');
+const cookieHeader = (jar, url) => Object.values(jarFor(jar, url)).join('; ');
 const tokenFrom = (html) => (String(html).match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/i) || [])[1] || null;
 
 // Follow 302s by hand so every hop's Set-Cookie lands in one jar — the OIDC dance crosses two
 // hosts and `redirect: "follow"` would drop the cookies set on the intermediate hops.
-async function hop(url, opts, jar, { max = 10 } = {}) {
+async function hop(url, opts, jar, { max = 12 } = {}) {
   let current = url, res = null;
   for (let i = 0; i < max; i++) {
     res = await fetch(current, {
       ...opts,
       redirect: 'manual',
-      headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', Cookie: cookieHeader(jar), ...(opts.headers || {}) },
+      headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', Cookie: cookieHeader(jar, current), ...(opts.headers || {}) },
     });
-    readCookies(res, jar);
-    if (res.status < 300 || res.status > 399) return res;
+    readCookies(res, jar, current);
+    if (res.status < 300 || res.status > 399) return Object.assign(res, { finalUrl: current });
     const loc = res.headers.get('location');
-    if (!loc) return res;
+    if (!loc) return Object.assign(res, { finalUrl: current });
     current = new URL(loc, current).toString();
     opts = { method: 'GET' };                 // a redirect is always followed as a GET with no body
   }
-  return res;
+  return Object.assign(res, { finalUrl: current });
+}
+
+// OIDC hands the authorization code back as a SELF-SUBMITTING FORM (response_mode=form_post), not
+// as a redirect: the callback page is a <form action="…/signin-oidc"> full of hidden inputs that the
+// browser posts on load. Nothing follows that automatically here, so it is replayed by hand.
+async function postBackForm(html, fromUrl, jar) {
+  const action = (html.match(/<form[^>]*action="([^"]+)"/i) || [])[1];
+  if (!action) return null;
+  const body = new URLSearchParams();
+  for (const m of html.matchAll(/<input[^>]*type="hidden"[^>]*>/gi)) {
+    const tag = m[0];
+    const name = (tag.match(/name="([^"]+)"/i) || [])[1];
+    const value = (tag.match(/value="([^"]*)"/i) || [])[1];
+    if (name) body.set(name, value != null ? value.replace(/&amp;/g, '&') : '');
+  }
+  if (![...body.keys()].length) return null;
+  const url = new URL(action.replace(/&amp;/g, '&'), fromUrl).toString();
+  return hop(url, {
+    method: 'POST', body: body.toString(),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: fromUrl },
+  }, jar);
 }
 
 let session = { jar: null, at: 0 };
@@ -84,37 +111,49 @@ export async function sterlingLogin({ force = false } = {}) {
   const user = process.env.STERLING_USER, pass = process.env.STERLING_PASS;
   if (!user || !pass) throw new Error('STERLING_USER / STERLING_PASS are not set on this service');
   const jar = {};
-  // Hitting the app unauthenticated bounces through OIDC and lands on the login form, which is
-  // where the antiforgery token and the exact ReturnUrl come from — both are per-request.
-  const start = await hop(`${BASE}/`, { method: 'GET' }, jar);
+  // START AT /SignIn, not at "/". The root is a PUBLIC landing page that answers 200 and carries an
+  // antiforgery token of its own, so starting there looks like a login page while being nothing of
+  // the sort — the first version of this posted the credentials into that page's form and then
+  // reported success on an empty cookie jar. /SignIn is the app's OIDC challenge and bounces to
+  // login.sterlingsafetywear.co.uk/connect/authorize → /Account/Login?ReturnUrl=…
+  const start = await hop(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar);
+  const loginUrl = start.finalUrl || '';
   const html = await start.text();
-  const token = tokenFrom(html);
-  const loginUrl = start.url || `${LOGIN_BASE}/Account/Login`;
-  if (!/\/Account\/Login/i.test(loginUrl) && !/name="__RequestVerificationToken"/i.test(html)) {
-    // Already signed in (a warm jar) — nothing to post.
-    session = { jar, at: Date.now() };
-    return jar;
+  const passField = (html.match(/<input[^>]*type="password"[^>]*name="([^"]+)"/i) || [])[1]
+    || (html.match(/<input[^>]*name="([^"]+)"[^>]*type="password"/i) || [])[1];
+  if (!passField) {
+    // No password box means this is not the login form, whatever it returned. NEVER post
+    // credentials into a page we have not positively identified.
+    if (/\/SignIn|signin-oidc/i.test(loginUrl) || Object.keys(jarFor(jar, BASE)).length) {
+      session = { jar, at: Date.now() };      // already authenticated — a warm session came back
+      return jar;
+    }
+    throw new Error(`Sterling login: no password field at ${loginUrl.slice(0, 120)} — not posting credentials`);
   }
+  const userField = (html.match(/<input[^>]*name="((?:[^"]*\.)?(?:Username|UserName|Email)[^"]*)"/i) || [])[1] || 'Username';
+  const token = tokenFrom(html);
+  const returnUrl = (html.match(/name="ReturnUrl"[^>]*value="([^"]*)"/i) || [])[1];
   const body = new URLSearchParams();
   if (token) body.set('__RequestVerificationToken', token);
-  // Field names come from the login page itself rather than being guessed, because ASP.NET Identity
-  // templates differ ("Email"/"Input.Email"/"Username") and a wrong name silently re-renders the
-  // form with a 200, which looks like success to anything that only checks the status code.
-  const emailField = (html.match(/<input[^>]*name="([^"]*(?:Email|UserName|Username)[^"]*)"/i) || [])[1] || 'Email';
-  const passField = (html.match(/<input[^>]*type="password"[^>]*name="([^"]+)"/i) || [])[1]
-    || (html.match(/<input[^>]*name="([^"]*Password[^"]*)"[^>]*type="password"/i) || [])[1] || 'Password';
-  body.set(emailField, user);
+  if (returnUrl) body.set('ReturnUrl', returnUrl.replace(/&amp;/g, '&'));
+  body.set(userField, user);
   body.set(passField, pass);
+  body.set('RememberLogin', 'false');
+  body.set('button', 'login');
   const res = await hop(loginUrl, {
     method: 'POST', body: body.toString(),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: loginUrl },
   }, jar);
-  const after = await res.text();
-  // The only trustworthy signal is that we ended up back on the app with a session — a 200 that is
-  // still the login page means the credentials were refused.
-  if (/name="__RequestVerificationToken"/i.test(after) && /\/Account\/Login/i.test(res.url || '')) {
-    const err = (after.match(/validation-summary-errors[\s\S]{0,200}?<li>([^<]+)</i) || [])[1];
-    throw new Error(`Sterling login refused${err ? `: ${err.trim()}` : ' (still on the login page)'}`);
+  let after = await res.text();
+  // The authorize endpoint answers with a form_post page; replay it to hand the code to the app.
+  const back = await postBackForm(after, res.finalUrl || loginUrl, jar);
+  if (back) after = await back.text();
+  // Trust the SESSION, not the status code: a refused login re-renders the form with a 200.
+  const appCookies = Object.keys(jarFor(jar, BASE));
+  if (!appCookies.length || /type="password"/i.test(after)) {
+    const err = (after.match(/validation-summary-errors[\s\S]{0,300}?<li>([^<]+)</i) || [])[1]
+      || (after.match(/field-validation-error[^>]*>([^<]+)</i) || [])[1];
+    throw new Error(`Sterling login refused${err ? `: ${err.trim()}` : ' — no app session cookie came back'}`);
   }
   session = { jar, at: Date.now() };
   return jar;
@@ -124,8 +163,12 @@ export async function sterlingLogin({ force = false } = {}) {
 async function appGet(path, jar) {
   const res = await hop(`${BASE}${path}`, { method: 'GET' }, jar);
   const html = await res.text();
-  if (/\/Account\/Login/i.test(res.url || '')) throw new Error(`session expired fetching ${path}`);
-  return { status: res.status, url: res.url, html };
+  // `res.url` is empty on a manually-followed redirect chain, so the hop's own final URL is what
+  // says where we ended up — without it an expired session reads as a successful fetch of the
+  // login page, and every later parse fails somewhere less obvious.
+  const at = res.finalUrl || res.url || '';
+  if (/\/Account\/Login/i.test(at)) throw new Error(`session expired fetching ${path} (bounced to login)`);
+  return { status: res.status, url: at, html };
 }
 
 // BASKET — add barcodes. `[{ barcode, quantity, isSale:false }]`, answered with the new line count.
@@ -143,11 +186,11 @@ export async function sterlingAddToBasket(items, { jar = null, page = '_' } = {}
     method: 'POST',
     headers: {
       'User-Agent': UA, 'Content-Type': 'application/json', Accept: '*/*',
-      requestverificationtoken: token, Cookie: cookieHeader(j), Referer: `${BASE}/detail/${encodeURIComponent(page)}`,
+      requestverificationtoken: token, Cookie: cookieHeader(j, BASE), Referer: `${BASE}/detail/${encodeURIComponent(page)}`,
     },
     body: JSON.stringify(body),
   });
-  readCookies(res, j);
+  readCookies(res, j, BASE);
   const text = (await res.text()).trim();
   return { ok: res.ok, status: res.status, sent: body, response: text.slice(0, 200) };
 }
@@ -212,10 +255,10 @@ export async function sterlingCheckout({ orderRef, orderText = '', jar = null, e
 
   const res = await fetch(`${BASE}/Checkout`, {
     method: 'POST', redirect: 'manual',
-    headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookieHeader(j), Referer: `${BASE}/Checkout` },
+    headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookieHeader(j, BASE), Referer: `${BASE}/Checkout` },
     body: fields.toString(),
   });
-  readCookies(res, j);
+  readCookies(res, j, BASE);
   const loc = res.headers.get('location');
   const text = res.status >= 300 && res.status <= 399 ? '' : await res.text();
   // A 302 away from /Checkout is the success shape; a 200 means it re-rendered the form, which is a
