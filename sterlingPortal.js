@@ -144,8 +144,16 @@ async function hopAuto(url, opts, jar, { maxForms = 4, trace = null } = {}) {
   return Object.assign(res, { pageHtml: await res.text() });
 }
 
-// The ONLY cookie that means "authenticated". Everything else on this host is handshake state.
-const hasAuthCookie = (jar) => Object.keys(jarFor(jar, BASE)).some((n) => /^\.AspNetCore\.Cookies/i.test(n));
+// "Signed in" is decided by the PAGE, not by a cookie name. The obvious candidate,
+// .AspNetCore.Cookies, is NOT what this app issues, so testing for it rejected a login that had
+// completely succeeded — the OIDC hand-back had run, /signin-oidc had answered 302, and the app
+// was serving the signed-in home page. What reliably distinguishes the two states is the SignOut
+// form: it is rendered only for an authenticated user (and the page grows ~39KB → ~46KB with it).
+const showsSignedIn = (html) => /action\s*=\s*['"]?\/SignOut/i.test(String(html)) || /\/SignOut\b/i.test(String(html));
+// Handshake cookies (.AspNetCore.OpenIdConnect.Nonce / .Correlation) are set before any credential
+// is checked, so "we hold a cookie" never meant "we are authenticated".
+const isHandshakeCookie = (n) => /^\.AspNetCore\.(OpenIdConnect\.Nonce|Correlation|Antiforgery)/i.test(n);
+const hasSessionCookie = (jar) => Object.keys(jarFor(jar, BASE)).some((n) => !isHandshakeCookie(n));
 
 let session = { jar: null, at: 0 };
 const TTL = 15 * 60 * 1000;
@@ -183,7 +191,7 @@ export async function sterlingLogin({ force = false, trace = null } = {}) {
     // .Correlation before a single credential is checked — so a handshake that never completed
     // reported a healthy login, and only the empty basket and the missing antiforgery tokens
     // further down gave it away.
-    if (hasAuthCookie(jar)) { session = { jar, at: Date.now() }; return jar; }
+    if (hasSessionCookie(jar) && showsSignedIn(html)) { session = { jar, at: Date.now() }; return jar; }
     throw new Error(`Sterling login: landed on ${loginUrl.slice(0, 120)} with no password field and no auth cookie `
       + `(held: ${Object.keys(jarFor(jar, BASE)).map((n) => n.replace(/\.CfDJ8.*/, '')).join(', ') || 'none'}) — not posting credentials`);
   }
@@ -208,7 +216,7 @@ export async function sterlingLogin({ force = false, trace = null } = {}) {
   // hands the authorization code to the app and finally sets the session cookie.
   const after = res.pageHtml;
   // Trust the SESSION, not the status code: a refused login re-renders the form with a 200.
-  if (!hasAuthCookie(jar) || hasPasswordBox(after)) {
+  if (!showsSignedIn(after) || hasPasswordBox(after)) {
     // Report SterlingS OWN words. IdentityServer renders the reason in an alert/validation block,
     // and "invalid credentials" needs a very different response from "your password must be reset"
     // — which their move notice says existing passwords may require on first use of the new site.
@@ -221,7 +229,7 @@ export async function sterlingLogin({ force = false, trace = null } = {}) {
       isAutoPost: isAutoPost(after), hasPasswordBox: hasPasswordBox(after) });
     throw new Error(`Sterling login refused${err ? `: "${err.trim().replace(/\s+/g, ' ')}"` : ' (no message on the page)'}`
       + ` — landed on ${(res.finalUrl || '').replace(LOGIN_BASE, 'login:').replace(BASE, 'b2b:').slice(0, 80)}`
-      + `, no .AspNetCore.Cookies auth cookie`);
+      + `, cookies held: ${Object.keys(jarFor(jar, BASE)).map((n) => n.replace(/\.CfDJ8.*/, '')).join(', ') || 'none'}`);
   }
   session = { jar, at: Date.now() };
   return jar;
