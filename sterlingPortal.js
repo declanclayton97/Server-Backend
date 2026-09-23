@@ -64,7 +64,7 @@ const tokenFrom = (html) => (String(html).match(/name="__RequestVerificationToke
 
 // Follow 302s by hand so every hop's Set-Cookie lands in one jar — the OIDC dance crosses two
 // hosts and `redirect: "follow"` would drop the cookies set on the intermediate hops.
-async function hop(url, opts, jar, { max = 12 } = {}) {
+async function hop(url, opts, jar, { max = 12, trace = null } = {}) {
   let current = url, res = null;
   for (let i = 0; i < max; i++) {
     res = await fetch(current, {
@@ -73,6 +73,7 @@ async function hop(url, opts, jar, { max = 12 } = {}) {
       headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', Cookie: cookieHeader(jar, current), ...(opts.headers || {}) },
     });
     readCookies(res, jar, current);
+    if (trace) trace.push({ kind: opts.method === 'POST' && i === 0 ? 'post' : 'get', status: res.status, url: current.replace(BASE, 'b2b:').replace(LOGIN_BASE, 'login:').slice(0, 140) });
     if (res.status < 300 || res.status > 399) return Object.assign(res, { finalUrl: current });
     const loc = res.headers.get('location');
     if (!loc) return Object.assign(res, { finalUrl: current });
@@ -106,8 +107,8 @@ function autoPostBody(html) {
 }
 
 // Follow redirects AND auto-submitting forms until a real page comes back.
-async function hopAuto(url, opts, jar, { maxForms = 4 } = {}) {
-  let res = await hop(url, opts, jar);
+async function hopAuto(url, opts, jar, { maxForms = 4, trace = null } = {}) {
+  let res = await hop(url, opts, jar, { trace });
   for (let i = 0; i < maxForms; i++) {
     const html = await res.text();
     if (!isAutoPost(html)) return Object.assign(res, { body: html });
@@ -115,13 +116,17 @@ async function hopAuto(url, opts, jar, { maxForms = 4 } = {}) {
     const body = autoPostBody(html);
     if (!action || ![...body.keys()].length) return Object.assign(res, { body: html });
     const next = new URL(action.replace(/&amp;/g, '&'), res.finalUrl || url).toString();
+    if (trace) trace.push({ kind: 'auto-form', to: next.replace(BASE, 'b2b:').replace(LOGIN_BASE, 'login:').slice(0, 140), fields: [...body.keys()].slice(0, 12) });
     res = await hop(next, {
       method: 'POST', body: body.toString(),
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Referer: res.finalUrl || url },
-    }, jar);
+    }, jar, { trace });
   }
   return Object.assign(res, { body: await res.text() });
 }
+
+// The ONLY cookie that means "authenticated". Everything else on this host is handshake state.
+const hasAuthCookie = (jar) => Object.keys(jarFor(jar, BASE)).some((n) => /^\.AspNetCore\.Cookies/i.test(n));
 
 let session = { jar: null, at: 0 };
 const TTL = 15 * 60 * 1000;
@@ -144,11 +149,15 @@ export async function sterlingLogin({ force = false } = {}) {
   if (!passField) {
     // No password box means this is not the login form, whatever it returned. NEVER post
     // credentials into a page we have not positively identified.
-    if (/\/SignIn|signin-oidc/i.test(loginUrl) || Object.keys(jarFor(jar, BASE)).length) {
-      session = { jar, at: Date.now() };      // already authenticated — a warm session came back
-      return jar;
-    }
-    throw new Error(`Sterling login: no password field at ${loginUrl.slice(0, 120)} — not posting credentials`);
+    //
+    // "Do we already have a session?" must be answered by the AUTH cookie and nothing else. This
+    // used to accept any cookie on the app host, and the OIDC challenge sets .AspNetCore.Nonce and
+    // .Correlation before a single credential is checked — so a handshake that never completed
+    // reported a healthy login, and only the empty basket and the missing antiforgery tokens
+    // further down gave it away.
+    if (hasAuthCookie(jar)) { session = { jar, at: Date.now() }; return jar; }
+    throw new Error(`Sterling login: landed on ${loginUrl.slice(0, 120)} with no password field and no auth cookie `
+      + `(held: ${Object.keys(jarFor(jar, BASE)).map((n) => n.replace(/\.CfDJ8.*/, '')).join(', ') || 'none'}) — not posting credentials`);
   }
   const userField = (html.match(/<input[^>]*name="((?:[^"]*\.)?(?:Username|UserName|Email)[^"]*)"/i) || [])[1] || 'Username';
   const token = tokenFrom(html);
@@ -168,11 +177,11 @@ export async function sterlingLogin({ force = false } = {}) {
   // hands the authorization code to the app and finally sets the session cookie.
   const after = res.body;
   // Trust the SESSION, not the status code: a refused login re-renders the form with a 200.
-  const appCookies = Object.keys(jarFor(jar, BASE));
-  if (!appCookies.length || /type="password"/i.test(after)) {
+  if (!hasAuthCookie(jar) || /type="password"/i.test(after)) {
     const err = (after.match(/validation-summary-errors[\s\S]{0,300}?<li>([^<]+)</i) || [])[1]
       || (after.match(/field-validation-error[^>]*>([^<]+)</i) || [])[1];
-    throw new Error(`Sterling login refused${err ? `: ${err.trim()}` : ' — no app session cookie came back'}`);
+    throw new Error(`Sterling login refused${err ? `: ${err.trim()}` : ''} — no .AspNetCore.Cookies auth cookie came back `
+      + `(held: ${Object.keys(jarFor(jar, BASE)).map((n) => n.replace(/\.CfDJ8.*/, '')).join(', ') || 'none'})`);
   }
   session = { jar, at: Date.now() };
   return jar;
@@ -195,30 +204,21 @@ async function appGet(path, jar) {
 // presence of any app cookie, and the OIDC handshake sets Nonce/Correlation cookies before any
 // authentication happens — so a challenge that never reached the login form looked like a session.
 export async function sterlingLoginTrace() {
-  const jar = {};
-  const trace = [];
-  let current = `${BASE}/SignIn?returnUrl=%2F`;
-  for (let i = 0; i < 12; i++) {
-    const res = await fetch(current, {
-      redirect: 'manual',
-      headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', Cookie: cookieHeader(jar, current) },
-    });
-    readCookies(res, jar, current);
-    const loc = res.headers.get('location');
-    trace.push({ hop: i, status: res.status, url: current.replace(BASE, 'b2b:').replace(LOGIN_BASE, 'login:').slice(0, 150), to: loc ? String(loc).slice(0, 150) : null });
-    if (!loc) {
-      const html = await res.text();
-      trace.push({
-        final: true, bytes: html.length, title: (html.match(/<title>([^<]*)</i) || [])[1] || null,
-        hasPasswordField: /type="password"/i.test(html), hasToken: /__RequestVerificationToken/.test(html),
-        formAction: (html.match(/<form[^>]*action="([^"]{0,120})"/i) || [])[1] || null,
-        fieldNames: [...html.matchAll(/<input[^>]*name="([^"]+)"/gi)].map((m) => m[1]).filter((n) => !/Verification/i.test(n)).slice(0, 12),
-      });
-      break;
-    }
-    current = new URL(loc, current).toString();
-  }
-  return { trace, cookies: Object.fromEntries(Object.entries(jar).map(([h, b]) => [h, Object.keys(b).map((k) => k.replace(/\.CfDJ8.*/, '.<id>'))])) };
+  const jar = {}, trace = [];
+  const res = await hopAuto(`${BASE}/SignIn?returnUrl=%2F`, { method: 'GET' }, jar, { trace });
+  const html = res.body || '';
+  return {
+    trace,
+    landedOn: (res.finalUrl || '').replace(BASE, 'b2b:').replace(LOGIN_BASE, 'login:').slice(0, 160),
+    bytes: html.length,
+    title: (html.match(/<title>([^<]*)</i) || [])[1] || null,
+    hasPasswordField: /type="password"/i.test(html),
+    hasToken: /__RequestVerificationToken/.test(html),
+    formAction: (html.match(/<form[^>]*action="([^"]{0,140})"/i) || [])[1] || null,
+    fieldNames: [...html.matchAll(/<input[^>]*name="([^"]+)"/gi)].map((m) => m[1]).filter((n) => !/Verification/i.test(n)).slice(0, 14),
+    errorText: (html.match(/validation-summary-errors[\s\S]{0,200}?<li>([^<]+)</i) || [])[1] || null,
+    cookies: Object.fromEntries(Object.entries(jar).map(([h, b]) => [h, Object.keys(b).map((k) => k.replace(/\.CfDJ8.*/, '.<id>'))])),
+  };
 }
 
 // What does the site actually hand US? Facts only — where the request ended up, how big the page
