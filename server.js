@@ -8522,6 +8522,126 @@ app.post('/api/purchasing/product-supplier-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// ── Add a missing size/colour variant to an existing product group ─────────────────────────
+// Sales orders arrive with a free-text row ("... ++ NEEDS ADDING ++") when the style exists
+// but that one size doesn't. The API has NO productGroupId on create: BP groups a new product
+// with existing ones by NAME, so the sibling's exact name is copied and the group is checked
+// on the re-read, never assumed. Brand, category, tax, nominals, prices and custom fields are
+// copied off the sibling. The API cannot set a primary supplier — the response names the one
+// to set via Data Manager map 3. BP ignores barcode writes, so the code goes on the EAN.
+// Dry run unless execute:true.
+app.post('/api/purchasing/add-variant-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled — set HEAL_LIVE_ENABLED=true on the backend' });
+  if (!BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return res.status(500).json({ error: 'live BP creds not configured' });
+  const { siblingId, sizeValueId, colourValueId, sku, ean, orderId, rowId, execute = false } = req.body || {};
+  if (!siblingId || !sizeValueId || !sku) return res.status(400).json({ error: 'siblingId, sizeValueId and sku required' });
+  if (!orderId !== !rowId) return res.status(400).json({ error: 'orderId and rowId go together' });
+  const first = (r) => (Array.isArray(r) ? r[0] : r);
+  const SIZE_OPT = 2, COLOUR_OPT = 1;
+  try {
+    const sib = first(await bpLive('GET', `/product-service/product/${siblingId}`));
+    if (!sib) return res.status(404).json({ error: `sibling ${siblingId} not found` });
+    if (!sib.productGroupId) return res.status(400).json({ error: 'sibling is not in a product group' });
+    const sc = (sib.salesChannels || [])[0] || {};
+    const name = sc.productName;
+    const sibColour = (sib.variations || []).find((v) => v.optionId === COLOUR_OPT);
+    const colourId = Number(colourValueId || (sibColour && sibColour.optionValueId));
+    if (!colourId) return res.status(400).json({ error: 'no colour on the sibling — pass colourValueId' });
+
+    const sizes = (await bpLive('GET', `/product-service/option/${SIZE_OPT}/value`)) || [];
+    const size = sizes.find((v) => v.optionValueId === Number(sizeValueId));
+    if (!size) return res.status(400).json({ error: `size value ${sizeValueId} does not exist on option ${SIZE_OPT}` });
+
+    // The group as it stands: everything sharing the name and group id, read in full.
+    const cols = [], rows = [];
+    for (let firstResult = 1; ; firstResult += 500) {
+      const s = await bpLive('GET', `/product-service/product-search?productName=${encodeURIComponent(name)}&pageSize=500&firstResult=${firstResult}`);
+      if (!cols.length) cols.push(...s.metaData.columns.map((c) => c.name));
+      rows.push(...s.results);
+      if (!s.metaData.morePagesAvailable) break;
+    }
+    const ix = (c) => cols.indexOf(c);
+    const groupIds = rows.filter((r) => r[ix('productGroupId')] === sib.productGroupId).map((r) => r[ix('productId')]).sort((a, b) => a - b);
+    const group = groupIds.length ? await bpLive('GET', `/product-service/product/${groupIds.join(',')}`) : [];
+    const opt = (p, id) => ((p.variations || []).find((v) => v.optionId === id) || {}).optionValueId;
+    const clash = group.find((p) => opt(p, SIZE_OPT) === size.optionValueId && opt(p, COLOUR_OPT) === colourId);
+    if (clash) return res.json({ changed: false, reason: 'variant already exists', productId: clash.id, sku: clash.identity && clash.identity.sku });
+    const skuHit = await bpLive('GET', `/product-service/product-search?SKU=${encodeURIComponent(sku)}`);
+    if (skuHit && skuHit.results && skuHit.results.length) return res.status(409).json({ error: `SKU ${sku} already used by product ${skuHit.results[0][0]}` });
+
+    const identity = { sku: String(sku).trim() };
+    if (ean) identity.ean = String(ean).trim();
+    const body = {
+      brandId: sib.brandId, productTypeId: sib.productTypeId, featured: false,
+      identity,
+      stock: { stockTracked: !!(sib.stock && sib.stock.stockTracked), weight: { magnitude: (sib.stock && sib.stock.weight && sib.stock.weight.magnitude) || 0 } },
+      financialDetails: { taxable: !!(sib.financialDetails && sib.financialDetails.taxable), taxCode: { id: sib.financialDetails.taxCode.id } },
+      salesChannels: [{
+        salesChannelName: sc.salesChannelName || 'Brightpearl', productName: name, productCondition: sc.productCondition || 'new',
+        categories: sc.categories || [], description: sc.description, shortDescription: sc.shortDescription,
+      }],
+      seasonIds: sib.seasonIds || [],
+      nominalCodeStock: sib.nominalCodeStock, nominalCodePurchases: sib.nominalCodePurchases, nominalCodeSales: sib.nominalCodeSales,
+      variations: [{ optionId: SIZE_OPT, optionValueId: size.optionValueId }, { optionId: COLOUR_OPT, optionValueId: colourId }],
+    };
+    const sibPrices = ((first(await bpLive('GET', `/product-service/product-price/${siblingId}`)) || {}).priceLists || [])
+      .filter((pl) => pl.quantityPrice && pl.quantityPrice['1'] != null)
+      .map((pl) => ({ priceListId: pl.priceListId, quantityPrice: { '1': String(pl.quantityPrice['1']) } }));
+    const sibFields = (await bpLive('GET', `/product-service/product/${siblingId}/custom-field`)) || {};
+    const fieldOps = Object.entries(sibFields).filter(([, v]) => v != null && v !== '' && typeof v !== 'object')
+      .map(([k, v]) => ({ op: 'add', path: `/${k}`, value: v }));
+
+    let order = null, src = null;
+    if (orderId) {
+      order = first(await bpLive('GET', `/order-service/order/${orderId}`));
+      src = order && (order.orderRows || {})[rowId];
+      if (!src) return res.status(400).json({ error: `row ${rowId} not on order ${orderId}` });
+      if (src.productId !== 1000) return res.status(400).json({ error: `row ${rowId} is product ${src.productId}, not free text` });
+    }
+    const plan = {
+      name, groupId: sib.productGroupId, groupSize: group.length, size: size.optionValueName,
+      colour: sibColour && sibColour.optionValue, prices: sibPrices, customFields: fieldOps.map((o) => o.path.slice(1)),
+      orderRow: src ? { orderId, rowId, text: src.productName, qty: src.quantity.magnitude, net: src.rowValue.rowNet.value } : null,
+    };
+    if (!execute) return res.json({ dryRun: true, ...plan, body });
+
+    const created = await bpLive('POST', '/product-service/product', body);
+    const newId = Number(Array.isArray(created) ? created[0] : created);
+    const steps = { created: newId };
+    const step = async (label, fn) => { try { await fn(); steps[label] = 'ok'; } catch (e) { steps[label] = String(e.message).slice(0, 200); } };
+    if (sibPrices.length) await step('prices', () => bpLive('PUT', `/product-service/product-price/${newId}/price-list`, { priceLists: sibPrices }));
+    if (fieldOps.length) await step('customFields', () => bpLive('PATCH', `/product-service/product/${newId}/custom-field`, fieldOps));
+
+    const np = first(await bpLive('GET', `/product-service/product/${newId}`));
+    const inGroup = np.productGroupId === sib.productGroupId;
+    const result = {
+      ...plan, productId: newId, steps,
+      after: {
+        sku: np.identity && np.identity.sku, ean: np.identity && np.identity.ean, productGroupId: np.productGroupId, inGroup,
+        variations: (np.variations || []).map((v) => `${v.optionName}=${v.optionValue}`), primarySupplierId: np.primarySupplierId ?? null,
+      },
+      supplierToSet: sib.primarySupplierId ?? null,
+    };
+    // Only move the order onto the product once it is really in the group — one that landed
+    // in a group of its own needs fixing in the UI first, not selling.
+    if (src && inGroup) {
+      const rv = src.rowValue;
+      const ccy = rv.rowNet.currencyCode || 'GBP';
+      const blank = { productId: src.productId, productName: '-', quantity: { magnitude: String(src.quantity.magnitude) },
+        rowValue: { taxCode: rv.taxCode, rowNet: { currency: ccy, value: '0.00' }, rowTax: { currency: ccy, value: '0.00' } } };
+      const real = { productId: newId, quantity: { magnitude: String(src.quantity.magnitude) },
+        rowValue: { taxCode: rv.taxCode, rowNet: { currency: ccy, value: String(rv.rowNet.value) }, rowTax: { currency: ccy, value: String(rv.rowTax.value) } } };
+      if (src.nominalCode) { blank.nominalCode = src.nominalCode; real.nominalCode = src.nominalCode; }
+      // PUT first: a failed add leaves the order short, never double-valued.
+      await step('rowBlanked', () => bpLive('PUT', `/order-service/order/${orderId}/row/${rowId}`, blank));
+      if (steps.rowBlanked === 'ok') await step('rowAdded', () => bpLive('POST', `/order-service/order/${orderId}/row`, real));
+      const ao = first(await bpLive('GET', `/order-service/order/${orderId}`));
+      result.orderTotals = { before: order.totalValue, after: ao.totalValue, unchanged: JSON.stringify(order.totalValue) === JSON.stringify(ao.totalValue) };
+    }
+    res.json(result);
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Brightpearl Data Manager import (legacy web UI). The public API cannot set a product's
 // LIVE/ARCHIVED/DISCONTINUED status at all — PATCH and PUT /status both 404 and a whole-
 // product PUT silently ignores the field — so a saved import map is the only route.
