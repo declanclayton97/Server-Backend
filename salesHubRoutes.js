@@ -6,6 +6,7 @@
 // salesHub.js; this module only gathers facts and performs the send.
 
 import nodemailer from "nodemailer";
+import { graphConfigured, salesMailbox, listInbox, getMessage, replyToMessage, sendNew } from "./graphMail.js";
 import {
   SALES_INTENTS,
   detectIntent,
@@ -327,6 +328,36 @@ export function registerSalesHubRoutes(app, deps) {
 
   // POST /api/sales-hub/lookup  { query, emailDate? }
   // `query` is either a bare order number or a whole pasted email.
+  // GET /api/sales-hub/inbox?top=30&unread=1 — the sales mailbox, newest first, each with the
+  // order number it names (if any) so the list shows which emails the hub can answer.
+  app.get("/api/sales-hub/inbox", requireUser, async (req, res) => {
+    if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected — set MS_TENANT_ID, MS_CLIENT_ID and MS_CLIENT_SECRET" });
+    try {
+      const msgs = await listInbox({ top: req.query.top, unreadOnly: req.query.unread === "1" });
+      res.json({
+        mailbox: salesMailbox(),
+        messages: msgs.map((m) => ({ ...m, orderNumber: extractOrderNumber(`${m.subject}
+${m.preview}`) || null })),
+      });
+    } catch (err) {
+      console.error("[sales-hub] inbox failed:", err.message);
+      res.status(err.status === 403 ? 403 : 500).json({ error: err.message });
+    }
+  });
+
+  // GET /api/sales-hub/inbox/:id — one email as plain text, ready for the lookup. Its
+  // receivedAt is the email's real date, so the stale check never has to guess one.
+  app.get("/api/sales-hub/inbox/:id", requireUser, async (req, res) => {
+    if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected" });
+    try {
+      const m = await getMessage(req.params.id);
+      res.json({ ...m, orderNumber: extractOrderNumber(`${m.subject}
+${m.text}`) || null });
+    } catch (err) {
+      res.status(err.status === 404 ? 404 : 500).json({ error: err.message });
+    }
+  });
+
   app.post("/api/sales-hub/lookup", requireUser, async (req, res) => {
     try {
       const raw = String((req.body && req.body.query) || "").trim();
@@ -450,26 +481,34 @@ export function registerSalesHubRoutes(app, deps) {
       const order = await gatherOrder(orderId).catch(() => null);
       const salesperson = (order && order.salesperson) || {};
 
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
-        port: parseInt(process.env.SMTP_PORT || "2525", 10),
-        secure: false,
-        auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
-      });
-
       const who = (req.hubUser && req.hubUser.name) || "";
       const fromName = who || String(b.sentBy || "").trim() || salesperson.name || "Tuffshop Sales";
       const fromAddress = process.env.SALES_SENDER_EMAIL || process.env.SENDER_EMAIL || "sales@tuffshop.co.uk";
 
-      await transporter.sendMail({
-        from: `"${fromName}" <${fromAddress}>`,
-        // The customer replies to the person who owns the order, not a shared
-        // address nobody watches.
-        replyTo: salesperson.email || fromAddress,
-        to,
-        subject,
-        html,
-      });
+      // The customer replies to the person who owns the order, not a shared
+      // address nobody watches.
+      const replyTo = salesperson.email || fromAddress;
+
+      // Through Outlook when connected: sent as the real sales mailbox (passes DMARC, which
+      // smtp2go does not), kept in Sent Items, and — when the email came from the inbox —
+      // threaded as a reply to it. smtp2go stays as the fallback so the hub still works if
+      // Graph is not configured.
+      let via;
+      if (graphConfigured()) {
+        const r = b.messageId
+          ? await replyToMessage(String(b.messageId), { html, to, replyTo })
+          : await sendNew({ to, subject, html, replyTo });
+        via = r.via;
+      } else {
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
+          port: parseInt(process.env.SMTP_PORT || "2525", 10),
+          secure: false,
+          auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
+        });
+        await transporter.sendMail({ from: `"${fromName}" <${fromAddress}>`, replyTo, to, subject, html });
+        via = "smtp2go";
+      }
 
       const note = buildSalesNote({
         intent: b.intent || "eta",
@@ -484,7 +523,7 @@ export function registerSalesHubRoutes(app, deps) {
 
       // The email has gone. A failed note must not read as a failed send, or
       // somebody will send it a second time.
-      res.json({ sent: true, noted, note });
+      res.json({ sent: true, via, noted, note });
     } catch (err) {
       console.error("[sales-hub] send failed:", err.message);
       res.status(500).json({ sent: false, error: err.message });
