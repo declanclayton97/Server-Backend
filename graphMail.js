@@ -100,11 +100,12 @@ export async function getMessage(id) {
 
 // Reply inside the customer's thread: createReply sets the threading headers and quotes the
 // original; our text goes ABOVE that quote, the way a person replying in Outlook would.
-export async function replyToMessage(id, { html, to, replyTo }) {
+export async function replyToMessage(id, { html, to, replyTo, subject }) {
   const draft = await graph("POST", `${mb()}/messages/${encodeURIComponent(id)}/createReply`, {}, { html: true });
   const quoted = (draft.body && draft.body.content) || "";
   const content = /<body[^>]*>/i.test(quoted) ? quoted.replace(/<body[^>]*>/i, (tag) => `${tag}${html}<br>`) : `${html}<br>${quoted}`;
   const patch = { body: { contentType: "HTML", content } };
+  if (subject) patch.subject = subject;
   if (to) patch.toRecipients = [{ emailAddress: { address: to } }];
   if (replyTo) patch.replyTo = [{ emailAddress: { address: replyTo } }];
   await graph("PATCH", `${mb()}/messages/${encodeURIComponent(draft.id)}`, patch);

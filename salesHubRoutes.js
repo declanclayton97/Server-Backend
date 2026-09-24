@@ -6,7 +6,7 @@
 // salesHub.js; this module only gathers facts and performs the send.
 
 import nodemailer from "nodemailer";
-import { graphConfigured, salesMailbox, listInbox, getMessage, replyToMessage, sendNew } from "./graphMail.js";
+import { graphConfigured, salesMailbox, listInbox, getMessage, replyToMessage, sendNew, markRead } from "./graphMail.js";
 import {
   SALES_INTENTS,
   detectIntent,
@@ -502,9 +502,13 @@ ${m.text}`) || null });
       let via;
       if (graphConfigured()) {
         const r = b.messageId
-          ? await replyToMessage(String(b.messageId), { html, to, replyTo })
+          ? await replyToMessage(String(b.messageId), { html, to, replyTo, subject })
           : await sendNew({ to, subject, html, replyTo });
         via = r.via;
+        // Outlook marks an email read once it has been replied to; do the same so the
+        // shared inbox shows it as dealt with. Never on merely OPENING it — a colleague
+        // may be relying on it staying unread.
+        if (b.messageId) markRead(String(b.messageId)).catch((e) => console.error("[sales-hub] markRead:", e.message));
       } else {
         const transporter = nodemailer.createTransport({
           host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
