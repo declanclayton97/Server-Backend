@@ -6,7 +6,7 @@
 // salesHub.js; this module only gathers facts and performs the send.
 
 import nodemailer from "nodemailer";
-import { graphConfigured, salesMailbox, listInbox, getMessage, replyToMessage, sendNew, markRead } from "./graphMail.js";
+import { graphConfigured, salesMailbox, listInbox, getMessage, replyToMessage, sendNew, markRead, setRead } from "./graphMail.js";
 import {
   SALES_INTENTS,
   detectIntent,
@@ -329,16 +329,95 @@ export function registerSalesHubRoutes(app, deps) {
 
   // POST /api/sales-hub/lookup  { query, emailDate? }
   // `query` is either a bare order number or a whole pasted email.
+  // ── Who is working on which email ──────────────────────────────────────────
+  // Opening an email in the hub claims it. The page renews the claim every 30s
+  // while it stays open and visible, so a closed tab or a laptop lid frees it
+  // within LOCK_TTL without anyone having to remember to let go. A second person
+  // opening it sees who has it and cannot reply — enforced here on send, not
+  // just hidden on the page.
+  const LOCK_TTL_SEC = 90;
+  let locksReady = null;
+  const ensureLocks = () => (locksReady ||= getPool().query(`CREATE TABLE IF NOT EXISTS sales_hub_email_locks (
+      message_id text PRIMARY KEY,
+      user_key text NOT NULL,
+      user_name text NOT NULL,
+      claimed_at timestamptz NOT NULL DEFAULT now(),
+      heartbeat_at timestamptz NOT NULL DEFAULT now()
+    )`).catch((e) => { locksReady = null; throw e; }));
+
+  // Live locks held by OTHER people, keyed by message id.
+  async function othersLocks(me) {
+    if (!(useDatabase && getPool())) return {};
+    await ensureLocks();
+    const r = await getPool().query(
+      `SELECT message_id, user_name, claimed_at FROM sales_hub_email_locks
+        WHERE heartbeat_at > now() - ($1 || ' seconds')::interval AND user_key <> $2`, [String(LOCK_TTL_SEC), me]);
+    return Object.fromEntries(r.rows.map((x) => [x.message_id, { name: x.user_name, since: x.claimed_at }]));
+  }
+
+  // POST /api/sales-hub/inbox/:id/claim — take (or renew) the email, unless
+  // someone else holds a live claim on it, in which case say who.
+  app.post("/api/sales-hub/inbox/:id/claim", requireUser, async (req, res) => {
+    if (!(useDatabase && getPool())) return res.json({ ok: true, locking: false });
+    try {
+      await ensureLocks();
+      const me = req.hubUser;
+      // One statement, so two people clicking at once cannot both win: the row is
+      // only overwritten when it is ours already or its holder has gone quiet.
+      const r = await getPool().query(
+        `INSERT INTO sales_hub_email_locks (message_id, user_key, user_name) VALUES ($1, $2, $3)
+         ON CONFLICT (message_id) DO UPDATE
+           SET user_key = EXCLUDED.user_key, user_name = EXCLUDED.user_name, heartbeat_at = now(),
+               claimed_at = CASE WHEN sales_hub_email_locks.user_key = EXCLUDED.user_key
+                                 THEN sales_hub_email_locks.claimed_at ELSE now() END
+         WHERE sales_hub_email_locks.user_key = EXCLUDED.user_key
+            OR sales_hub_email_locks.heartbeat_at <= now() - ($4 || ' seconds')::interval
+         RETURNING user_key`,
+        [req.params.id, me.key, me.name, String(LOCK_TTL_SEC)]);
+      if (r.rowCount) return res.json({ ok: true, locking: true });
+      const h = await getPool().query(`SELECT user_name, claimed_at FROM sales_hub_email_locks WHERE message_id = $1`, [req.params.id]);
+      res.status(409).json({ ok: false, lockedBy: h.rows[0] && h.rows[0].user_name, since: h.rows[0] && h.rows[0].claimed_at });
+    } catch (err) {
+      // A broken lock table must not stop anyone answering email — fail open, loudly.
+      console.error("[sales-hub] claim failed:", err.message);
+      res.json({ ok: true, locking: false, error: err.message });
+    }
+  });
+
+  // POST /api/sales-hub/inbox/:id/release — let go (only ever of our own claim).
+  app.post("/api/sales-hub/inbox/:id/release", requireUser, async (req, res) => {
+    if (!(useDatabase && getPool())) return res.json({ ok: true });
+    try {
+      await ensureLocks();
+      await getPool().query(`DELETE FROM sales_hub_email_locks WHERE message_id = $1 AND user_key = $2`, [req.params.id, req.hubUser.key]);
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // POST /api/sales-hub/inbox/:id/read { isRead } — Outlook's read/unread toggle,
+  // written to the real mailbox so everyone sees it.
+  app.post("/api/sales-hub/inbox/:id/read", requireUser, async (req, res) => {
+    if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected" });
+    try {
+      await setRead(req.params.id, !!(req.body && req.body.isRead));
+      res.json({ ok: true, isRead: !!(req.body && req.body.isRead) });
+    } catch (err) { res.status(err.status === 404 ? 404 : 500).json({ error: err.message }); }
+  });
+
   // GET /api/sales-hub/inbox?top=30&unread=1 — the sales mailbox, newest first, each with the
   // order number it names (if any) so the list shows which emails the hub can answer.
   app.get("/api/sales-hub/inbox", requireUser, async (req, res) => {
     if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected — set MS_TENANT_ID, MS_CLIENT_ID and MS_CLIENT_SECRET" });
     try {
       const msgs = await listInbox({ top: req.query.top, unreadOnly: req.query.unread === "1" });
+      const locks = await othersLocks(req.hubUser.key).catch(() => ({}));
       res.json({
         mailbox: salesMailbox(),
-        messages: msgs.map((m) => ({ ...m, orderNumber: extractOrderNumber(`${m.subject}
-${m.preview}`) || null })),
+        messages: msgs.map((m) => ({
+          ...m,
+          orderNumber: extractOrderNumber(`${m.subject}\n${m.preview}`) || null,
+          viewing: locks[m.id] || null,
+        })),
       });
     } catch (err) {
       console.error("[sales-hub] inbox failed:", err.message);
@@ -352,8 +431,7 @@ ${m.preview}`) || null })),
     if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected" });
     try {
       const m = await getMessage(req.params.id);
-      res.json({ ...m, orderNumber: extractOrderNumber(`${m.subject}
-${m.text}`) || null });
+      res.json({ ...m, orderNumber: extractOrderNumber(`${m.subject}\n${m.text}`) || null });
     } catch (err) {
       res.status(err.status === 404 ? 404 : 500).json({ error: err.message });
     }
@@ -482,6 +560,11 @@ ${m.text}`) || null });
         return res.status(409).json({
           error: "This draft was blocked. Re-check it and tick the override if you are sure.",
         });
+      }
+
+      if (b.messageId) {
+        const held = (await othersLocks(req.hubUser.key).catch(() => ({})))[String(b.messageId)];
+        if (held) return res.status(423).json({ error: `${held.name} is working on this email — not sent.` });
       }
 
       const order = await gatherOrder(orderId).catch(() => null);

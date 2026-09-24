@@ -126,6 +126,8 @@ export async function sendNew({ to, subject, html, replyTo }) {
   return { via: "graph", mailbox: salesMailbox() };
 }
 
-export async function markRead(id) {
-  await graph("PATCH", `${mb()}/messages/${encodeURIComponent(id)}`, { isRead: true });
+export async function markRead(id) { return setRead(id, true); }
+
+export async function setRead(id, isRead) {
+  await graph("PATCH", `${mb()}/messages/${encodeURIComponent(id)}`, { isRead: !!isRead });
 }
