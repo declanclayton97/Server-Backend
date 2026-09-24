@@ -8578,7 +8578,10 @@ app.post('/api/purchasing/add-variant-live', async (req, res) => {
       financialDetails: { taxable: !!(sib.financialDetails && sib.financialDetails.taxable), taxCode: { id: sib.financialDetails.taxCode.id } },
       salesChannels: [{
         salesChannelName: sc.salesChannelName || 'Brightpearl', productName: name, productCondition: sc.productCondition || 'new',
-        categories: sc.categories || [], description: sc.description, shortDescription: sc.shortDescription,
+        categories: sc.categories || [],
+        // BP rejects a description with empty text (PRDC-009), and most siblings have one.
+        ...(sc.description && sc.description.text ? { description: sc.description } : {}),
+        ...(sc.shortDescription && sc.shortDescription.text ? { shortDescription: sc.shortDescription } : {}),
       }],
       seasonIds: sib.seasonIds || [],
       nominalCodeStock: sib.nominalCodeStock, nominalCodePurchases: sib.nominalCodePurchases, nominalCodeSales: sib.nominalCodeSales,
