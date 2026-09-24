@@ -3197,6 +3197,9 @@ async function placePortwestOrder(pool, altItemsUrl, { padToThreshold = 0, verif
     try {
       const r = await fetch(`${altItemsUrl}/api/portwest-stock?name=${encodeURIComponent(d.name || 'Portwest')}&sku=${encodeURIComponent(d.sku)}`, { signal: AbortSignal.timeout(20000) });
       const j = await r.json();
+      // A colour Portwest no longer make (PS61 White, SO 488496, 2026-09-24): name what they DO
+      // make, so sales can offer a swap instead of hunting for a reason.
+      if (j && j.notListed === 'colour' && Array.isArray(j.listedColours)) return `Portwest no longer make this colour — this style now comes in ${j.listedColours.join(', ')} only`;
       if (j && j.found === true) return Number(j.avail) === 0 ? `out of stock at Portwest${j.deldate ? `, due ${j.deldate}` : ''}` : `Portwest show ${j.avail} in stock — rejected for another reason`;
       if (j && j.found === false && !j.reason) return 'Portwest do not list this size/colour on their order grid';
     } catch { /* unknown */ }
