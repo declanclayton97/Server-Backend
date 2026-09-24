@@ -6,7 +6,7 @@
 // salesHub.js; this module only gathers facts and performs the send.
 
 import nodemailer from "nodemailer";
-import { graphConfigured, salesMailbox, listInbox, getMessage, replyToMessage, sendNew, markRead, setRead } from "./graphMail.js";
+import { graphConfigured, salesMailbox, listInbox, getMessage, replyToMessage, sendNew, markRead, setRead, getAttachment } from "./graphMail.js";
 import {
   SALES_INTENTS,
   detectIntent,
@@ -327,8 +327,6 @@ export function registerSalesHubRoutes(app, deps) {
     };
   }
 
-  // POST /api/sales-hub/lookup  { query, emailDate? }
-  // `query` is either a bare order number or a whole pasted email.
   // ── Who is working on which email ──────────────────────────────────────────
   // Opening an email in the hub claims it. The page renews the claim every 30s
   // while it stays open and visible, so a closed tab or a laptop lid frees it
@@ -437,6 +435,33 @@ export function registerSalesHubRoutes(app, deps) {
     }
   });
 
+  // GET /api/sales-hub/inbox/:id/attachments/:aid — one attachment's bytes.
+  // Customer-supplied files are served defensively: only real raster image types keep
+  // their type (SVG can carry script, so it does not); everything else goes out as a
+  // download, never rendered, and nosniff stops a browser guessing otherwise.
+  const SAFE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp"]);
+  app.get("/api/sales-hub/inbox/:id/attachments/:aid", requireUser, async (req, res) => {
+    if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected" });
+    try {
+      const a = await getAttachment(req.params.id, req.params.aid);
+      const type = String(a.contentType).toLowerCase().split(";")[0].trim();
+      const safe = SAFE_IMAGE_TYPES.has(type);
+      const filename = String(a.name).replace(/[^\w.\- ()]+/g, "_").slice(0, 120) || "attachment";
+      res.set({
+        "Content-Type": safe ? type : "application/octet-stream",
+        "Content-Disposition": `${safe ? "inline" : "attachment"}; filename="${filename}"`,
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, max-age=3600",
+      });
+      res.send(a.buf);
+    } catch (err) {
+      res.status(err.status === 404 ? 404 : 500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/sales-hub/lookup  { query, emailDate? }
+  // `query` is either a bare order number or a whole email.
   app.post("/api/sales-hub/lookup", requireUser, async (req, res) => {
     try {
       const raw = String((req.body && req.body.query) || "").trim();

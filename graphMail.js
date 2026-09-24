@@ -94,8 +94,29 @@ export async function getMessage(id) {
     fromName: (m.from && m.from.emailAddress && m.from.emailAddress.name) || "",
     fromAddress: (m.from && m.from.emailAddress && m.from.emailAddress.address) || "",
     receivedAt: m.receivedDateTime,
-    text: (m.body && m.body.content) || "",
+    // Inline images leave "[cid:image001.png@01DB…]" markers in the text body; the
+    // images themselves are listed below with the attachments.
+    text: ((m.body && m.body.content) || "").replace(/\[cid:[^\]]+\]/g, "").replace(/\n{3,}/g, "\n\n"),
+    attachments: await listAttachments(id).catch(() => []),
   };
+}
+
+// File attachments only (an attached EMAIL or calendar item has no bytes to show).
+// contentBytes is left out of the list — a few photos would make it megabytes.
+export async function listAttachments(id) {
+  const j = await graph("GET", `${mb()}/messages/${encodeURIComponent(id)}/attachments?$select=id,name,contentType,size,isInline`);
+  return (j.value || [])
+    .filter((a) => !a["@odata.type"] || a["@odata.type"] === "#microsoft.graph.fileAttachment")
+    .map((a) => ({ id: a.id, name: a.name || "attachment", contentType: a.contentType || "", size: a.size || 0, isInline: !!a.isInline }));
+}
+
+// The raw bytes of one attachment, plus what it says it is.
+export async function getAttachment(id, attachmentId) {
+  const base = `${GRAPH}${mb()}/messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`;
+  const meta = await graph("GET", `${mb()}/messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}?$select=name,contentType,size`);
+  const r = await fetch(`${base}/$value`, { headers: { Authorization: `Bearer ${await token()}` } });
+  if (!r.ok) { const e = new Error(`Graph attachment -> ${r.status}`); e.status = r.status; throw e; }
+  return { name: meta.name || "attachment", contentType: meta.contentType || "", buf: Buffer.from(await r.arrayBuffer()) };
 }
 
 // Reply inside the customer's thread: createReply sets the threading headers and quotes the
