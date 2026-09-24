@@ -67,7 +67,17 @@ export function detectIntent(text) {
 // the number on THEIR confirmation — "000121305" — which is not a Brightpearl
 // order id at all; it is the order's reference. Brightpearl can find it
 // (customerRef), but only if we stop throwing the leading zeros away first.
-const ORDER_NUMBER_RE = /(?:\b(?:order|ord|so|inv|invoice|ref(?:erence)?)\s*[:#]?\s*|#)(\d{4,12})\b/i;
+//
+// The LABEL decides, not the position. "Your Invoice #000109482 for Order
+// #000123455" names both, and the first number is the invoice — so an order
+// label beats a reference or a bare "#", which beat an invoice label. An
+// invoice number is only used when nothing else is named.
+const LABELLED_NUMBER_RES = [
+  /\b(?:sales\s*order|order|ord|so)\s*(?:no\.?|number)?\s*[:#]?\s*(\d{4,12})\b/i,
+  /\b(?:ref(?:erence)?)\s*(?:no\.?|number)?\s*[:#]?\s*(\d{4,12})\b/i,
+  /(?<!\b(?:inv|invoice)\s*(?:no\.?|number)?\s*)#\s*(\d{4,12})\b/i,
+  /\b(?:inv|invoice)\s*(?:no\.?|number)?\s*[:#]?\s*(\d{4,12})\b/i,
+];
 // A zero-padded web reference. TWO or more leading zeros, deliberately: a UK
 // mobile in an email signature (07960158931) has exactly one, and matching
 // that would send us looking up somebody's phone number as an order.
@@ -87,8 +97,10 @@ const BARE_NUMBER_RE = /\b(\d{6})\b/g;
  */
 export function extractOrderNumber(text) {
   const s = String(text || "");
-  const tagged = s.match(ORDER_NUMBER_RE);
-  if (tagged) return tagged[1];
+  for (const re of LABELLED_NUMBER_RES) {
+    const tagged = s.match(re);
+    if (tagged) return tagged[1];
+  }
   const web = s.match(WEB_REF_RE);
   if (web) return web[1];
 

@@ -45,6 +45,12 @@ assertEq("hash form", extractOrderNumber("ref #488976 outstanding"), "488976");
 assertEq("SO prefix", extractOrderNumber("SO489433 - any news"), "489433");
 assertEq("bare 6-digit fallback", extractOrderNumber("your 489448 hasn't arrived"), "489448");
 assertEq("no number", extractOrderNumber("Where is my stuff?"), null);
+// The order number beats an invoice number, whichever comes first (Dec, 24 Sep).
+assertEq("order beats invoice", extractOrderNumber("Your Invoice #000109482 for Order #000123455"), "000123455");
+assertEq("order beats invoice (plain)", extractOrderNumber("Invoice 109482 - order 489373"), "489373");
+assertEq("invoice number used only when alone", extractOrderNumber("Query on invoice 000109482"), "000109482");
+assertEq("bare # beats an invoice label", extractOrderNumber("Invoice #000109482 re #489373"), "489373");
+assertEq("order number wording", extractOrderNumber("Order number: 489373"), "489373");
 // A phone number must not beat a tagged order number.
 assertEq("tagged beats phone", extractOrderNumber("call me on 01924 123456 re order 489373"), "489373");
 
