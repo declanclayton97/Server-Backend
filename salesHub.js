@@ -332,7 +332,7 @@ export function notesSince(notes, emailDate, opts = {}) {
  *               or promise a date for a line the supplier has refused. A human
  *               must look at this.
  */
-export function assessDuplication({ notes, emailDate, proposedDates = [], blockedLines = [], automatedEmails = [] }) {
+export function assessDuplication({ notes, emailDate, proposedDates = [], blockedLines = [], automatedEmails = [], slippedFrom = null }) {
   const laterNotes = notesSince(notes, emailDate);
   const reasons = [];
   let level = emailDate ? "ok" : "unknown";
@@ -373,25 +373,38 @@ export function assessDuplication({ notes, emailDate, proposedDates = [], blocke
     });
   }
 
-  // proposedDates arrives as the canonical keys the draft would commit us to.
-  const ourKeys = proposedDates.map((d) => (typeof d === "string" && /^\d{2}-\d{2}$/.test(d) ? d : null))
-    .filter(Boolean);
+  // proposedDates arrives as the window keys the draft would commit us to.
+  const ours = proposedDates.map(parseWindowKey).filter(Boolean);
+
+  // The PO now says later than a colleague told them. The draft follows the PO —
+  // the honest thing — but a person must see that it changes the story.
+  if (slippedFrom && slippedFrom.window && ours.length) {
+    bump("warn");
+    reasons.push({
+      kind: "window_slipped",
+      text:
+        `${slippedFrom.addedBy || "A colleague"} told them "${slippedFrom.raw}" on ${formatWhen(slippedFrom.addedOn)} ` +
+        `(${prettyWindow(slippedFrom.window)}), but the purchase order now puts it at ${prettyWindow(ours[0])}. ` +
+        `This reply moves it back — say sorry for the change.`,
+    });
+  }
 
   for (const n of laterNotes) {
-    const theirs = datesMentioned(n.text);
+    const theirs = windowsMentioned(n.text, n.addedOn);
     if (!theirs.length) continue;
     const theirRaw = theirs.map((d) => d.raw).join(", ");
 
-    // Same day, written differently, is NOT a contradiction.
-    const agrees = theirs.some((d) => ourKeys.includes(d.key));
-    if (ourKeys.length && !agrees) {
+    // The same window however it was worded — "mid next week" on Thursday and
+    // "midweek" the following Monday — is NOT a contradiction. A different week is.
+    const sameWeek = ours.length && theirs.some((t) => ours.some((o) => o.monday === t.window.monday));
+    if (ours.length && !sameWeek) {
       bump("blocked");
       reasons.push({
         kind: "date_conflict",
         text:
-          `${n.addedBy || "A colleague"} already gave ${theirRaw} on ` +
-          `${formatWhen(n.addedOn)}. This draft says ${ourKeys.map(prettyKey).join(", ")}. ` +
-          `Sending it contradicts them.`,
+          `${n.addedBy || "A colleague"} already told them "${theirRaw}" on ` +
+          `${formatWhen(n.addedOn)} (${prettyWindow(theirs[0].window)}). This draft says ` +
+          `${ours.map(prettyWindow).join(", ")}. Sending it contradicts them.`,
         note: n,
       });
     } else {
@@ -503,20 +516,42 @@ export function greeting(order) {
 // Phrase a delivery expectation from the PURCHASE ORDER behind the line, which
 // is the only honest source we have. No PO, or a PO with no date, means we say
 // we are chasing it - never a guessed date.
-export function etaSentence(po) {
-  if (!po) return { text: "I am chasing this with our supplier now and will come straight back to you with a date.", dates: [] };
-  if (!po.expectedDate) {
-    return {
-      text: `This is on order with ${po.supplier || "our supplier"}${po.placedOn ? ` (placed ${formatDay(po.placedOn)})` : ""}. ` +
-            `They have not confirmed a despatch date yet, so I am chasing it and will update you as soon as I hear.`,
-      dates: [],
-    };
+//
+// Never a date — a window ("mid next week"). Where a colleague has already
+// given the customer one, that is what we repeat, re-worded for today, so the
+// customer hears one story. Only if the PO now says LATER than that do we move
+// it, and the guard flags that we are changing what they were told.
+//
+// Returns { text, dates: [windowKey], source, slippedFrom? } where source is
+// "note" | "po" | "po-slipped" | "none".
+export function etaSentence(po, { today = new Date(), promised = null, allowanceDays = DELIVERY_ALLOWANCE_DAYS } = {}) {
+  const who = po && po.supplier ? `the ${esc(supplierLabel(po.supplier))} items` : "the stock";
+  const chasing = "I am chasing this with our supplier now and will come straight back to you with an update.";
+  const poWin = windowFromPo(po, allowanceDays);
+
+  let win = null, source = "none", slippedFrom;
+  if (promised && (!poWin || compareWindows(poWin, promised.window) <= 0)) { win = promised.window; source = "note"; }
+  else if (poWin) {
+    win = poWin;
+    source = promised ? "po-slipped" : "po";
+    if (promised) slippedFrom = promised;
   }
-  const shown = formatDay(po.expectedDate);
+
+  const phrase = win ? phraseWindow(win, today) : null;
+  if (!phrase) {
+    // No window, or the window has already passed: the goods are late and we
+    // do not know when — say we are on it rather than invent one.
+    if (po && !po.expectedDate) {
+      return { text: `This is on order with ${esc(supplierLabel(po.supplier) || "our supplier")}. They have not confirmed when it will be with us yet, so ${chasing.charAt(0).toLowerCase() + chasing.slice(1)}`, dates: [], source: "none" };
+    }
+    return { text: win ? `This is running a little later than expected. ${chasing}` : chasing, dates: [], source: win ? "overdue" : "none" };
+  }
   return {
-    text: `This is on order with ${po.supplier || "our supplier"} and is currently due with us ${shown}. ` +
-          `Allowing for decoration and carriage I would expect it with you shortly after that.`,
-    dates: dateKeys(shown),
+    text: `We're just waiting on ${who} to arrive, and it should be with you ${phrase}.`,
+    dates: [windowKey(win)],
+    phrase,
+    source,
+    ...(slippedFrom ? { slippedFrom } : {}),
   };
 }
 
@@ -540,6 +575,184 @@ function formatDay(when) {
   return nextWorkingDay(d).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
 }
 
+// ---------------------------------------------------------------------------
+// Delivery WINDOWS, not dates.
+//
+// The team never gives a customer an exact day. They say "early next week",
+// "mid next week", "late this week" — a date is a promise the courier gets to
+// break for us. So an ETA here is a window: the Monday of a week plus a part of
+// it (early = Mon/Tue, mid = Wed, late = Thu/Fri, week = "sometime that week").
+//
+// A window is ABSOLUTE (it names a real week) and only turned back into words
+// at the moment of writing, relative to the day we write. That matters: Jack's
+// note on Thursday 24 Sep says "mid next week"; answering on Monday 28 Sep, the
+// same window is "mid this week", and repeating his words would move it a week.
+// ---------------------------------------------------------------------------
+export const WINDOW_PARTS = ["early", "mid", "late"];
+
+// A calendar day in the UK as a local-midnight Date, whatever the server's zone.
+function ukDay(when) {
+  const d = when instanceof Date ? when : new Date(when);
+  if (isNaN(d.getTime())) return null;
+  const [y, m, day] = d.toLocaleDateString("en-CA", { timeZone: "Europe/London" }).split("-").map(Number);
+  return new Date(y, m - 1, day);
+}
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const mondayOf = (d) => addDays(d, -((d.getDay() + 6) % 7));
+const partOfDay = (d) => (d.getDay() <= 2 ? "early" : d.getDay() === 3 ? "mid" : "late");
+
+function addWorkingDays(d, n) {
+  let out = nextWorkingDay(d);
+  for (let i = 0; i < n; i++) out = nextWorkingDay(addDays(out, 1));
+  return out;
+}
+
+// The window a given day falls in (a weekend or bank holiday rolls forward).
+export function windowOf(when) {
+  const d = ukDay(when);
+  if (!d) return null;
+  const w = nextWorkingDay(d);
+  return { monday: isoDay(mondayOf(w)), part: partOfDay(w) };
+}
+export const windowKey = (w) => (w ? `${w.monday}/${w.part}` : null);
+export function parseWindowKey(key) {
+  const m = /^(\d{4}-\d{2}-\d{2})\/(early|mid|late|week)$/.exec(String(key || ""));
+  return m ? { monday: m[1], part: m[2] } : null;
+}
+
+// Order two windows: negative if a is sooner. "week" sorts as the END of its week,
+// the cautious reading of "sometime next week".
+const PART_RANK = { early: 0, mid: 1, late: 2, week: 2 };
+export function compareWindows(a, b) {
+  if (a.monday !== b.monday) return a.monday < b.monday ? -1 : 1;
+  return PART_RANK[a.part] - PART_RANK[b.part];
+}
+
+/**
+ * Words for a window, as seen from `today`. Returns null when the window is
+ * already behind us — the goods are late, and saying so is the caller's job.
+ */
+export function phraseWindow(w, today = new Date()) {
+  const t = ukDay(today);
+  const weeks = Math.round((new Date(w.monday + "T12:00:00") - mondayOf(t)) / (7 * 86400000));
+  if (weeks < 0) return null;
+  if (weeks === 0) {
+    if (w.part !== "week" && PART_RANK[w.part] < PART_RANK[partOfDay(t)]) return null;
+    return { early: "early this week", mid: "midweek", late: "by the end of this week", week: "this week" }[w.part];
+  }
+  if (weeks === 1) return w.part === "week" ? "next week" : `${w.part} next week`;
+  if (weeks === 2) return w.part === "week" ? "the week after next" : `${w.part} the week after next`;
+  return `in around ${weeks} weeks`;
+}
+
+const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const PART_WORDS = [
+  [/^(?:early|beginning of|start of)$/i, "early"],
+  [/^(?:mid|middle of)$/i, "mid"],
+  [/^(?:late|end of|back end of|latter part of)$/i, "late"],
+];
+const partFromWords = (s) => (PART_WORDS.find(([re]) => re.test(String(s || "").trim())) || [])[1] || "week";
+
+/**
+ * Every delivery window a note gives, read relative to when the NOTE was written.
+ * Covers what the team actually types — "mid next week", "early this week",
+ * "end of the week", "midweek", "week after next", "Tuesday", "25/09".
+ * Returns [{ raw, window }].
+ */
+export function windowsMentioned(text, writtenOn) {
+  const s = plainText(text);
+  const base = ukDay(writtenOn || new Date());
+  if (!s || !base) return [];
+  const out = [];
+  const seen = new Set();
+  const push = (raw, w) => {
+    const k = windowKey(w);
+    if (!w || seen.has(k)) return;
+    seen.add(k);
+    out.push({ raw: raw.trim(), window: w });
+  };
+  const inWeek = (offset, part) => ({ monday: isoDay(addDays(mondayOf(base), 7 * offset)), part });
+
+  const PART = "(early|beginning of|start of|mid|middle of|late|end of|back end of|latter part of)";
+  let m;
+  const rel = new RegExp(`\\b(?:${PART}[\\s-]*)?(?:the\\s+)?(this|next)\\s+week\\b`, "gi");
+  while ((m = rel.exec(s))) {
+    // "next week" inside "the week after next" is handled below
+    if (/after\s*$/i.test(s.slice(0, m.index))) continue;
+    push(m[0], inWeek(m[2].toLowerCase() === "next" ? 1 : 0, partFromWords(m[1])));
+  }
+  const after = new RegExp(`\\b(?:${PART}[\\s-]*)?(?:the\\s+)?week after next\\b`, "gi");
+  while ((m = after.exec(s))) push(m[0], inWeek(2, partFromWords(m[1])));
+  // "midweek", "end of the week", "later this week" without this/next: this week,
+  // unless that part of it has already gone — then it can only mean next week.
+  const bare = /\b(mid[\s-]?week|end of (?:the )?week|later (?:on )?in the week|by the weekend)\b/gi;
+  while ((m = bare.exec(s))) {
+    const part = /^mid/i.test(m[1]) ? "mid" : "late";
+    const gone = PART_RANK[part] < PART_RANK[partOfDay(base)];
+    push(m[0], inWeek(gone ? 1 : 0, part));
+  }
+  // A named weekday: the next one after the note (never the note's own day).
+  const wd = /\b(?:on|by|for|until|till|due|arriving|expected)\s+(monday|tuesday|wednesday|thursday|friday)\b/gi;
+  while ((m = wd.exec(s))) {
+    const target = WEEKDAYS.indexOf(m[1].toLowerCase());
+    let d = addDays(base, 1);
+    while (d.getDay() !== target) d = addDays(d, 1);
+    push(m[0], windowOf(d));
+  }
+  if (/\btomorrow\b/i.test(s)) push("tomorrow", windowOf(addWorkingDays(base, 1)));
+  // Written dates ("25/09", "Thursday 25 September"): the next such day on or after
+  // the note, so a December note saying "05/01" means January.
+  for (const d of datesMentioned(s)) {
+    const [mm, dd] = d.key.split("-").map(Number);
+    let when = new Date(base.getFullYear(), mm - 1, dd);
+    if (when < addDays(base, -60)) when = new Date(base.getFullYear() + 1, mm - 1, dd);
+    push(d.raw, windowOf(when));
+  }
+  return out;
+}
+
+/**
+ * The window this customer was most recently given — the newest note that
+ * represents contact (a person, or one of our own replies) and names one.
+ * Machine notes are ignored: "Auto-PO ... due 25/09" was never said to anyone.
+ */
+export function promisedWindow(notes) {
+  const withWindows = (notes || [])
+    .filter(isContactNote)
+    .map((n) => ({ n, t: new Date(n.addedOn).getTime(), found: windowsMentioned(n.text, n.addedOn) }))
+    .filter((x) => !isNaN(x.t) && x.found.length)
+    .sort((a, b) => b.t - a.t);
+  if (!withWindows.length) return null;
+  const { n, found } = withWindows[0];
+  return { window: found[0].window, raw: found[0].raw, addedBy: n.addedBy || "", addedOn: n.addedOn, text: summarise(n.text) };
+}
+
+// "MASCOT" -> "Mascot": supplier names are stored shouting.
+const supplierLabel = (s) => String(s || "").trim().toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+
+// Working days from the goods reaching us to reaching the customer: goods-in,
+// decoration, courier. Tunable without a deploy of the logic.
+export const DELIVERY_ALLOWANCE_DAYS = Number(process.env.SALES_HUB_ALLOWANCE_DAYS || 2);
+
+/**
+ * When the customer should have it, as a window, from the supplier's date plus
+ * our allowance. null when the PO has no date.
+ */
+export function windowFromPo(po, allowanceDays = DELIVERY_ALLOWANCE_DAYS) {
+  if (!po || !po.expectedDate) return null;
+  const d = ukDay(po.expectedDate);
+  return d ? windowOf(addWorkingDays(d, allowanceDays)) : null;
+}
+
+// "2026-09-28/mid" -> "mid week commencing 28 September", for notes and warnings.
+export function prettyWindow(key) {
+  const w = typeof key === "string" ? parseWindowKey(key) : key;
+  if (!w) return String(key || "");
+  const wc = new Date(w.monday + "T12:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "long" });
+  return `${w.part === "week" ? "" : w.part + " "}week commencing ${wc}`;
+}
+
 /**
  * Build the draft. Returns { subject, html, text, proposedDates }.
  *
@@ -554,7 +767,9 @@ function formatDay(when) {
  * who actually answered them, and that person should not be signing a
  * colleague's name to their own words.
  */
-export function buildSalesReply({ intent, order, po, blockedLines = [], salesperson, signedBy, tone = "warm" }) {
+export function buildSalesReply({ intent, order, po, blockedLines = [], salesperson, signedBy, tone = "warm", today = new Date(), promised = null }) {
+  const etaOpts = { today, promised };
+  let eta = null;
   // Same rule as the subject: quote the NUMBER to the customer, never the
   // internal reference. Fall back to the reference only if there is no id.
   const ref = order?.id || order?.reference;
@@ -581,7 +796,7 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
         outstanding.map((l) => `&bull; ${esc(l.name)}${l.outstanding ? ` &times; ${esc(l.outstanding)}` : ""}`).join("<br>")
       );
     }
-    const eta = etaSentence(po);
+    eta = etaSentence(po, etaOpts);
     lines.push(eta.text);
     proposedDates = eta.dates;
   } else if (intent === "delay") {
@@ -597,12 +812,12 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
       );
     } else {
       lines.push(`I am sorry order ${esc(ref)} has taken longer than it should have.`);
-      const eta = etaSentence(po);
+      eta = etaSentence(po, etaOpts);
       lines.push(eta.text);
       proposedDates = eta.dates;
     }
   } else {
-    const eta = etaSentence(po);
+    eta = etaSentence(po, etaOpts);
     lines.push(`I have checked order ${esc(ref)} for you.`);
     lines.push(eta.text);
     proposedDates = eta.dates;
@@ -635,20 +850,44 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
     html,
     text: lines.join("\n\n").replace(/<br>/g, "\n").replace(/<[^>]+>/g, ""),
     proposedDates,
+    // How the window was chosen, so the page can say "kept to what Jack told them".
+    eta: eta ? { source: eta.source, phrase: eta.phrase || null, slippedFrom: eta.slippedFrom || null } : null,
   };
 }
 
 // What gets written to the Brightpearl order so the next person can see what
 // the customer was told, without digging through a mailbox.
-export function buildSalesNote({ intent, to, subject, sentBy, proposedDates = [], duplicationLevel }) {
+//
+// The WHOLE email goes in, not just "I sent one": the next person to pick the
+// order up needs to see exactly what the customer was told, in the words used.
+export function buildSalesNote({ intent, to, subject, sentBy, proposedDates = [], duplicationLevel, body = "" }) {
   const label = (SALES_INTENTS.find((i) => i.key === intent) || {}).label || intent;
   const bits = [
     `Sales Hub reply sent to ${to}`,
     `Reason: ${label}`,
     `Subject: ${subject}`,
   ];
-  if (proposedDates.length) bits.push(`Date given: ${proposedDates.join(", ")}`);
+  if (proposedDates.length) bits.push(`Delivery window given: ${proposedDates.map(prettyWindow).join(", ")}`);
   if (sentBy) bits.push(`Sent by: ${sentBy}`);
   if (duplicationLevel && duplicationLevel !== "ok") bits.push(`Sent despite a "${duplicationLevel}" warning.`);
-  return bits.join("\n");
+  const text = String(body || "").trim();
+  return bits.join("\n") + (text ? `\n\n--- Email sent ---\n${text}` : "");
+}
+
+// The sent HTML as plain text for the order note: paragraphs and line breaks kept,
+// the signature block dropped (it is the same on every email and pages long).
+export function emailToNoteText(html) {
+  let s = String(html || "");
+  const at = s.indexOf(SIGNATURE_HTML);
+  if (at >= 0) s = s.slice(0, at) + s.slice(at + SIGNATURE_HTML.length);
+  return s
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h\d)>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "• ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&bull;/g, "•").replace(/&times;/g, "×")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }

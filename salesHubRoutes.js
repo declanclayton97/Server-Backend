@@ -20,7 +20,8 @@ import {
   assessDuplication,
   buildSalesReply,
   buildSalesNote,
-  dateKeys,
+  promisedWindow,
+  emailToNoteText,
 } from "./salesHub.js";
 
 const num = (v) => (v == null || v === "" || isNaN(Number(v)) ? null : Number(v));
@@ -429,8 +430,12 @@ ${m.text}`) || null });
         .slice()
         .sort((a, b) => new Date(b.expectedDate || 0) - new Date(a.expectedDate || 0))[0] || null;
 
+      // What this customer was last told ("advised mid next week"), from the notes.
+      // The draft keeps to it unless the PO has since moved later.
+      const promised = promisedWindow(order.timeline);
+
       const draft = buildSalesReply({
-        intent, order, po,
+        intent, order, po, promised,
         blockedLines: order.blockedLines,
         salesperson: order.salesperson,
         // The SESSION says who this is; the body is only a fallback for a
@@ -444,9 +449,10 @@ ${m.text}`) || null });
         proposedDates: draft.proposedDates,
         blockedLines: order.blockedLines,
         automatedEmails: order.automatedEmails,
+        slippedFrom: draft.eta && draft.eta.slippedFrom,
       });
 
-      res.json({ draft, assessment, po, usedNoEmailDate: !emailDate });
+      res.json({ draft, assessment, po, promised, usedNoEmailDate: !emailDate });
     } catch (err) {
       console.error("[sales-hub] draft failed:", err.message);
       res.status(500).json({ error: err.message });
@@ -514,12 +520,15 @@ ${m.text}`) || null });
         intent: b.intent || "eta",
         to, subject,
         sentBy: who || b.sentBy || salesperson.name || "",
-        proposedDates: Array.isArray(b.proposedDates) ? b.proposedDates : dateKeys(html),
+        proposedDates: Array.isArray(b.proposedDates) ? b.proposedDates : [],
         duplicationLevel: b.acknowledgedLevel,
+        body: emailToNoteText(html),
       });
-      let noted = true;
-      try { await postBpOrderNote(orderId, note); }
-      catch (e) { noted = false; console.error("[sales-hub] note failed:", e.message); }
+      // postBpOrderNote reports failure by RETURNING false, not throwing — reading
+      // only the catch told people "written to the order notes" when it was not.
+      let noted = false;
+      try { noted = (await postBpOrderNote(orderId, note)) !== false; }
+      catch (e) { console.error("[sales-hub] note failed:", e.message); }
 
       // The email has gone. A failed note must not read as a failed send, or
       // somebody will send it a second time.

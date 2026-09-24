@@ -16,6 +16,11 @@ import {
   etaSentence,
   buildSalesReply,
   buildSalesNote,
+  windowsMentioned,
+  windowKey,
+  phraseWindow,
+  promisedWindow,
+  emailToNoteText,
 } from "./salesHub.js";
 
 let pass = 0, fail = 0;
@@ -170,23 +175,23 @@ assertEq("but the UI can still see them",
 // --- THE CORE GUARD ---------------------------------------------------------
 // Dec's scenario: emails Monday, rings Wednesday and is given 25/09, our reply
 // to the Monday email would land Thursday.
-const repeat = assessDuplication({ notes, emailDate: emailMon, proposedDates: dateKeys("Thursday, 25 September") });
+const repeat = assessDuplication({ notes, emailDate: emailMon, proposedDates: ["2026-09-21/late"] });
 assertEq("same date already given -> warn", repeat.level, "warn");
 assertTrue("says they already know", repeat.reasons.some((r) => r.kind === "already_told"));
 
 // Worse: we are about to give a DIFFERENT date to the one promised.
-const clash = assessDuplication({ notes, emailDate: emailMon, proposedDates: dateKeys("Friday, 2 October") });
+const clash = assessDuplication({ notes, emailDate: emailMon, proposedDates: ["2026-09-28/late"] });
 assertEq("different date -> blocked", clash.level, "blocked");
 assertTrue("names the conflict", clash.reasons.some((r) => r.kind === "date_conflict"));
 assertTrue("quotes the colleague", clash.reasons[0].text.includes("Sarah"));
 
 // Nothing since the email at all.
-assertEq("quiet order -> ok", assessDuplication({ notes: [notes[0]], emailDate: emailMon, proposedDates: dateKeys("25 September") }).level, "ok");
+assertEq("quiet order -> ok", assessDuplication({ notes: [notes[0]], emailDate: emailMon, proposedDates: ["2026-09-21/late"] }).level, "ok");
 
 // NO EMAIL DATE: must NOT read as a clean bill of health. "ok" means we looked
 // and found nothing; saying that when we never looked is the one lie this
 // module must not tell.
-const noDate = assessDuplication({ notes, emailDate: null, proposedDates: dateKeys("25 September") });
+const noDate = assessDuplication({ notes, emailDate: null, proposedDates: ["2026-09-21/late"] });
 assertEq("no email date -> unknown, not ok", noDate.level, "unknown");
 assertTrue("explains why the check is off", noDate.reasons.some(r => r.kind === "no_email_date"));
 // The one fact that lets a salesperson decide for themselves: when this
@@ -206,7 +211,7 @@ assertEq("lastContact skips auto-PO chatter",
 assertEq("lastContact on a silent order is null", lastContact([]), null);
 // A blocked line still blocks even with no date - that check needs no date.
 assertEq("no date but a blocked line + a date still blocks",
-  assessDuplication({ notes: [], emailDate: null, proposedDates: dateKeys("25 September"),
+  assessDuplication({ notes: [], emailDate: null, proposedDates: ["2026-09-21/late"],
     blockedLines: [{ sku: "X" }] }).level, "blocked");
 
 // Contact since, but no date in it - still worth a look.
@@ -219,7 +224,7 @@ assertTrue("tells them to read it", vague.reasons.some((r) => r.kind === "contac
 
 // Never promise a date on a line the supplier refused.
 const blocked = assessDuplication({
-  notes: [], emailDate: emailMon, proposedDates: dateKeys("25 September"),
+  notes: [], emailDate: emailMon, proposedDates: ["2026-09-21/late"],
   blockedLines: [{ sku: "119627-271-407", name: "Fristads trousers" }],
 });
 assertEq("blocked line + a date -> blocked", blocked.level, "blocked");
@@ -244,17 +249,20 @@ assertTrue("PO without a date -> still no promise",
   etaSentence({ supplier: "Blaklader", placedOn: "2026-09-10" }).expectedDate === undefined);
 assertEq("PO without a date proposes nothing",
   etaSentence({ supplier: "Blaklader", placedOn: "2026-09-10" }).dates, []);
-// A supplier due date on a WEEKEND must not become a promised weekend delivery.
-// 19 Sept 2026 is a Saturday; the copy should say the Monday.
-const weekend = etaSentence({ supplier: "CHADWICK", expectedDate: "2026-09-19" });
-assertFalse("never promises a Saturday", /Saturday/.test(weekend.text));
-assertTrue("rolls forward to the Monday", /Monday 21 September/.test(weekend.text));
-assertEq("and proposes the rolled date", weekend.dates, ["09-21"]);
-// A weekday date is left exactly as it is.
-const weekday = etaSentence({ supplier: "CHADWICK", expectedDate: "2026-09-23" });
-assertTrue("a Wednesday stays Wednesday", /Wednesday 23 September/.test(weekday.text));
-
-const withDate = etaSentence({ supplier: "Blaklader", expectedDate: "2026-09-25" });
+// Windows, never dates. Today is fixed so the wording is testable.
+const THU24 = new Date("2026-09-24T12:00:00+01:00"), MON28 = new Date("2026-09-28T09:00:00+01:00");
+// A supplier date on a Saturday rolls to Monday, + 2 working days allowance = Wednesday.
+const weekend = etaSentence({ supplier: "CHADWICK", expectedDate: "2026-09-26" }, { today: THU24 });
+assertEq("Saturday PO date -> window mid next week", weekend.dates, ["2026-09-28/mid"]);
+assertTrue("worded as a window", weekend.text.includes("mid next week"));
+assertFalse("never names a day", /monday|tuesday|wednesday|thursday|friday|saturday|sunday/i.test(weekend.text));
+assertFalse("never names a date", /\b\d{1,2}(st|nd|rd|th)?\s+(sep|oct)/i.test(weekend.text));
+assertTrue("supplier name is not shouted", weekend.text.includes("Chadwick"));
+// A PO date already behind us is late: say we are chasing, promise nothing.
+const late = etaSentence({ supplier: "CHADWICK", expectedDate: "2026-09-10" }, { today: THU24 });
+assertEq("overdue PO proposes nothing", late.dates, []);
+assertTrue("overdue PO says we are chasing", /chasing/.test(late.text));
+const withDate = etaSentence({ supplier: "Blaklader", expectedDate: "2026-09-25" }, { today: THU24 });
 assertTrue("PO with a date names the supplier", withDate.text.includes("Blaklader"));
 assertTrue("PO with a date proposes one", withDate.dates.length > 0);
 
@@ -281,7 +289,7 @@ assertEq("a garment named after its decoration is still goods",
 
 // --- drafting ---------------------------------------------------------------
 const order = { id: 489373, reference: "489373", customerName: "Dave Smith", contactName: "Dave Smith", lines: [] };
-const draft = buildSalesReply({ intent: "eta", order, po: { supplier: "Blaklader", expectedDate: "2026-09-25" }, salesperson: { name: "Bob" } });
+const draft = buildSalesReply({ intent: "eta", order, po: { supplier: "Blaklader", expectedDate: "2026-09-25" }, salesperson: { name: "Bob" }, today: THU24 });
 assertTrue("greets by first name only", draft.html.includes("Hi Dave,"));
 assertFalse("does not use the surname", draft.html.includes("Hi Dave Smith"));
 // A COMPANY name must never be shortened into a first name.
@@ -330,11 +338,55 @@ assertTrue("escapes the ampersand in a name", nasty.html.includes("A&amp;B"));
 // --- the note written back --------------------------------------------------
 const note = buildSalesNote({
   intent: "eta", to: "dave@x.com", subject: "Update on your order - order 489373",
-  sentBy: "Bob", proposedDates: ["25 September"], duplicationLevel: "warn",
+  sentBy: "Bob", proposedDates: ["2026-09-28/mid"], duplicationLevel: "warn",
+  body: "Hi Dave,\n\nWe're just waiting on the Mascot items to arrive, and it should be with you mid next week.",
 });
 assertTrue("note records the recipient", note.includes("dave@x.com"));
-assertTrue("note records the date given", note.includes("25 September"));
+assertTrue("note records the window given", note.includes("mid week commencing 28 September"));
+assertTrue("note carries the whole email", note.includes("should be with you mid next week"));
 assertTrue("note records that a warning was overridden", note.includes("warn"));
+
+// --- Dec's scenario, 24 Sep 2026 -------------------------------------------
+// Jack noted: "customer emailed re delivery - advised mid next week". The reply
+// must keep to that window, worded for the day it is sent, with no dates in it.
+const jack = { addedOn: "2026-09-24T11:27:00+01:00", addedBy: "Jack Ellis-Haynes", text: "customer emailed re delivery - advised mid next week" };
+const jackWin = windowsMentioned(jack.text, jack.addedOn);
+assertEq("reads 'mid next week' from the note", jackWin.map((w) => windowKey(w.window)), ["2026-09-28/mid"]);
+assertEq("phrases the same window on the Thursday", phraseWindow(jackWin[0].window, THU24), "mid next week");
+assertEq("...and as 'midweek' the following Monday", phraseWindow(jackWin[0].window, MON28), "midweek");
+const autoPo = { addedOn: "2026-09-24T12:00:00+01:00", addedBy: "", text: "Auto-PO for MASCOT.\nOrder demand from: SO#1 due 25/09" };
+const promised = promisedWindow([autoPo, jack]);
+assertTrue("promised window comes from Jack, not the Auto-PO", promised && promised.addedBy === "Jack Ellis-Haynes");
+const mascotPo = { supplier: "MASCOT", expectedDate: "2026-09-25" };   // Fri + 2 working days = Tue 29th
+const keep = buildSalesReply({ intent: "eta", order, po: mascotPo, salesperson: { name: "Bob" }, today: THU24, promised });
+assertTrue("keeps Jack's window, not the sooner PO one", keep.text.includes("mid next week"));
+assertTrue("names what we are waiting on", keep.text.includes("Mascot"));
+assertEq("source is the note", keep.eta.source, "note");
+assertFalse("no dates in the email", /\b\d{1,2}\/\d{1,2}\b|\b\d{1,2}(st|nd|rd|th)?\s+(september|october)/i.test(keep.text));
+// PO slips LATER than Jack's promise: follow the PO, and the guard says so.
+const slip = buildSalesReply({ intent: "eta", order, po: { supplier: "MASCOT", expectedDate: "2026-10-05" }, salesperson: { name: "Bob" }, today: THU24, promised });
+assertEq("slipped PO wins", slip.eta.source, "po-slipped");
+assertTrue("worded from the PO", slip.text.includes("the week after next"));
+const slipCheck = assessDuplication({ notes: [jack], emailDate: "2026-09-23T09:00:00Z", proposedDates: slip.proposedDates, slippedFrom: slip.eta.slippedFrom });
+assertTrue("guard flags the changed story", slipCheck.reasons.some((r) => r.kind === "window_slipped"));
+// Same window worded differently by a later note is agreement, not a clash.
+const agree = assessDuplication({ notes: [jack], emailDate: "2026-09-23T09:00:00Z", proposedDates: ["2026-09-28/mid"] });
+assertEq("same window -> warn, not blocked", agree.level, "warn");
+const clash2 = assessDuplication({ notes: [jack], emailDate: "2026-09-23T09:00:00Z", proposedDates: ["2026-10-05/mid"] });
+assertEq("different week -> blocked", clash2.level, "blocked");
+// Other phrasings the team uses (note written Thursday 24 Sep).
+const w = (t, on = "2026-09-24T10:00:00+01:00") => windowsMentioned(t, on).map((x) => windowKey(x.window));
+assertEq("early next week", w("told him early next week"), ["2026-09-28/early"]);
+assertEq("late this week", w("advised late this week"), ["2026-09-21/late"]);
+assertEq("end of the week", w("should be end of the week"), ["2026-09-21/late"]);
+assertEq("midweek on a Thursday means next week", w("advised midweek"), ["2026-09-28/mid"]);
+assertEq("week after next", w("said week after next"), ["2026-10-05/week"]);
+assertEq("a weekday", w("told her by Tuesday"), ["2026-09-28/early"]);
+// The note text: the email as the customer saw it, minus the signature.
+const noteText = emailToNoteText(keep.html);
+assertTrue("note text has the reply", noteText.includes("mid next week"));
+assertFalse("note text has no tags", /<[a-z]/i.test(noteText));
+assertTrue("note text drops the signature block", noteText.length < 1200);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
