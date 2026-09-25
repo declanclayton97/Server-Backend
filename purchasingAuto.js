@@ -244,7 +244,7 @@ export const SUPPLIERS = {
   // licensed DeWalt workwear range. Their products are NOT named "castle" — detect by
   // brand. No dedicated PO custom field yet, so re-pickup is prevented by clearing the
   // CASTLE tag on finalize.
-  CASTLE:       { contactId: 332,   costList: 20, poField: 'PCF_CASTLEPO', lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|\bfort\b/i.test(n || '') }, // DeWalt moved to Sterling (Castle no longer sells it)
+  CASTLE:       { contactId: 332,   costList: 20, poField: 'PCF_CASTLEPO', lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|(?<![-\w])fort\b/i.test(n || '') && !/\bcarhartt\b/i.test(n || '') }, // DeWalt moved to Sterling (Castle no longer sells it). NOT Carhartt's "Fort" shirt (107012) nor Base "T-Fort" boots (SO 489391, 2026-09-25)
   // Sterling Safetywear — brands Apache / City Knights / DeWalt. ⚠ DeWalt ALSO comes
   // via Castle, so on a multi-supplier order a DeWalt row is ambiguous — the
   // PCF_SUPPLIER tag decides which supplier the order is for; single-supplier orders
