@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-// Is it safe to deploy Server-Backend right now?
+// Is it safe to deploy PURCHASING-AUTOMATION or ALTERNATE-ITEMS right now?
+//
+// Since the 2026-09-20 cutover the schedule runs on Purchasing-Automation, and placements call
+// Alternate-Items (Castle/Portwest baskets, stock) mid-run — restarting either inside a window is
+// what can orphan a PO or double-order. Server-Backend no longer runs purchasing, so this does NOT
+// gate a Server-Backend deploy (user, 2026-09-25). It lives here for history; the rule is unchanged.
 //
 // WHY THIS EXISTS: on 2026-08-19 two deploys landed inside the Fristads poller window. The first
 // orphaned PO 483226; the second restarted the service mid-run so `last_run_date` never saved, the
