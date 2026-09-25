@@ -58,9 +58,11 @@ export function verifyPassword(password, salt, expectedHash) {
 }
 
 // Sessions are a random token; only its hash is stored, so a leaked database
-// does not hand over working logins. Long-lived on purpose - being asked to log
-// in twice a day is how people end up sharing one account.
-export const SESSION_DAYS = 60;
+// does not hand over working logins. A week (Dec, 2026-09-25): the hub reads the
+// sales inbox now, so a lost laptop must fall out within days, but a code every
+// morning is how people end up sharing one account. Counted from sign-in, not
+// extended by use.
+export const SESSION_DAYS = 7;
 export const newSessionToken = () => crypto.randomBytes(32).toString("hex");
 export const hashToken = (t) => crypto.createHash("sha256").update(String(t)).digest("hex");
 export const sessionExpiry = (from = new Date()) =>

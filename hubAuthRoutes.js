@@ -10,7 +10,7 @@
 import {
   validateName, validatePassword, nameKey,
   hashPassword, verifyPassword,
-  newSessionToken, hashToken, sessionExpiry, tokenFromRequest,
+  newSessionToken, hashToken, sessionExpiry, tokenFromRequest, SESSION_DAYS,
   newTotpSecret, verifyTotp, otpauthUrl, sealSecret, openSecret,
 } from "./hubAuth.js";
 
@@ -53,6 +53,12 @@ export function registerHubAuthRoutes(app, deps) {
         expires_at TIMESTAMPTZ NOT NULL
       );
     `);
+    // Sessions issued under a longer limit are held to the current one, counted from
+    // when they signed in — shortening SESSION_DAYS applies to everyone, not just new sign-ins.
+    ready.then(() => getPool().query(
+      `UPDATE hub_sessions SET expires_at = created_at + ($1 || ' days')::interval
+        WHERE expires_at > created_at + ($1 || ' days')::interval`, [String(SESSION_DAYS)]))
+      .catch((e) => console.error("[hub-auth] session cap failed:", e.message));
     if (!process.env.HUB_TOTP_KEY) console.warn("[hub-auth] HUB_TOTP_KEY not set — authenticator secrets are stored unencrypted");
     return ready;
   }
