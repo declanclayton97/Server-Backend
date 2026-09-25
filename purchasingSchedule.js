@@ -1190,17 +1190,43 @@ async function pullSterlingOrderNo(poId) {
 // Sterling's shop (sterling.famlive.net) is a WebForms site with no HTTP order API, so
 // the order is placed by the headless portal-order WORKER. Each PO line's EAN resolves
 // (sterlingProducts.json) to { search, colour, size } the worker uses to drive the shop.
-async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
+async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0, poId: existingPoId = null, rehearse = false } = {}) {
   const steps = {};
-  let po;
-  try { po = await createPo({ supplierKey: 'STERLING', execute: true, padToThreshold, logPool: pool }); }
-  catch (e) { throw createPoErr(e); }
-  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
-  const poId = po.poId;
-  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
-  const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+  let po, poId, soIds, linesByOrder;
+  if (existingPoId) {
+    // PLACE AGAINST A PO A FAILED RUN ALREADY BUILT, instead of minting a second one (user,
+    // 2026-09-25: "we dont want junk PO's"). The 13:00 run on 25 Sep built PO 491923 and then
+    // died on "fetch failed" at Sterling's login, leaving a draft holding the whole demand.
+    // Only an UNSENT Sterling PO qualifies — status 6, Sterling's contact, no order number on it.
+    let hdr;
+    try { hdr = (await bp.bpLiveGet(`/order-service/order/${existingPoId}`))[0]; }
+    catch (e) { throw stepErr('create-po', `couldn't read PO ${existingPoId}: ${e.message}`); }
+    const supplierId = hdr && hdr.parties && hdr.parties.supplier && hdr.parties.supplier.contactId;
+    const statusId = hdr && hdr.orderStatus && hdr.orderStatus.orderStatusId;
+    if (!hdr || hdr.orderTypeCode !== 'PO' || Number(supplierId) !== STERLING_SUPPLIER_CONTACT || Number(statusId) !== 6 || /^\d{5,}/.test(String(hdr.reference || ''))) {
+      throw stepErr('create-po', `PO ${existingPoId} is not an unsent Sterling PO (type ${hdr && hdr.orderTypeCode}, supplier ${supplierId}, status ${statusId}, ref ${JSON.stringify(hdr && hdr.reference)}) — refusing to place against it`);
+    }
+    poId = Number(existingPoId);
+    // Contributors from the PO's OWN note: a fresh demand read still shows these SO lines (onOrder
+    // is not subtracted), but the note is what this PO was built from and what finalise must match.
+    const contrib = await bp.getPoContributors(poId);
+    soIds = contrib.soIds; linesByOrder = contrib.linesByOrder;
+    const rows = await bp.getOrderCartLines(poId);
+    const soSkus = new Set(Object.values(linesByOrder).flat().map((x) => String(x.sku)));
+    // Rebuild the same shape createPo returns, so everything below runs unchanged.
+    po = { poId, soLines: [], lowLines: [] };
+    for (const r of rows) (soSkus.has(String(r.sku)) ? po.soLines : po.lowLines).push({ sku: r.sku, qty: r.qty, name: r.name, productId: r.productId });
+    steps.po = { poId, reused: true, soIds, soUnits: po.soLines.reduce((a, l) => a + l.qty, 0), lowUnits: po.lowLines.reduce((a, l) => a + l.qty, 0) };
+  } else {
+    try { po = await createPo({ supplierKey: 'STERLING', execute: true, padToThreshold, logPool: pool }); }
+    catch (e) { throw createPoErr(e); }
+    if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+    poId = po.poId;
+    soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+    linesByOrder = {};
+    for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+    steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+  }
 
   // resolve each PO line (EAN -> search/colour/size); skip service lines; abort on genuinely-unresolved
   // Only the not-orderable filter is still needed: the barcode path below replaces the resolver.
@@ -1280,7 +1306,11 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
 
   // EMPTY FIRST. Anything left in the basket — a half-finished run, someone browsing — would ride
   // along into our order, which is the guarantee clearFirst gives every other lane here.
-  const jar = await sterlingPortal.sterlingLogin();
+  // LOGIN gets its own step. Unlabelled, Sterling's login timing out on 25 Sep read as step
+  // "unknown" — which cannot be told apart from a checkout that may have gone through.
+  let jar;
+  try { jar = await sterlingPortal.sterlingLogin(); }
+  catch (e) { throw stepErr('login', `Sterling login failed before anything reached their basket: ${e.message}`, { poId }); }
   steps.basketCleared = await sterlingPortal.sterlingEmptyBasket({ jar });
   const add = await sterlingPortal.sterlingAddToBasket(barcodeLines, { jar });
   if (!add.ok) throw stepErr('cart', `Sterling basket add failed: ${JSON.stringify(add).slice(0, 200)}`, { poId, add });
@@ -1296,6 +1326,13 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   if (missing.length) {
     throw stepErr('cart', `the Sterling basket does not hold what was asked for — NOT ordering. PO#${poId} left for review: `
       + missing.map((m) => `${m.barcode} wanted ${m.want}, basket has ${m.got}`).join('; '), { poId, missing, basket: basket.lines });
+  }
+
+  // REHEARSAL: everything up to here is proven (login, add, read-back) — empty the basket again
+  // and stop, so a placement against an existing PO can be checked before anything is bought.
+  if (rehearse) {
+    steps.rehearsalBasketEmptied = await sterlingPortal.sterlingEmptyBasket({ jar });
+    return { poId, rehearsed: true, lines: barcodeLines, steps };
   }
 
   // CHECK OUT. sterlingCheckout refuses to submit unless the form is addressed to OUR postcode —
@@ -4136,6 +4173,8 @@ export async function runFristadsScheduled(opts = {}) { return runSupplierSchedu
 // prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
 export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null, packSizes, excludeSkus }); }
 export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes, excludeSkus }); }
+// Sterling against an existing unsent PO. rehearse:true stops after the basket read-back and empties it.
+export async function sterlingPlaceExisting({ pool, altItemsUrl, poId, rehearse = true }) { return placeSterlingOrder(pool, altItemsUrl, { poId, rehearse }); }
 
 
 // ── TELL THE PERSON WITH THE CUSTOMER, NOT JUST PURCHASING ───────────────────────────────────
