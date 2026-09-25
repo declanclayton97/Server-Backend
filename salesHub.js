@@ -740,6 +740,64 @@ export function promisedWindow(notes) {
   return { window: found[0].window, raw: found[0].raw, addedBy: n.addedBy || "", addedOn: n.addedOn, text: summarise(n.text) };
 }
 
+// ---------------------------------------------------------------------------
+// Already on its way / ready to go — both beat any supplier window.
+//
+// Brightpearl writes one note per consignment, always worded the same:
+//   "Royal Mail tracking reference received: VJ210582045GB"
+//   "FedEx tracking reference received: 394857261038"
+//   "DPD Local tracking reference received: 15501234567890"
+// ---------------------------------------------------------------------------
+const TRACKING_NOTE_RE = /^\s*([A-Za-z][\w .&-]{1,30}?)\s+tracking reference received:\s*([A-Za-z0-9-]{6,40})/i;
+const TRACKING_URLS = [
+  [/royal\s*mail/i, (r) => `https://www.royalmail.com/track-your-item#/tracking-results/${r}`],
+  [/fedex/i, (r) => `https://www.fedex.com/fedextrack/?trknbr=${r}`],
+  [/dpd\s*local/i, (r) => `https://track.dpdlocal.co.uk/search?reference=${r}`],
+  [/dpd/i, (r) => `https://track.dpd.co.uk/search?reference=${r}`],
+  [/parcelforce/i, (r) => `https://www.parcelforce.com/track-trace?trackNumber=${r}`],
+  [/\bups\b/i, (r) => `https://www.ups.com/track?tracknum=${r}`],
+  [/\bdhl\b/i, (r) => `https://www.dhl.com/gb-en/home/tracking/tracking-express.html?tracking-id=${r}`],
+];
+
+/** The newest tracking reference on the order, or null. */
+export function trackingFromNotes(notes) {
+  const found = (notes || [])
+    .map((n) => ({ n, m: TRACKING_NOTE_RE.exec(plainText(n.text)), t: new Date(n.addedOn).getTime() }))
+    .filter((x) => x.m)
+    .sort((a, b) => (b.t || 0) - (a.t || 0))[0];
+  if (!found) return null;
+  const carrier = found.m[1].trim(), ref = found.m[2].trim();
+  const link = TRACKING_URLS.find(([re]) => re.test(carrier));
+  return { carrier, ref, url: link ? link[1](encodeURIComponent(ref)) : null, addedOn: found.n.addedOn };
+}
+
+// The status the warehouse works from; in it, the goods are here and going out.
+export const isPickPackShip = (status) => /in\s*stock.*pick/i.test(String(status || ""));
+
+const trackingLine = (t) =>
+  `Your ${esc(t.carrier)} tracking reference is <b>${esc(t.ref)}</b>` +
+  (t.url ? `, and you can follow it here: <a href="${esc(t.url)}">${esc(t.url)}</a>.` : ".");
+
+/**
+ * What to tell the customer about delivery, most certain first:
+ *   1. it has been sent — here is the tracking;
+ *   2. it is in stock and being picked — with them within 48 hours;
+ *   3. otherwise the window from the notes / purchase order (etaSentence).
+ */
+export function deliverySentence(order, po, etaOpts = {}) {
+  const tracking = trackingFromNotes(order && order.timeline);
+  if (tracking) {
+    return { text: `Good news &mdash; this has now been sent for you. ${trackingLine(tracking)}`, dates: [], source: "tracking", tracking };
+  }
+  if (isPickPackShip(order && order.status)) {
+    return {
+      text: "Good news &mdash; everything is in stock and your order is being picked and packed now, so it should be with you within the next 48 hours.",
+      dates: [], source: "in-stock",
+    };
+  }
+  return etaSentence(po, etaOpts);
+}
+
 // "MASCOT" -> "Mascot": supplier names are stored shouting.
 const supplierLabel = (s) => String(s || "").trim().toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
 
@@ -808,6 +866,8 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
         outstanding.map((l) => `&bull; ${esc(l.name)}${l.outstanding ? ` &times; ${esc(l.outstanding)}` : ""}`).join("<br>")
       );
     }
+    const sent = trackingFromNotes(order && order.timeline);
+    if (sent) lines.push(`The part already sent is on its way. ${trackingLine(sent)}`);
     eta = etaSentence(po, etaOpts);
     lines.push(eta.text);
     proposedDates = eta.dates;
@@ -824,12 +884,12 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
       );
     } else {
       lines.push(`I am sorry order ${esc(ref)} has taken longer than it should have.`);
-      eta = etaSentence(po, etaOpts);
+      eta = deliverySentence(order, po, etaOpts);
       lines.push(eta.text);
       proposedDates = eta.dates;
     }
   } else {
-    eta = etaSentence(po, etaOpts);
+    eta = deliverySentence(order, po, etaOpts);
     lines.push(`I have checked order ${esc(ref)} for you.`);
     lines.push(eta.text);
     proposedDates = eta.dates;
@@ -863,7 +923,7 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
     text: lines.join("\n\n").replace(/<br>/g, "\n").replace(/<[^>]+>/g, ""),
     proposedDates,
     // How the window was chosen, so the page can say "kept to what Jack told them".
-    eta: eta ? { source: eta.source, phrase: eta.phrase || null, slippedFrom: eta.slippedFrom || null } : null,
+    eta: eta ? { source: eta.source, phrase: eta.phrase || null, slippedFrom: eta.slippedFrom || null, tracking: eta.tracking || null } : null,
   };
 }
 

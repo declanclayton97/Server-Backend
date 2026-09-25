@@ -21,6 +21,8 @@ import {
   phraseWindow,
   promisedWindow,
   emailToNoteText,
+  trackingFromNotes,
+  isPickPackShip,
 } from "./salesHub.js";
 
 let pass = 0, fail = 0;
@@ -393,6 +395,32 @@ const noteText = emailToNoteText(keep.html);
 assertTrue("note text has the reply", noteText.includes("mid next week"));
 assertFalse("note text has no tags", /<[a-z]/i.test(noteText));
 assertTrue("note text drops the signature block", noteText.length < 1200);
+
+// --- sent / in stock beat any window (Dec, 25 Sep) ---------------------------
+const shippedNotes = [
+  { addedOn: "2026-09-20T09:00:00Z", kind: "system", text: "FedEx tracking reference received: 394857261038" },
+  { addedOn: "2026-09-24T15:10:00Z", kind: "system", text: "Royal Mail tracking reference received: VJ210582045GB" },
+];
+const trk = trackingFromNotes(shippedNotes);
+assertEq("newest tracking wins", trk && trk.ref, "VJ210582045GB");
+assertEq("carrier read", trk && trk.carrier, "Royal Mail");
+assertTrue("Royal Mail link", trk && trk.url.includes("royalmail.com") && trk.url.includes("VJ210582045GB"));
+assertEq("DPD Local gets its own link", trackingFromNotes([{ addedOn: "2026-09-24T10:00:00Z", text: "DPD Local tracking reference received: 15501234567890" }]).url,
+  "https://track.dpdlocal.co.uk/search?reference=15501234567890");
+assertEq("no tracking -> null", trackingFromNotes([{ addedOn: "2026-09-24T10:00:00Z", text: "Auto-PO for MASCOT" }]), null);
+const sentReply = buildSalesReply({ intent: "eta", order: { ...order, timeline: shippedNotes }, po: mascotPo, salesperson: { name: "Bob" }, today: THU24, promised });
+assertTrue("sent: says it has been sent", sentReply.text.includes("has now been sent"));
+assertTrue("sent: gives the reference", sentReply.text.includes("VJ210582045GB"));
+assertFalse("sent: no longer talks about waiting on stock", sentReply.text.includes("waiting on"));
+assertEq("sent: source is tracking", sentReply.eta.source, "tracking");
+assertTrue("pick/pack/ship status recognised", isPickPackShip("In stock, pick/pack/ship"));
+assertFalse("other statuses are not", isPickPackShip("Stock needs ordering"));
+const ppsReply = buildSalesReply({ intent: "eta", order: { ...order, status: "In stock, pick/pack/ship", timeline: [] }, po: mascotPo, salesperson: { name: "Bob" }, today: THU24, promised });
+assertTrue("in stock: within 48 hours", ppsReply.text.includes("within the next 48 hours"));
+assertEq("in stock: source", ppsReply.eta.source, "in-stock");
+const partReply = buildSalesReply({ intent: "part_shipped", order: { ...order, timeline: shippedNotes, lines: [{ name: "Jacket", outstanding: 2 }] }, po: mascotPo, salesperson: { name: "Bob" }, today: THU24, promised });
+assertTrue("part shipped: tracking for what went", partReply.text.includes("VJ210582045GB"));
+assertTrue("part shipped: window for the rest", partReply.text.includes("mid next week"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
