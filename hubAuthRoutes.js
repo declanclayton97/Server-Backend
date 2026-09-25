@@ -11,6 +11,7 @@ import {
   validateName, validatePassword, nameKey,
   hashPassword, verifyPassword,
   newSessionToken, hashToken, sessionExpiry, tokenFromRequest,
+  newTotpSecret, verifyTotp, otpauthUrl, sealSecret, openSecret,
 } from "./hubAuth.js";
 
 export function registerHubAuthRoutes(app, deps) {
@@ -38,7 +39,21 @@ export function registerHubAuthRoutes(app, deps) {
         expires_at TIMESTAMPTZ NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_hub_sessions_user ON hub_sessions(name_key);
+      -- Authenticator (TOTP). A session only counts once its code step is done.
+      ALTER TABLE hub_users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+      ALTER TABLE hub_users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT;
+      ALTER TABLE hub_sessions ADD COLUMN IF NOT EXISTS mfa BOOLEAN NOT NULL DEFAULT FALSE;
+      -- Between "password right" and "code right". Short-lived, few attempts.
+      CREATE TABLE IF NOT EXISTS hub_pending_logins (
+        token_hash TEXT PRIMARY KEY,
+        name_key   TEXT NOT NULL REFERENCES hub_users(name_key) ON DELETE CASCADE,
+        purpose    TEXT NOT NULL,            -- 'code' | 'enrol'
+        secret     TEXT,                     -- the new secret while enrolling (sealed)
+        attempts   INT NOT NULL DEFAULT 0,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
     `);
+    if (!process.env.HUB_TOTP_KEY) console.warn("[hub-auth] HUB_TOTP_KEY not set — authenticator secrets are stored unencrypted");
     return ready;
   }
 
@@ -55,7 +70,7 @@ export function registerHubAuthRoutes(app, deps) {
     const r = await getPool().query(
       `SELECT u.name_key, u.display_name
          FROM hub_sessions s JOIN hub_users u ON u.name_key = s.name_key
-        WHERE s.token_hash = $1 AND s.expires_at > NOW()`,
+        WHERE s.token_hash = $1 AND s.expires_at > NOW() AND s.mfa`,
       [hashToken(token)]
     );
     if (!r.rowCount) return null;
@@ -89,15 +104,35 @@ export function registerHubAuthRoutes(app, deps) {
     }
   };
 
+  // Only ever called once the authenticator code has been checked.
   async function issueSession(key) {
     const token = newSessionToken();
     await getPool().query(
-      `INSERT INTO hub_sessions (token_hash, name_key, expires_at) VALUES ($1, $2, $3)`,
+      `INSERT INTO hub_sessions (token_hash, name_key, expires_at, mfa) VALUES ($1, $2, $3, TRUE)`,
       [hashToken(token), key, sessionExpiry()]
     );
     // Tidy expired rows opportunistically rather than running a sweeper.
     getPool().query(`DELETE FROM hub_sessions WHERE expires_at < NOW()`).catch(() => {});
     return token;
+  }
+
+  const PENDING_MINUTES = 5, PENDING_ATTEMPTS = 5;
+
+  // Password was right: hand back a short-lived ticket for the code step. Someone
+  // with no authenticator yet gets a fresh secret to scan instead.
+  async function startSecondStep(user) {
+    const ticket = newSessionToken();
+    const enrolling = !user.totp_secret;
+    const secret = enrolling ? newTotpSecret() : null;
+    getPool().query(`DELETE FROM hub_pending_logins WHERE expires_at < NOW()`).catch(() => {});
+    await getPool().query(
+      `INSERT INTO hub_pending_logins (token_hash, name_key, purpose, secret, expires_at)
+       VALUES ($1, $2, $3, $4, NOW() + ($5 || ' minutes')::interval)`,
+      [hashToken(ticket), user.name_key, enrolling ? "enrol" : "code", secret ? sealSecret(secret) : null, String(PENDING_MINUTES)]
+    );
+    return enrolling
+      ? { mfa: "enrol", ticket, name: user.display_name, secret, otpauth: otpauthUrl(user.display_name, secret) }
+      : { mfa: "code", ticket, name: user.display_name };
   }
 
   // Who has an account. Lets the sign-in screen offer names instead of making
@@ -156,7 +191,7 @@ export function registerHubAuthRoutes(app, deps) {
         // overwriting a colleague's account by picking the same name.
         return res.status(409).json({ error: `"${n.name}" already has an account. Sign in instead, or add your surname.` });
       }
-      res.json({ token: await issueSession(n.key), name: n.name });
+      res.json(await startSecondStep({ name_key: n.key, display_name: n.name, totp_secret: null }));
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -168,7 +203,7 @@ export function registerHubAuthRoutes(app, deps) {
     try {
       await ensureTables();
       const r = await getPool().query(
-        `SELECT name_key, display_name, pw_salt, pw_hash FROM hub_users WHERE name_key = $1`, [key]
+        `SELECT name_key, display_name, pw_salt, pw_hash, totp_secret FROM hub_users WHERE name_key = $1`, [key]
       );
       const u = r.rows[0];
       // Same message whether the name is unknown or the password is wrong.
@@ -177,7 +212,63 @@ export function registerHubAuthRoutes(app, deps) {
       if (!u || !verifyPassword(b.password, u.pw_salt, u.pw_hash)) {
         return res.status(401).json({ error: "That name and password do not match" });
       }
-      res.json({ token: await issueSession(u.name_key), name: u.display_name });
+      // Right password is only half of it now.
+      res.json(await startSecondStep(u));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/hub/mfa { ticket, code } — the authenticator step. On enrolment the
+  // first good code is what switches the authenticator on.
+  app.post("/api/hub/mfa", async (req, res) => {
+    if (!needDb(res)) return;
+    const b = req.body || {};
+    if (!b.ticket) return res.status(400).json({ error: "Sign in again" });
+    try {
+      await ensureTables();
+      // Count the attempt BEFORE checking, in the same statement that reads the
+      // ticket, so parallel guesses cannot all slip under the limit.
+      const r = await getPool().query(
+        `UPDATE hub_pending_logins p SET attempts = attempts + 1
+          FROM hub_users u
+         WHERE p.token_hash = $1 AND u.name_key = p.name_key AND p.expires_at > NOW()
+         RETURNING p.name_key, p.purpose, p.secret, p.attempts, u.display_name, u.totp_secret, u.totp_last_step`,
+        [hashToken(b.ticket)]);
+      const t = r.rows[0];
+      if (!t) return res.status(401).json({ error: "That took too long — sign in again", restart: true });
+      if (t.attempts > PENDING_ATTEMPTS) {
+        await getPool().query(`DELETE FROM hub_pending_logins WHERE token_hash = $1`, [hashToken(b.ticket)]);
+        return res.status(429).json({ error: "Too many wrong codes — sign in again", restart: true });
+      }
+      const secret = openSecret(t.purpose === "enrol" ? t.secret : t.totp_secret);
+      const step = verifyTotp(secret, b.code);
+      if (step == null) return res.status(401).json({ error: "That code is not right — check the app and try the current one" });
+      if (t.totp_last_step != null && step <= Number(t.totp_last_step)) {
+        return res.status(401).json({ error: "That code has already been used — wait for the next one" });
+      }
+      await getPool().query(
+        `UPDATE hub_users SET totp_last_step = $2${t.purpose === "enrol" ? ", totp_secret = $3" : ""} WHERE name_key = $1`,
+        t.purpose === "enrol" ? [t.name_key, step, t.secret] : [t.name_key, step]);
+      await getPool().query(`DELETE FROM hub_pending_logins WHERE token_hash = $1`, [hashToken(b.ticket)]);
+      res.json({ token: await issueSession(t.name_key), name: t.display_name, enrolled: t.purpose === "enrol" });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Lost phone: an admin clears the authenticator and the person sets it up again
+  // at their next sign-in. Their sessions end with it.
+  app.post("/api/hub/reset-authenticator", async (req, res) => {
+    if (!needDb(res)) return;
+    const b = req.body || {};
+    const admin = process.env.HUB_ADMIN_KEY;
+    if (!admin) return res.status(503).json({ error: "Set HUB_ADMIN_KEY on the backend to reset authenticators" });
+    if (String(b.adminKey || "") !== admin) return res.status(403).json({ error: "Wrong admin key" });
+    const key = nameKey(b.name);
+    if (!key) return res.status(400).json({ error: "Which name?" });
+    try {
+      await ensureTables();
+      const r = await getPool().query(`UPDATE hub_users SET totp_secret = NULL, totp_last_step = NULL WHERE name_key = $1`, [key]);
+      if (!r.rowCount) return res.status(404).json({ error: "No account with that name" });
+      await getPool().query(`DELETE FROM hub_sessions WHERE name_key = $1`, [key]);
+      res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

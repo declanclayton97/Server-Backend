@@ -3,6 +3,7 @@ import {
   nameKey, validateName, validatePassword,
   hashPassword, verifyPassword,
   newSessionToken, hashToken, sessionExpiry, tokenFromRequest,
+  base32Encode, base32Decode, totpCode, verifyTotp, newTotpSecret, totpStep, sealSecret, openSecret, otpauthUrl,
 } from "./hubAuth.js";
 
 let pass = 0, fail = 0;
@@ -58,6 +59,30 @@ assertEq("Bearer header", tokenFromRequest(req({ authorization: "Bearer abc123" 
 assertEq("case-insensitive scheme", tokenFromRequest(req({ authorization: "bearer abc123" })), "abc123");
 assertEq("query fallback", tokenFromRequest(req({}, { token: "abc123" })), "abc123");
 assertEq("nothing at all", tokenFromRequest(req({}, {})), null);
+
+// --- authenticator codes (RFC 6238) ------------------------------------------
+// The RFC's own SHA-1 test key "12345678901234567890" and its published codes
+// (8-digit in the RFC; the last 6 digits are what an authenticator app shows).
+const RFC = base32Encode(Buffer.from("12345678901234567890"));
+assertEq("base32 round trip", base32Decode(RFC).toString(), "12345678901234567890");
+assertEq("RFC 6238 at 59s", totpCode(RFC, totpStep(59 * 1000)), "287082");
+assertEq("RFC 6238 at 1111111109s", totpCode(RFC, totpStep(1111111109 * 1000)), "081804");
+assertEq("RFC 6238 at 1234567890s", totpCode(RFC, totpStep(1234567890 * 1000)), "005924");
+const sec = newTotpSecret(), now = Date.parse("2026-09-25T10:00:00Z");
+assertEq("a fresh secret is 32 base32 chars", sec.length, 32);
+assertEq("current code verifies", verifyTotp(sec, totpCode(sec, totpStep(now)), now), totpStep(now));
+assertTrue("previous step still accepted (clock drift)", verifyTotp(sec, totpCode(sec, totpStep(now) - 1), now) != null);
+assertEq("two steps old is refused", verifyTotp(sec, totpCode(sec, totpStep(now) - 2), now), null);
+assertEq("wrong code refused", verifyTotp(sec, "000000", now) === totpStep(now) && totpCode(sec, totpStep(now)) !== "000000" ? "bad" : "ok", "ok");
+assertEq("junk refused", verifyTotp(sec, "12ab56", now), null);
+assertEq("spaces in a typed code are fine", verifyTotp(sec, totpCode(sec, totpStep(now)).replace(/^(\d{3})/, "$1 "), now), totpStep(now));
+assertTrue("otpauth url names the hub", otpauthUrl("Dan Ford", sec).startsWith("otpauth://totp/Tuffshop%20Sales%20Hub:Dan%20Ford?secret="));
+process.env.HUB_TOTP_KEY = "test-key";
+const sealed = sealSecret(sec);
+assertTrue("sealed secret is not the secret", sealed.startsWith("enc:") && !sealed.includes(sec));
+assertEq("sealed secret opens", openSecret(sealed), sec);
+delete process.env.HUB_TOTP_KEY;
+assertEq("without a key it is stored as-is", sealSecret(sec), sec);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
