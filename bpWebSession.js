@@ -535,7 +535,9 @@ async function getOrderAllocations(orderId, { client = BP_CLIENT } = {}) {
 // document goes to exactly one address (BP pre-fills the supplier's + account emails otherwise).
 // send:false = DRY-RUN — GETs the form and returns what it parsed (token, recipient rows, defaults)
 // WITHOUT sending. send:true actually emails.
-async function emailOrderDocument(orderId, { contactId, to, subject, message, templateTypeId = 7, send = false, client = BP_CLIENT } = {}) {
+// messageExtra: a line ADDED under whatever message would otherwise go (BP's template default),
+// for a supplier-specific term that must be on every PO email — e.g. Hellberg's agreed free carriage.
+async function emailOrderDocument(orderId, { contactId, to, subject, message, messageExtra, templateTypeId = 7, send = false, client = BP_CLIENT } = {}) {
   if (!orderId || !contactId || !to) throw new Error('orderId, contactId and to are required');
   const url = `${BP_HOST}/template_print.php?return-to-oid=${encodeURIComponent(orderId)}&oID=${encodeURIComponent(orderId)}&contacts_id=${encodeURIComponent(contactId)}&template_type_id=${encodeURIComponent(templateTypeId)}`;
   // 1. GET the send form → __fc_csrf_token + the recipient rows + default subject/message.
@@ -556,7 +558,9 @@ async function emailOrderDocument(orderId, { contactId, to, subject, message, te
   const defSubject = (html.match(/name="email_subject"[^>]*value="([^"]*)"/i) || [])[1] || '';
   const defMessage = (html.match(/name="email_message"[^>]*>([\s\S]*?)<\/textarea>/i) || [, ''])[1].trim();
   const parsed = { tokenFound: !!token, tokenPrefix: token ? token.slice(0, 14) + '…' : null, toRows, idxRows, defaultRecipients: defaults, defSubject, defMessagePreview: defMessage.slice(0, 120), formPresent: /template_print\.php/i.test(html) && (toRows.length > 0 || html.includes('email_to_0')) };
-  if (!send) return { dryRun: true, orderId, contactId, would_send_to: to, parsed };
+  const baseMessage = message || defMessage || 'Good Afternoon,\n\nPlease process the order as attached.\n\nAny out of stock items are fine to go onto back order but please advise us of these items by email.';
+  const finalMessage = messageExtra ? `${baseMessage}\n\n${messageExtra}` : baseMessage;
+  if (!send) return { dryRun: true, orderId, contactId, would_send_to: to, would_message: finalMessage, parsed };
   if (!token) throw new Error('no __fc_csrf_token on template_print form — cannot send');
   // 2. POST — only email_to_0 = `to`, all other recipient/cc/bcc rows cleared.
   const rows = toRows.length ? toRows : ['email_to_0'];
@@ -566,7 +570,7 @@ async function emailOrderDocument(orderId, { contactId, to, subject, message, te
   rows.forEach((f, i) => { body.set(f, i === 0 ? to : ''); body.set(f.replace('_to_', '_cc_'), ''); body.set(f.replace('_to_', '_bcc_'), ''); });
   body.set('email_to_0', to); // guarantee slot 0 holds the intended recipient
   body.set('email_subject', subject || defSubject || 'TuffShop Purchase Order');
-  body.set('email_message', message || defMessage || 'Good Afternoon,\n\nPlease process the order as attached.\n\nAny out of stock items are fine to go onto back order but please advise us of these items by email.');
+  body.set('email_message', finalMessage);
   body.set('quickNote', '');
   body.set('send_type', 'pdf');
   body.set('send_from_me', '1');

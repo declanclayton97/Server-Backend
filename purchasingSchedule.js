@@ -1472,6 +1472,8 @@ const EMAIL_SUPPLIER_CONFIG = {
     emailFromSupplier: 'SNICKERS',
     carriageNet: () => 0,
     freeOver: () => 0,
+    // Added under the standard PO email, every time (user, 2026-09-28).
+    messageExtra: 'Free of Charge carriage as agreed with Ben',
   },
   BUCKLER: {
     label: 'Buckler Boots', contactId: 8981,
@@ -1596,7 +1598,7 @@ async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToTh
     }).catch(() => {});
   }
 
-  const mail = await emailOrderDocument(poId, { contactId: cfg.contactId, to, send: live });
+  const mail = await emailOrderDocument(poId, { contactId: cfg.contactId, to, messageExtra: cfg.messageExtra || null, send: live });
   if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${to}: ${JSON.stringify(mail).slice(0, 200)}`);
   steps.email = { to, sent: true, status: mail.status };
 
