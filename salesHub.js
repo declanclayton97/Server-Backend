@@ -54,9 +54,14 @@ export const SALES_INTENTS = [
     label: "ETA / where is my order",
     match: /\b(eta|when|where|due|expect|arrive|arriving|dispatch|despatch|deliver|delivery|update)\b/i,
   },
+  {
+    key: "plain",
+    label: "Plain reply (no template)",
+    match: /$^/,   // never picked by wording; it is the fallback and a manual choice
+  },
 ];
 
-export const DEFAULT_INTENT = "eta";
+export const DEFAULT_INTENT = "plain";
 
 // Pick the intent from the customer's own words. Falls back to ETA, because a
 // sales email with no recognisable ask is nearly always "where is my stuff".
@@ -944,9 +949,12 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
   let proposedDates = [];
 
   lines.push(esc(greeting(order)));
-  lines.push("Thanks for getting in touch, and sorry to keep you waiting.");
+  if (intent !== "plain") lines.push("Thanks for getting in touch, and sorry to keep you waiting.");
 
-  if (intent === "returns") {
+  if (intent === "plain") {
+    // Just the frame of an email — the salesperson writes the rest, as in Outlook.
+    lines.push("<br>");
+  } else if (intent === "returns") {
     lines.push("Thanks for letting us know &mdash; no problem at all.");
     lines.push(returnsRef
       ? `Your returns reference is <b>${esc(returnsRef)}</b>. Please write this reference on your invoice and send it back with the item(s) to:<br>` + RETURNS_ADDRESS.map(esc).join("<br>")
@@ -998,7 +1006,7 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
     proposedDates = eta.dates;
   }
 
-  if (intent !== "returns") lines.push("If there is a date you need this by, tell me and I will do what I can to work to it.");
+  if (intent !== "returns" && intent !== "plain") lines.push("If there is a date you need this by, tell me and I will do what I can to work to it.");
   // Whoever is signed in signs it; the order's salesperson is only a fallback
   // for a draft built outside the hub.
   lines.push(`Kind regards,<br>${esc(String(signedBy || "").trim() || salesperson?.name || "")}`);
@@ -1036,7 +1044,7 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
 //
 // The WHOLE email goes in, not just "I sent one": the next person to pick the
 // order up needs to see exactly what the customer was told, in the words used.
-export function buildSalesNote({ intent, to, subject, sentBy, proposedDates = [], duplicationLevel, body = "" }) {
+export function buildSalesNote({ intent, to, subject, sentBy, proposedDates = [], duplicationLevel, body = "", attachments = [] }) {
   const label = (SALES_INTENTS.find((i) => i.key === intent) || {}).label || intent;
   const bits = [
     `Sales Hub reply sent to ${to}`,
@@ -1045,6 +1053,7 @@ export function buildSalesNote({ intent, to, subject, sentBy, proposedDates = []
   ];
   if (proposedDates.length) bits.push(`Delivery window given: ${proposedDates.map(prettyWindow).join(", ")}`);
   if (sentBy) bits.push(`Sent by: ${sentBy}`);
+  if (attachments.length) bits.push(`Attached: ${attachments.join(", ")}`);
   if (duplicationLevel && duplicationLevel !== "ok") bits.push(`Sent despite a "${duplicationLevel}" warning.`);
   const text = String(body || "").trim();
   return bits.join("\n") + (text ? `\n\n--- Email sent ---\n${text}` : "");

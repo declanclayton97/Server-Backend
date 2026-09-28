@@ -121,7 +121,7 @@ export async function getAttachment(id, attachmentId) {
 
 // Reply inside the customer's thread: createReply sets the threading headers and quotes the
 // original; our text goes ABOVE that quote, the way a person replying in Outlook would.
-export async function replyToMessage(id, { html, to, replyTo, subject }) {
+export async function replyToMessage(id, { html, to, replyTo, subject, attachments = [] }) {
   const draft = await graph("POST", `${mb()}/messages/${encodeURIComponent(id)}/createReply`, {}, { html: true });
   const quoted = (draft.body && draft.body.content) || "";
   const content = /<body[^>]*>/i.test(quoted) ? quoted.replace(/<body[^>]*>/i, (tag) => `${tag}${html}<br>`) : `${html}<br>${quoted}`;
@@ -130,21 +130,55 @@ export async function replyToMessage(id, { html, to, replyTo, subject }) {
   if (to) patch.toRecipients = [{ emailAddress: { address: to } }];
   if (replyTo) patch.replyTo = [{ emailAddress: { address: replyTo } }];
   await graph("PATCH", `${mb()}/messages/${encodeURIComponent(draft.id)}`, patch);
+  await addAttachments(draft.id, attachments);
   await graph("POST", `${mb()}/messages/${encodeURIComponent(draft.id)}/send`);
   return { via: "graph-reply", mailbox: salesMailbox() };
 }
 
-export async function sendNew({ to, subject, html, replyTo }) {
-  await graph("POST", `${mb()}/sendMail`, {
-    message: {
-      subject,
-      body: { contentType: "HTML", content: html },
-      toRecipients: [{ emailAddress: { address: to } }],
-      ...(replyTo ? { replyTo: [{ emailAddress: { address: replyTo } }] } : {}),
-    },
-    saveToSentItems: true,
+// A new message (not a reply): built as a draft so attachments can go on it first.
+export async function sendNew({ to, subject, html, replyTo, attachments = [] }) {
+  const draft = await graph("POST", `${mb()}/messages`, {
+    subject,
+    body: { contentType: "HTML", content: html },
+    toRecipients: [{ emailAddress: { address: to } }],
+    ...(replyTo ? { replyTo: [{ emailAddress: { address: replyTo } }] } : {}),
   });
+  await addAttachments(draft.id, attachments);
+  await graph("POST", `${mb()}/messages/${encodeURIComponent(draft.id)}/send`);
   return { via: "graph", mailbox: salesMailbox() };
+}
+
+// Files onto a draft. Graph takes up to 3 MB in one call; anything bigger goes
+// through an upload session in chunks (multiples of 320 KiB, as Graph requires).
+const SIMPLE_MAX = 3 * 1024 * 1024;
+const CHUNK = 320 * 1024 * 10;   // 3.125 MiB
+export async function addAttachments(draftId, files = []) {
+  for (const f of files) {
+    const bytes = Buffer.from(String(f.base64 || ""), "base64");
+    const name = String(f.name || "attachment").slice(0, 200);
+    const contentType = String(f.contentType || "application/octet-stream");
+    if (bytes.length <= SIMPLE_MAX) {
+      await graph("POST", `${mb()}/messages/${encodeURIComponent(draftId)}/attachments`, {
+        "@odata.type": "#microsoft.graph.fileAttachment", name, contentType, contentBytes: bytes.toString("base64"),
+      });
+      continue;
+    }
+    const s = await graph("POST", `${mb()}/messages/${encodeURIComponent(draftId)}/attachments/createUploadSession`, {
+      AttachmentItem: { attachmentType: "file", name, size: bytes.length, contentType },
+    });
+    for (let at = 0; at < bytes.length; at += CHUNK) {
+      const part = bytes.subarray(at, Math.min(at + CHUNK, bytes.length));
+      // The upload URL carries its own authorisation — sending ours as well is refused.
+      const r = await fetch(s.uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Length": String(part.length), "Content-Range": `bytes ${at}-${at + part.length - 1}/${bytes.length}` },
+        body: part,
+      });
+      if (!r.ok && r.status !== 200 && r.status !== 201 && r.status !== 202) {
+        const e = new Error(`Attachment upload failed for ${name}: ${r.status}`); e.status = r.status; throw e;
+      }
+    }
+  }
 }
 
 export async function markRead(id) { return setRead(id, true); }

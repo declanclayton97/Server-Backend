@@ -560,11 +560,20 @@ export function registerSalesHubRoutes(app, deps) {
   app.post("/api/sales-hub/draft", requireUser, async (req, res) => {
     try {
       const orderId = num(req.body && req.body.orderId);
+      const intent = String((req.body && req.body.intent) || "eta");
+      // A plain reply does not need an order behind it — most of the inbox is not
+      // about one, and it should still be answerable from here.
+      if (!orderId && intent === "plain") {
+        const draft = buildSalesReply({
+          intent, order: { contactName: String((req.body && req.body.contactName) || "") },
+          salesperson: {}, signedBy: (req.hubUser && req.hubUser.name) || "",
+        });
+        return res.json({ draft, assessment: { level: "ok", reasons: [], laterNotes: [] }, po: null, promised: null, returnsRef: null });
+      }
       if (!orderId) return res.status(400).json({ error: "orderId required" });
       const order = await gatherOrder(orderId);
       if (!order) return res.status(404).json({ error: "Order not found" });
 
-      const intent = String((req.body && req.body.intent) || "eta");
       const emailDate = (req.body && req.body.emailDate) || null;
 
       // Use the PO that finishes LAST: quoting the earliest would promise a
@@ -617,9 +626,19 @@ export function registerSalesHubRoutes(app, deps) {
       const to = String(b.to || "").trim();
       const subject = String(b.subject || "").trim();
       const html = String(b.html || "");
-      if (!orderId || !to || !subject || !html) {
-        return res.status(400).json({ error: "orderId, to, subject and html are all required" });
+      if ((!orderId && !b.messageId) || !to || !subject || !html) {
+        return res.status(400).json({ error: "to, subject and html are required, and an order or an inbox email to reply to" });
       }
+      // Files from the compose box, base64. Outlook's own limits: 20 MB a file.
+      const attachments = Array.isArray(b.attachments) ? b.attachments.slice(0, 10) : [];
+      let total = 0;
+      for (const a of attachments) {
+        const n = Buffer.byteLength(String(a.base64 || ""), "base64");
+        total += n;
+        if (!a.name || n === 0) return res.status(400).json({ error: "An attachment is empty or has no name" });
+        if (n > 20 * 1024 * 1024) return res.status(413).json({ error: `${a.name} is over 20 MB` });
+      }
+      if (total > 25 * 1024 * 1024) return res.status(413).json({ error: "Attachments come to more than 25 MB" });
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
         return res.status(400).json({ error: `"${to}" is not an email address` });
       }
@@ -634,7 +653,7 @@ export function registerSalesHubRoutes(app, deps) {
         if (held) return res.status(423).json({ error: `${held.name} is working on this email — not sent.` });
       }
 
-      const order = await gatherOrder(orderId).catch(() => null);
+      const order = orderId ? await gatherOrder(orderId).catch(() => null) : null;
       const salesperson = (order && order.salesperson) || {};
 
       const who = (req.hubUser && req.hubUser.name) || "";
@@ -652,8 +671,8 @@ export function registerSalesHubRoutes(app, deps) {
       let via;
       if (graphConfigured()) {
         const r = b.messageId
-          ? await replyToMessage(String(b.messageId), { html, to, replyTo, subject })
-          : await sendNew({ to, subject, html, replyTo });
+          ? await replyToMessage(String(b.messageId), { html, to, replyTo, subject, attachments })
+          : await sendNew({ to, subject, html, replyTo, attachments });
         via = r.via;
         // Outlook marks an email read once it has been replied to; do the same so the
         // shared inbox shows it as dealt with. Never on merely OPENING it — a colleague
@@ -666,7 +685,8 @@ export function registerSalesHubRoutes(app, deps) {
           secure: false,
           auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
         });
-        await transporter.sendMail({ from: `"${fromName}" <${fromAddress}>`, replyTo, to, subject, html });
+        await transporter.sendMail({ from: `"${fromName}" <${fromAddress}>`, replyTo, to, subject, html,
+          attachments: attachments.map((a) => ({ filename: a.name, content: Buffer.from(String(a.base64), "base64"), contentType: a.contentType })) });
         via = "smtp2go";
       }
 
@@ -677,16 +697,19 @@ export function registerSalesHubRoutes(app, deps) {
         proposedDates: Array.isArray(b.proposedDates) ? b.proposedDates : [],
         duplicationLevel: b.acknowledgedLevel,
         body: emailToNoteText(html),
+        attachments: attachments.map((a) => a.name),
       });
       // postBpOrderNote reports failure by RETURNING false, not throwing — reading
       // only the catch told people "written to the order notes" when it was not.
       let noted = false;
-      try { noted = (await postBpOrderNote(orderId, note)) !== false; }
-      catch (e) { console.error("[sales-hub] note failed:", e.message); }
+      if (orderId) {
+        try { noted = (await postBpOrderNote(orderId, note)) !== false; }
+        catch (e) { console.error("[sales-hub] note failed:", e.message); }
+      }
 
       // The email has gone. A failed note must not read as a failed send, or
       // somebody will send it a second time.
-      res.json({ sent: true, via, noted, note });
+      res.json({ sent: true, via, noted, noOrder: !orderId, note });
     } catch (err) {
       console.error("[sales-hub] send failed:", err.message);
       res.status(500).json({ sent: false, error: err.message });

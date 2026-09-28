@@ -45,7 +45,7 @@ assertEq("proof beats eta", detectIntent("Can you resend the proof to approve? W
 assertEq("part-shipped", detectIntent("We only received part of the order, where is the rest"), "part_shipped");
 assertEq("delay/cancel", detectIntent("Still waiting. If it's delayed again I want to cancel"), "delay");
 assertEq("plain eta", detectIntent("Any update on when this is due?"), "eta");
-assertEq("unrecognised falls back to eta", detectIntent("Morning!"), "eta");
+assertEq("an email that fits no template gets a plain reply (Dec, 28 Sep)", detectIntent("Morning!"), "plain");
 
 // --- order number -----------------------------------------------------------
 assertEq("tagged wins", extractOrderNumber("Hi, chasing order 489373 please"), "489373");
@@ -481,6 +481,15 @@ assertEq("unset lead time -> measured", iso(poArrival({ supplierContactId: 2, pl
 // Unknown supplier with an impossible date -> no date at all (we chase, we do not call it late)
 assertEq("impossible and unmeasured -> null", poArrival({ supplierContactId: 999, placedOn: "2026-09-21T10:00:00+01:00", expectedDate: "2026-09-01T00:00:00+01:00" }), null);
 setSupplierLeadTimes([]);
+
+// --- plain reply (no template) --------------------------------------------------
+const plain = buildSalesReply({ intent: "plain", order: { contactName: "Sam Carter" }, salesperson: {}, signedBy: "Dec Clayton" });
+assertTrue("plain: greets", plain.html.includes("Hi Sam,"));
+assertTrue("plain: signs off", plain.html.includes("Dec Clayton"));
+assertFalse("plain: no template sentences", /sorry to keep you waiting|date you need this by|checked order/.test(plain.text));
+assertEq("plain: promises nothing", plain.proposedDates, []);
+const withFiles = buildSalesNote({ intent: "plain", to: "a@b.com", subject: "RE: hi", body: "Hi", attachments: ["proof.pdf", "photo.jpg"] });
+assertTrue("note lists attachments", withFiles.includes("Attached: proof.pdf, photo.jpg"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
