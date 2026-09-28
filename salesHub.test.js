@@ -438,6 +438,7 @@ assertEq("a delay is still a delay", detectIntent("Still waiting on my order, th
 const ret = buildSalesReply({ intent: "returns", order, salesperson: { name: "Bob" }, returnsRef: "DC28092601", today: THU24 });
 assertTrue("return mail gives the reference", ret.text.includes("DC28092601"));
 assertTrue("and where to send it", ret.text.includes("LS26 8LG"));
+assertTrue("reference goes on the invoice", ret.text.includes("write this reference on your invoice and send it back"));
 assertEq("return mail promises no date", ret.proposedDates, []);
 assertTrue("subject carries the reference", ret.subject.includes("DC28092601"));
 assertFalse("no 'date you need this by' line on a return", ret.text.includes("date you need this by"));
@@ -449,6 +450,7 @@ assertTrue("decoration row = logo order", isLogoOrder(logoOrder));
 const tl = typicalSentence(logoOrder, THU24);
 assertEq("logo typical window", tl && tl.dates, ["2026-10-05/late"]);
 assertTrue("logo wording names the usual time", tl && /around 8 working days/.test(tl.text));
+assertTrue("says personalisation, not logo", tl && tl.text.startsWith("Orders with personalisation"));
 const plainOrder = { ...order, placedOn: "2026-09-24T09:00:00+01:00", allRows: [{ kind: "goods" }], timeline: [] };
 const tp = typicalSentence(plainOrder, THU24);   // Thu + 5 + 1 = Fri 2 Oct
 assertEq("non-logo typical window", tp && tp.dates, ["2026-09-28/late"]);

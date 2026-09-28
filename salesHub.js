@@ -842,7 +842,7 @@ export function typicalSentence(order, today = new Date()) {
   if (!phrase) return null;            // already past the typical time: that is a chase, not an estimate
   return {
     text: logo
-      ? `Orders with your logo on usually take around ${lt.median} working days to make up and send out, so yours should be with you ${phrase}.`
+      ? `Orders with personalisation usually take around ${lt.median} working days to make up and send out, so yours should be with you ${phrase}.`
       : `It should be with you ${phrase}.`,
     dates: [windowKey(win)], phrase, source: logo ? "typical-logo" : "typical",
   };
@@ -919,9 +919,8 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
   if (intent === "returns") {
     lines.push("Thanks for letting us know &mdash; no problem at all.");
     lines.push(returnsRef
-      ? `Your returns reference is <b>${esc(returnsRef)}</b>. Please write it clearly on the outside of the parcel, or pop a note inside with it on, so we can match it to order ${esc(ref)} as soon as it arrives.`
-      : `Please write your order number, ${esc(ref)}, clearly on the outside of the parcel so we can match it as soon as it arrives.`);
-    lines.push("Please send the item(s) back to:<br>" + RETURNS_ADDRESS.map(esc).join("<br>"));
+      ? `Your returns reference is <b>${esc(returnsRef)}</b>. Please write this reference on your invoice and send it back with the item(s) to:<br>` + RETURNS_ADDRESS.map(esc).join("<br>")
+      : `Please write your order number, ${esc(ref)}, on your invoice and send it back with the item(s) to:<br>` + RETURNS_ADDRESS.map(esc).join("<br>"));
     lines.push("Once it's back with us and checked, I'll be in touch to sort the exchange or refund for you.");
   } else if (intent === "proof_approval") {
     lines.push(
