@@ -8522,6 +8522,32 @@ app.post('/api/purchasing/product-supplier-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// POST /api/purchasing/so-add-row-live { orderId, productId, qty, net, tax, taxCode?, nominalCode?, execute }
+// Put a real product row on a sales order still in Stock needs ordering, at a stated price.
+// Brightpearl wants a whole-number quantity string ("1"), not the "1.0000" it returns.
+app.post('/api/purchasing/so-add-row-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled' });
+  const b = req.body || {};
+  const orderId = Number(b.orderId), productId = Number(b.productId), qty = Number(b.qty);
+  if (!orderId || !productId || !(qty > 0) || b.net == null || b.tax == null) return res.status(400).json({ error: 'orderId, productId, qty, net and tax required' });
+  try {
+    const first = (r) => (Array.isArray(r) ? r[0] : r);
+    const order = first(await bpLive('GET', `/order-service/order/${orderId}`));
+    if (!order) return res.status(404).json({ error: 'order not found' });
+    const sno = Number(process.env.PURCHASING_DEMAND_STATUS_ID || 23);
+    if (order.orderStatus.orderStatusId !== sno) return res.status(409).json({ error: `order is in "${order.orderStatus.name}", not Stock needs ordering` });
+    const row = {
+      productId, quantity: { magnitude: String(qty) },
+      rowValue: { taxCode: b.taxCode || 'T20', rowNet: { currency: 'GBP', value: String(b.net) }, rowTax: { currency: 'GBP', value: String(b.tax) } },
+      ...(b.nominalCode ? { nominalCode: String(b.nominalCode) } : {}),
+    };
+    if (!b.execute) return res.json({ dryRun: true, orderId, row, totalBefore: order.totalValue });
+    await bpLive('POST', `/order-service/order/${orderId}/row`, row);
+    const after = first(await bpLive('GET', `/order-service/order/${orderId}`));
+    res.json({ ok: true, orderId, totalBefore: order.totalValue, totalAfter: after.totalValue });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // ── Add a missing size/colour variant to an existing product group ─────────────────────────
 // Sales orders arrive with a free-text row ("... ++ NEEDS ADDING ++") when the style exists
 // but that one size doesn't. The API has NO productGroupId on create: BP groups a new product
@@ -8632,7 +8658,7 @@ app.post('/api/purchasing/add-variant-live', async (req, res) => {
       const ccy = rv.rowNet.currencyCode || 'GBP';
       const blank = { productId: src.productId, productName: '-', quantity: { magnitude: String(src.quantity.magnitude) },
         rowValue: { taxCode: rv.taxCode, rowNet: { currency: ccy, value: '0.00' }, rowTax: { currency: ccy, value: '0.00' } } };
-      const real = { productId: newId, quantity: { magnitude: String(src.quantity.magnitude) },
+      const real = { productId: newId, quantity: { magnitude: String(Number(src.quantity.magnitude)) },   // "1", not "1.0000" (ORDC-024)
         rowValue: { taxCode: rv.taxCode, rowNet: { currency: ccy, value: String(rv.rowNet.value) }, rowTax: { currency: ccy, value: String(rv.rowTax.value) } } };
       if (src.nominalCode) { blank.nominalCode = src.nominalCode; real.nominalCode = src.nominalCode; }
       // PUT first: a failed add leaves the order short, never double-valued.
