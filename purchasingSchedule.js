@@ -2473,6 +2473,50 @@ export async function snickersLineStatus(altItemsUrl, sku, sizeLabel) {
   }
 }
 
+// PLACE AGAINST A PO A FAILED RUN ALREADY BUILT, instead of minting a second one (user: "we dont want
+// junk PO's"). Rebuilds the { soLines, lowLines } shape createPo returns — contributors from the PO's own
+// note, quantities and unit costs from its rows — so a placement function runs unchanged. Only an UNSENT
+// auto-PO for this supplier qualifies: status 6, the supplier's contact, its "Auto-PO for <KEY>" note, and
+// no supplier order number on it. Used for Snickers PO 492409 and Blaklader PO 492538 (2026-09-28).
+async function existingAutoPo(existingPoId, { contactIds, autoKey }) {
+  const hdr = (await bp.bpLiveGet(`/order-service/order/${existingPoId}`))[0];
+  const status = hdr && hdr.orderStatus && hdr.orderStatus.orderStatusId;
+  const supplierId = hdr && hdr.parties && hdr.parties.supplier && hdr.parties.supplier.contactId;
+  const notes = await bp.bpLiveGet(`/order-service/order/${existingPoId}/note`).catch(() => []);
+  const autoRe = new RegExp(`Auto-PO for ${autoKey}\\b`);
+  const isAuto = (Array.isArray(notes) ? notes : []).some((n) => autoRe.test(String(n.text || '')));
+  if (!hdr || hdr.orderTypeCode !== 'PO' || Number(status) !== 6 || !contactIds.includes(Number(supplierId)) || !isAuto || /^\d{6,}/.test(String(hdr.reference || ''))) {
+    throw stepErr('create-po', `PO ${existingPoId} is not an unsent ${autoKey} auto-PO (type ${hdr && hdr.orderTypeCode}, status ${status}, supplier ${supplierId}, auto-note ${isAuto}, ref ${JSON.stringify(hdr && hdr.reference)}) — refusing to place against it`);
+  }
+  // Contributors from the PO's own note; the ROWS are the truth for quantities. SO quantity per
+  // SKU is carved out of the row total, the remainder is low-inventory — so the per-SKU sum that
+  // goes to the basket equals the PO exactly.
+  const contrib = await bp.getPoContributors(existingPoId);
+  const rows = await bp.getOrderCartLines(existingPoId);
+  const rowBySku = new Map(rows.map((r) => [String(r.sku).toUpperCase(), r]));
+  // Unit cost per SKU from the PO's own rows. Without it the price check below read every line as
+  // £0 and reported a £4,645.73 "gap" on PO 492409 that was really £20.62 (2026-09-28).
+  const costOf = new Map();
+  for (const r of Object.values(hdr.orderRows || {})) {
+    const k = String(r.productSku || '').toUpperCase(); const c = parseFloat(r.itemCost && r.itemCost.value);
+    if (k && Number.isFinite(c) && !costOf.has(k)) costOf.set(k, c);
+  }
+  const soLines = [], soQty = new Map();
+  for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
+    for (const it of items) {
+      const r = rowBySku.get(String(it.sku).toUpperCase()) || {};
+      soLines.push({ order: Number(order), sku: it.sku, qty: it.qty, name: r.name || null, productId: r.productId || null, colour: r.colour, size: r.size, cost: costOf.get(String(it.sku).toUpperCase()) || 0 });
+      soQty.set(String(it.sku).toUpperCase(), (soQty.get(String(it.sku).toUpperCase()) || 0) + it.qty);
+    }
+  }
+  const lowLines = [];
+  for (const r of rows) {
+    const left = Math.round(r.qty) - (soQty.get(String(r.sku).toUpperCase()) || 0);
+    if (left > 0) lowLines.push({ sku: r.sku, qty: left, name: r.name, productId: r.productId, colour: r.colour, size: r.size, cost: costOf.get(String(r.sku).toUpperCase()) || 0 });
+  }
+  return { created: true, poId: Number(existingPoId), soLines, lowLines, soUnits: soLines.reduce((a, l) => a + l.qty, 0), lowUnits: lowLines.reduce((a, l) => a + l.qty, 0), reused: true };
+}
+
 async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [], includeSalesOrders = true, includeLowInv = true, poId: existingPoId = null, discontinued = [], rehearse = false } = {}) {
   const steps = {};
   // excludeSkus: lines Hultafors genuinely cannot sell us — a discontinued code is the usual one.
@@ -2483,44 +2527,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const excl = new Set((excludeSkus || []).map((x) => String(x).trim().toUpperCase()).filter(Boolean));
   let po;
   if (existingPoId) {
-    // PLACE AGAINST A PO A FAILED RUN ALREADY BUILT (user: "we dont want junk PO's"). PO 492409 on
-    // 2026-09-28 stopped at checkout on one dead CLC code; a fresh run would mint a second PO for
-    // the same ~60 sales-order lines. Only an unsent Snickers auto-PO qualifies.
-    const hdr = (await bp.bpLiveGet(`/order-service/order/${existingPoId}`))[0];
-    const status = hdr && hdr.orderStatus && hdr.orderStatus.orderStatusId;
-    const supplierId = hdr && hdr.parties && hdr.parties.supplier && hdr.parties.supplier.contactId;
-    const notes = await bp.bpLiveGet(`/order-service/order/${existingPoId}/note`).catch(() => []);
-    const isSnickersAuto = (Array.isArray(notes) ? notes : []).some((n) => /Auto-PO for SNICKERS\b/.test(String(n.text || '')));
-    if (!hdr || hdr.orderTypeCode !== 'PO' || Number(status) !== 6 || Number(supplierId) !== 331 || !isSnickersAuto || /^\d{6,}/.test(String(hdr.reference || ''))) {
-      throw stepErr('create-po', `PO ${existingPoId} is not an unsent Snickers auto-PO (type ${hdr && hdr.orderTypeCode}, status ${status}, supplier ${supplierId}, auto-note ${isSnickersAuto}, ref ${JSON.stringify(hdr && hdr.reference)}) — refusing to place against it`);
-    }
-    // Contributors from the PO's own note; the ROWS are the truth for quantities. SO quantity per
-    // SKU is carved out of the row total, the remainder is low-inventory — so the per-SKU sum that
-    // goes to the basket equals the PO exactly.
-    const contrib = await bp.getPoContributors(existingPoId);
-    const rows = await bp.getOrderCartLines(existingPoId);
-    const rowBySku = new Map(rows.map((r) => [String(r.sku).toUpperCase(), r]));
-    // Unit cost per SKU from the PO's own rows. Without it the price check below read every line as
-    // £0 and reported a £4,645.73 "gap" on PO 492409 that was really £20.62 (2026-09-28).
-    const costOf = new Map();
-    for (const r of Object.values(hdr.orderRows || {})) {
-      const k = String(r.productSku || '').toUpperCase(); const c = parseFloat(r.itemCost && r.itemCost.value);
-      if (k && Number.isFinite(c) && !costOf.has(k)) costOf.set(k, c);
-    }
-    const soLines = [], soQty = new Map();
-    for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
-      for (const it of items) {
-        const r = rowBySku.get(String(it.sku).toUpperCase()) || {};
-        soLines.push({ order: Number(order), sku: it.sku, qty: it.qty, name: r.name || null, productId: r.productId || null, colour: r.colour, size: r.size, cost: costOf.get(String(it.sku).toUpperCase()) || 0 });
-        soQty.set(String(it.sku).toUpperCase(), (soQty.get(String(it.sku).toUpperCase()) || 0) + it.qty);
-      }
-    }
-    const lowLines = [];
-    for (const r of rows) {
-      const left = Math.round(r.qty) - (soQty.get(String(r.sku).toUpperCase()) || 0);
-      if (left > 0) lowLines.push({ sku: r.sku, qty: left, name: r.name, productId: r.productId, colour: r.colour, size: r.size, cost: costOf.get(String(r.sku).toUpperCase()) || 0 });
-    }
-    po = { created: true, poId: Number(existingPoId), soLines, lowLines, soUnits: soLines.reduce((a, l) => a + l.qty, 0), lowUnits: lowLines.reduce((a, l) => a + l.qty, 0), reused: true };
+    po = await existingAutoPo(existingPoId, { contactIds: [331], autoKey: 'SNICKERS' });
   } else {
     try { po = await createPo({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool, includeSalesOrders, includeLowInv }); }
     catch (e) { throw createPoErr(e); }
@@ -3528,11 +3535,17 @@ async function blakladerOrderForPo(altItemsUrl, poId, { scan = 8 } = {}) {
   }
   return null;
 }
-async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, includeSalesOrders = true, includeLowInv = true } = {}) {
+async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, includeSalesOrders = true, includeLowInv = true, poId: existingPoId = null } = {}) {
   const steps = {};
   let po;
-  try { po = await createPo({ supplierKey: 'BLAKLADER', execute: live, padToThreshold, logPool: pool, includeSalesOrders, includeLowInv }); }
-  catch (e) { throw createPoErr(e); }
+  // Reuse an unsent auto-PO a failed run left (PO 492538, 2026-09-28: their orders/send 502'd). The
+  // basket step below starts with clearFirst and verifies what landed, so a basket still holding
+  // the failed attempt cannot ride along twice.
+  if (existingPoId) po = await existingAutoPo(existingPoId, { contactIds: [BLAKLADER_SUPPLIER_CONTACT], autoKey: 'BLAKLADER' });
+  else {
+    try { po = await createPo({ supplierKey: 'BLAKLADER', execute: live, padToThreshold, logPool: pool, includeSalesOrders, includeLowInv }); }
+    catch (e) { throw createPoErr(e); }
+  }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -4249,6 +4262,8 @@ export async function runFristadsScheduled(opts = {}) { return runSupplierSchedu
 // prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
 export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null, packSizes, excludeSkus }); }
 export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes, excludeSkus }); }
+// Blaklader against an existing unsent auto-PO (the basket step clears and verifies first).
+export async function blakladerPlaceExisting({ pool, altItemsUrl, poId }) { return placeBlakladerOrder(pool, altItemsUrl, { poId, live: true }); }
 // Snickers against an existing unsent auto-PO; `discontinued` runs the discontinued route for those SKUs.
 export async function snickersPlaceExisting({ pool, altItemsUrl, poId, discontinued = [], rehearse = true }) { return placeSnickersOrder(pool, altItemsUrl, { poId, discontinued, rehearse, live: true }); }
 // Sterling against an existing unsent PO. rehearse:true stops after the basket read-back and empties it.
