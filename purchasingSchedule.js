@@ -2500,18 +2500,25 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     const contrib = await bp.getPoContributors(existingPoId);
     const rows = await bp.getOrderCartLines(existingPoId);
     const rowBySku = new Map(rows.map((r) => [String(r.sku).toUpperCase(), r]));
+    // Unit cost per SKU from the PO's own rows. Without it the price check below read every line as
+    // £0 and reported a £4,645.73 "gap" on PO 492409 that was really £20.62 (2026-09-28).
+    const costOf = new Map();
+    for (const r of Object.values(hdr.orderRows || {})) {
+      const k = String(r.productSku || '').toUpperCase(); const c = parseFloat(r.itemCost && r.itemCost.value);
+      if (k && Number.isFinite(c) && !costOf.has(k)) costOf.set(k, c);
+    }
     const soLines = [], soQty = new Map();
     for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
       for (const it of items) {
         const r = rowBySku.get(String(it.sku).toUpperCase()) || {};
-        soLines.push({ order: Number(order), sku: it.sku, qty: it.qty, name: r.name || null, productId: r.productId || null, colour: r.colour, size: r.size });
+        soLines.push({ order: Number(order), sku: it.sku, qty: it.qty, name: r.name || null, productId: r.productId || null, colour: r.colour, size: r.size, cost: costOf.get(String(it.sku).toUpperCase()) || 0 });
         soQty.set(String(it.sku).toUpperCase(), (soQty.get(String(it.sku).toUpperCase()) || 0) + it.qty);
       }
     }
     const lowLines = [];
     for (const r of rows) {
       const left = Math.round(r.qty) - (soQty.get(String(r.sku).toUpperCase()) || 0);
-      if (left > 0) lowLines.push({ sku: r.sku, qty: left, name: r.name, productId: r.productId, colour: r.colour, size: r.size });
+      if (left > 0) lowLines.push({ sku: r.sku, qty: left, name: r.name, productId: r.productId, colour: r.colour, size: r.size, cost: costOf.get(String(r.sku).toUpperCase()) || 0 });
     }
     po = { created: true, poId: Number(existingPoId), soLines, lowLines, soUnits: soLines.reduce((a, l) => a + l.qty, 0), lowUnits: lowLines.reduce((a, l) => a + l.qty, 0), reused: true };
   } else {
