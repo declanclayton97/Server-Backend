@@ -139,6 +139,7 @@ export function registerSalesHubRoutes(app, deps) {
               supplier: bySupplier[String(p.id)] || (p.parties && p.parties.supplier && p.parties.supplier.companyName) || "",
               status: (p.orderStatus && p.orderStatus.name) || "",
               placedOn: p.placedOn || p.createdOn || null,
+              supplierContactId: (p.parties && p.parties.supplier && p.parties.supplier.contactId) || null,
               expectedDate: (p.delivery && p.delivery.deliveryDate) || null,
             }))
             // A CANCELLED PO is not a commitment to anything. demand_log keeps a

@@ -20,6 +20,7 @@ import { SIGNATURE_HTML } from "./emailSignature.js";
 // The bank-holiday list the quote chase already maintains, so both agree on
 // what counts as a working day rather than keeping two calendars.
 import { isBankHoliday } from "./quoteChase.js";
+import { readFileSync } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Intents. Ordered: the first match wins, so put the specific before the vague.
@@ -877,9 +878,38 @@ export const DELIVERY_ALLOWANCE_DAYS = Number(process.env.SALES_HUB_ALLOWANCE_DA
  * our allowance. null when the PO has no date.
  */
 export function windowFromPo(po, allowanceDays = DELIVERY_ALLOWANCE_DAYS) {
-  if (!po || !po.expectedDate) return null;
-  const d = ukDay(po.expectedDate);
-  return d ? windowOf(addWorkingDays(d, allowanceDays)) : null;
+  const due = poArrival(po);
+  return due ? windowOf(addWorkingDays(due, allowanceDays)) : null;
+}
+
+// ---------------------------------------------------------------------------
+// When the goods will reach US. A PO's due date is usually NOT a supplier's word:
+// Brightpearl fills it in as placed date + the lead time on the supplier's contact,
+// and those settings are guesses — Portwest says 4 days and arrives in 2, Vigilant
+// is set to 0 and takes five weeks, and some POs are due before they were placed.
+// So when the date is that default (or impossible), use what the supplier has
+// actually taken, measured by scripts/supplier-leadtimes.mjs (75th percentile,
+// working days, PO raised -> first goods booked in). A date somebody has changed
+// to what the supplier told them is kept as it is.
+// ---------------------------------------------------------------------------
+let SUPPLIER_LEAD = {};
+try {
+  const j = JSON.parse(readFileSync(new URL("./scripts/supplier-leadtimes.json", import.meta.url), "utf8"));
+  for (const r of j.suppliers || []) SUPPLIER_LEAD[r.contactId] = r;
+} catch { /* no measurements: fall back to the PO dates as they stand */ }
+export const setSupplierLeadTimes = (rows) => { SUPPLIER_LEAD = Object.fromEntries(rows.map((r) => [r.contactId, r])); };
+
+export function poArrival(po) {
+  if (!po) return null;
+  const placed = po.placedOn ? ukDay(po.placedOn) : null;
+  const due = po.expectedDate ? ukDay(po.expectedDate) : null;
+  const m = SUPPLIER_LEAD[po.supplierContactId];
+  const dueDays = placed && due ? Math.round((due - placed) / 864e5) : null;
+  const isDefault = !due || (placed && due < placed) ||
+    (m && m.bpLeadTimeDays != null && dueDays != null && Math.abs(dueDays - m.bpLeadTimeDays) <= 1);
+  if (isDefault && m && placed) return addWorkingDays(placed, m.p75);
+  if (placed && due && due < placed) return null;                 // impossible date and nothing measured
+  return due;
 }
 
 // "2026-09-28/mid" -> "mid week commencing 28 September", for notes and warnings.

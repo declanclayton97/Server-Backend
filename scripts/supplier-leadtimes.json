@@ -1,0 +1,573 @@
+{
+ "measuredOn": "2026-09-28",
+ "since": "2026-03-28",
+ "suppliers": [
+  {
+   "supplier": "Snickers",
+   "contactId": 331,
+   "pos": 438,
+   "median": 5,
+   "p75": 7,
+   "p90": 14,
+   "bpLeadTimeDays": 10
+  },
+  {
+   "supplier": "Steel Blue",
+   "contactId": 71449,
+   "pos": 255,
+   "median": 2,
+   "p75": 5,
+   "p90": 17,
+   "bpLeadTimeDays": 6
+  },
+  {
+   "supplier": "Portwest",
+   "contactId": 298,
+   "pos": 243,
+   "median": 2,
+   "p75": 2,
+   "p90": 7,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Blaklader",
+   "contactId": 323,
+   "pos": 193,
+   "median": 5,
+   "p75": 6,
+   "p90": 7,
+   "bpLeadTimeDays": 9
+  },
+  {
+   "supplier": "Carhartt UK LTD",
+   "contactId": 65173,
+   "pos": 185,
+   "median": 7,
+   "p75": 8,
+   "p90": 16,
+   "bpLeadTimeDays": 11
+  },
+  {
+   "supplier": "VIGILANT ENTERPRISES",
+   "contactId": 70485,
+   "pos": 175,
+   "median": 19,
+   "p75": 24,
+   "p90": 27,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "Sterling Safetywear Ltd",
+   "contactId": 341,
+   "pos": 152,
+   "median": 2,
+   "p75": 3,
+   "p90": 5,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Castle Clothing",
+   "contactId": 332,
+   "pos": 132,
+   "median": 3,
+   "p75": 4,
+   "p90": 5,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Buckler Boots Ltd",
+   "contactId": 8981,
+   "pos": 126,
+   "median": 2,
+   "p75": 3,
+   "p90": 9,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Uneek",
+   "contactId": 322,
+   "pos": 125,
+   "median": 2,
+   "p75": 2,
+   "p90": 3,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Pencarrie",
+   "contactId": 204,
+   "pos": 113,
+   "median": 2,
+   "p75": 2,
+   "p90": 3,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Chadwick Textiles",
+   "contactId": 42485,
+   "pos": 98,
+   "median": 3,
+   "p75": 4,
+   "p90": 9,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Ralawise",
+   "contactId": 205,
+   "pos": 96,
+   "median": 1,
+   "p75": 2,
+   "p90": 2,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "BeeSwift",
+   "contactId": 326,
+   "pos": 88,
+   "median": 2,
+   "p75": 4,
+   "p90": 12,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Helly Hansen",
+   "contactId": 214,
+   "pos": 85,
+   "median": 3,
+   "p75": 5,
+   "p90": 6,
+   "bpLeadTimeDays": 6
+  },
+  {
+   "supplier": "Fristads Workwear Ltd",
+   "contactId": 37419,
+   "pos": 81,
+   "median": 5,
+   "p75": 5,
+   "p90": 6,
+   "bpLeadTimeDays": 7
+  },
+  {
+   "supplier": "MASCOT INTERNATIONAL A/S",
+   "contactId": 334,
+   "pos": 80,
+   "median": 6,
+   "p75": 6,
+   "p90": 7,
+   "bpLeadTimeDays": 9
+  },
+  {
+   "supplier": "SCRUFFS WORKWEAR LTD",
+   "contactId": 130243,
+   "pos": 72,
+   "median": 5,
+   "p75": 6,
+   "p90": 7,
+   "bpLeadTimeDays": 6
+  },
+  {
+   "supplier": "Leo Textiles Ltd T/A Leo Workwear",
+   "contactId": 7919,
+   "pos": 69,
+   "median": 2,
+   "p75": 3,
+   "p90": 5,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "V12 Footwear",
+   "contactId": 92811,
+   "pos": 65,
+   "median": 2,
+   "p75": 3,
+   "p90": 9,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "SPECIALIST SPORTS LTD",
+   "contactId": 100383,
+   "pos": 61,
+   "median": 3,
+   "p75": 6,
+   "p90": 21,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "AS APPAREL IMPEX LTD",
+   "contactId": 47921,
+   "pos": 59,
+   "median": 3,
+   "p75": 4,
+   "p90": 7,
+   "bpLeadTimeDays": 6
+  },
+  {
+   "supplier": "Ultimate Industrial",
+   "contactId": 5982,
+   "pos": 54,
+   "median": 2,
+   "p75": 3,
+   "p90": 6,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Performance Brands",
+   "contactId": 11611,
+   "pos": 48,
+   "median": 2,
+   "p75": 3,
+   "p90": 4,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Engel",
+   "contactId": 83093,
+   "pos": 46,
+   "median": 5,
+   "p75": 5,
+   "p90": 7,
+   "bpLeadTimeDays": 8
+  },
+  {
+   "supplier": "PULSAR UK",
+   "contactId": 11807,
+   "pos": 45,
+   "median": 2,
+   "p75": 2,
+   "p90": 3,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Briggs Footwear",
+   "contactId": 338,
+   "pos": 45,
+   "median": 2,
+   "p75": 2,
+   "p90": 4,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Rock Fall",
+   "contactId": 38733,
+   "pos": 43,
+   "median": 3,
+   "p75": 4,
+   "p90": 5,
+   "bpLeadTimeDays": 6
+  },
+  {
+   "supplier": "WALSH - BLYTH & TURTON (BUNZL UK LTD)",
+   "contactId": 92774,
+   "pos": 33,
+   "median": 2,
+   "p75": 3,
+   "p90": 6,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Tranemo Workwear Ltd",
+   "contactId": 11780,
+   "pos": 33,
+   "median": 5,
+   "p75": 6,
+   "p90": 7,
+   "bpLeadTimeDays": 10
+  },
+  {
+   "supplier": "Behrens Group",
+   "contactId": 38380,
+   "pos": 32,
+   "median": 3,
+   "p75": 4,
+   "p90": 6,
+   "bpLeadTimeDays": 7
+  },
+  {
+   "supplier": "Brook Taverner",
+   "contactId": 5499,
+   "pos": 30,
+   "median": 2,
+   "p75": 3,
+   "p90": 4,
+   "bpLeadTimeDays": 5
+  },
+  {
+   "supplier": "SDL GROUP LTD (SURRIDGE)",
+   "contactId": 33248,
+   "pos": 27,
+   "median": 3,
+   "p75": 5,
+   "p90": 5,
+   "bpLeadTimeDays": 2
+  },
+  {
+   "supplier": "Supertouch",
+   "contactId": 342,
+   "pos": 22,
+   "median": 2,
+   "p75": 3,
+   "p90": 3,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Get Game Gear",
+   "contactId": 39229,
+   "pos": 21,
+   "median": 18,
+   "p75": 21,
+   "p90": 28,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "COTTON RIDGE",
+   "contactId": 58612,
+   "pos": 21,
+   "median": 1,
+   "p75": 2,
+   "p90": 3,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Footsure",
+   "contactId": 8885,
+   "pos": 18,
+   "median": 1,
+   "p75": 2,
+   "p90": 2,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Panther srl",
+   "contactId": 56194,
+   "pos": 18,
+   "median": 6,
+   "p75": 8,
+   "p90": 16,
+   "bpLeadTimeDays": 12
+  },
+  {
+   "supplier": "N.M. WILLIAMS (UK) LTD",
+   "contactId": 15143,
+   "pos": 16,
+   "median": 2,
+   "p75": 3,
+   "p90": 4,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "Future Garments Ltd",
+   "contactId": 18049,
+   "pos": 16,
+   "median": 3,
+   "p75": 7,
+   "p90": 14,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "ORN",
+   "contactId": 7753,
+   "pos": 13,
+   "median": 2,
+   "p75": 3,
+   "p90": 3,
+   "bpLeadTimeDays": 5
+  },
+  {
+   "supplier": "TOOLBANK",
+   "contactId": 5582,
+   "pos": 12,
+   "median": 1,
+   "p75": 2,
+   "p90": 3,
+   "bpLeadTimeDays": 2
+  },
+  {
+   "supplier": "Centurion",
+   "contactId": 337,
+   "pos": 9,
+   "median": 7,
+   "p75": 13,
+   "p90": 13,
+   "bpLeadTimeDays": 18
+  },
+  {
+   "supplier": "Amazon",
+   "contactId": 7715,
+   "pos": 8,
+   "median": 2,
+   "p75": 4,
+   "p90": 4,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "Xpres",
+   "contactId": 5500,
+   "pos": 6,
+   "median": 1,
+   "p75": 1,
+   "p90": 2,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "Hijat International",
+   "contactId": 39091,
+   "pos": 6,
+   "median": 25,
+   "p75": 38,
+   "p90": 48,
+   "bpLeadTimeDays": 42
+  },
+  {
+   "supplier": "PF CONCEPTS",
+   "contactId": 29982,
+   "pos": 6,
+   "median": 2,
+   "p75": 4,
+   "p90": 4,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "J&K ROSS LIMITED",
+   "contactId": 52395,
+   "pos": 6,
+   "median": 3,
+   "p75": 4,
+   "p90": 4,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "Orbit International Plc",
+   "contactId": 35193,
+   "pos": 6,
+   "median": 1,
+   "p75": 1,
+   "p90": 1,
+   "bpLeadTimeDays": 4
+  },
+  {
+   "supplier": "BTC Activewear",
+   "contactId": 206,
+   "pos": 6,
+   "median": 3,
+   "p75": 3,
+   "p90": 4,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "GLOBAL SAFETY LIMITED",
+   "contactId": 72779,
+   "pos": 6,
+   "median": 1,
+   "p75": 2,
+   "p90": 2,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "Bromely sports",
+   "contactId": 93447,
+   "pos": 5,
+   "median": 16,
+   "p75": 20,
+   "p90": 20,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "Prestige Leisure UK Ltd",
+   "contactId": 7382,
+   "pos": 5,
+   "median": 3,
+   "p75": 3,
+   "p90": 3,
+   "bpLeadTimeDays": 3
+  },
+  {
+   "supplier": "Pro-Direct Sport Ltd",
+   "contactId": 33219,
+   "pos": 5,
+   "median": 3,
+   "p75": 3,
+   "p90": 3,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "Clipper Gifts - (Plato Group International Limited)",
+   "contactId": 14730,
+   "pos": 3,
+   "median": 4,
+   "p75": 4,
+   "p90": 4,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "U-Power",
+   "contactId": 48234,
+   "pos": 3,
+   "median": 13,
+   "p75": 13,
+   "p90": 13,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "PYRAMID DISPLAY MATERIALS LIMITED",
+   "contactId": 12072,
+   "pos": 3,
+   "median": 1,
+   "p75": 1,
+   "p90": 1,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "K Print - Design & Print",
+   "contactId": 11318,
+   "pos": 3,
+   "median": 13,
+   "p75": 13,
+   "p90": 13,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "UK Point of Sale Group Ltd",
+   "contactId": 83681,
+   "pos": 3,
+   "median": 2,
+   "p75": 2,
+   "p90": 2,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "Fashion Exchange (UK) Ltd",
+   "contactId": 82593,
+   "pos": 3,
+   "median": 2,
+   "p75": 2,
+   "p90": 2,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "TROPHY DISTRIBUTORS",
+   "contactId": 47152,
+   "pos": 3,
+   "median": 1,
+   "p75": 1,
+   "p90": 1,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "SubliBlanks LTD",
+   "contactId": 67692,
+   "pos": 3,
+   "median": 4,
+   "p75": 4,
+   "p90": 4,
+   "bpLeadTimeDays": 0
+  },
+  {
+   "supplier": "GOAL INN",
+   "contactId": 60862,
+   "pos": 3,
+   "median": 4,
+   "p75": 4,
+   "p90": 4,
+   "bpLeadTimeDays": 0
+  }
+ ]
+}

@@ -27,6 +27,8 @@ import {
   returnRef,
   typicalSentence,
   isLogoOrder,
+  poArrival,
+  setSupplierLeadTimes,
 } from "./salesHub.js";
 
 let pass = 0, fail = 0;
@@ -460,6 +462,25 @@ const noPo = buildSalesReply({ intent: "eta", order: logoOrder, po: null, salesp
 assertEq("no PO, no note -> typical", noPo.eta.source, "typical-logo");
 const withNote = buildSalesReply({ intent: "eta", order: logoOrder, po: null, salesperson: { name: "Bob" }, today: THU24, promised });
 assertEq("a colleague's promise still beats the typical time", withNote.eta.source, "note");
+
+// --- measured supplier lead times over Brightpearl's default due dates ---------
+setSupplierLeadTimes([
+  { contactId: 65173, supplier: "Carhartt UK LTD", p75: 8, bpLeadTimeDays: 11 },
+  { contactId: 1, supplier: "Portwest", p75: 2, bpLeadTimeDays: 4 },
+  { contactId: 2, supplier: "VIGILANT ENTERPRISES", p75: 24, bpLeadTimeDays: 0 },
+]);
+const iso = (d) => d && d.toLocaleDateString("en-CA");
+// Carhartt PO 490863: placed Mon 21 Sep, BP default due Fri 2 Oct (= +11) -> measured 8 working days = Thu 1 Oct
+assertEq("Carhartt default date -> measured", iso(poArrival({ supplierContactId: 65173, placedOn: "2026-09-21T14:00:00+01:00", expectedDate: "2026-10-02T00:00:00+01:00" })), "2026-10-01");
+// A date somebody changed to what the supplier said is kept
+assertEq("confirmed date kept", iso(poArrival({ supplierContactId: 65173, placedOn: "2026-09-21T14:00:00+01:00", expectedDate: "2026-09-24T00:00:00+01:00" })), "2026-09-24");
+// Portwest due BEFORE it was placed -> measured instead
+assertEq("impossible date -> measured", iso(poArrival({ supplierContactId: 1, placedOn: "2026-09-21T10:00:00+01:00", expectedDate: "2026-09-08T00:00:00+01:00" })), "2026-09-23");
+// Vigilant with lead time 0 (due = placed) -> five weeks, not 'late'
+assertEq("unset lead time -> measured", iso(poArrival({ supplierContactId: 2, placedOn: "2026-09-21T10:00:00+01:00", expectedDate: "2026-09-21T00:00:00+01:00" })), "2026-10-23");
+// Unknown supplier with an impossible date -> no date at all (we chase, we do not call it late)
+assertEq("impossible and unmeasured -> null", poArrival({ supplierContactId: 999, placedOn: "2026-09-21T10:00:00+01:00", expectedDate: "2026-09-01T00:00:00+01:00" }), null);
+setSupplierLeadTimes([]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
