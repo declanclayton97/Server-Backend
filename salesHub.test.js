@@ -419,11 +419,14 @@ assertTrue("sent: says it has been sent", sentReply.text.includes("has now been 
 assertTrue("sent: gives the reference", sentReply.text.includes("VJ210582045GB"));
 assertFalse("sent: no longer talks about waiting on stock", sentReply.text.includes("waiting on"));
 assertEq("sent: source is tracking", sentReply.eta.source, "tracking");
+assertFalse("sent: no 'date you need this by' offer", sentReply.text.includes("date you need this by"));
 assertTrue("pick/pack/ship status recognised", isPickPackShip("In stock, pick/pack/ship"));
 assertFalse("other statuses are not", isPickPackShip("Stock needs ordering"));
 const ppsReply = buildSalesReply({ intent: "eta", order: { ...order, status: "In stock, pick/pack/ship", timeline: [] }, po: mascotPo, salesperson: { name: "Bob" }, today: THU24, promised });
 assertTrue("in stock: within 48 hours", ppsReply.text.includes("within the next 48 hours"));
 assertEq("in stock: source", ppsReply.eta.source, "in-stock");
+assertFalse("in stock: no 'date you need this by' offer", ppsReply.text.includes("date you need this by"));
+assertTrue("still offered when waiting on stock", keep.text.includes("date you need this by"));
 const partReply = buildSalesReply({ intent: "part_shipped", order: { ...order, timeline: shippedNotes, lines: [{ name: "Jacket", outstanding: 2 }] }, po: mascotPo, salesperson: { name: "Bob" }, today: THU24, promised });
 assertTrue("part shipped: tracking for what went", partReply.text.includes("VJ210582045GB"));
 assertTrue("part shipped: window for the rest", partReply.text.includes("mid next week"));
