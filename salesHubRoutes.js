@@ -22,6 +22,8 @@ import {
   buildSalesNote,
   promisedWindow,
   emailToNoteText,
+  initialsOf,
+  returnRef,
 } from "./salesHub.js";
 
 const num = (v) => (v == null || v === "" || isNaN(Number(v)) ? null : Number(v));
@@ -516,6 +518,43 @@ export function registerSalesHubRoutes(app, deps) {
     }
   });
 
+  // Returns references. One per order, per person, per day: drafting the same return
+  // twice gives the same number, so switching the reply type back and forth does not
+  // burn through the day's sequence. The primary key makes a duplicate impossible.
+  let refsReady = null;
+  const ensureRefs = () => (refsReady ||= getPool().query(`CREATE TABLE IF NOT EXISTS sales_hub_return_refs (
+      ref        text PRIMARY KEY,
+      initials   text NOT NULL,
+      day        date NOT NULL,
+      seq        int  NOT NULL,
+      order_id   bigint NOT NULL,
+      created_by text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`).catch((e) => { refsReady = null; throw e; }));
+
+  async function returnsRefFor(orderId, user) {
+    if (!(useDatabase && getPool())) return null;
+    const initials = initialsOf(user && user.name);
+    if (!initials) return null;
+    await ensureRefs();
+    const day = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+    const had = await getPool().query(
+      `SELECT ref FROM sales_hub_return_refs WHERE order_id = $1 AND created_by = $2 AND day = $3`, [orderId, user.key, day]);
+    if (had.rowCount) return had.rows[0].ref;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const n = await getPool().query(
+        `SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM sales_hub_return_refs WHERE initials = $1 AND day = $2`, [initials, day]);
+      const seq = n.rows[0].next;
+      const ref = returnRef(initials, new Date(), seq);
+      const ins = await getPool().query(
+        `INSERT INTO sales_hub_return_refs (ref, initials, day, seq, order_id, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (ref) DO NOTHING RETURNING ref`,
+        [ref, initials, day, seq, orderId, user.key]);
+      if (ins.rowCount) return ref;          // someone else took that number a moment ago: try the next
+    }
+    throw new Error("Could not allocate a returns reference");
+  }
+
   // POST /api/sales-hub/draft  { orderId, intent, emailDate }
   app.post("/api/sales-hub/draft", requireUser, async (req, res) => {
     try {
@@ -537,8 +576,10 @@ export function registerSalesHubRoutes(app, deps) {
       // The draft keeps to it unless the PO has since moved later.
       const promised = promisedWindow(order.timeline);
 
+      const returnsRef = intent === "returns" ? await returnsRefFor(order.id, req.hubUser) : null;
+
       const draft = buildSalesReply({
-        intent, order, po, promised,
+        intent, order, po, promised, returnsRef,
         blockedLines: order.blockedLines,
         salesperson: order.salesperson,
         // The SESSION says who this is; the body is only a fallback for a
@@ -555,7 +596,7 @@ export function registerSalesHubRoutes(app, deps) {
         slippedFrom: draft.eta && draft.eta.slippedFrom,
       });
 
-      res.json({ draft, assessment, po, promised, usedNoEmailDate: !emailDate });
+      res.json({ draft, assessment, po, promised, returnsRef, usedNoEmailDate: !emailDate });
     } catch (err) {
       console.error("[sales-hub] draft failed:", err.message);
       res.status(500).json({ error: err.message });

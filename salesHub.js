@@ -28,6 +28,11 @@ import { isBankHoliday } from "./quoteChase.js";
 // ---------------------------------------------------------------------------
 export const SALES_INTENTS = [
   {
+    key: "returns",
+    label: "Return / exchange (sends a returns reference)",
+    match: /\b(return(?:ing|ed)?|send (?:it|them|this|these|the \w+) back|exchange|swap(?:ping)?|wrong size|too (?:big|small|tight|loose|long|short)|does(?:n'?t| not) fit)\b/i,
+  },
+  {
     key: "proof_approval",
     label: "Waiting on proof / artwork approval",
     // Order is parked on US doing nothing because THEY have not approved.
@@ -795,8 +800,70 @@ export function deliverySentence(order, po, etaOpts = {}) {
       dates: [], source: "in-stock",
     };
   }
-  return etaSentence(po, etaOpts);
+  const eta = etaSentence(po, etaOpts);
+  // No purchase order and no colleague's promise: fall back to how long orders
+  // like this one actually take, rather than just "I am chasing it".
+  if (!po && eta.source === "none") {
+    const typical = typicalSentence(order, etaOpts.today);
+    if (typical) return typical;
+  }
+  return eta;
 }
+
+// ---------------------------------------------------------------------------
+// How long orders really take — measured from Brightpearl, 28 Sep 2026: 12,394
+// fully-shipped sales orders from 28 Jun to 28 Sep, order placed -> last parcel
+// sent, in UK working days. Logo = has a decoration row (non-stocked, brand 74).
+//
+//                      orders  median  75%  90%
+//   logo                1,323     8     12   19
+//   non-logo           11,071     1      5    7
+//
+// The 75% figure is what we quote: a promise we keep three times in four, not
+// the median we would miss half the time. Plus a working day for the courier.
+// Re-run scripts/sales-hub-leadtimes.mjs every few months and update these.
+// ---------------------------------------------------------------------------
+export const LEAD_TIMES = {
+  measuredOn: "2026-09-28",
+  logo: { median: 8, p75: 12 },
+  plain: { median: 1, p75: 5 },
+  courierDays: 1,
+};
+export const isLogoOrder = (order) => ((order && order.allRows) || []).some((r) => r.kind === "service");
+
+export function typicalSentence(order, today = new Date()) {
+  if (!order || !order.placedOn) return null;
+  const placed = ukDay(order.placedOn);
+  if (!placed) return null;
+  const logo = isLogoOrder(order);
+  const lt = logo ? LEAD_TIMES.logo : LEAD_TIMES.plain;
+  const win = windowOf(addWorkingDays(placed, lt.p75 + LEAD_TIMES.courierDays));
+  const phrase = win && phraseWindow(win, today);
+  if (!phrase) return null;            // already past the typical time: that is a chase, not an estimate
+  return {
+    text: logo
+      ? `Orders with your logo on usually take around ${lt.median} working days to make up and send out, so yours should be with you ${phrase}.`
+      : `It should be with you ${phrase}.`,
+    dates: [windowKey(win)], phrase, source: logo ? "typical-logo" : "typical",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Returns references: the sender's initials, the date as DDMMYY, then a two-digit
+// count of that person's returns that day — "DC28092601". The count lives in the
+// database (salesHubRoutes); these two only shape it.
+// ---------------------------------------------------------------------------
+export function initialsOf(name) {
+  const words = String(name || "").trim().split(/\s+/).filter((w) => /^[A-Za-z]/.test(w));
+  return words.map((w) => w[0]).join("").slice(0, 3).toUpperCase();
+}
+export function returnRef(initials, when, seq) {
+  const d = ukDay(when || new Date());
+  const dd = String(d.getDate()).padStart(2, "0"), mm = String(d.getMonth() + 1).padStart(2, "0"), yy = String(d.getFullYear()).slice(-2);
+  return `${initials}${dd}${mm}${yy}${String(seq).padStart(2, "0")}`;
+}
+export const RETURNS_ADDRESS = (process.env.RETURNS_ADDRESS ||
+  "Tuff Workwear Ltd, 144-146 Aberford Road, Woodlesford, Leeds, LS26 8LG").split(/\s*,\s*/);
 
 // "MASCOT" -> "Mascot": supplier names are stored shouting.
 const supplierLabel = (s) => String(s || "").trim().toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
@@ -837,7 +904,7 @@ export function prettyWindow(key) {
  * who actually answered them, and that person should not be signing a
  * colleague's name to their own words.
  */
-export function buildSalesReply({ intent, order, po, blockedLines = [], salesperson, signedBy, tone = "warm", today = new Date(), promised = null }) {
+export function buildSalesReply({ intent, order, po, blockedLines = [], salesperson, signedBy, tone = "warm", today = new Date(), promised = null, returnsRef = null }) {
   const etaOpts = { today, promised };
   let eta = null;
   // Same rule as the subject: quote the NUMBER to the customer, never the
@@ -849,7 +916,14 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
   lines.push(esc(greeting(order)));
   lines.push("Thanks for getting in touch, and sorry to keep you waiting.");
 
-  if (intent === "proof_approval") {
+  if (intent === "returns") {
+    lines.push("Thanks for letting us know &mdash; no problem at all.");
+    lines.push(returnsRef
+      ? `Your returns reference is <b>${esc(returnsRef)}</b>. Please write it clearly on the outside of the parcel, or pop a note inside with it on, so we can match it to order ${esc(ref)} as soon as it arrives.`
+      : `Please write your order number, ${esc(ref)}, clearly on the outside of the parcel so we can match it as soon as it arrives.`);
+    lines.push("Please send the item(s) back to:<br>" + RETURNS_ADDRESS.map(esc).join("<br>"));
+    lines.push("Once it's back with us and checked, I'll be in touch to sort the exchange or refund for you.");
+  } else if (intent === "proof_approval") {
     lines.push(
       `Your order ${esc(ref)} is ready to go into production - we are just waiting on your approval of the proof ` +
       `before we can start. As soon as you come back to us with a yes, it goes straight into the queue.`
@@ -895,7 +969,7 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
     proposedDates = eta.dates;
   }
 
-  lines.push("If there is a date you need this by, tell me and I will do what I can to work to it.");
+  if (intent !== "returns") lines.push("If there is a date you need this by, tell me and I will do what I can to work to it.");
   // Whoever is signed in signs it; the order's salesperson is only a fallback
   // for a draft built outside the hub.
   lines.push(`Kind regards,<br>${esc(String(signedBy || "").trim() || salesperson?.name || "")}`);
@@ -912,7 +986,8 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
   // number is what they were asked to quote and what they wrote in with.
   const subjectRef = order?.id ? ` - order ${order.id}` : "";
   const subject =
-    intent === "proof_approval" ? `Your proof${subjectRef}`
+    intent === "returns" ? `Your return${returnsRef ? " - " + returnsRef : ""}${subjectRef}`
+    : intent === "proof_approval" ? `Your proof${subjectRef}`
       : intent === "delay" ? `An update on your order${subjectRef}`
         : intent === "part_shipped" ? `The rest of your order${subjectRef}`
           : `Update on your order${subjectRef}`;

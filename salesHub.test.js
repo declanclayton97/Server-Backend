@@ -23,6 +23,10 @@ import {
   emailToNoteText,
   trackingFromNotes,
   isPickPackShip,
+  initialsOf,
+  returnRef,
+  typicalSentence,
+  isLogoOrder,
 } from "./salesHub.js";
 
 let pass = 0, fail = 0;
@@ -421,6 +425,39 @@ assertEq("in stock: source", ppsReply.eta.source, "in-stock");
 const partReply = buildSalesReply({ intent: "part_shipped", order: { ...order, timeline: shippedNotes, lines: [{ name: "Jacket", outstanding: 2 }] }, po: mascotPo, salesperson: { name: "Bob" }, today: THU24, promised });
 assertTrue("part shipped: tracking for what went", partReply.text.includes("VJ210582045GB"));
 assertTrue("part shipped: window for the rest", partReply.text.includes("mid next week"));
+
+// --- returns (Dec, 28 Sep) ---------------------------------------------------
+assertEq("initials", initialsOf("Dec Clayton"), "DC");
+assertEq("three names", initialsOf("Jack Ellis Haynes"), "JEH");
+assertEq("hyphenated surname is one word", initialsOf("Jack Ellis-Haynes"), "JE");
+assertEq("ref shape matches Dec's example", returnRef("DC", new Date("2026-09-28T10:00:00+01:00"), 1), "DC28092601");
+assertEq("late evening is still that UK day", returnRef("DC", new Date("2026-09-28T23:30:00+01:00"), 12), "DC28092612");
+assertEq("return email picked from the wording", detectIntent("Hi, the jacket is too small, can I send it back?"), "returns");
+assertEq("exchange too", detectIntent("Could I exchange these for a size up please"), "returns");
+assertEq("a delay is still a delay", detectIntent("Still waiting on my order, this is unacceptable"), "delay");
+const ret = buildSalesReply({ intent: "returns", order, salesperson: { name: "Bob" }, returnsRef: "DC28092601", today: THU24 });
+assertTrue("return mail gives the reference", ret.text.includes("DC28092601"));
+assertTrue("and where to send it", ret.text.includes("LS26 8LG"));
+assertEq("return mail promises no date", ret.proposedDates, []);
+assertTrue("subject carries the reference", ret.subject.includes("DC28092601"));
+assertFalse("no 'date you need this by' line on a return", ret.text.includes("date you need this by"));
+
+// --- typical lead times when nothing better is known --------------------------
+const logoOrder = { ...order, placedOn: "2026-09-21T10:00:00+01:00", allRows: [{ kind: "goods" }, { kind: "service" }], timeline: [] };
+assertTrue("decoration row = logo order", isLogoOrder(logoOrder));
+// Mon 21 Sep + 12 + 1 working days = Thu 8 Oct -> "late the week after next" from Thu 24 Sep
+const tl = typicalSentence(logoOrder, THU24);
+assertEq("logo typical window", tl && tl.dates, ["2026-10-05/late"]);
+assertTrue("logo wording names the usual time", tl && /around 8 working days/.test(tl.text));
+const plainOrder = { ...order, placedOn: "2026-09-24T09:00:00+01:00", allRows: [{ kind: "goods" }], timeline: [] };
+const tp = typicalSentence(plainOrder, THU24);   // Thu + 5 + 1 = Fri 2 Oct
+assertEq("non-logo typical window", tp && tp.dates, ["2026-09-28/late"]);
+const old = typicalSentence({ ...plainOrder, placedOn: "2026-08-01T09:00:00+01:00" }, THU24);
+assertEq("older than typical -> no estimate (it is a chase)", old, null);
+const noPo = buildSalesReply({ intent: "eta", order: logoOrder, po: null, salesperson: { name: "Bob" }, today: THU24 });
+assertEq("no PO, no note -> typical", noPo.eta.source, "typical-logo");
+const withNote = buildSalesReply({ intent: "eta", order: logoOrder, po: null, salesperson: { name: "Bob" }, today: THU24, promised });
+assertEq("a colleague's promise still beats the typical time", withNote.eta.source, "note");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
