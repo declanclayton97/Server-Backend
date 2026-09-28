@@ -2473,7 +2473,7 @@ export async function snickersLineStatus(altItemsUrl, sku, sizeLabel) {
   }
 }
 
-async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [], includeSalesOrders = true, includeLowInv = true } = {}) {
+async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [], includeSalesOrders = true, includeLowInv = true, poId: existingPoId = null, discontinued = [], rehearse = false } = {}) {
   const steps = {};
   // excludeSkus: lines Hultafors genuinely cannot sell us — a discontinued code is the usual one.
   // Kept OFF the basket so one dead line cannot strand the whole order (486870 held £6,399 of 98
@@ -2482,14 +2482,48 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // that sales order unfulfillable while looking like a clean run.
   const excl = new Set((excludeSkus || []).map((x) => String(x).trim().toUpperCase()).filter(Boolean));
   let po;
-  try { po = await createPo({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool, includeSalesOrders, includeLowInv }); }
-  catch (e) { throw createPoErr(e); }
-  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  if (existingPoId) {
+    // PLACE AGAINST A PO A FAILED RUN ALREADY BUILT (user: "we dont want junk PO's"). PO 492409 on
+    // 2026-09-28 stopped at checkout on one dead CLC code; a fresh run would mint a second PO for
+    // the same ~60 sales-order lines. Only an unsent Snickers auto-PO qualifies.
+    const hdr = (await bp.bpLiveGet(`/order-service/order/${existingPoId}`))[0];
+    const status = hdr && hdr.orderStatus && hdr.orderStatus.orderStatusId;
+    const supplierId = hdr && hdr.parties && hdr.parties.supplier && hdr.parties.supplier.contactId;
+    const notes = await bp.bpLiveGet(`/order-service/order/${existingPoId}/note`).catch(() => []);
+    const isSnickersAuto = (Array.isArray(notes) ? notes : []).some((n) => /Auto-PO for SNICKERS\b/.test(String(n.text || '')));
+    if (!hdr || hdr.orderTypeCode !== 'PO' || Number(status) !== 6 || Number(supplierId) !== 331 || !isSnickersAuto || /^\d{6,}/.test(String(hdr.reference || ''))) {
+      throw stepErr('create-po', `PO ${existingPoId} is not an unsent Snickers auto-PO (type ${hdr && hdr.orderTypeCode}, status ${status}, supplier ${supplierId}, auto-note ${isSnickersAuto}, ref ${JSON.stringify(hdr && hdr.reference)}) — refusing to place against it`);
+    }
+    // Contributors from the PO's own note; the ROWS are the truth for quantities. SO quantity per
+    // SKU is carved out of the row total, the remainder is low-inventory — so the per-SKU sum that
+    // goes to the basket equals the PO exactly.
+    const contrib = await bp.getPoContributors(existingPoId);
+    const rows = await bp.getOrderCartLines(existingPoId);
+    const rowBySku = new Map(rows.map((r) => [String(r.sku).toUpperCase(), r]));
+    const soLines = [], soQty = new Map();
+    for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
+      for (const it of items) {
+        const r = rowBySku.get(String(it.sku).toUpperCase()) || {};
+        soLines.push({ order: Number(order), sku: it.sku, qty: it.qty, name: r.name || null, productId: r.productId || null, colour: r.colour, size: r.size });
+        soQty.set(String(it.sku).toUpperCase(), (soQty.get(String(it.sku).toUpperCase()) || 0) + it.qty);
+      }
+    }
+    const lowLines = [];
+    for (const r of rows) {
+      const left = Math.round(r.qty) - (soQty.get(String(r.sku).toUpperCase()) || 0);
+      if (left > 0) lowLines.push({ sku: r.sku, qty: left, name: r.name, productId: r.productId, colour: r.colour, size: r.size });
+    }
+    po = { created: true, poId: Number(existingPoId), soLines, lowLines, soUnits: soLines.reduce((a, l) => a + l.qty, 0), lowUnits: lowLines.reduce((a, l) => a + l.qty, 0), reused: true };
+  } else {
+    try { po = await createPo({ supplierKey: 'SNICKERS', execute: live, padToThreshold, logPool: pool, includeSalesOrders, includeLowInv }); }
+    catch (e) { throw createPoErr(e); }
+    if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  }
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [], ...(po.reused ? { reused: true } : {}) };
 
   // Worker lines = the PO's SKUs (skip the =====LOW INV==== separator productId 1000), summed
   // per SKU. Build from soLines/lowLines (FULL SKUs); the /po-cart-lines route truncates them.
@@ -2527,10 +2561,43 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
       return { stockCode, qty };
     });
   };
+  // DISCONTINUED BY INSTRUCTION. The automatic route below fires only when the portal SAYS
+  // "discontinued"; a code it has simply never heard of (CL100527X, CLC apron, 2026-09-28: "product
+  // not found", by SKU and by EAN) never trips it. When a person confirms the line is dead, run the
+  // SAME route — PO row off, recorded so every future run drops it, stranded tags settled, sales
+  // told — before the basket is built. A rehearsal only leaves it out; it writes nothing.
+  const confirmedDead = [...new Set((discontinued || []).map((x) => String(x).trim()).filter(Boolean))]
+    .filter((sku) => bySku.has(sku.toUpperCase()));
+  if (confirmedDead.length) {
+    const dead = confirmedDead.map((sku) => ({ sku, status: 'Discontinued (confirmed by staff)' }));
+    if (!rehearse && live) {
+      const handled = await handleDiscontinuedLines({ pool, altItemsUrl, supplierKey: 'SNICKERS', poId, dead, po });
+      steps.discontinued = handled;
+      await logPurchasingError(pool, {
+        supplier: 'SNICKERS', step: 'discontinued', severity: 'review',
+        message: `${dead.length} line(s) confirmed discontinued by staff and removed from PO ${poId}: `
+          + handled.items.map((it) => `${it.sku}${it.orders.length ? ` (wanted by ${it.orders.map((o) => '#' + o.id).join(', ')})` : ' (low-inventory only)'}`).join('; ')
+          + `. ${(handled.emailed && (handled.emailed.accepted || []).length) ? `sales@ notified (${handled.emailed.accepted.join(', ')}).` : 'EMAIL NOT CONFIRMED — check that sales were told.'}`
+          + (handled.tagsSettled.length ? ` Tag cleared on ${handled.tagsSettled.length} order(s) with nothing else to come from Snickers.` : '')
+          + ' The sales-order lines were NOT touched — someone still has to agree a substitute or a refund with the customer.'
+          + (handled.problems.length ? ` PROBLEMS: ${handled.problems.join('; ')}` : ''),
+        context: { poId, dead, handled },
+      }).catch(() => {});
+    } else steps.wouldDiscontinue = confirmedDead;
+    for (const sku of confirmedDead) bySku.delete(sku.toUpperCase());
+  }
+
   let lines = buildLines();
   if (!lines.length) throw stepErr('resolve', 'no orderable Snickers lines');
   if (packApplied.length) steps.packRounding = packApplied;
   steps.resolve = { lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0) };
+
+  // REHEARSAL: the worker stages the basket and reads it back, and never presses Confirm.
+  if (rehearse) {
+    const dry = await workerPlaceOrder({ supplier: 'SNICKERS', ref: poId, lines, execute: false });
+    return { poId, rehearsed: true, ready: !!(dry && dry.ready), missingLines: (dry && dry.missingLines) || [],
+      expectedUnits: (dry && dry.expectedUnits) ?? null, cartUnits: (dry && dry.cart && dry.cart.qtySum) ?? null, steps };
+  }
 
   // Drive the Hultafors worker (async job + poll). ref = PO id → the portal PO-number field.
   let wr = await workerPlaceOrder({ supplier: 'SNICKERS', ref: poId, lines, execute: live });
@@ -4175,6 +4242,8 @@ export async function runFristadsScheduled(opts = {}) { return runSupplierSchedu
 // prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
 export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null, packSizes, excludeSkus }); }
 export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes, excludeSkus }); }
+// Snickers against an existing unsent auto-PO; `discontinued` runs the discontinued route for those SKUs.
+export async function snickersPlaceExisting({ pool, altItemsUrl, poId, discontinued = [], rehearse = true }) { return placeSnickersOrder(pool, altItemsUrl, { poId, discontinued, rehearse, live: true }); }
 // Sterling against an existing unsent PO. rehearse:true stops after the basket read-back and empties it.
 export async function sterlingPlaceExisting({ pool, altItemsUrl, poId, rehearse = true }) { return placeSterlingOrder(pool, altItemsUrl, { poId, rehearse }); }
 
