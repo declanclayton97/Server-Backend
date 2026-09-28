@@ -8522,6 +8522,32 @@ app.post('/api/purchasing/product-supplier-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// POST /api/purchasing/so-delete-placeholder-row-live { orderId, rowId, execute }
+// Remove a '-' placeholder left by add-variant-live: ONLY a product-1000 row named '-' at
+// £0.00 on a Stock needs ordering order. Anything else is refused, whatever is asked.
+app.post('/api/purchasing/so-delete-placeholder-row-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled' });
+  const b = req.body || {};
+  const orderId = Number(b.orderId), rowId = String(b.rowId || '');
+  if (!orderId || !rowId) return res.status(400).json({ error: 'orderId and rowId required' });
+  try {
+    const first = (r) => (Array.isArray(r) ? r[0] : r);
+    const order = first(await bpLive('GET', `/order-service/order/${orderId}`));
+    if (!order) return res.status(404).json({ error: 'order not found' });
+    const sno = Number(process.env.PURCHASING_DEMAND_STATUS_ID || 23);
+    if (order.orderStatus.orderStatusId !== sno) return res.status(409).json({ error: 'order is not in Stock needs ordering' });
+    const row = (order.orderRows || {})[rowId];
+    if (!row) return res.status(404).json({ error: 'row not on order' });
+    const isPlaceholder = row.productId === 1000 && String(row.productName || '').trim() === '-'
+      && Number(row.rowValue.rowNet.value) === 0 && Number(row.rowValue.rowTax.value) === 0;
+    if (!isPlaceholder) return res.status(409).json({ error: 'not a placeholder row — refusing', row: { productId: row.productId, name: row.productName, net: row.rowValue.rowNet.value } });
+    if (!b.execute) return res.json({ dryRun: true, orderId, rowId, totalBefore: order.totalValue });
+    await bpLive('DELETE', `/order-service/order/${orderId}/row/${rowId}`);
+    const after = first(await bpLive('GET', `/order-service/order/${orderId}`));
+    res.json({ ok: true, orderId, rowId, gone: !(after.orderRows || {})[rowId], totalBefore: order.totalValue, totalAfter: after.totalValue });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // POST /api/purchasing/so-set-supplier-tag-live { orderId, expect, tag, execute }
 // Set an SNO order's supplier tag (PCF_SUPPLIER), only if it still reads `expect`.
 app.post('/api/purchasing/so-set-supplier-tag-live', async (req, res) => {
