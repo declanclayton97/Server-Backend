@@ -61,14 +61,34 @@ export function registerSalesHubRoutes(app, deps) {
     const raw = String(token || "").trim();
     if (!raw) return null;
 
+    // A bare number is ambiguous. Magento web orders are "000123384", and people
+    // drop the zeros — but 123384 is ALSO a real Brightpearl id, of an order from
+    // years ago. So try it both ways and take the more recent order, rather than
+    // letting the id win just because it was tried first.
+    let byId = null;
     if (looksLikeOrderId(raw)) {
       try {
         const r = await bpLive("GET", `/order-service/order/${raw}`);
         const o = Array.isArray(r) ? r[0] : r;
-        if (o && o.id) return { id: o.id, via: "id" };
+        if (o && o.id) byId = { id: o.id, via: "id", createdOn: o.createdOn || o.placedOn };
       } catch (e) { /* not an id, or gone — try it as a reference */ }
     }
+    const refs = [raw];
+    if (/^\d{4,8}$/.test(raw)) refs.push(raw.padStart(9, "0"));   // Magento pads to 9
+    let byRef = null;
+    for (const ref of [...new Set(refs)]) {
+      const hit = await findByCustomerRef(ref);
+      if (hit && (!byRef || new Date(hit.createdOn) > new Date(byRef.createdOn))) byRef = hit;
+    }
+    if (byId && byRef) {
+      const [win, other] = new Date(byRef.createdOn) > new Date(byId.createdOn) ? [byRef, byId] : [byId, byRef];
+      return { ...win, alsoMatched: (win.alsoMatched || 0) + 1, otherMatch: { id: other.id, via: other.via } };
+    }
+    return byId || byRef;
+  }
 
+  // Sales orders whose customer reference (the web / Magento order number) is this.
+  async function findByCustomerRef(raw) {
     try {
       const s = await bpLive("GET", `/order-service/order-search?customerRef=${encodeURIComponent(raw)}&pageSize=20`);
       const md = s && s.metaData;
@@ -82,7 +102,7 @@ export function registerSalesHubRoutes(app, deps) {
         .filter((r) => Number(r[ix.orderTypeId]) === 1)
         .sort((a, b) => new Date(b[ix.createdOn]) - new Date(a[ix.createdOn]));
       if (!rows.length) return null;
-      return { id: rows[0][ix.orderId], via: "reference", alsoMatched: rows.length - 1 };
+      return { id: rows[0][ix.orderId], via: "reference", alsoMatched: rows.length - 1, createdOn: rows[0][ix.createdOn] };
     } catch (e) {
       console.error("[sales-hub] reference lookup failed:", e.message);
       return null;
@@ -511,6 +531,7 @@ export function registerSalesHubRoutes(app, deps) {
         matchedBy: resolved.via,          // "id" or "reference"
         matchedOn: orderNumber,
         alsoMatched: resolved.alsoMatched || 0,
+        otherMatch: resolved.otherMatch || null,
         intents: SALES_INTENTS.map((i) => ({ key: i.key, label: i.label })),
       });
     } catch (err) {
