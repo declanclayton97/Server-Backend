@@ -8522,6 +8522,24 @@ app.post('/api/purchasing/product-supplier-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// POST /api/purchasing/so-set-supplier-tag-live { orderId, expect, tag, execute }
+// Set an SNO order's supplier tag (PCF_SUPPLIER), only if it still reads `expect`.
+app.post('/api/purchasing/so-set-supplier-tag-live', async (req, res) => {
+  if (process.env.HEAL_LIVE_ENABLED !== 'true') return res.status(503).json({ error: 'live heal disabled' });
+  const b = req.body || {};
+  const orderId = Number(b.orderId);
+  if (!orderId || !b.tag || b.expect == null) return res.status(400).json({ error: 'orderId, expect and tag required' });
+  try {
+    const cf = (await bpLive('GET', `/order-service/order/${orderId}/custom-field`)) || {};
+    const before = cf.PCF_SUPPLIER == null ? '' : String(cf.PCF_SUPPLIER);
+    if (before !== String(b.expect)) return res.status(409).json({ error: 'tag has changed', before });
+    if (!b.execute) return res.json({ dryRun: true, orderId, before, after: String(b.tag) });
+    await bpLive('PATCH', `/order-service/order/${orderId}/custom-field`, [{ op: 'add', path: '/PCF_SUPPLIER', value: String(b.tag) }]);
+    const now = (await bpLive('GET', `/order-service/order/${orderId}/custom-field`)) || {};
+    res.json({ ok: true, orderId, before, after: now.PCF_SUPPLIER });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // POST /api/purchasing/so-add-row-live { orderId, productId, qty, net, tax, taxCode?, nominalCode?, execute }
 // Put a real product row on a sales order still in Stock needs ordering, at a stated price.
 // Brightpearl wants a whole-number quantity string ("1"), not the "1.0000" it returns.
