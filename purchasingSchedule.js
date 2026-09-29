@@ -616,12 +616,16 @@ export async function fristadsAvailable(altItemsUrl, line) {
   }
 }
 
-async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
+async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId: existingPoId = null, discontinued = [] } = {}) {
   const steps = {};
-  // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs)
+  // 1. create the combined PO (SO + low-inv + separator + notes; stamps the SOs) — or reuse an
+  // unsent auto-PO a failed run left (PO 492701, 2026-09-28: stopped at the cart on 121640).
   let po;
-  try { po = await createPo({ supplierKey: 'FRISTADS', execute: true, padToThreshold, logPool: pool }); }
-  catch (e) { throw createPoErr(e); }
+  if (existingPoId) po = await existingAutoPo(existingPoId, { contactIds: [FRISTADS_SUPPLIER_CONTACT], autoKey: 'FRISTADS' });
+  else {
+    try { po = await createPo({ supplierKey: 'FRISTADS', execute: true, padToThreshold, logPool: pool }); }
+    catch (e) { throw createPoErr(e); }
+  }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   let soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -631,7 +635,30 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   // two by SKU silently matches nothing.
   const linesByOrder = {};
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [], ...(po.reused ? { reused: true } : {}) };
+
+  // DISCONTINUED BY INSTRUCTION — same route as Snickers: the PO row comes off (so the cart below
+  // never sees it), the code is recorded, stranded tags settle, sales are emailed. Fristads' site and
+  // feed simply have no 121640 any more ("product page not found"), which no automatic check reads
+  // as discontinued, so a person confirms it (user, 2026-09-29).
+  const deadSkus = [...new Set((discontinued || []).map((x) => String(x).trim()).filter(Boolean))];
+  if (deadSkus.length) {
+    const dead = deadSkus.map((sku) => ({ sku, status: 'Discontinued (confirmed by staff)' }));
+    const handled = await handleDiscontinuedLines({ pool, altItemsUrl, supplierKey: 'FRISTADS', poId, dead, po });
+    steps.discontinued = handled;
+    await logPurchasingError(pool, {
+      supplier: 'FRISTADS', step: 'discontinued', severity: 'review',
+      message: `${dead.length} line(s) confirmed discontinued by staff and removed from PO ${poId}: `
+        + handled.items.map((it) => `${it.sku}${it.orders.length ? ` (wanted by ${it.orders.map((o) => '#' + o.id).join(', ')})` : ' (low-inventory only)'}`).join('; ')
+        + `. ${(handled.emailed && (handled.emailed.accepted || []).length) ? `sales@ notified (${handled.emailed.accepted.join(', ')}).` : 'EMAIL NOT CONFIRMED — check that sales were told.'}`
+        + ' The sales-order lines were NOT touched — someone still has to agree a substitute or a refund with the customer.'
+        + (handled.problems.length ? ` PROBLEMS: ${handled.problems.join('; ')}` : ''),
+      context: { poId, dead, handled },
+    }).catch(() => {});
+    // The dead line must not appear in the "Ordered on PO#" note of the order that wanted it.
+    const deadSet = new Set(deadSkus.map((s) => s.toUpperCase()));
+    for (const k of Object.keys(linesByOrder)) linesByOrder[k] = linesByOrder[k].filter((it) => !deadSet.has(String(it.sku || '').toUpperCase()));
+  }
 
   // 2. push the PO lines to the Fristads cart (unresolved = size/item not on the portal)
   const cartLines = await bp.getOrderCartLines(poId).catch((e) => { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); });
@@ -935,7 +962,25 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}
   }
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
-  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  // Orders that lost a discontinued line are finalised WITHOUT the "ordered" status and parked,
+  // exactly as the Snickers route does — marking them Ordered Stock Awaiting Delivery would hide an
+  // item nobody bought and nobody will.
+  const hitByDead = new Set(((steps.discontinued && steps.discontinued.affectedOrders) || []).map(Number));
+  const cleanIds = soIds.filter((id) => !hitByDead.has(Number(id)));
+  const partIds = soIds.filter((id) => hitByDead.has(Number(id)));
+  if (cleanIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: cleanIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  if (partIds.length) {
+    try {
+      steps.finalizePartial = await bp.finalizeSupplierTagsLive({ orderIds: partIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: false, linesByOrder, execute: true });
+      const em = steps.discontinued && steps.discontinued.emailed;
+      const emailLine = em && (em.accepted || []).length ? `sales@ have been emailed (${em.accepted.join(', ')}).` : 'THE EMAIL TO sales@ DID NOT SEND — this note is the only record, so tell them.';
+      for (const id of partIds) {
+        const what = (((steps.discontinued && steps.discontinued.deadByOrder) || {})[id] || []).map((d) => `${d.sku}${d.qty > 1 ? ` x${d.qty}` : ''}${d.name ? ` (${d.name})` : ''}`).join(', ');
+        await bp.addOrderNoteLive(id, `DISCONTINUED at Fristads — NOT ordered and cannot be: ${what}. Everything else on this order from Fristads was ordered on PO#${poId}. ${emailLine} This order is on "Order Confirmation Sent" until a substitute or refund is agreed with the customer.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
+        await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS).catch(() => {});
+      }
+    } catch (e) { steps.finalizePartialError = e.message; }
+  }
 
   return { poId, reservationNo: poRef, orderNo, orderStatus: order && order.orderStatus, sum: order && order.sum, orderNoPending: !orderNo, steps };
 }
@@ -4269,6 +4314,8 @@ export async function runFristadsScheduled(opts = {}) { return runSupplierSchedu
 // prepare already created + verified (custref = PO#) + finalise. Non-mutating vs mutating.
 export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { verifyOnly: true, poId: poId ? Number(poId) : null, packSizes, excludeSkus }); }
 export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes, excludeSkus }); }
+// Fristads against an existing unsent auto-PO; `discontinued` runs the discontinued route for those SKUs.
+export async function fristadsPlaceExisting({ pool, altItemsUrl, poId, discontinued = [] }) { return placeFristadsOrder(pool, altItemsUrl, { poId, discontinued }); }
 // Blaklader against an existing unsent auto-PO (the basket step clears and verifies first).
 export async function blakladerPlaceExisting({ pool, altItemsUrl, poId }) { return placeBlakladerOrder(pool, altItemsUrl, { poId, live: true }); }
 // Snickers against an existing unsent auto-PO; `discontinued` runs the discontinued route for those SKUs.
