@@ -32,6 +32,7 @@ import {
 import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
+import { registerReturnsBpSandbox } from './returnsBpSandbox.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
 import { printJobsFromRows, extractLogoUrls, extractPrintedGarments } from './printLines.js';
@@ -15373,6 +15374,8 @@ registerReturnsRoutes(app, {
   useDatabase,
   rootDir: __dirname,
 });
+// TEMPORARY: proves the returns Brightpearl writes on the TEST account only.
+registerReturnsBpSandbox(app, { bpTest: purchasingAuto.bpApi });
 
 // Whether the SALES WhatsApp number is set up, so the dashboard can say why
 // the chat buttons are missing instead of failing on click.
