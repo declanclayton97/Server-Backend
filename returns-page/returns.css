@@ -96,3 +96,15 @@
 .rt .rt-item-qty select { background: #fff !important; color: #000 !important; border: 0 !important; padding: 10px 12px !important;
   height: auto !important; font-weight: 700; cursor: pointer; }
 .rt .rt-item:not(.is-on) .rt-item-qty select { border: 1px solid #000 !important; }
+
+/* "Return this item" — one plain button per item instead of a quantity dropdown. */
+.rt-item-pick { flex: 0 0 auto; }
+.rt .rt-pick, .rt .rt-pick:hover, .rt .rt-pick:focus { background: #F3D014 !important; color: #000 !important; border: 2px solid #F3D014 !important;
+  font-weight: 800 !important; text-transform: uppercase; padding: 12px 20px !important; cursor: pointer; line-height: 1.25 !important;
+  height: auto !important; min-width: 210px; box-shadow: none !important; text-shadow: none !important; }
+.rt .rt-pick::before, .rt .rt-pick::after { display: none !important; }
+.rt .rt-item.is-on .rt-pick { background: #fff !important; border-color: #fff !important; }
+.rt .rt-pick small { display: block; font-weight: 400; text-transform: none; font-size: 11px; color: #555; }
+.rt .rt-howmany { max-width: 200px; margin-bottom: 16px; }
+@media (max-width: 767px) { .rt .rt-pick { width: 100%; } }
+.rt-order-head p.rt-instruct { margin: 0 0 16px; font-size: 16px; color: #000; }

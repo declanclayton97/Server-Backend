@@ -54,17 +54,22 @@
     $("rt-sent").textContent = found.despatchedOn;
     $("rt-last").textContent = found.lastDay;
     $("rt-items").innerHTML = found.lines.map(function (l, i) {
-      var qty = "";
-      if (l.available > 0) {
+      // One obvious button per item. A quantity is only asked for when they bought
+      // more than one — a "0 / 1 / 2" dropdown confused people (Dec, 29 Sep).
+      var pick = l.available > 0
+        ? '<div class="rt-item-pick"><button type="button" class="rt-pick">Return this item</button></div>'
+        : '<div class="rt-item-sub">Already being returned</div>';
+      var howMany = "";
+      if (l.available > 1) {
         var o = "";
-        for (var n = 0; n <= l.available; n++) o += '<option value="' + n + '">' + (n === 0 ? "Keeping it" : "Sending back " + n) + "</option>";
-        qty = '<div class="rt-item-qty"><select class="rt-qty" aria-label="How many are coming back">' + o + "</select></div>";
+        for (var n = 1; n <= l.available; n++) o += '<option value="' + n + '">' + n + " of " + l.available + "</option>";
+        howMany = '<p class="rt-q">How many are you sending back?</p><select class="rt-qty rt-howmany">' + o + "</select>";
       }
       return '<div class="rt-item" data-i="' + i + '">' +
         '<div class="rt-item-head"><div><div class="rt-item-name">' + esc(l.name) + '</div>' +
-          '<div class="rt-item-sub">You ordered ' + l.qty + (l.available < l.qty ? " &middot; " + (l.qty - l.available) + " already on its way back" : "") + "</div></div>" +
-          (qty || '<div class="rt-item-sub">Already on its way back</div>') + "</div>" +
-        '<div class="rt-item-body">' +
+          '<div class="rt-item-sub">You ordered ' + l.qty + (l.available < l.qty ? " &middot; " + (l.qty - l.available) + " already being returned" : "") + "</div></div>" +
+          pick + "</div>" +
+        '<div class="rt-item-body">' + howMany +
           '<p class="rt-q">What would you like?</p>' +
           '<div class="rt-toggle">' +
             '<button type="button" data-out="exchange">Swap it<small>Free delivery on the new one</small></button>' +
@@ -80,8 +85,13 @@
     }).join("");
 
     Array.prototype.forEach.call(document.querySelectorAll(".rt-item"), function (el) {
-      var q = el.querySelector(".rt-qty");
-      if (q) q.addEventListener("change", function () { el.classList.toggle("is-on", Number(q.value) > 0); fit(); });
+      var pickBtn = el.querySelector(".rt-pick");
+      if (pickBtn) pickBtn.addEventListener("click", function () {
+        var on = !el.classList.contains("is-on");
+        el.classList.toggle("is-on", on);
+        pickBtn.innerHTML = on ? "&#10003; Returning this item<small>Tap to undo</small>" : "Return this item";
+        fit();
+      });
       Array.prototype.forEach.call(el.querySelectorAll(".rt-toggle button"), function (b) {
         b.addEventListener("click", function () {
           el.dataset.out = b.dataset.out;
@@ -114,8 +124,8 @@
     var lines = [], items = document.querySelectorAll(".rt-item");
     for (var i = 0; i < items.length; i++) {
       var el = items[i], l = found.lines[Number(el.dataset.i)], q = el.querySelector(".rt-qty");
-      var qty = q ? Number(q.value) : 0;
-      if (!qty) continue;
+      if (!el.classList.contains("is-on")) continue;
+      var qty = q ? Number(q.value) : 1;
       var out = el.dataset.out;
       if (!out) return msg("rt-submit-msg", 'Would you like to swap "' + l.name + '" or get a refund?');
       if (out === "exchange") {
@@ -129,7 +139,7 @@
         lines.push({ rowId: l.rowId, qty: qty, outcome: "refund", reason: reason });
       }
     }
-    if (!lines.length) return msg("rt-submit-msg", "Choose how many of each item you're sending back.");
+    if (!lines.length) return msg("rt-submit-msg", 'Press "Return this item" on each item you are sending back.');
     var email = $("rt-email").value.trim();
     if (found.needsEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return msg("rt-submit-msg", "We need an email address to send your returns reference to.");
     $("rt-submit").disabled = true; msg("rt-submit-msg", "");
