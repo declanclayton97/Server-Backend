@@ -198,6 +198,19 @@ assertEq('style name drops Size-', styleName('Snickers 6241 Trousers (Black) Siz
   assertEq('swaps and refunds split', [s.swaps, s.refunds], [2, 1]);
 }
 
+// --- sizes ---
+{
+  const { sizeKey, moveSize } = await import("./returns.js");
+  const order = ["X Small", "Small", "Medium", "Large", "XL", "2XL", "3XL", "4XL", "XXXXXL", "XXXXXXL"].map((x) => sizeKey(x).rank);
+  assertTrue("letter sizes sort X Small .. 6XL", order.every((r, i) => i === 0 || r > order[i - 1]));
+  assertEq("waist moves, leg stays", sizeKey("31 Waist 28 Leg (Snickers Size 192)").sig, "# waist 28 leg");
+  const sib = [["31 Waist 28 Leg", 1], ["33 Waist 28 Leg", 2], ["32 Waist 30 Leg", 3], ["34 Waist 28 Leg", 4]].map(([size, productId]) => ({ size, productId, colourId: 7 }));
+  assertEq("one size up skips a missing 32 and keeps the leg", moveSize({ size: "31 Waist 28 Leg", colourId: 7 }, sib, 1).productId, 2);
+  assertEq("two sizes up", moveSize({ size: "31 Waist 28 Leg", colourId: 7 }, sib, 2).productId, 4);
+  assertEq("nothing below the smallest", moveSize({ size: "31 Waist 28 Leg", colourId: 7 }, sib, -1), null);
+  assertEq("XL up one is 2XL", moveSize({ size: "XL", colourId: 1 }, [{ size: "XL", colourId: 1, productId: 1 }, { size: "2XL", colourId: 1, productId: 2 }, { size: "2XL", colourId: 9, productId: 3 }], 1).productId, 2);
+}
+
 assertEq("despatchDate takes the earliest invoice",
   despatchDate({ invoices: [{ taxDate: "2026-09-12T00:00:00+01:00" }, { taxDate: "2026-09-05T00:00:00+01:00" }] }), "2026-09-05");
 

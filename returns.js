@@ -343,9 +343,9 @@ export function styleName(name) {
 // ignored for the signature, because they change WITH the size.
 // ---------------------------------------------------------------------------
 const LETTERS = [
-  ["xxxs", "3xs"], ["xxs", "2xs"], ["xs", "x-small", "extra small"], ["s", "small", "sm"], ["m", "medium", "med"],
+  ["xxxs", "3xs", "xxx small", "xxx-small"], ["xxs", "2xs", "xx small", "xx-small"], ["xs", "x-small", "x small", "extra small"], ["s", "small", "sm"], ["m", "medium", "med"],
   ["l", "large", "lg"], ["xl", "x-large", "extra large"], ["xxl", "2xl", "xx-large"], ["xxxl", "3xl", "xxx-large"],
-  ["4xl", "xxxxl", "xxxx-large"], ["5xl", "xxxxxl"], ["6xl"], ["7xl"],
+  ["4xl", "xxxxl", "xxxx-large"], ["5xl", "xxxxxl", "xxxxx-large"], ["6xl", "xxxxxxl"], ["7xl", "xxxxxxxl"], ["8xl", "xxxxxxxxl"],
 ];
 export function sizeKey(text) {
   const raw = String(text || "").toLowerCase().replace(/\([^)]*\)/g, " ").split("/")[0].replace(/\s+/g, " ").trim();
