@@ -32,6 +32,7 @@ import {
 import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
+import { bpSafeText } from './bpText.js';
 import { registerReturnsBpSandbox } from './returnsBpSandbox.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -3075,7 +3076,8 @@ async function postBpOrderNote(orderId, noteText) {
     },
     body: JSON.stringify({
       contactId: 0, // 0 = system note
-      text: noteText,
+      // Plain ASCII: Brightpearl's screens garble anything else (see bpText.js).
+      text: bpSafeText(noteText),
       addedOn: new Date().toISOString(),
     }),
   }, { label: 'bp-note' });

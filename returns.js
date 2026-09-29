@@ -215,11 +215,11 @@ export function returnEmailHtml({ ref, orderRef, name, lines, lastDay, address }
 // The note left on the original Brightpearl order, so anyone who opens it sees the return.
 export function returnNoteText({ ref, email, lines, comments }) {
   return [
-    `RETURN REQUESTED ONLINE — ${ref}`,
+    `RETURN REQUESTED ONLINE - ${ref}`,
     `Reference emailed to: ${email}`,
-    ...lines.map((l) => `- ${l.qty} x ${l.name}${l.sku ? " (" + l.sku + ")" : ""} — ${l.outcome === "exchange" ? "EXCHANGE: " + wantedText(l) : "REFUND: " + l.reason}`),
+    ...lines.map((l) => `- ${l.qty} x ${l.name}${l.sku ? " (" + l.sku + ")" : ""} - ${l.outcome === "exchange" ? "EXCHANGE: " + wantedText(l) : "REFUND: " + l.reason}`),
     comments ? `Customer comments: ${comments}` : "",
-    "Waiting for the goods to come back. Customer pays return postage.",
+    "Waiting for the goods to come back.",
   ].filter(Boolean).join("\n");
 }
 
@@ -330,4 +330,49 @@ export function styleName(name) {
   n = n.replace(/\s\d{5,}\s*$/, " ");
   n = n.replace(/[\s,\-–(\/]+$/, "");
   return n.replace(/\s{2,}/g, " ").trim();
+}
+
+// ---------------------------------------------------------------------------
+// SIZES — "one size up" within a style. Brightpearl's option values all carry
+// sortOrder 0, so the order comes from the size text itself. A size is split into
+// a RANK (what moves) and a SIGNATURE (what must stay the same):
+//   "31 Waist 28 Leg (Snickers Size 192)" -> rank 31, sig "# waist 28 leg"   (leg stays)
+//   "C52"  -> 52, "c#"        "36R" -> 36, "#r"        "UK 8 / EU42" -> 8, "uk #"
+//   "XL" / "X-Large"          -> letter rank 5, sig ""
+// Brackets (a brand's own size code) and anything after "/" (a conversion) are
+// ignored for the signature, because they change WITH the size.
+// ---------------------------------------------------------------------------
+const LETTERS = [
+  ["xxxs", "3xs"], ["xxs", "2xs"], ["xs", "x-small", "extra small"], ["s", "small", "sm"], ["m", "medium", "med"],
+  ["l", "large", "lg"], ["xl", "x-large", "extra large"], ["xxl", "2xl", "xx-large"], ["xxxl", "3xl", "xxx-large"],
+  ["4xl", "xxxxl", "xxxx-large"], ["5xl", "xxxxxl"], ["6xl"], ["7xl"],
+];
+export function sizeKey(text) {
+  const raw = String(text || "").toLowerCase().replace(/\([^)]*\)/g, " ").split("/")[0].replace(/\s+/g, " ").trim();
+  if (!raw) return null;
+  for (let i = 0; i < LETTERS.length; i++) {
+    for (const w of LETTERS[i]) {
+      const re = new RegExp("(^|\s)" + w.replace(/[-]/g, "\-") + "(?=\s|$)");
+      if (re.test(raw)) return { fam: "alpha", rank: i, sig: raw.replace(re, "$1#").trim() };
+    }
+  }
+  const m = raw.match(/\d+(?:\.\d+)?/);
+  if (!m) return null;
+  return { fam: "num", rank: Number(m[0]), sig: (raw.slice(0, m.index) + "#" + raw.slice(m.index + m[0].length)).trim() };
+}
+export const SIZE_STEPS = { "One size up": 1, "One size down": -1, "Two sizes up": 2, "Two sizes down": -2 };
+
+// siblings: [{ productId, size, colourId }]; returns the sibling `steps` sizes away
+// from `current` in the same colour and fit, or null when there is no such size.
+export function moveSize(current, siblings, steps) {
+  const k = sizeKey(current.size);
+  if (!k || !steps) return null;
+  const same = siblings.filter((s) => s.colourId === current.colourId).map((s) => ({ ...s, k: sizeKey(s.size) }))
+    .filter((s) => s.k && s.k.fam === k.fam && s.k.sig === k.sig);
+  const ranks = [...new Set(same.map((s) => s.k.rank))].sort((a, b) => a - b);
+  const at = ranks.indexOf(k.rank);
+  if (at < 0) return null;
+  const want = ranks[at + steps];
+  if (want === undefined) return null;
+  return same.find((s) => s.k.rank === want) || null;
 }

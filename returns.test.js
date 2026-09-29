@@ -149,7 +149,7 @@ assertEq("a one-letter name still masks", maskEmail("j@x.com"), "j•••@x.co
   assertTrue("exchanges go out free", html.includes("free standard delivery"));
   assertTrue("the exchange says what they want", html.includes("Exchange &ndash; One size up"));
   const note = returnNoteText({ ref: "WR29092601", email: "jo@x.com", lines, comments: "" });
-  assertTrue("note starts with the reference", note.startsWith("RETURN REQUESTED ONLINE — WR29092601"));
+  assertTrue("note starts with the reference", note.startsWith("RETURN REQUESTED ONLINE - WR29092601") && !note.includes("postage"));
   assertTrue("note spells out the exchange", note.includes("EXCHANGE: One size up"));
 }
 
