@@ -16,6 +16,18 @@ export function registerReturnsBpSandbox(app, { bpTest }) {
     try {
       const customerId = Number(req.query.customer || 128071);
       const pid = Number(req.query.product || 143061);
+      if (req.query.step === "addr") {
+        // An order delivered to an address that is NOT the customer's default, with a delivery method.
+        const id = await tryStep("create SO with delivery address + method", () => bpTest("POST", "/order-service/order", {
+          orderTypeCode: "SO", reference: "RETURNS SANDBOX ADDR", priceListId: 3, priceModeCode: "EXC", warehouseId: 2,
+          currency: { orderCurrencyCode: "GBP" }, assignment: { current: { channelId: 17 } },
+          parties: { customer: { contactId: customerId }, delivery: { addressFullName: "Test Person", companyName: "Test Co", addressLine1: "1 Test Street",
+            addressLine2: "Rothwell", addressLine3: "Leeds", addressLine4: "West Yorkshire", postalCode: "LS26 8LG", countryIsoCode: "GBR", telephone: "0113 000 0000", email: "test@example.com" } },
+          delivery: { shippingMethodId: 104 },
+        }));
+        if (id) await tryStep("read", async () => { const o = await one(id); return { ...brief(o), deliveryParty: o.parties.delivery, deliveryBlock: o.delivery }; });
+        return res.json({ account: "TEST (tuffbsitc)", log });
+      }
       // 1. a sale to return against
       const soId = await tryStep("create SO", () => bpTest("POST", "/order-service/order", {
         orderTypeCode: "SO", reference: "RETURNS SANDBOX", priceListId: 3, priceModeCode: "EXC", warehouseId: 2,
