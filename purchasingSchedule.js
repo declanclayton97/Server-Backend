@@ -202,8 +202,62 @@ export function triageSignature({ supplier, step, message, context }, lines) {
 // trains everyone to ignore Blaklader alerts, which is worse than not sending one. The row is still
 // written, so the hub shows it, force-run-safety reads it and the history is intact; only the email
 // is withheld. Never use it for something nobody has looked at.
+// ── Page snapshots: what the supplier's screen looked like when it failed ───────────────────────
+// A failure that says "no checkout form" or "login failed" is a claim about a page nobody saw, and
+// the worker's own screenshot expires with its job after 30 minutes. Any error whose context
+// carries `screenshot` (a PNG data URL from the browser worker) or `pageHtml` (the page a plain-HTTP
+// lane was served) — at any depth — has it stored here and replaced by a link, so the row stays
+// small and the evidence stays forever (user, 2026-09-29, after Sterling's form vanished once).
+export async function ensureSnapshotTable(pool) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS purchasing_page_snapshot (
+    id serial PRIMARY KEY, created_at timestamptz DEFAULT now(),
+    supplier text, step text, po_id integer, kind text, content text)`);
+}
+const SNAPSHOT_BASE = process.env.PUBLIC_BASE_URL || 'https://purchasing-automation.onrender.com';
+async function storeSnapshots(pool, { supplier, step, context }) {
+  if (!pool || !context || typeof context !== 'object') return { context, links: [] };
+  const found = [];
+  const walk = (o, depth) => {
+    if (!o || typeof o !== 'object' || depth > 4) return o;
+    if (Array.isArray(o)) return o.map((x) => walk(x, depth + 1));
+    const out = {};
+    for (const [k, v] of Object.entries(o)) {
+      if (k === 'screenshot' && typeof v === 'string' && v.length > 200) { found.push({ kind: 'png', content: v.replace(/^data:image\/png;base64,/, '') }); out[k] = '(stored — see snapshots)'; }
+      else if (k === 'pageHtml' && typeof v === 'string' && v.length > 50) { found.push({ kind: 'html', content: v }); out[k] = '(stored — see snapshots)'; }
+      else out[k] = walk(v, depth + 1);
+    }
+    return out;
+  };
+  const clean = walk(context, 0);
+  if (!found.length) return { context, links: [] };
+  const links = [];
+  try {
+    await ensureSnapshotTable(pool);
+    for (const f of found.slice(0, 4)) {
+      const r = await pool.query('INSERT INTO purchasing_page_snapshot (supplier, step, po_id, kind, content) VALUES ($1,$2,$3,$4,$5) RETURNING id',
+        [supplier, step, Number(context.poId) || null, f.kind, f.content]);
+      links.push({ id: r.rows[0].id, kind: f.kind, url: `${SNAPSHOT_BASE}/api/purchasing/page-snapshot/${r.rows[0].id}` });
+    }
+  } catch (e) { console.error('[page-snapshot] store failed:', e.message); return { context, links: [] }; }
+  return { context: { ...clean, snapshots: links }, links };
+}
+
+// The last failing worker job's screenshot, per supplier — attached to that run's error below.
+let lastWorkerShot = null;
+
+// The worker screenshot for THIS supplier, only if taken in the last 30 minutes (this run), then cleared.
+function workerShotFor(supplierKey) {
+  const w = lastWorkerShot;
+  if (!w || w.supplier !== String(supplierKey).toUpperCase() || Date.now() - w.at > 30 * 60 * 1000) return {};
+  lastWorkerShot = null;
+  return { screenshot: w.data, screenshotJobId: w.jobId };
+}
+
 export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error', placed = null, notify = true } = {}) {
   let errorId = null;
+  const snap = await storeSnapshots(pool, { supplier, step, context });
+  context = snap.context;
+  if (snap.links.length) message = `${message} — page ${snap.links.map((l) => `${l.kind === 'png' ? 'screenshot' : 'snapshot'}: ${l.url}`).join(', ')}`;
   // Recorded IN the context so the stored row carries the fact too — an email is read once, but
   // force-run-safety and the triage routine read the row for the rest of the day.
   const ctx = placed === null ? context : { ...(context || {}), placed };
@@ -1154,6 +1208,8 @@ async function workerPlaceOrder({ supplier = 'STERLING', ref, lines, execute, op
     // confirm on 2026-09-11 the one image that would have said whether £3k had been spent was
     // sitting in memory at an address nobody could name, and it expired untouched. Callers put this
     // in the error context; GET {worker}/job/{jobId} then retrieves it while it lasts.
+    // Keep a failing job's screenshot so the run's error row can store it (see storeSnapshots).
+    if (j.status === 'done' && !j.ok && !j.placed && j.screenshot) lastWorkerShot = { supplier: String(supplier).toUpperCase(), at: Date.now(), data: j.screenshot, jobId };
     if (j.status === 'done') return { ...j, jobId };  // ok OR not-ok - the caller inspects it
     if (j.status === 'error') throw stepErr('checkout', `worker job errored: ${j.error}`, { jobId, job: j });
 
@@ -4095,7 +4151,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     // log under the same supplier name, so without it the 16:20 reorder run would happily adopt the
     // 09:30 customer run's orphaned draft, empty it, and refill it with reorder lines only —
     // dropping the customer lines from that PO with nothing to show it had happened.
-    if (notify) await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, lineMode, ...(activePoId ? { poId: activePoId } : {}), ...(e.context || {}) } }).catch(() => {});
+    if (notify) await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, lineMode, ...(activePoId ? { poId: activePoId } : {}), ...(e.context || {}), ...workerShotFor(cfg.supplierKey) } }).catch(() => {});
     if (!dryRun) { try { await saveState(pool, { id: cfg.stateId, workingDaysWaited: (await getState(pool, cfg.stateId)).working_days_waited, lastRunDate: uk.date, result: report }); } catch {} }
     return report;
   } finally { running = false; }

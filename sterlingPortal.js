@@ -479,7 +479,9 @@ export async function sterlingCheckout({ orderRef, orderText = '', jar = null, e
     // verified fine. The page's own title and opening text answer it.
     const text = String(html || '').replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const page = { title: (String(html || '').match(/<title>([^<]*)</i) || [])[1] || null, bytes: String(html || '').length,
-      signedOut: /\/SignIn\b|type="password"/i.test(html || ''), text: text.slice(0, 400) };
+      signedOut: /\/SignIn\b|type="password"/i.test(html || ''), text: text.slice(0, 400),
+      // The whole page, for the error log's snapshot store (it is lifted out of the row there).
+      pageHtml: String(html || '').slice(0, 900000) };
     return { ok: false, step: 'checkout-form', reason: `no checkout form on /Checkout — page "${page.title || '?'}": ${page.text.slice(0, 160)}`, page };
   }
   const form = html.slice(start, html.indexOf('</form>', start));
