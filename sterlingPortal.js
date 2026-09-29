@@ -473,7 +473,15 @@ export async function sterlingCheckout({ orderRef, orderText = '', jar = null, e
   const j = jar || (await sterlingLogin());
   const { html } = await appGet('/Checkout', j);
   const start = html.indexOf('<form id="checkout-form"');
-  if (start < 0) return { ok: false, step: 'checkout-form', reason: 'no checkout form on /Checkout — basket empty, or the page changed' };
+  if (start < 0) {
+    // SAY WHAT WAS THERE. "basket empty, or the page changed" left PO 492740 (2026-09-29) with
+    // no way to tell a sign-out, an account notice and a redesign apart after the basket had
+    // verified fine. The page's own title and opening text answer it.
+    const text = String(html || '').replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const page = { title: (String(html || '').match(/<title>([^<]*)</i) || [])[1] || null, bytes: String(html || '').length,
+      signedOut: /\/SignIn\b|type="password"/i.test(html || ''), text: text.slice(0, 400) };
+    return { ok: false, step: 'checkout-form', reason: `no checkout form on /Checkout — page "${page.title || '?'}": ${page.text.slice(0, 160)}`, page };
+  }
   const form = html.slice(start, html.indexOf('</form>', start));
   const token = tokenFrom(form) || tokenFrom(html);
   if (!token) return { ok: false, step: 'checkout-form', reason: 'no antiforgery token in the checkout form' };

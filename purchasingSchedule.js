@@ -1378,6 +1378,8 @@ async function placeSterlingOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
   // REHEARSAL: everything up to here is proven (login, add, read-back) — empty the basket again
   // and stop, so a placement against an existing PO can be checked before anything is bought.
   if (rehearse) {
+    // Read the checkout too (execute:false never submits) — the form is what failed on PO 492740.
+    steps.checkoutPreview = await sterlingPortal.sterlingCheckout({ orderRef: String(poId), orderText: `Tuff Workwear PO ${poId}`, jar, execute: false }).catch((e) => ({ ok: false, error: e.message }));
     steps.rehearsalBasketEmptied = await sterlingPortal.sterlingEmptyBasket({ jar });
     return { poId, rehearsed: true, lines: barcodeLines, steps };
   }
