@@ -24,8 +24,10 @@ import fs from "fs";
 import {
   assessReturn, validateSelection, postcodeMatches, returnEmailHtml, returnNoteText,
   RETURN_WINDOW_DAYS, prettyDate, EXCHANGE_CHOICES, REFUND_REASONS, WEB_RETURNS_ADDRESS,
-  orderEmail, maskEmail,
+  orderEmail, maskEmail, statusEmail, validatePhotos,
 } from "./returns.js";
+import { buildBrightpearlReport, summariseOnline } from "./returnsReport.js";
+
 
 const STATUSES = ["requested", "received", "refunded", "exchanged", "rejected", "cancelled"];
 const OPEN_STATUSES = ["requested", "received"];
@@ -66,6 +68,10 @@ export function registerReturnsRoutes(app, deps) {
       updated_at    timestamptz NOT NULL DEFAULT now()
     )`);
     await pool.query(`CREATE INDEX IF NOT EXISTS returns_requests_order ON returns_requests (order_id)`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS first_name text`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS photos int NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS photos_emailed boolean`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS returns_report_cache (days int PRIMARY KEY, built_at timestamptz NOT NULL, data jsonb NOT NULL)`);
   })().catch((e) => { ready = null; throw e; }));
 
   // Quantities already on an open return, per order row.
@@ -246,15 +252,17 @@ export function registerReturnsRoutes(app, deps) {
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, message: "We need an email address to send your returns reference to." });
       const sel = validateSelection(assessment, b.lines);
       if (!sel.ok) return res.status(400).json({ ok: false, message: sel.error });
+      const ph = validatePhotos(b.photos, sel.lines);
+      if (!ph.ok) return res.status(400).json({ ok: false, message: ph.error });
 
       const ref = await allocateRef(order.id);
       const cust = (order.parties && order.parties.customer) || {};
       const name = String(cust.addressFullName || "").trim().split(/\s+/)[0] || "";
       await getPool().query(
-        `INSERT INTO returns_requests (ref, order_id, order_ref, customer_name, email, lines, comments, history)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        `INSERT INTO returns_requests (ref, order_id, order_ref, customer_name, email, lines, comments, history, first_name, photos)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [ref, order.id, order.reference || String(order.id), cust.companyName || cust.addressFullName || "", email,
-          JSON.stringify(sel.lines), comments, JSON.stringify([{ at: new Date().toISOString(), status: "requested", by: "customer" }])]);
+          JSON.stringify(sel.lines), comments, JSON.stringify([{ at: new Date().toISOString(), status: "requested", by: "customer" }]), name, ph.photos.length]);
 
       // The request is stored: from here a failure is reported, never a lost return.
       let emailed = false, noted = false;
@@ -272,14 +280,20 @@ export function registerReturnsRoutes(app, deps) {
       await getPool().query(`UPDATE returns_requests SET emailed = $2, noted = $3 WHERE ref = $1`, [ref, emailed, noted]);
 
       // A heads-up in the shared sales inbox, where the team already works.
-      if (process.env.RETURNS_NOTIFY_INBOX !== "off" && graphConfigured()) {
-        sendMail({
+      if ((process.env.RETURNS_NOTIFY_INBOX !== "off" || ph.photos.length) && graphConfigured()) {
+        const n = ph.photos.length;
+        sendNew({
           to: salesMailbox(),
-          subject: `Online return ${ref} - order ${order.reference || order.id}`,
-          html: `<p>A customer has requested a return online.</p><pre style="font-family:Arial,sans-serif;">${
+          subject: `${n ? "PHOTOS - " : ""}Online return ${ref} - order ${order.reference || order.id}${n ? ` (${n} photo${n === 1 ? "" : "s"} attached)` : ""}`,
+          html: `<p>A customer has requested a return online.${n ? ` They've attached <b>${n} photo${n === 1 ? "" : "s"}</b> (below).` : ""}</p><pre style="font-family:Arial,sans-serif;">${
             returnNoteText({ ref, email, lines: sel.lines, comments }).replace(/</g, "&lt;")}</pre><p>Brightpearl order ${order.id}.${emailed ? "" : " <b>The confirmation email to the customer FAILED — please send them the reference.</b>"}</p>`,
           replyTo: email,
-        }).catch((e) => console.error(`[returns] ${ref} inbox notice failed:`, e.message));
+          attachments: ph.photos,
+        }).then(() => getPool().query(`UPDATE returns_requests SET photos_emailed = true WHERE ref = $1`, [ref]))
+          .catch((e) => {
+            console.error(`[returns] ${ref} inbox notice failed:`, e.message);
+            if (n) getPool().query(`UPDATE returns_requests SET photos_emailed = false WHERE ref = $1`, [ref]).catch(() => {});
+          });
       }
 
       res.json({ ok: true, ref, emailed, emailHint: maskEmail(email), lastDay: prettyDate(assessment.lastDay), address: WEB_RETURNS_ADDRESS,
@@ -302,12 +316,48 @@ export function registerReturnsRoutes(app, deps) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // GET /api/returns/report?days=90 — the Brightpearl half is cached (it takes a
+  // minute or two to build) and rebuilt in the background when older than 12 hours;
+  // the online half is read fresh every time.
+  const building = new Set();
+  function rebuild(days) {
+    if (building.has(days)) return;
+    building.add(days);
+    buildBrightpearlReport({ bpLive, days })
+      .then((data) => getPool().query(
+        `INSERT INTO returns_report_cache (days, built_at, data) VALUES ($1, now(), $2)
+         ON CONFLICT (days) DO UPDATE SET built_at = now(), data = EXCLUDED.data`, [days, JSON.stringify(data)]))
+      .catch((e) => console.error(`[returns] report build (${days}d) failed:`, e.message))
+      .finally(() => building.delete(days));
+  }
+  app.get("/api/returns/report", requireUser, async (req, res) => {
+    try {
+      await ensureTables();
+      const days = [30, 90, 180, 365].includes(Number(req.query.days)) ? Number(req.query.days) : 90;
+      const c = await getPool().query(`SELECT built_at, data FROM returns_report_cache WHERE days = $1`, [days]);
+      const cached = c.rows[0] || null;
+      const stale = !cached || Date.now() - new Date(cached.built_at).getTime() > 12 * 3600 * 1000;
+      if (stale || req.query.refresh) rebuild(days);
+      const bp = cached ? cached.data : null;
+      const productToKey = {};
+      for (const s of (bp && bp.styles) || []) for (const id of s.productIds || []) productToKey[id] = s.key;
+      const online = await getPool().query(
+        `SELECT status, lines FROM returns_requests WHERE created_at > now() - ($1 || ' days')::interval`, [String(days)]);
+      res.json({ days, building: building.has(days), builtAt: cached && cached.built_at, bp, online: summariseOnline(online.rows, productToKey) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.post("/api/returns/requests/:ref/status", requireUser, async (req, res) => {
     try {
       await ensureTables();
       const status = String((req.body && req.body.status) || "");
       if (!STATUSES.includes(status)) return res.status(400).json({ error: "unknown status" });
       const note = String((req.body && req.body.note) || "").trim().slice(0, 500);
+      const message = String((req.body && req.body.customerMessage) || "").trim().slice(0, 1500);
+      const emailCustomer = req.body && req.body.emailCustomer !== false;
+      if (status === "rejected" && emailCustomer && !message) {
+        return res.status(400).json({ error: "Tell the customer why it's been rejected (the message box), or untick 'Email the customer'." });
+      }
       const by = (req.hubUser && req.hubUser.name) || "staff";
       const r = await getPool().query(
         `UPDATE returns_requests SET status = $2, updated_at = now(),
@@ -315,10 +365,23 @@ export function registerReturnsRoutes(app, deps) {
           WHERE ref = $1 RETURNING *`,
         [req.params.ref, status, JSON.stringify([{ at: new Date().toISOString(), status, by, note }])]);
       if (!r.rowCount) return res.status(404).json({ error: "no such return" });
-      const row = r.rows[0];
-      postBpOrderNote(row.order_id, `RETURN ${row.ref} marked ${status.toUpperCase()} by ${by}${note ? " — " + note : ""}`)
+      let row = r.rows[0];
+      // Tell the customer. The status is saved either way; a failed email is recorded
+      // on the return so the hub can show it rather than it vanishing.
+      let emailed = null;
+      const mail = emailCustomer ? statusEmail(status, row, message) : null;
+      if (mail) {
+        try { await sendMail({ to: row.email, subject: mail.subject, html: mail.html, replyTo: salesMailbox() }); emailed = true; }
+        catch (e) { emailed = false; console.error(`[returns] ${row.ref} status email failed:`, e.message); }
+        const upd = await getPool().query(
+          `UPDATE returns_requests SET history = jsonb_set(history, ARRAY[(jsonb_array_length(history) - 1)::text, 'emailed'], $2::jsonb) WHERE ref = $1 RETURNING *`,
+          [row.ref, JSON.stringify(emailed)]);
+        if (upd.rowCount) row = upd.rows[0];
+      }
+      postBpOrderNote(row.order_id, `RETURN ${row.ref} marked ${status.toUpperCase()} by ${by}${note ? " — " + note : ""}` +
+        (mail ? (emailed ? `\nCustomer emailed: "${mail.subject}"${message ? " — " + message : ""}` : "\nCustomer email FAILED") : ""))
         .catch((e) => console.error(`[returns] ${row.ref} status note failed:`, e.message));
-      res.json({ request: row });
+      res.json({ request: row, emailed });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 }

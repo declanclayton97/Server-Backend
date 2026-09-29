@@ -89,6 +89,7 @@
       if (pickBtn) pickBtn.addEventListener("click", function () {
         var on = !el.classList.contains("is-on");
         el.classList.toggle("is-on", on);
+        photoNeed();
         pickBtn.innerHTML = on ? "&#10003; Returning this item<small>Tap to undo</small>" : "Return this item";
         fit();
       });
@@ -97,17 +98,18 @@
           el.dataset.out = b.dataset.out;
           Array.prototype.forEach.call(el.querySelectorAll(".rt-toggle button"), function (x) { x.classList.toggle("is-on", x === b); });
           Array.prototype.forEach.call(el.querySelectorAll(".rt-choice"), function (c) { c.classList.toggle("rt-hidden", c.dataset.for !== b.dataset.out); });
-          fit();
+          photoNeed(); fit();
         });
       });
       el.querySelector(".rt-exchange").addEventListener("change", function () {
         el.querySelector(".rt-other").classList.toggle("rt-hidden", this.value !== "Something else"); fit();
       });
       el.querySelector(".rt-reason").addEventListener("change", function () {
-        el.querySelector(".rt-note").classList.toggle("rt-hidden", !/faulty|wrong item/i.test(this.value)); fit();
+        el.querySelector(".rt-note").classList.toggle("rt-hidden", !/faulty|wrong item/i.test(this.value)); photoNeed(); fit();
       });
     });
 
+    photos = []; drawThumbs(); photoNeed();
     $("rt-email-field").classList.toggle("rt-hidden", !found.needsEmail);
     $("rt-email-hint").innerHTML = found.needsEmail ? "" : "We'll email your returns reference to <b>" + esc(found.emailHint) + "</b>, the address on your order.";
     msg("rt-submit-msg", "");
@@ -140,10 +142,11 @@
       }
     }
     if (!lines.length) return msg("rt-submit-msg", 'Press "Return this item" on each item you are sending back.');
+    if (photoNeed() && !photos.length) { $("rt-photos").scrollIntoView({ behavior: "smooth", block: "center" }); return msg("rt-submit-msg", "As something is faulty or damaged, please add a photo of the problem so we can see it."); }
     var email = $("rt-email").value.trim();
     if (found.needsEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return msg("rt-submit-msg", "We need an email address to send your returns reference to.");
     $("rt-submit").disabled = true; msg("rt-submit-msg", "");
-    post("/api/returns/submit", { orderNumber: query.orderNumber, postcode: query.postcode, email: email, lines: lines, comments: $("rt-comments").value.trim() }).then(function (j) {
+    post("/api/returns/submit", { orderNumber: query.orderNumber, postcode: query.postcode, email: email, lines: lines, comments: $("rt-comments").value.trim(), photos: photos.map(function (x) { return { contentType: x.contentType, base64: x.base64 }; }) }).then(function (j) {
       $("rt-submit").disabled = false;
       if (!j.ok) return msg("rt-submit-msg", j.message || "Something went wrong there. Please try again.");
       $("rt-done-ref").textContent = j.ref;
@@ -158,8 +161,62 @@
       $("rt-done-mail").innerHTML = j.emailed
         ? "We've emailed all of this to <b>" + esc(j.emailHint) + "</b> too."
         : "We couldn't send the email, so please make a note of your reference. Our team has been told.";
+      if (photos.length) $("rt-done-mail").innerHTML += " Thanks for the photo" + (photos.length === 1 ? "" : "s") + " &ndash; our team will take a look and be in touch if we need anything.";
       show("rt-choose", false); show("rt-done", true);
       top();
+    });
+  });
+
+  // ---- Photos --------------------------------------------------------------------
+  // Shrunk on the device to a 1600px JPEG before sending: a phone photo is 3-8 MB,
+  // this makes it ~300 KB, so it uploads quickly on mobile data and fits in an email.
+  var photos = [], MAX_PHOTOS = 6;
+  function photoNeed() {
+    var need = Array.prototype.some.call(document.querySelectorAll(".rt-item.is-on"), function (el) {
+      return el.dataset.out === "refund" && /faulty|damaged/i.test(el.querySelector(".rt-reason").value);
+    });
+    $("rt-photos").classList.toggle("is-needed", need);
+    $("rt-photos-title").innerHTML = need ? "Photos of the problem <em>(needed)</em>" : "Photos <em>(optional)</em>";
+    $("rt-photos-help").textContent = need
+      ? "Please add at least one photo showing the fault or damage, so we can see what's wrong."
+      : "If anything's damaged or not right, a photo helps us sort it out quicker.";
+    return need;
+  }
+  function drawThumbs() {
+    $("rt-thumbs").innerHTML = photos.map(function (x, i) {
+      return '<div class="rt-thumb" style="background-image:url(' + x.url + ')"><button type="button" data-i="' + i + '" aria-label="Remove photo">&times;</button></div>';
+    }).join("");
+    Array.prototype.forEach.call($("rt-thumbs").querySelectorAll("button"), function (b) {
+      b.addEventListener("click", function () { photos.splice(Number(b.dataset.i), 1); drawThumbs(); });
+    });
+    fit();
+  }
+  function shrink(file) {
+    return new Promise(function (resolve) {
+      var img = new Image(), url = URL.createObjectURL(file);
+      img.onload = function () {
+        var s = Math.min(1, 1600 / Math.max(img.width, img.height));
+        var c = document.createElement("canvas");
+        c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        var data = c.toDataURL("image/jpeg", 0.82);
+        resolve({ contentType: "image/jpeg", base64: data.split(",")[1], url: data });
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve(null); };
+      img.src = url;
+    });
+  }
+  $("rt-photo-input").addEventListener("change", function () {
+    var files = Array.prototype.slice.call(this.files || []);
+    this.value = "";
+    var room = MAX_PHOTOS - photos.length;
+    if (files.length > room) msg("rt-submit-msg", "You can add up to " + MAX_PHOTOS + " photos.", "info");
+    Promise.all(files.slice(0, Math.max(0, room)).map(shrink)).then(function (out) {
+      var bad = out.filter(function (x) { return !x; }).length;
+      photos = photos.concat(out.filter(Boolean));
+      drawThumbs();
+      if (bad) msg("rt-submit-msg", "One of those files isn't a photo we can open. Try a JPG or PNG.");
     });
   });
 

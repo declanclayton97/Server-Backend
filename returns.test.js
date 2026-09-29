@@ -11,7 +11,12 @@ import {
   returnNoteText,
   orderEmail,
   maskEmail,
+  statusEmail,
+  validatePhotos,
+  fitSignal,
+  styleName,
 } from "./returns.js";
+import { summariseOnline } from "./returnsReport.js";
 
 let pass = 0, fail = 0;
 function assertEq(label, actual, expected) {
@@ -146,6 +151,51 @@ assertEq("a one-letter name still masks", maskEmail("j@x.com"), "j•••@x.co
   const note = returnNoteText({ ref: "WR29092601", email: "jo@x.com", lines, comments: "" });
   assertTrue("note starts with the reference", note.startsWith("RETURN REQUESTED ONLINE — WR29092601"));
   assertTrue("note spells out the exchange", note.includes("EXCHANGE: One size up"));
+}
+
+
+// --- status emails ------------------------------------------------------------
+{
+  const row = { ref: 'WR29092601', first_name: 'Jo', lines: [{ qty: 1, name: 'Boots', outcome: 'exchange', exchangeChoice: 'One size up' }, { qty: 1, name: 'Hat', outcome: 'refund', reason: 'Too big' }] };
+  const got = statusEmail('received', row);
+  assertTrue('arrived email names the return', got.subject.includes('WR29092601') && got.html.includes('has arrived'));
+  assertTrue('arrived email says both things will happen', got.html.includes('send your replacement out and sort your refund'));
+  assertTrue('refund email', statusEmail('refunded', row).html.includes('processed the refund'));
+  assertTrue('exchange email lists only the swapped items', statusEmail('exchanged', row).html.includes('Boots') && !statusEmail('exchanged', row).html.includes('Hat'));
+  assertEq('a rejection with no reason is not sent', statusEmail('rejected', row, ''), null);
+  assertTrue('a rejection carries the reason, escaped', statusEmail('rejected', row, 'Worn <b>').html.includes('Worn &lt;b&gt;'));
+  assertEq('cancelling emails nobody', statusEmail('cancelled', row), null);
+  assertTrue('greets by first name', got.html.includes('Hi Jo,'));
+}
+
+// --- photos -------------------------------------------------------------------
+{
+  const jpg = { contentType: 'image/jpeg', base64: 'AAAA' };
+  assertTrue('photos optional for a size swap', validatePhotos([], [{ reason: 'Exchange: one size up' }]).ok);
+  assertFalse('faulty needs a photo', validatePhotos([], [{ reason: 'Faulty or damaged' }]).ok);
+  assertTrue('faulty with a photo', validatePhotos([jpg], [{ reason: 'Faulty or damaged' }]).ok);
+  assertFalse('not a picture', validatePhotos([{ contentType: 'application/pdf', base64: 'AAAA' }], []).ok);
+  assertFalse('too many', validatePhotos(Array(7).fill(jpg), []).ok);
+  assertEq('named in order', validatePhotos([jpg, jpg], []).photos.map((x) => x.name), ['photo-1.jpg', 'photo-2.jpg']);
+}
+
+// --- report -------------------------------------------------------------------
+assertEq('fit needs a few votes', fitSignal(2, 0), null);
+assertEq('runs small', fitSignal(4, 1), 'runs small');
+assertEq('runs big', fitSignal(0, 3), 'runs big');
+assertEq('mixed says nothing', fitSignal(3, 2), null);
+assertEq('style name drops the size', styleName('Snickers 6318 AllroundWork 4-Way Stretch Trousers (Black)-44'), 'Snickers 6318 AllroundWork 4-Way Stretch Trousers');
+assertEq('style name drops Size-', styleName('Snickers 6241 Trousers (Black) Size-36" Waist'), 'Snickers 6241 Trousers');
+{
+  const s = summariseOnline([
+    { status: 'requested', lines: [{ productId: 5, name: 'Boot Size-9', qty: 2, outcome: 'exchange', exchangeChoice: 'One size up' }] },
+    { status: 'received', lines: [{ productId: 6, name: 'Boot Size-8', qty: 1, outcome: 'refund', reason: 'Too small' }] },
+    { status: 'cancelled', lines: [{ productId: 6, name: 'Boot Size-8', qty: 5, outcome: 'refund', reason: 'Too big' }] },
+  ], { 5: 'g1', 6: 'g1' });
+  assertEq('cancelled returns do not count', s.units, 3);
+  assertEq('both sizes land on one style', s.styles.length, 1);
+  assertEq('and it runs small', s.styles[0].fit, 'runs small');
+  assertEq('swaps and refunds split', [s.swaps, s.refunds], [2, 1]);
 }
 
 assertEq("despatchDate takes the earliest invoice",

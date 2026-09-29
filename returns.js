@@ -125,7 +125,7 @@ export function assessReturn(order, { productMeta = {}, channelName = "", reques
     .map(({ rowId, r }) => {
       const qty = Math.round(Number((r.quantity && r.quantity.magnitude) || 0));
       const already = Math.max(0, Math.round(Number(requested[rowId] || 0)));
-      return { rowId, name: String(r.productName || "").trim(), sku: r.productSku || "", qty, available: Math.max(0, qty - already) };
+      return { rowId, productId: Number(r.productId) || null, name: String(r.productName || "").trim(), sku: r.productSku || "", qty, available: Math.max(0, qty - already) };
     })
     .filter((l) => l.qty > 0);
   if (!lines.length) return fail("nothing", "There's nothing on this order we can take back online. Give us a call or drop us an email and we'll help.");
@@ -154,12 +154,12 @@ export function validateSelection(assessment, picks) {
       if (!choice) return { ok: false, error: `What would you like instead of "${line.name}"?` };
       const exchangeFor = String(p.exchangeFor || "").trim().slice(0, 200);
       if (choice === "Something else" && !exchangeFor) return { ok: false, error: `Tell us what you'd like instead of "${line.name}".` };
-      chosen.push({ rowId: line.rowId, name: line.name, sku: line.sku, qty, outcome: "exchange",
+      chosen.push({ rowId: line.rowId, productId: line.productId, name: line.name, sku: line.sku, qty, outcome: "exchange",
         exchangeChoice: choice, exchangeFor: choice === "Something else" ? exchangeFor : "", reason: "Exchange: " + choice.toLowerCase() });
     } else if (p.outcome === "refund") {
       const reason = REFUND_REASONS.includes(p.reason) ? p.reason : null;
       if (!reason) return { ok: false, error: `Let us know why "${line.name}" is coming back.` };
-      chosen.push({ rowId: line.rowId, name: line.name, sku: line.sku, qty, outcome: "refund", exchangeChoice: "", exchangeFor: "", reason });
+      chosen.push({ rowId: line.rowId, productId: line.productId, name: line.name, sku: line.sku, qty, outcome: "refund", exchangeChoice: "", exchangeFor: "", reason });
     } else {
       return { ok: false, error: `Would you like to exchange "${line.name}" or get a refund?` };
     }
@@ -221,4 +221,113 @@ export function returnNoteText({ ref, email, lines, comments }) {
     comments ? `Customer comments: ${comments}` : "",
     "Waiting for the goods to come back. Customer pays return postage.",
   ].filter(Boolean).join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// STATUS EMAILS — sent when staff move a return along in the Sales Hub.
+// Cancelled / reopened send nothing: those are corrections, not news.
+// `message` is what the staff member typed for the customer; a rejection needs one.
+// ---------------------------------------------------------------------------
+const emailShell = (name, body) => `<div style="font-family:'Open Sans',Arial,sans-serif;font-size:14px;line-height:1.55;color:#222;max-width:620px;">
+  <div style="background:#000;padding:14px 18px;"><img src="https://tuffshop.co.uk/media/athlete2/default/tuffshop_logo.png" alt="Tuffshop" height="56" style="display:block;height:56px;"></div>
+  <div style="padding:18px 4px;">
+  <p>${name ? "Hi " + esc(name) + "," : "Hi,"}</p>
+  ${body}
+  <p>Any questions, just reply to this email or give us a call on 0113 288 7713.</p>
+  <p>Thanks,<br>The Tuffshop team</p>
+  </div></div>`;
+
+const itemList = (lines) => "<ul>" + (lines || []).map((l) =>
+  `<li>${l.qty} &times; ${esc(l.name)}${l.outcome === "exchange" ? " &ndash; swapping for " + esc(wantedText(l).toLowerCase()) : ""}</li>`).join("") + "</ul>";
+
+export const STATUS_EMAILS = ["received", "refunded", "exchanged", "rejected"];
+
+export function statusEmail(status, row, message = "") {
+  const ref = esc(row.ref), msg = String(message || "").trim();
+  const extra = msg ? `<p style="background:#f5f5f5;padding:10px 14px;">${esc(msg).replace(/\n/g, "<br>")}</p>` : "";
+  const exchanging = (row.lines || []).some((l) => l.outcome === "exchange");
+  const refunding = (row.lines || []).some((l) => l.outcome === "refund");
+  const name = row.first_name || "";
+  if (status === "received") {
+    const next = exchanging && refunding ? "send your replacement out and sort your refund"
+      : exchanging ? "send your replacement out with free standard delivery" : "sort your refund";
+    return { subject: `We've got your return ${row.ref}`,
+      html: emailShell(name, `<p>Just to let you know your return <b>${ref}</b> has arrived with us:</p>${itemList(row.lines)}
+        <p>We'll check it over and ${next} as soon as we can. We'll email you again when that's done.</p>${extra}`) };
+  }
+  if (status === "refunded") {
+    return { subject: `Your refund for return ${row.ref}`,
+      html: emailShell(name, `<p>Good news &ndash; we've processed the refund for your return <b>${ref}</b>.</p>
+        <p>It goes back the same way you paid. It can take a few working days to show on your account, depending on your bank.</p>${extra}`) };
+  }
+  if (status === "exchanged") {
+    return { subject: `Your replacement is on its way (${row.ref})`,
+      html: emailShell(name, `<p>Your replacement for return <b>${ref}</b> is on its way to you, with free standard delivery.</p>${itemList((row.lines || []).filter((l) => l.outcome === "exchange"))}
+        ${refunding ? "<p>The refund for the rest of your return has been processed too.</p>" : ""}${extra}`) };
+  }
+  if (status === "rejected") {
+    if (!msg) return null;
+    return { subject: `About your return ${row.ref}`,
+      html: emailShell(name, `<p>We've had a look at the items you sent back under return <b>${ref}</b>, and unfortunately we can't accept this return:</p>${extra}
+        <p>Give us a call on 0113 288 7713 and we'll sort out what happens next.</p>`) };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// PHOTOS — for faulty or damaged items. Emailed to sales with the return notice.
+// The page shrinks them to JPEGs before sending; these are the server's limits.
+// ---------------------------------------------------------------------------
+export const PHOTO_MAX = 6;
+export const PHOTO_MAX_BYTES = 6 * 1024 * 1024;
+export const PHOTOS_REQUIRED_RE = /faulty|damaged/i;
+export function validatePhotos(photos, lines) {
+  const list = Array.isArray(photos) ? photos : [];
+  if (list.length > PHOTO_MAX) return { ok: false, error: `You can add up to ${PHOTO_MAX} photos.` };
+  const out = [];
+  for (const [i, p] of list.entries()) {
+    const type = String((p && p.contentType) || "");
+    if (!/^image\/(jpeg|png|webp|heic|heif)$/i.test(type)) return { ok: false, error: "Photos need to be pictures (JPG or PNG)." };
+    const b64 = String((p && p.base64) || "");
+    const bytes = Math.floor(b64.length * 3 / 4);
+    if (!bytes) return { ok: false, error: "One of the photos didn't come through. Please try adding it again." };
+    if (bytes > PHOTO_MAX_BYTES) return { ok: false, error: "One of the photos is too big. Please try a smaller one." };
+    const ext = type.split("/")[1].replace("jpeg", "jpg");
+    out.push({ name: `photo-${i + 1}.${ext}`, contentType: type, base64: b64 });
+  }
+  if (!out.length && (lines || []).some((l) => PHOTOS_REQUIRED_RE.test(l.reason || ""))) {
+    return { ok: false, error: "As something's faulty or damaged, please add a photo so we can see the problem." };
+  }
+  return { ok: true, photos: out };
+}
+
+// ---------------------------------------------------------------------------
+// REPORT — what the online returns say about fit. A swap up a size or a "too
+// small" refund both mean the item came up small; the reverse means big.
+// ---------------------------------------------------------------------------
+export function fitVotes(line) {
+  const r = String(line.reason || "").toLowerCase(), c = String(line.exchangeChoice || "").toLowerCase();
+  const q = Number(line.qty || 1);
+  if (/too small/.test(r) || /sizes? up/.test(c)) return { small: q, big: 0 };
+  if (/too big/.test(r) || /sizes? down/.test(c)) return { small: 0, big: q };
+  return { small: 0, big: 0 };
+}
+export function fitSignal(small, big) {
+  const n = small + big;
+  if (n < 3) return null;                         // too few to say anything
+  if (small / n >= 0.7) return "runs small";
+  if (big / n >= 0.7) return "runs big";
+  return null;
+}
+
+// "Snickers 6241 AllroundWork Trousers (Black) Size-36\" Waist 194557" -> the style,
+// without the size/colour tail, so every variant of a style reads as one name.
+export function styleName(name) {
+  let n = String(name || "");
+  n = n.replace(/\bSizes?\s*[-:]?\s*[^,()]*$/i, " ");
+  n = n.replace(/\)\s*[-–]\s*[A-Z0-9.\/"]{1,8}\s*$/i, ")");   // "(Black)-44" -> "(Black)"
+  n = n.replace(/\([^)]*\)\s*$/, " ");
+  n = n.replace(/\s\d{5,}\s*$/, " ");
+  n = n.replace(/[\s,\-–(\/]+$/, "");
+  return n.replace(/\s{2,}/g, " ").trim();
 }
