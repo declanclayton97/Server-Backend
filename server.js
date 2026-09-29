@@ -31,6 +31,7 @@ import {
 } from './quoteChase.js';
 import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
+import { registerReturnsRoutes } from './returnsRoutes.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
 import { printJobsFromRows, extractLogoUrls, extractPrintedGarments } from './printLines.js';
@@ -130,6 +131,18 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.raw({ limit: '50mb', type: 'application/octet-stream' }));
+
+// The customer returns page is published on its own hostname (returns.tuffshop.co.uk,
+// a Render custom domain). On that host ONLY the returns page and its two public API
+// routes answer; everything else this service does stays unreachable from there.
+app.use((req, res, next) => {
+  const host = String(req.headers.host || '').toLowerCase();
+  if (!/^returns\./.test(host)) return next();
+  if (req.path === '/' ) return res.redirect(302, '/returns');
+  if (req.path === '/returns' || req.path === '/returns/' || req.path === '/api/returns/lookup'
+      || req.path === '/api/returns/submit' || req.path === '/favicon.ico') return next();
+  return res.status(404).send('Not found');
+});
 
 // Static email assets (logo, social icons) referenced from chase-email HTML.
 // Served from https://<host>/email-assets/imageXXX.png
@@ -15349,6 +15362,16 @@ registerSalesHubRoutes(app, {
   pool,
   useDatabase,
   resolveSalesperson,
+});
+
+// Self-service returns: the public page at /returns (and returns.tuffshop.co.uk) plus
+// the staff queue. See returnsRoutes.js.
+registerReturnsRoutes(app, {
+  bpLive,
+  postBpOrderNote,
+  pool: () => pool,
+  useDatabase,
+  rootDir: __dirname,
 });
 
 // Whether the SALES WhatsApp number is set up, so the dashboard can say why

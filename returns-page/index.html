@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Returns | Tuffshop</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --yellow:#F3D014; --black:#111; --ink:#333; --muted:#6b6b6b; --line:#e2e2e2; --bg:#f6f6f6; --red:#b3261e; --green:#1e7a34; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Open Sans",Helvetica,Arial,sans-serif; color:var(--ink); background:var(--bg); font-size:15px; line-height:1.5; }
+  header { background:var(--black); padding:14px 16px; }
+  header .in { max-width:860px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  header img { height:46px; display:block; }
+  header a.back { color:#fff; font-size:13px; text-decoration:none; opacity:.85; }
+  header a.back:hover { opacity:1; text-decoration:underline; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:28px; font-weight:800; margin:0 0 6px; text-transform:uppercase; letter-spacing:.3px; }
+  .lead { color:var(--muted); margin:0 0 22px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:6px; padding:22px; margin-bottom:18px; }
+  .policy { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:18px; }
+  .policy div { background:#fff; border:1px solid var(--line); border-left:4px solid var(--yellow); border-radius:4px; padding:10px 12px; font-size:13px; }
+  .policy b { display:block; font-size:14px; color:var(--black); }
+  label { display:block; font-weight:600; font-size:13px; margin:0 0 6px; }
+  input[type=text], input[type=email], select, textarea { width:100%; font:inherit; padding:10px 12px; border:1px solid #cfcfcf; border-radius:4px; background:#fff; }
+  input:focus, select:focus, textarea:focus { outline:2px solid var(--yellow); outline-offset:0; border-color:#b89c00; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:600px) { .row { grid-template-columns:1fr; } h1 { font-size:23px; } }
+  .hint { color:var(--muted); font-size:12px; margin-top:4px; }
+  button.primary { background:var(--yellow); color:#000; border:0; font:inherit; font-weight:700; text-transform:uppercase; padding:12px 26px; border-radius:4px; cursor:pointer; margin-top:16px; }
+  button.primary:hover { filter:brightness(.95); }
+  button.primary[disabled] { opacity:.6; cursor:wait; }
+  button.link { background:none; border:0; color:var(--muted); text-decoration:underline; cursor:pointer; font:inherit; font-size:13px; padding:0; margin-top:14px; }
+  .msg { padding:12px 14px; border-radius:4px; margin-top:14px; font-size:14px; }
+  .msg.err { background:#fdecea; border-left:4px solid var(--red); color:#5f1510; }
+  .msg.info { background:#fff8d6; border-left:4px solid var(--yellow); }
+  .item { border:1px solid var(--line); border-radius:4px; padding:14px; margin-bottom:12px; }
+  .item.on { border-color:#b89c00; background:#fffdf2; }
+  .item-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+  .item-name { font-weight:600; }
+  .item-sub { color:var(--muted); font-size:12px; }
+  .item-qty { min-width:140px; }
+  .item-body { display:none; margin-top:12px; }
+  .item.on .item-body { display:block; }
+  .choice { display:flex; gap:18px; flex-wrap:wrap; margin-top:4px; }
+  .choice label { font-weight:400; display:flex; align-items:center; gap:6px; margin:0; font-size:14px; }
+  .exch { margin-top:10px; display:none; }
+  .ref { font-size:30px; font-weight:800; letter-spacing:1.5px; background:var(--yellow); display:inline-block; padding:8px 18px; border-radius:4px; margin:6px 0 14px; }
+  .addr { background:var(--bg); border-radius:4px; padding:12px 14px; font-weight:600; }
+  ol.steps { padding-left:20px; }
+  ol.steps li { margin-bottom:6px; }
+  .hidden { display:none; }
+  footer { text-align:center; color:var(--muted); font-size:12px; padding:0 16px 30px; }
+</style>
+</head>
+<body>
+<header><div class="in">
+  <a href="https://www.tuffshop.co.uk/"><img src="https://tuffshop.co.uk/media/athlete2/default/tuffshop_logo.png" alt="Tuffshop"></a>
+  <a class="back" href="https://www.tuffshop.co.uk/">&larr; Back to tuffshop.co.uk</a>
+</div></header>
+
+<main>
+  <h1>Returns &amp; exchanges</h1>
+  <p class="lead">Start a return in a couple of minutes. You'll get a returns reference by email straight away.</p>
+
+  <div class="policy">
+    <div><b>30 days</b>Return within 30 days of your order being sent.</div>
+    <div><b>Not personalised</b>Printed or embroidered items can't be returned.</div>
+    <div><b>Postage</b>Return postage is paid by you. We recommend a tracked service.</div>
+  </div>
+
+  <!-- Step 1: find the order -->
+  <section class="card" id="find">
+    <form id="findForm" novalidate>
+      <div class="row">
+        <div>
+          <label for="orderNumber">Order number</label>
+          <input type="text" id="orderNumber" autocomplete="off" placeholder="e.g. 000124559" required>
+          <div class="hint">It's on your order confirmation email.</div>
+        </div>
+        <div>
+          <label for="postcode">Delivery postcode</label>
+          <input type="text" id="postcode" autocomplete="postal-code" placeholder="e.g. LS26 8LG" required>
+        </div>
+      </div>
+      <button class="primary" type="submit" id="findBtn">Find my order</button>
+      <div id="findMsg"></div>
+    </form>
+  </section>
+
+  <!-- Step 2: choose items -->
+  <section class="card hidden" id="choose">
+    <p style="margin-top:0"><b>Order <span id="orderRef"></span></b> &mdash; sent <span id="sentOn"></span>. Please send your return by <b id="lastDay"></b>.</p>
+    <p class="hint" style="margin-top:-6px">Choose how many of each item you're sending back.</p>
+    <div id="items"></div>
+    <div class="row" style="margin-top:6px">
+      <div>
+        <label for="email">Your email address</label>
+        <input type="email" id="email" autocomplete="email" placeholder="We'll send your returns reference here" required>
+      </div>
+      <div>
+        <label for="comments">Anything else we should know? <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+        <textarea id="comments" rows="2" maxlength="1000"></textarea>
+      </div>
+    </div>
+    <button class="primary" id="submitBtn" type="button">Get my returns reference</button>
+    <div id="submitMsg"></div>
+    <button class="link" type="button" id="startOver">Look up a different order</button>
+  </section>
+
+  <!-- Step 3: done -->
+  <section class="card hidden" id="done">
+    <h2 style="margin-top:0">Your returns reference</h2>
+    <div class="ref" id="doneRef"></div>
+    <ol class="steps">
+      <li><b>Write this reference on your invoice</b> and put it in the parcel with the item(s).</li>
+      <li>Send the parcel to:<div class="addr" id="doneAddr"></div></li>
+      <li>Post it by <b id="doneBy"></b>. Return postage is paid by you, so keep your proof of postage.</li>
+      <li>Once it arrives and has been checked, we'll process your return and email you.</li>
+    </ol>
+    <div id="doneMail"></div>
+  </section>
+</main>
+<footer>Tuff Workwear Ltd &middot; Need help? Email <a href="mailto:sales@tuffshop.co.uk">sales@tuffshop.co.uk</a> or call 0113 288 7713</footer>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const show = (id, on) => $(id).classList.toggle("hidden", !on);
+  const msg = (id, text, kind) => { $(id).innerHTML = text ? '<div class="msg ' + (kind || "err") + '">' + esc(text) + "</div>" : ""; };
+  let found = null, query = null;
+
+  async function post(url, body) {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    let j = {};
+    try { j = await r.json(); } catch (e) { j = { ok: false, message: "Something went wrong. Please try again." }; }
+    return j;
+  }
+
+  $("findForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const orderNumber = $("orderNumber").value.trim(), postcode = $("postcode").value.trim();
+    if (!orderNumber || !postcode) return msg("findMsg", "Please enter your order number and delivery postcode.");
+    $("findBtn").disabled = true; msg("findMsg", "");
+    try {
+      const j = await post("/api/returns/lookup", { orderNumber, postcode });
+      if (!j.ok) return msg("findMsg", j.message || "We couldn't find that order.", j.code === "already" ? "info" : "err");
+      found = j; query = { orderNumber, postcode };
+      render();
+    } finally { $("findBtn").disabled = false; }
+  });
+
+  function render() {
+    $("orderRef").textContent = found.orderRef;
+    $("sentOn").textContent = found.despatchedOn;
+    $("lastDay").textContent = found.lastDay;
+    const reasonOpts = '<option value="">Choose a reason…</option>' + found.reasons.map((r) => '<option>' + esc(r) + "</option>").join("");
+    $("items").innerHTML = found.lines.map((l, i) => {
+      const qtyOpts = Array.from({ length: l.available + 1 }, (_, n) => '<option value="' + n + '">' + (n === 0 ? "Not returning" : "Return " + n) + "</option>").join("");
+      return '<div class="item" data-i="' + i + '">' +
+        '<div class="item-head"><div><div class="item-name">' + esc(l.name) + '</div>' +
+        '<div class="item-sub">Ordered ' + l.qty + (l.available < l.qty ? " &middot; " + (l.qty - l.available) + " already being returned" : "") + "</div></div>" +
+        (l.available > 0 ? '<div class="item-qty"><select class="qty" aria-label="Quantity to return">' + qtyOpts + "</select></div>"
+                         : '<div class="item-sub">Already being returned</div>') + "</div>" +
+        '<div class="item-body">' +
+          '<div class="row"><div><label>Why are you returning it?</label><select class="reason">' + reasonOpts + "</select></div>" +
+          '<div><label>What would you like?</label><div class="choice">' +
+            '<label><input type="radio" name="out' + i + '" value="refund" checked> Refund</label>' +
+            '<label><input type="radio" name="out' + i + '" value="exchange"> Exchange</label></div></div></div>' +
+          '<div class="exch"><label>What would you like instead?</label><input type="text" class="exchFor" maxlength="200" placeholder="e.g. the same trousers in 34R"></div>' +
+        "</div></div>";
+    }).join("");
+    document.querySelectorAll(".item").forEach((el) => {
+      const q = el.querySelector(".qty");
+      if (q) q.addEventListener("change", () => el.classList.toggle("on", Number(q.value) > 0));
+      el.querySelectorAll('input[type=radio]').forEach((r) => r.addEventListener("change", () => {
+        el.querySelector(".exch").style.display = el.querySelector('input[value=exchange]').checked ? "block" : "none";
+      }));
+    });
+    msg("submitMsg", "");
+    show("find", false); show("choose", true); show("done", false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  $("startOver").addEventListener("click", () => { found = null; show("choose", false); show("find", true); msg("findMsg", ""); });
+
+  $("submitBtn").addEventListener("click", async () => {
+    const lines = [];
+    for (const el of document.querySelectorAll(".item")) {
+      const l = found.lines[Number(el.dataset.i)];
+      const q = el.querySelector(".qty");
+      const qty = q ? Number(q.value) : 0;
+      if (!qty) continue;
+      const reason = el.querySelector(".reason").value;
+      const outcome = el.querySelector('input[value=exchange]').checked ? "exchange" : "refund";
+      const exchangeFor = el.querySelector(".exchFor").value.trim();
+      if (!reason) return msg("submitMsg", 'Please choose a reason for "' + l.name + '".');
+      if (outcome === "exchange" && !exchangeFor) return msg("submitMsg", 'Please tell us what you\'d like instead of "' + l.name + '".');
+      lines.push({ rowId: l.rowId, qty, reason, outcome, exchangeFor });
+    }
+    if (!lines.length) return msg("submitMsg", "Please choose at least one item to return.");
+    const email = $("email").value.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return msg("submitMsg", "Please enter a valid email address.");
+    $("submitBtn").disabled = true; msg("submitMsg", "");
+    try {
+      const j = await post("/api/returns/submit", Object.assign({}, query, { email, lines, comments: $("comments").value.trim() }));
+      if (!j.ok) return msg("submitMsg", j.message || "Something went wrong. Please try again.");
+      $("doneRef").textContent = j.ref;
+      $("doneAddr").innerHTML = j.address.map(esc).join("<br>");
+      $("doneBy").textContent = j.lastDay;
+      $("doneMail").innerHTML = j.emailed
+        ? '<div class="msg info">We\'ve emailed this to <b>' + esc(email) + "</b> as well.</div>"
+        : '<div class="msg err">We couldn\'t send the confirmation email, so please make a note of your reference. Our team has been told.</div>';
+      show("choose", false); show("done", true);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } finally { $("submitBtn").disabled = false; }
+  });
+})();
+</script>
+</body>
+</html>
