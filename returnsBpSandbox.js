@@ -16,6 +16,28 @@ export function registerReturnsBpSandbox(app, { bpTest }) {
     try {
       const customerId = Number(req.query.customer || 128071);
       const pid = Number(req.query.product || 143061);
+      if (req.query.step === "flow") {
+        const { planBrightpearl, executeBrightpearl } = await import("./returnsBp.js");
+        const so = await tryStep("create sale", () => bpTest("POST", "/order-service/order", {
+          orderTypeCode: "SO", reference: "000999001", priceListId: 3, priceModeCode: "EXC", warehouseId: 2,
+          currency: { orderCurrencyCode: "GBP" }, assignment: { current: { channelId: 17 } }, delivery: { shippingMethodId: 104 },
+          parties: { customer: { contactId: customerId }, delivery: { addressFullName: "Flow Test", addressLine1: "2 Return Road", addressLine3: "Leeds", postalCode: "LS26 8LG", countryIsoCode: "GBR", email: "test@example.com" } } }));
+        const rowA = await tryStep("row trousers x2", () => bpTest("POST", `/order-service/order/${so}/row`, { productId: 143061, quantity: { magnitude: "2" }, nominalCode: "4000",
+          rowValue: { taxCode: "T20", rowNet: { currency: "GBP", value: "139.84" }, rowTax: { currency: "GBP", value: "27.97" } } }));
+        const rowB = await tryStep("row knee pads", () => bpTest("POST", `/order-service/order/${so}/row`, { productId: 16838, quantity: { magnitude: "1" }, nominalCode: "4000",
+          rowValue: { taxCode: "T20", rowNet: { currency: "GBP", value: "16.62" }, rowTax: { currency: "GBP", value: "3.33" } } }));
+        const ret = { ref: "WRTEST01", order_id: so, lines: [
+          { rowId: String(rowA), qty: 1, name: "Snickers 6241 trousers", outcome: "exchange", exchangeChoice: "One size up" },
+          ...(rowB ? [{ rowId: String(rowB), qty: 1, name: "Knee pads", outcome: "refund", reason: "Changed my mind" }] : []),
+          { rowId: String(rowA), qty: 1, name: "Snickers 6241 trousers", outcome: "exchange", exchangeChoice: "Something else", exchangeFor: "the black ones" },
+        ] };
+        const plan = await tryStep("plan", () => planBrightpearl(bpTest, ret));
+        if (plan) log.push({ step: "plan summary", ok: true, out: { credit: { ref: plan.credit.reference, gross: plan.credit.gross, status: plan.credit.status, rows: plan.credit.rows.map((r) => [r.productId, r.qty, r.net, r.tax]) },
+          exchange: plan.exchange && plan.exchange.lines.map((l) => ({ choice: l.choice, from: l.from && l.from.size, suggested: l.suggested, suggestedSize: (l.options.find((x) => x.productId === l.suggested) || {}).size, options: l.options.length })), warnings: plan.warnings } });
+        const done = plan && await tryStep("execute", () => executeBrightpearl(bpTest, plan, { returnRef: ret.ref }));
+        for (const id of [so, done && done.creditId, done && done.exchangeId].filter(Boolean)) await tryStep(`read ${id}`, async () => brief(await one(id)));
+        return res.json({ log });
+      }
       if (req.query.step === "notes") {
         // Are non-ASCII characters mangled in notes, and does \u-escaping the JSON fix it?
         const id = await tryStep("create SO", () => bpTest("POST", "/order-service/order", {
