@@ -84,8 +84,15 @@ export async function planBrightpearl(bp, ret) {
   const warnings = [];
   const lines = ret.lines || [];
 
-  const creditRows = [];
+  // One credit row per ORDER row: two return lines on the same row (one swapped, one
+  // refunded) are credited together, so splitting 27.97 VAT gives 27.97, not 13.99 + 13.99.
+  const merged = [];
   for (const l of lines) {
+    const m = merged.find((x) => String(x.rowId) === String(l.rowId));
+    if (m) { m.qty += Number(l.qty); m.outcomes.add(l.outcome); } else merged.push({ ...l, qty: Number(l.qty), outcomes: new Set([l.outcome]) });
+  }
+  const creditRows = [];
+  for (const l of merged) {
     const r = (order.orderRows || {})[l.rowId];
     if (!r) { warnings.push(`"${l.name}" is no longer on order ${order.id} (row ${l.rowId}), so it can't be credited automatically.`); continue; }
     const soldQty = Number((r.quantity && r.quantity.magnitude) || 0) || 1;
@@ -98,21 +105,24 @@ export async function planBrightpearl(bp, ret) {
       tax: whole ? round2(rowTax) : round2(rowTax / soldQty * l.qty),
       unitNet: rowNet / soldQty, unitTax: rowTax / soldQty,
       taxCode: (r.rowValue && r.rowValue.taxCode) || "T20", nominalCode: r.nominalCode || "4000",
-      outcome: l.outcome, exchangeChoice: l.exchangeChoice || "", exchangeFor: l.exchangeFor || "", reason: l.reason || "",
+      outcome: l.outcomes.has("refund") ? "refund" : "exchange", outcomes: [...l.outcomes],
     });
   }
   const creditNet = round2(creditRows.reduce((a, r) => a + r.net, 0));
   const creditTax = round2(creditRows.reduce((a, r) => a + r.tax, 0));
-  const hasRefund = creditRows.some((r) => r.outcome === "refund");
-  const hasExchange = creditRows.some((r) => r.outcome === "exchange");
+  const hasRefund = lines.some((l) => l.outcome === "refund");
+  const hasExchange = lines.some((l) => l.outcome === "exchange");
   const ref = order.reference || String(order.id);
 
   // For each swap: the style's sizes in the same colour, with the one the customer
   // asked for picked out. Staff confirm or change it before anything is created.
   const exchangeLines = [];
-  for (const c of creditRows.filter((r) => r.outcome === "exchange")) {
+  for (const x of lines.filter((l) => l.outcome === "exchange")) {
+    const cr = creditRows.find((r) => r.rowId === String(x.rowId));
+    if (!cr) continue;
+    const c = { ...cr, qty: Number(x.qty), exchangeChoice: x.exchangeChoice || "", exchangeFor: x.exchangeFor || "" };
     const steps = SIZE_STEPS[c.exchangeChoice];
-    const line = { rowId: c.rowId, name: c.name, qty: c.qty, choice: c.exchangeChoice, text: c.exchangeFor,
+    const line = { key: String(lines.indexOf(x)), rowId: c.rowId, name: c.name, qty: c.qty, choice: c.exchangeChoice, text: c.exchangeFor,
       unitNet: c.unitNet, unitTax: c.unitTax, taxCode: c.taxCode, nominalCode: c.nominalCode, from: null, options: [], suggested: null };
     if (steps) {
       try {
@@ -162,7 +172,7 @@ const rowBody = (r) => ({
 });
 
 /**
- * Create it. `choices` = { [rowId]: productId | null } for the swaps (null = staff will
+ * Create it. `choices` = { [exchange line key]: productId | null } for the swaps (null = staff will
  * add the item). `progress(patch)` is called after every write so a failure part-way
  * leaves a record of what exists — a retry must never make a second credit.
  */
@@ -192,7 +202,7 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
     done.exchangeId = ex; await progress({ bp_exchange_id: ex });
     let exGross = 0;
     for (const l of plan.exchange.lines) {
-      const pick = Object.prototype.hasOwnProperty.call(choices, l.rowId) ? choices[l.rowId] : l.suggested;
+      const pick = Object.prototype.hasOwnProperty.call(choices, l.key) ? choices[l.key] : l.suggested;
       const ok = pick && (l.options || []).some((x) => Number(x.productId) === Number(pick));
       if (ok) {
         const net = round2(l.unitNet * l.qty), tax = round2(l.unitTax * l.qty);
@@ -221,9 +231,13 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
   done.transferred = transferred;
 
   // 4. Credit status: refunds still owe money; a fully-used exchange credit is finished.
-  const refund = plan.credit.rows.some((r) => r.outcome === "refund");
+  const refund = plan.credit.rows.some((r) => (r.outcomes || [r.outcome]).includes("refund"));
   const status = refund ? 121 : (transferred >= plan.credit.gross - 0.005 ? 11 : null);
-  if (status) { await bp("PUT", `/order-service/order/${sc}/status`, { orderStatusId: status }); done.creditStatus = status; }
+  if (status) {
+    // Everything exists by now; a status that will not set is reported, not fatal.
+    try { await bp("PUT", `/order-service/order/${sc}/status`, { orderStatusId: status }); done.creditStatus = status; }
+    catch (e) { done.warnings = [`Credit status ${status} not set: ${String(e.message).slice(0, 160)}`]; }
+  }
 
   // 5. Notes, so each record says where it came from.
   const summary = `Online return ${returnRef}: credit SC#${sc} (GBP ${money(plan.credit.gross)})${done.exchangeId ? `, exchange order SO#${done.exchangeId}` : ""}.`;
