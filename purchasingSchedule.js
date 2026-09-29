@@ -15,10 +15,12 @@ import { updateOrderReference, emailOrderDocument } from './bpWebSession.js';
 
 const THRESHOLD_NET = Number(process.env.FRISTADS_FREESHIP_THRESHOLD || 300); // £ ex-VAT
 // Where an order goes when part of it turned out to be discontinued. NOT 22 ("Ordered Stock
-// Awaiting Delivery") — that would claim the whole order is on its way. 60 is "Order Confirmation
-// Sent", which the low inventory report excludes from Open SO (with 1 and 18), so parking here also
-// stops anything re-ordering behind it while a person decides on a substitute or a refund.
-const DISCONTINUED_PARK_STATUS = Number(process.env.DISCONTINUED_PARK_STATUS_ID || 60);
+// Awaiting Delivery") — that would claim the whole order is on its way. 120 "Item Out of Stock"
+// (user, 2026-09-29; was 60 "Order Confirmation Sent"). 120 is NOT excluded from the low-inventory
+// Open SO count the way 60 was, so the dead code is kept out of replenishment by the
+// purchasing_discontinued record instead (createComboPOLive filters low-inventory rows on it).
+const DISCONTINUED_PARK_STATUS = Number(process.env.DISCONTINUED_PARK_STATUS_ID || 120);
+const DISCONTINUED_PARK_LABEL = "Item Out of Stock";
 const MAX_WAIT_WORKING_DAYS = 3;
 const NOTIFY_TO = process.env.PURCHASING_SCHEDULE_EMAIL || 'dec@tuffshop.co.uk';
 const FRISTADS_SUPPLIER_CONTACT = 37419;
@@ -976,7 +978,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
       const emailLine = em && (em.accepted || []).length ? `sales@ have been emailed (${em.accepted.join(', ')}).` : 'THE EMAIL TO sales@ DID NOT SEND — this note is the only record, so tell them.';
       for (const id of partIds) {
         const what = (((steps.discontinued && steps.discontinued.deadByOrder) || {})[id] || []).map((d) => `${d.sku}${d.qty > 1 ? ` x${d.qty}` : ''}${d.name ? ` (${d.name})` : ''}`).join(', ');
-        await bp.addOrderNoteLive(id, `DISCONTINUED at Fristads — NOT ordered and cannot be: ${what}. Everything else on this order from Fristads was ordered on PO#${poId}. ${emailLine} This order is on "Order Confirmation Sent" until a substitute or refund is agreed with the customer.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
+        await bp.addOrderNoteLive(id, `DISCONTINUED at Fristads — NOT ordered and cannot be: ${what}. Everything else on this order from Fristads was ordered on PO#${poId}. ${emailLine} This order is on "${DISCONTINUED_PARK_LABEL}" until a substitute or refund is agreed with the customer.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
         await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS).catch(() => {});
       }
     } catch (e) { steps.finalizePartialError = e.message; }
@@ -2910,7 +2912,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // bought. Its in-stock items ARE ordered — that half is normal — but sending it to "Ordered Stock
   // Awaiting Delivery" would say the whole order is on its way, and that is how SO 484193 sat
   // looking complete for a trouser that reached no PO until a customer chased it. Those orders go
-  // to "Order Confirmation Sent" (60) instead: it parks them off the ordering flow (the low
+  // to DISCONTINUED_PARK_STATUS (120 "Item Out of Stock"; was 60) instead: it parks them off the ordering flow (the low
   // inventory report excludes 1/18/60 from Open SO, so nothing re-orders behind it) and leaves them
   // visibly unfinished for whoever picks up the email to sales.
   const hitByDiscontinued = new Set(((steps.discontinued && steps.discontinued.affectedOrders) || []).map(Number));
@@ -2947,7 +2949,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
           const emailLine = em && (em.accepted || []).length
             ? `sales@ have been emailed (${em.accepted.join(', ')}).`
             : 'THE EMAIL TO sales@ DID NOT SEND — this note is the only record, so tell them.';
-          if (live) await bp.addOrderNoteLive(id, `DISCONTINUED at Snickers — NOT ordered and cannot be: ${what}. Everything else on this order was ordered on PO#${poId}. ${emailLine} This order is on "Order Confirmation Sent" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, SNICKERS_SUPPLIER_CONTACT);
+          if (live) await bp.addOrderNoteLive(id, `DISCONTINUED at Snickers — NOT ordered and cannot be: ${what}. Everything else on this order was ordered on PO#${poId}. ${emailLine} This order is on "${DISCONTINUED_PARK_LABEL}" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, SNICKERS_SUPPLIER_CONTACT);
           if (live) await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS);
           parked.push({ id, status: DISCONTINUED_PARK_STATUS, dead: deadHere.map((d) => d.sku) });
         } catch (e) { parked.push({ id, error: e.message }); }
@@ -3022,7 +3024,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
   let priceOverrides = null;
   if (live) {
     let preview;
-    try { preview = await createPo({ supplierKey, execute: false }); }
+    try { preview = await createPo({ supplierKey, execute: false, logPool: pool }); }
     catch (e) { throw stepErr('preflight', `couldn't value the demand: ${e.message}`); }
     // name/colour/size go with the line so the portal can fall back to style + colour NAME + size
     // when neither our SKU nor our EAN is in its sheet. 802211-001L aborted the whole Carhartt run
@@ -3947,7 +3949,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     // spend, so it would place — or wait — on a figure that does not exist.
     const splitOpts = { includeSalesOrders: lineMode !== 'low', includeLowInv: lineMode !== 'so' };
     let plan;
-    try { plan = await createPo({ supplierKey: cfg.supplierKey, execute: false, ...splitOpts }); }
+    try { plan = await createPo({ supplierKey: cfg.supplierKey, execute: false, logPool: pool, ...splitOpts }); }
     catch (e) { throw stepErr('value-check', `couldn't value the demand (Brightpearl down or demand read failed): ${e.message}`); }
     if (plan.unresolvedSkus && plan.unresolvedSkus.length) throw stepErr('value-check', `low-inventory item codes don't match any Brightpearl product: ${plan.unresolvedSkus.join(', ')}`);
     const lines = [...(plan.soLines || []), ...(plan.lowLines || [])];

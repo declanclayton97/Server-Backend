@@ -1938,7 +1938,21 @@ export async function createComboPOLive(opts = {}) {
     return !!detect(name, sku);
   };
   const lowRowsAll = li.rows || [];
-  const lowRowsOwn = lowRowsAll.filter(ownsRow);
+  // A code the discontinued route has recorded for THIS supplier is never re-bought as stock.
+  // Parked orders used to be kept out of Open SO by status (60 is on NON_DEMAND_SO_STATUS_IDS), but
+  // they now park on 120 "Item Out of Stock" (user, 2026-09-29), which DOES count — so the dead line
+  // would come back here as a low-inventory row and stop the next run, as 121640 did for Fristads.
+  // Filtering on the record covers every supplier, not just Snickers. Best-effort: no table, no filter.
+  let deadCodes = new Set();
+  if (opts.logPool) {
+    try {
+      const r = await opts.logPool.query('SELECT upper(sku) AS sku FROM purchasing_discontinued WHERE upper(supplier) = $1', [supplierKey]);
+      deadCodes = new Set(r.rows.map((x) => x.sku));
+    } catch { /* table not created yet */ }
+  }
+  const lowRowsDead = deadCodes.size ? lowRowsAll.filter((d) => deadCodes.has(String(d.sku || '').toUpperCase())) : [];
+  if (lowRowsDead.length) console.log(`[low-inv] ${supplierKey}: skipped ${lowRowsDead.length} discontinued code(s): ${lowRowsDead.map((d) => d.sku).join(', ')}`);
+  const lowRowsOwn = lowRowsAll.filter((d) => ownsRow(d) && !deadCodes.has(String(d.sku || '').toUpperCase()));
   const lowRowsForeign = lowRowsAll.length - lowRowsOwn.length;
   if (lowRowsForeign) {
     // Not an error: a shared contact returns the other lane's rows every time. Recorded on the plan
