@@ -2764,7 +2764,14 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     // 2026-09-11 (PO 488518, 84/84 units staged, no missing lines) the run said only "did not
     // confirm placement" and the evidence expired 30 minutes later with the worker's job.
     const stillOnConfirm = wr && wr.confirmGone === false;
+    // A LOGIN failure never reaches the basket, let alone Confirm. It fell through to the "NOT known
+    // whether Hultafors took this order — DO NOT re-run" verdict on 2026-09-29 (PO 492690, their
+    // sign-in page came back with only hidden inputs), which read as a possible double order for
+    // what was plainly nothing submitted. Say so, so it can be placed against the same PO.
+    const loginFailed = !!(wr && /login failed/i.test(String(wr.error || wr.statusText || '')) && !(wr.cart && wr.cart.qtySum));
     const verdict = miss.length ? ''
+      : loginFailed
+        ? `. The worker could not SIGN IN to Hultafors, so nothing was staged or submitted — PO#${poId} can be placed as it is (snickers-place-existing) once the portal answers.`
       : stillOnConfirm
         ? `. The Confirm button was STILL on screen after the click, so nothing was submitted — this order can be re-run.`
         : `. The cart was complete (${(wr && wr.cart && wr.cart.qtySum) ?? '?'} of ${(wr && wr.expectedUnits) ?? '?'} units, no missing lines) and the Confirm button `
