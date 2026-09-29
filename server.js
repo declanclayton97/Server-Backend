@@ -9773,6 +9773,19 @@ app.post('/api/purchasing/stamp-po-field-live', express.json(), async (req, res)
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// READ-ONLY: Sterling tracking for one PO — Order History (Customer Ref. = our PO) -> the order's
+// detail page -> each line's Carrier Ref. (DPD). orderNo skips the history lookup. Used by the
+// Alternate-Items PO tracking sweep; nothing is changed on the portal.
+app.get('/api/purchasing/sterling-tracking', async (req, res) => {
+  const poId = Number(req.query.po);
+  const orderNo = /^\d{5,9}$/.test(String(req.query.orderNo || '')) ? String(req.query.orderNo) : null;
+  if (!poId && !orderNo) return res.status(400).json({ error: 'po or orderNo required' });
+  try {
+    const { sterlingOrderTracking } = await import('./sterlingPortal.js');
+    res.json({ ok: true, ...(await sterlingOrderTracking({ poId, orderNo })) });
+  } catch (e) { res.status(502).json({ ok: false, error: String(e.message || e).slice(0, 300) }); }
+});
+
 // READ-ONLY: dry-run the Sterling combo PO, resolve each line to the worker payload
 // (EAN -> search/colour/size via sterlingProducts.json). NO PO, NO placement — just
 // shows what would be sent to the portal worker.

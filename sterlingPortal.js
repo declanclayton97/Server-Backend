@@ -250,6 +250,76 @@ async function appGet(path, jar) {
   return { status: res.status, url: at, html };
 }
 
+// TRACKING — read-only. Account > Order History (/Account/OrderHistory, found 2026-09-29) lists
+// Order | Customer Ref. (= our PO) | Total Qty | Net | Order Date | Status | Carriage | Delivery
+// Method | Order Detail, each order linking to /Account/OrderDetail/<order no>. The detail page has
+// one row per line — Style | Option | Material | Colour | Unit cost | Order Qty | Del. Qty |
+// Status (Shipped / Incomplete) | Carrier Ref. — and the carrier ref is a DPD consignment number
+// linking to apis.track.dpd.co.uk/v1/track?postcode=&parcel=<ref>, used here exactly as given.
+const cellsOf = (tr) => [...tr.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => m[1]);
+const textOf = (h) => String(h || '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+let historyCache = { at: 0, rows: null };
+
+async function appGetFresh(path) {
+  try { return await appGet(path, await sterlingLogin()); }
+  catch (e) {
+    if (!/session expired/i.test(e.message)) throw e;
+    return appGet(path, await sterlingLogin({ force: true }));
+  }
+}
+
+export function parseSterlingOrderHistory(html) {
+  const rows = [];
+  for (const tr of String(html).split(/<tr\b/i).slice(1)) {
+    const body = tr.split(/<\/tr>/i)[0];
+    const link = body.match(/\/Account\/OrderDetail\/(\d+)/i);
+    const c = cellsOf(body).map(textOf);
+    if (!link || c.length < 6) continue;
+    rows.push({ orderNo: link[1], customerRef: c[1], qty: c[2], net: c[3], date: c[4], status: c[5], method: c[7] || null });
+  }
+  return rows;
+}
+
+export function parseSterlingOrderDetail(html) {
+  const status = (textOf((String(html).match(/<th\b[^>]*>\s*Status:\s*([^<]{2,40})</i) || [])[1]) || null);
+  const lines = [];
+  for (const tr of String(html).split(/<tr\b/i).slice(1)) {
+    const body = tr.split(/<\/tr>/i)[0];
+    const raw = cellsOf(body);
+    if (raw.length < 9) continue;
+    const c = raw.map(textOf);
+    const a = raw[8].match(/<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    lines.push({
+      style: c[0], option: c[1], colour: c[3], ordered: c[5], delivered: c[6], status: c[7],
+      carrierRef: a ? textOf(a[2]) : (c[8] || null),
+      url: a ? a[1].replace(/&amp;/g, '&') : null,
+    });
+  }
+  return { status, lines };
+}
+
+// { poId, orderNo? } -> { found, orderNo, status, lines, parcels:[{ref,url}] }. orderNo (from the BP
+// PO reference "<Sterling order no>/ …") is used when known; otherwise Customer Ref. = poId.
+export async function sterlingOrderTracking({ poId, orderNo = null } = {}) {
+  let order = orderNo ? String(orderNo) : null;
+  if (!order) {
+    if (!historyCache.rows || Date.now() - historyCache.at > 10 * 60 * 1000) {
+      const { html } = await appGetFresh('/Account/OrderHistory');
+      historyCache = { at: Date.now(), rows: parseSterlingOrderHistory(html) };
+      if (!historyCache.rows.length) throw new Error('Sterling order history: no orders read (page changed?)');
+    }
+    const hit = historyCache.rows.filter((r) => new RegExp('^' + poId + '(?:\\b|$)').test(r.customerRef));
+    if (!hit.length) return { found: false };
+    order = hit[0].orderNo;
+  }
+  const { html } = await appGetFresh('/Account/OrderDetail/' + encodeURIComponent(order));
+  const d = parseSterlingOrderDetail(html);
+  if (!d.lines.length) return { found: false, orderNo: order, error: 'order detail had no lines' };
+  const parcels = [];
+  for (const l of d.lines) if (l.carrierRef && !parcels.some((p) => p.ref === l.carrierRef)) parcels.push({ ref: l.carrierRef, url: l.url });
+  return { found: true, orderNo: order, status: d.status, lines: d.lines, parcels };
+}
+
 // Trace the OIDC challenge WITHOUT posting credentials: every hop, where it ended, and whether a
 // password box is there at the end. Needed because "login succeeded" was being decided by the
 // presence of any app cookie, and the OIDC handshake sets Nonce/Correlation cookies before any
