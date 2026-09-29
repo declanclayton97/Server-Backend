@@ -8522,6 +8522,25 @@ app.post('/api/purchasing/product-supplier-live', async (req, res) => {
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// Remove a '-' £0 placeholder row. The API can delete it on an UNPAID order; on a paid one it
+// refuses (ORDC-053 "Order has payments"), so the row goes to the browser worker (module BPROW),
+// which deletes it through the real order screen. The worker applies the same placeholder check
+// itself before clicking anything.
+async function deletePlaceholderRow(orderId, rowId, { wait = false } = {}) {
+  try {
+    await bpLive('DELETE', `/order-service/order/${orderId}/row/${rowId}`);
+    return { via: 'api', deleted: true };
+  } catch (e) {
+    const url = process.env.STERLING_WORKER_URL || 'https://portal-order-worker.onrender.com';
+    const r = await fetch(`${url}/place-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-worker-secret': process.env.STERLING_WORKER_SECRET || '' },
+      body: JSON.stringify({ supplier: 'BPROW', ref: `placeholder ${orderId}/${rowId}`, lines: [{ orderId, rowId: String(rowId) }], execute: true, async: !wait }),
+    });
+    const j = await r.json().catch(() => ({}));
+    return { via: 'browser', apiRefused: String(e.message || e).slice(0, 160), ...(wait ? { deleted: !!j.placed, worker: j } : { jobId: j.jobId || null, worker: j.jobId ? undefined : j }) };
+  }
+}
+
 // POST /api/purchasing/so-delete-placeholder-row-live { orderId, rowId, execute }
 // Remove a '-' placeholder left by add-variant-live: ONLY a product-1000 row named '-' at
 // £0.00 on a Stock needs ordering order. Anything else is refused, whatever is asked.
@@ -8542,9 +8561,10 @@ app.post('/api/purchasing/so-delete-placeholder-row-live', async (req, res) => {
       && Number(row.rowValue.rowNet.value) === 0 && Number(row.rowValue.rowTax.value) === 0;
     if (!isPlaceholder) return res.status(409).json({ error: 'not a placeholder row — refusing', row: { productId: row.productId, name: row.productName, net: row.rowValue.rowNet.value } });
     if (!b.execute) return res.json({ dryRun: true, orderId, rowId, totalBefore: order.totalValue });
-    await bpLive('DELETE', `/order-service/order/${orderId}/row/${rowId}`);
+    const how = await deletePlaceholderRow(orderId, rowId, { wait: true });
     const after = first(await bpLive('GET', `/order-service/order/${orderId}`));
-    res.json({ ok: true, orderId, rowId, gone: !(after.orderRows || {})[rowId], totalBefore: order.totalValue, totalAfter: after.totalValue });
+    res.json({ ok: true, orderId, rowId, how, gone: !(after.orderRows || {})[rowId], totalBefore: order.totalValue, totalAfter: after.totalValue,
+      totalUnchanged: JSON.stringify(order.totalValue) === JSON.stringify(after.totalValue) });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
@@ -8708,6 +8728,12 @@ app.post('/api/purchasing/add-variant-live', async (req, res) => {
       // PUT first: a failed add leaves the order short, never double-valued.
       await step('rowBlanked', () => bpLive('PUT', `/order-service/order/${orderId}/row/${rowId}`, blank));
       if (steps.rowBlanked === 'ok') await step('rowAdded', () => bpLive('POST', `/order-service/order/${orderId}/row`, real));
+      // The blanked row is now a '-' £0 placeholder; take it off (API, or the browser worker
+      // on a paid order — that runs in the background and reports as a worker job).
+      if (steps.rowAdded === 'ok') {
+        try { result.placeholder = await deletePlaceholderRow(orderId, rowId); steps.placeholderRemoved = result.placeholder.via === 'api' ? 'ok' : 'queued (browser worker)'; }
+        catch (e) { steps.placeholderRemoved = String(e.message || e).slice(0, 160); }
+      }
       const ao = first(await bpLive('GET', `/order-service/order/${orderId}`));
       result.orderTotals = { before: order.totalValue, after: ao.totalValue, unchanged: JSON.stringify(order.totalValue) === JSON.stringify(ao.totalValue) };
     }
