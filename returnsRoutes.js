@@ -389,7 +389,58 @@ export function registerReturnsRoutes(app, deps) {
         if (patch.bp_exchange_id) await getPool().query(`UPDATE returns_requests SET bp_exchange_id = $2 WHERE ref = $1`, [row.ref, patch.bp_exchange_id]);
       };
       const done = await executeBrightpearl(bpLive, plan, { choices, returnRef: row.ref, progress });
-      const result = { ...done, by, at: new Date().toISOString(), creditGross: plan.credit.gross, creditRef: plan.credit.reference, warnings: [...(plan.warnings || []), ...(done.warnings || [])] };
+
+      // What happened, in one line per thing, for the hub row.
+      const summary = [`Credit SC#${done.creditId} (GBP ${plan.credit.gross.toFixed(2)})`];
+      for (const l of (plan.exchange && plan.exchange.lines) || []) {
+        const pick = Object.prototype.hasOwnProperty.call(choices, l.key) ? choices[l.key] : l.suggested;
+        const opt = pick && (l.options || []).find((o) => Number(o.productId) === Number(pick));
+        summary.push(opt
+          ? `Exchange SO#${done.exchangeId}: sending ${opt.size || opt.sku}${l.from ? ` (${String(l.choice).toLowerCase()} from ${l.from.size})` : ""}${opt.inStock > 0 ? "" : " - NOT IN STOCK, needs ordering"}`
+          : `Exchange SO#${done.exchangeId}: ADD THE ITEM - customer wants ${l.choice === "Something else" ? l.text : String(l.choice).toLowerCase()}`);
+      }
+
+      // Refunds: accounts pay the money back. Tell them what, how much and how it was paid.
+      const refundLines = (row.lines || []).filter((l) => l.outcome === "refund");
+      let accounts = null;
+      if (refundLines.length) {
+        const unit = Object.fromEntries(plan.credit.rows.map((r) => [r.rowId, r.unitNet + r.unitTax]));
+        const amount = Math.round(refundLines.reduce((a, l) => a + (unit[String(l.rowId)] || 0) * Number(l.qty), 0) * 100) / 100;
+        accounts = { to: process.env.RETURNS_ACCOUNTS_EMAIL || "accounts@tuffshop.co.uk", amount, sent: false };
+        let paidBy = "";
+        try {
+          const methods = Object.fromEntries(((await bpLive("GET", "/accounting-service/payment-method")) || []).map((m) => [m.code, m.name]));
+          const s = await bpLive("GET", `/accounting-service/customer-payment-search?orderId=${row.order_id}`);
+          const ix = Object.fromEntries(((s && s.metaData && s.metaData.columns) || []).map((c, i) => [c.name, i]));
+          paidBy = [...new Set(((s && s.results) || []).filter((x) => x[ix.paymentType] === "RECEIPT").map((x) => methods[x[ix.paymentMethodCode]] || x[ix.paymentMethodCode]))].join(", ");
+        } catch { /* the email still goes without it */ }
+        const link = (id) => `<a href="https://euw1.brightpearlapp.com/patt-op.php?scode=invoice&oID=${id}">${id}</a>`;
+        const td = 'style="padding:6px 10px;border:1px solid #ddd;"';
+        try {
+          await sendMail({
+            to: accounts.to, replyTo: salesMailbox(),
+            subject: `Refund to process: GBP ${amount.toFixed(2)} - return ${row.ref} - order ${row.order_ref || row.order_id}`,
+            html: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;">
+              <p>Hi,</p>
+              <p>A return has come back and needs refunding.</p>
+              <table style="border-collapse:collapse;font-size:13px;">
+                <tr><td ${td}><b>Refund</b></td><td ${td}><b>&pound;${amount.toFixed(2)}</b> inc VAT</td></tr>
+                <tr><td ${td}>Customer</td><td ${td}>${String(row.customer_name || "").replace(/</g, "&lt;")} (${String(row.email || "").replace(/</g, "&lt;")})</td></tr>
+                <tr><td ${td}>Paid by</td><td ${td}>${paidBy || "not found - check the order"}</td></tr>
+                <tr><td ${td}>Original order</td><td ${td}>SO ${link(row.order_id)} (${String(row.order_ref || "").replace(/</g, "&lt;")})</td></tr>
+                <tr><td ${td}>Credit</td><td ${td}>SC ${link(done.creditId)} - set to Refund requested</td></tr>
+                <tr><td ${td}>Return</td><td ${td}>${row.ref}</td></tr>
+              </table>
+              <p>Items refunded:</p><ul>${refundLines.map((l) => `<li>${l.qty} &times; ${String(l.name).replace(/</g, "&lt;")} (${String(l.reason || "").replace(/</g, "&lt;")})</li>`).join("")}</ul>
+              ${done.exchangeId ? `<p>The rest of this return was a swap - exchange order SO ${link(done.exchangeId)} has been created and paid from the credit.</p>` : ""}
+              <p>Please process the refund and mark the credit complete. Thanks.</p></div>`,
+          });
+          accounts.sent = true;
+        } catch (e) { accounts.error = String(e.message).slice(0, 200); console.error(`[returns] ${row.ref} accounts email failed:`, e.message); }
+        summary.push(`Refund GBP ${amount.toFixed(2)}: ${accounts.sent ? "accounts emailed (" + accounts.to + ")" : "accounts email FAILED - tell them yourself"}`);
+      }
+      const result = { ...done, by, at: new Date().toISOString(), creditGross: plan.credit.gross, creditRef: plan.credit.reference,
+        summary, accounts, warnings: [...(plan.warnings || []), ...(done.warnings || [])] };
       const upd = await getPool().query(
         `UPDATE returns_requests SET bp_result = $2, updated_at = now(), history = history || $3::jsonb WHERE ref = $1 RETURNING *`,
         [row.ref, JSON.stringify(result), JSON.stringify([{ at: result.at, status: row.status, by,
