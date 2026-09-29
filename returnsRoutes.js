@@ -27,6 +27,7 @@ import {
   orderEmail, maskEmail, statusEmail, validatePhotos,
 } from "./returns.js";
 import { buildBrightpearlReport, summariseOnline } from "./returnsReport.js";
+import { planBrightpearl, executeBrightpearl } from "./returnsBp.js";
 
 
 const STATUSES = ["requested", "received", "refunded", "exchanged", "rejected", "cancelled"];
@@ -71,6 +72,10 @@ export function registerReturnsRoutes(app, deps) {
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS first_name text`);
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS photos int NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS photos_emailed boolean`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_started_at timestamptz`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_credit_id bigint`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_exchange_id bigint`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_result jsonb`);
     await pool.query(`CREATE TABLE IF NOT EXISTS returns_report_cache (days int PRIMARY KEY, built_at timestamptz NOT NULL, data jsonb NOT NULL)`);
   })().catch((e) => { ready = null; throw e; }));
 
@@ -345,6 +350,60 @@ export function registerReturnsRoutes(app, deps) {
         `SELECT status, lines FROM returns_requests WHERE created_at > now() - ($1 || ' days')::interval`, [String(days)]);
       res.json({ days, building: building.has(days), builtAt: cached && cached.built_at, bp, online: summariseOnline(online.rows, productToKey) });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Brightpearl: the credit, the exchange order, the money between them -------
+  // GET  .../bp-plan    what would be created (reads only; sizes offered for each swap)
+  // POST .../bp-create  { choices: { [line key]: productId|null } } — creates it, ONCE.
+  // Only after the goods have arrived. bp_started_at is claimed atomically, so a double
+  // click or two people at once cannot make two credits; every id is saved the moment it
+  // exists, so a failure part-way shows what was made instead of inviting a re-run.
+  const getReturn = async (ref) => (await getPool().query(`SELECT * FROM returns_requests WHERE ref = $1`, [ref])).rows[0] || null;
+
+  app.get("/api/returns/requests/:ref/bp-plan", requireUser, async (req, res) => {
+    try {
+      await ensureTables();
+      const row = await getReturn(req.params.ref);
+      if (!row) return res.status(404).json({ error: "no such return" });
+      if (row.bp_started_at) return res.json({ already: true, request: row });
+      res.json({ plan: await planBrightpearl(bpLive, row) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/returns/requests/:ref/bp-create", requireUser, async (req, res) => {
+    const by = (req.hubUser && req.hubUser.name) || "staff";
+    let claimed = null;
+    try {
+      await ensureTables();
+      const row = await getReturn(req.params.ref);
+      if (!row) return res.status(404).json({ error: "no such return" });
+      if (row.status !== "received") return res.status(409).json({ error: "Mark the return as arrived first - credits are only raised once the goods are back." });
+      const claim = await getPool().query(
+        `UPDATE returns_requests SET bp_started_at = now() WHERE ref = $1 AND bp_started_at IS NULL RETURNING *`, [row.ref]);
+      if (!claim.rowCount) return res.status(409).json({ error: "This return has already been put into Brightpearl.", request: await getReturn(row.ref) });
+      claimed = row.ref;
+      const plan = await planBrightpearl(bpLive, row);
+      const choices = (req.body && req.body.choices) || {};
+      const progress = async (patch) => {
+        if (patch.bp_credit_id) await getPool().query(`UPDATE returns_requests SET bp_credit_id = $2 WHERE ref = $1`, [row.ref, patch.bp_credit_id]);
+        if (patch.bp_exchange_id) await getPool().query(`UPDATE returns_requests SET bp_exchange_id = $2 WHERE ref = $1`, [row.ref, patch.bp_exchange_id]);
+      };
+      const done = await executeBrightpearl(bpLive, plan, { choices, returnRef: row.ref, progress });
+      const result = { ...done, by, at: new Date().toISOString(), creditGross: plan.credit.gross, creditRef: plan.credit.reference, warnings: [...(plan.warnings || []), ...(done.warnings || [])] };
+      const upd = await getPool().query(
+        `UPDATE returns_requests SET bp_result = $2, updated_at = now(), history = history || $3::jsonb WHERE ref = $1 RETURNING *`,
+        [row.ref, JSON.stringify(result), JSON.stringify([{ at: result.at, status: row.status, by,
+          note: `Brightpearl: credit SC#${done.creditId}${done.exchangeId ? ", exchange order SO#" + done.exchangeId : ""}` }])]);
+      res.json({ request: upd.rows[0], result });
+    } catch (e) {
+      console.error(`[returns] ${req.params.ref} bp-create failed:`, e.message);
+      // Keep the claim: something may already exist in Brightpearl. Record the error so
+      // the hub shows exactly what was and wasn't made.
+      if (claimed) await getPool().query(
+        `UPDATE returns_requests SET bp_result = COALESCE(bp_result, '{}'::jsonb) || $2::jsonb WHERE ref = $1`,
+        [claimed, JSON.stringify({ error: String(e.message).slice(0, 400), at: new Date().toISOString(), by })]).catch(() => {});
+      res.status(500).json({ error: e.message, request: claimed ? await getReturn(claimed).catch(() => null) : null });
+    }
   });
 
   app.post("/api/returns/requests/:ref/status", requireUser, async (req, res) => {
