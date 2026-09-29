@@ -1,0 +1,98 @@
+/* Returns page — sits inside the tuffshop.co.uk theme, so this only lays out what
+   the theme has no styles for. Headings, inputs and buttons come from the theme. */
+.rt { padding-top: 10px; padding-bottom: 60px; }
+.rt-hidden { display: none !important; }
+.rt-hero { margin: 0 0 26px; }
+.rt-hero .page-title { margin: 0 0 10px; }
+.rt-intro { font-size: 16px; max-width: 760px; margin: 0; color: #444; }
+
+.rt-steps { list-style: none; margin: 0 0 34px; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; background: #000; }
+.rt-steps li { display: flex; gap: 16px; align-items: flex-start; padding: 22px 24px; color: #fff; border-right: 1px solid #2a2a2a; margin: 0; }
+.rt-steps li:last-child { border-right: 0; }
+.rt-steps h3 { color: #fff; margin: 2px 0 4px; font-size: 18px; text-transform: uppercase; }
+.rt-steps p { margin: 0; color: #cfcfcf; font-size: 13px; }
+.rt-num { flex: 0 0 44px; height: 44px; background: #F3D014; color: #000; font-weight: 800; font-size: 22px; display: flex; align-items: center; justify-content: center; }
+
+.rt-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 40px; align-items: start; }
+.rt-h { text-transform: uppercase; margin: 0 0 18px; }
+.rt-panel { border-top: 4px solid #F3D014; background: #fff; padding: 26px 0 0; }
+.rt-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 30px; }
+.rt .fieldset { margin: 0 0 10px; }
+.rt .field { margin-bottom: 18px; }
+.rt .label em { font-style: normal; font-weight: 400; color: #888; text-transform: none; }
+.rt .actions-toolbar { margin-top: 6px; }
+.rt .action.primary { min-width: 240px; }
+.rt .action.primary[disabled] { opacity: .6; cursor: wait; }
+
+.rt-msg { margin: 16px 0 0; padding: 14px 16px; font-size: 14px; background: #f7f7f7; border-left: 4px solid #F3D014; }
+.rt-msg--err { border-left-color: #d0021b; background: #fdf1f2; }
+
+.rt-order-head p { margin: -8px 0 20px; color: #444; }
+.rt-item { border: 1px solid #e3e3e3; margin-bottom: 14px; }
+.rt-item.is-on { border-color: #000; }
+.rt-item-head { display: flex; gap: 18px; justify-content: space-between; align-items: center; padding: 16px 18px; }
+.rt-item.is-on .rt-item-head { background: #000; color: #fff; }
+.rt-item-name { font-weight: 700; }
+.rt-item-sub { font-size: 12px; color: #888; margin-top: 2px; }
+.rt-item.is-on .rt-item-sub { color: #bbb; }
+.rt-item-qty { flex: 0 0 180px; }
+.rt-item-qty select { width: 100%; }
+.rt-item-body { display: none; padding: 18px; }
+.rt-item.is-on .rt-item-body { display: block; }
+.rt-q { font-weight: 700; text-transform: uppercase; font-size: 13px; margin: 0 0 10px; }
+.rt-toggle { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+.rt-toggle button { flex: 1 1 160px; background: #fff; color: #000; border: 2px solid #000; font-weight: 700; text-transform: uppercase; padding: 12px 14px; cursor: pointer; font-size: 14px; }
+.rt-toggle button small { display: block; font-weight: 400; text-transform: none; font-size: 12px; color: #666; margin-top: 2px; }
+.rt-toggle button.is-on { background: #F3D014; border-color: #F3D014; }
+.rt-choice select { width: 100%; max-width: 420px; }
+.rt-other { margin-top: 12px; max-width: 520px; }
+.rt-note { margin-top: 12px; font-size: 13px; background: #fff8d6; padding: 10px 12px; }
+
+.rt-extra { margin-top: 24px; }
+.rt-email-hint { color: #444; margin: 0 0 16px; }
+.rt-link { text-decoration: underline; }
+
+.rt-bigref { display: inline-block; background: #F3D014; color: #000; font-weight: 800; font-size: 34px; letter-spacing: 2px; padding: 10px 22px; margin: 2px 0 20px; }
+.rt-todo { padding-left: 22px; margin: 0 0 20px; }
+.rt-todo li { margin-bottom: 12px; }
+.rt-address { background: #f5f5f5; padding: 12px 14px; font-weight: 700; margin-top: 6px; line-height: 1.5; }
+
+.rt-side .rt-box { border: 1px solid #e3e3e3; padding: 22px 22px 18px; margin-bottom: 20px; }
+.rt-side h3 { text-transform: uppercase; margin: 0 0 12px; }
+.rt-list { margin: 0 0 14px; padding-left: 18px; }
+.rt-list li { margin-bottom: 8px; font-size: 14px; }
+.rt-box--dark { background: #000; color: #fff; border-color: #000; }
+.rt-box--dark h3 { color: #F3D014; }
+.rt-box--dark a { color: #fff; font-weight: 700; }
+
+/* The site's mobile menu needs its own scripts; this is a plain stand-in. */
+.rt-mnav { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,.55); display: none; }
+.rt-mnav.is-open { display: block; }
+.rt-mnav-panel { position: absolute; top: 0; left: 0; bottom: 0; width: 82%; max-width: 340px; background: #000; overflow: auto; padding: 18px 0; }
+.rt-mnav-panel a { display: block; color: #fff; text-transform: uppercase; font-weight: 700; padding: 14px 22px; border-bottom: 1px solid #222; text-decoration: none; }
+.rt-mnav-close { color: #F3D014 !important; }
+
+@media (max-width: 1024px) {
+  .rt-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 767px) {
+  .rt-steps { grid-template-columns: 1fr; }
+  .rt-steps li { border-right: 0; border-bottom: 1px solid #2a2a2a; padding: 16px 18px; }
+  .rt-row { grid-template-columns: 1fr; }
+  .rt-item-head { flex-direction: column; align-items: stretch; }
+  .rt-item-qty { flex-basis: auto; }
+  .rt .action.primary { width: 100%; }
+  .rt-bigref { font-size: 28px; }
+}
+
+/* The theme styles every <button> and <select> (black fills, animated ::before, underlined
+   selects). These controls need their own look, so they win outright. */
+.rt .rt-toggle button, .rt .rt-toggle button:hover, .rt .rt-toggle button:focus, .rt .rt-toggle button:active {
+  background: #fff !important; color: #000 !important; border: 2px solid #000 !important; box-shadow: none !important;
+  line-height: 1.3 !important; height: auto !important; text-shadow: none !important; }
+.rt .rt-toggle button::before, .rt .rt-toggle button::after { display: none !important; }
+.rt .rt-toggle button.is-on, .rt .rt-toggle button.is-on:hover { background: #F3D014 !important; border-color: #F3D014 !important; color: #000 !important; }
+.rt .rt-toggle button small { color: #555 !important; }
+.rt .rt-item-qty select { background: #fff !important; color: #000 !important; border: 0 !important; padding: 10px 12px !important;
+  height: auto !important; font-weight: 700; cursor: pointer; }
+.rt .rt-item:not(.is-on) .rt-item-qty select { border: 1px solid #000 !important; }

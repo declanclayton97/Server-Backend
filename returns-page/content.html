@@ -1,0 +1,100 @@
+<div class="container rt">
+  <div class="rt-hero">
+    <h1 class="page-title">Returns &amp; Exchanges</h1>
+    <p class="rt-intro">Something not quite right? Pop your order number and postcode in below, tell us what's coming back, and we'll email you a returns reference to send back with it.</p>
+  </div>
+
+  <ol class="rt-steps">
+    <li><span class="rt-num">1</span><div><h3>Find your order.</h3><p>Use the order number from your confirmation email.</p></div></li>
+    <li><span class="rt-num">2</span><div><h3>Tell us what's coming back.</h3><p>Swap it for another size or get your money back.</p></div></li>
+    <li><span class="rt-num">3</span><div><h3>Post it back.</h3><p>Write your reference on the invoice and send it to us.</p></div></li>
+  </ol>
+
+  <div class="rt-grid">
+    <div class="rt-main">
+
+      <!-- Step 1 -->
+      <section class="rt-panel" id="rt-find">
+        <h2 class="rt-h">Find your order.</h2>
+        <form id="rt-find-form" class="form" novalidate>
+          <fieldset class="fieldset">
+            <div class="rt-row">
+              <div class="field required">
+                <label class="label" for="rt-order"><span>Order number</span></label>
+                <div class="control"><input type="text" class="input-text" id="rt-order" autocomplete="off" placeholder="e.g. 000124559"></div>
+              </div>
+              <div class="field required">
+                <label class="label" for="rt-postcode"><span>Delivery postcode</span></label>
+                <div class="control"><input type="text" class="input-text" id="rt-postcode" autocomplete="postal-code" placeholder="e.g. LS26 8LG"></div>
+              </div>
+            </div>
+          </fieldset>
+          <div class="actions-toolbar"><button type="submit" class="action primary" id="rt-find-btn"><span>Find my order</span></button></div>
+          <div id="rt-find-msg"></div>
+        </form>
+      </section>
+
+      <!-- Step 2 -->
+      <section class="rt-panel rt-hidden" id="rt-choose">
+        <div class="rt-order-head">
+          <h2 class="rt-h">Order <span id="rt-ref"></span>.</h2>
+          <p>We sent this on <b id="rt-sent"></b>. You've got until <b id="rt-last"></b> to send it back.</p>
+        </div>
+        <div id="rt-items"></div>
+        <div class="rt-extra">
+          <div class="field" id="rt-email-field">
+            <label class="label" for="rt-email"><span>Your email address</span></label>
+            <div class="control"><input type="email" class="input-text" id="rt-email" autocomplete="email" placeholder="So we can send your returns reference"></div>
+          </div>
+          <p class="rt-email-hint" id="rt-email-hint"></p>
+          <div class="field">
+            <label class="label" for="rt-comments"><span>Anything else we should know? <em>(optional)</em></span></label>
+            <div class="control"><textarea class="input-text" id="rt-comments" rows="2" maxlength="1000"></textarea></div>
+          </div>
+        </div>
+        <div class="actions-toolbar"><button type="button" class="action primary" id="rt-submit"><span>Get my returns reference</span></button></div>
+        <div id="rt-submit-msg"></div>
+        <p><a href="#" class="rt-link" id="rt-again">Look up a different order</a></p>
+      </section>
+
+      <!-- Step 3 -->
+      <section class="rt-panel rt-hidden" id="rt-done">
+        <h2 class="rt-h">You're all set.</h2>
+        <p>Your returns reference is</p>
+        <div class="rt-bigref" id="rt-done-ref"></div>
+        <ol class="rt-todo">
+          <li>Write <b class="rt-done-ref2"></b> on your invoice and pop it in the parcel with your items.</li>
+          <li>Send it to:<div class="rt-address" id="rt-done-addr"></div></li>
+          <li>Post it by <b id="rt-done-by"></b>. We'd recommend a tracked service, as the parcel's your responsibility until it reaches us.</li>
+          <li id="rt-done-next"></li>
+        </ol>
+        <div id="rt-done-contact"></div>
+        <p class="rt-email-hint" id="rt-done-mail"></p>
+      </section>
+    </div>
+
+    <aside class="rt-side">
+      <div class="rt-box">
+        <h3>Good to know.</h3>
+        <ul class="rt-list">
+          <li>You've got 30 days from getting your order to send it back.</li>
+          <li>Exchanges go back out with free standard delivery.</li>
+          <li>Items need to be unworn and in a condition we can sell again.</li>
+          <li>We can't take back printed or embroidered items unless they're faulty.</li>
+          <li>Socks and underwear can't be returned unless they're faulty.</li>
+          <li>Return postage is down to you, so use a tracked service.</li>
+        </ul>
+        <a class="rt-link" href="https://tuffshop.co.uk/returns">Read our full returns policy</a>
+      </div>
+      <div class="rt-box">
+        <h3>Send it to.</h3>
+        <p class="rt-address">Customer Returns<br>Tuffshop.co.uk<br>144-146 Aberford Road<br>Woodlesford<br>Leeds<br>LS26 8LG</p>
+      </div>
+      <div class="rt-box rt-box--dark">
+        <h3>Need a hand?</h3>
+        <p>If something's faulty or we've sent the wrong thing, give us a call before you send it back and we'll get it sorted.</p>
+        <p><a href="tel:01132887713">0113 288 7713</a><br><a href="mailto:sales@tuffshop.co.uk">sales@tuffshop.co.uk</a></p>
+      </div>
+    </aside>
+  </div>
+</div>

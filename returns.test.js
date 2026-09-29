@@ -9,6 +9,8 @@ import {
   normPostcode,
   returnEmailHtml,
   returnNoteText,
+  orderEmail,
+  maskEmail,
 } from "./returns.js";
 
 let pass = 0, fail = 0;
@@ -56,7 +58,7 @@ assertFalse("a fragment is not a postcode", postcodeMatches(order(), "LS2"));
   assertEq("only the goods are offered, not carriage or notes", a.lines.map((l) => l.rowId), ["11", "12"]);
   assertEq("quantities come through as whole numbers", a.lines.map((l) => l.qty), [2, 1]);
   assertEq("despatch = invoice tax date (UK day)", a.despatchedOn, "2026-09-10");
-  assertEq("last day is 30 days after it was sent", a.lastDay, "2026-10-10");
+  assertEq("last day is 30 days after it arrived (sent + 2)", a.lastDay, "2026-10-12");
 }
 
 // --- the policy -------------------------------------------------------------
@@ -72,10 +74,10 @@ assertEq("Amazon goes back to Amazon",
 }
 assertEq("not invoiced = not sent yet",
   assessReturn(order({ invoices: [] }), { productMeta: meta, today }).code, "not-sent");
-assertEq("31 days after despatch is too late",
-  assessReturn(order(), { productMeta: meta, today: new Date("2026-10-11T12:00:00Z") }).code, "too-late");
-assertTrue("day 30 is still in time",
-  assessReturn(order(), { productMeta: meta, today: new Date("2026-10-10T20:00:00Z") }).ok);
+assertEq("33 days after despatch is too late",
+  assessReturn(order(), { productMeta: meta, today: new Date("2026-10-13T12:00:00Z") }).code, "too-late");
+assertTrue("the last day is still in time",
+  assessReturn(order(), { productMeta: meta, today: new Date("2026-10-12T20:00:00Z") }).ok);
 assertEq("a credit note is not an order",
   assessReturn(order({ orderTypeCode: "SC" }), { productMeta: meta, today }).code, "not-found");
 
@@ -92,35 +94,58 @@ assertEq("a credit note is not an order",
   const a = assessReturn(order(), { productMeta: meta, today, requested: { 11: 1 } });
   assertFalse("more than is left is refused",
     validateSelection(a, [{ rowId: "11", qty: 2, reason: "Too small", outcome: "refund" }]).ok);
-  assertFalse("a reason is required",
+  assertFalse("a refund needs a reason",
     validateSelection(a, [{ rowId: "12", qty: 1, reason: "", outcome: "refund" }]).ok);
   assertFalse("an unknown reason is refused",
     validateSelection(a, [{ rowId: "12", qty: 1, reason: "<script>", outcome: "refund" }]).ok);
-  assertFalse("an exchange needs to say what for",
-    validateSelection(a, [{ rowId: "12", qty: 1, reason: "Too big", outcome: "exchange", exchangeFor: " " }]).ok);
+  assertFalse("an exchange needs a choice",
+    validateSelection(a, [{ rowId: "12", qty: 1, outcome: "exchange", exchangeChoice: "" }]).ok);
+  assertFalse("an unknown exchange choice is refused",
+    validateSelection(a, [{ rowId: "12", qty: 1, outcome: "exchange", exchangeChoice: "Three sizes up" }]).ok);
+  assertFalse("'Something else' needs saying what",
+    validateSelection(a, [{ rowId: "12", qty: 1, outcome: "exchange", exchangeChoice: "Something else", exchangeFor: " " }]).ok);
+  assertFalse("neither swap nor refund chosen",
+    validateSelection(a, [{ rowId: "12", qty: 1 }]).ok);
   assertFalse("a carriage row cannot be picked",
     validateSelection(a, [{ rowId: "13", qty: 1, reason: "Other", outcome: "refund" }]).ok);
   assertFalse("nothing chosen",
     validateSelection(a, [{ rowId: "12", qty: 0, reason: "Other", outcome: "refund" }]).ok);
   const ok = validateSelection(a, [
-    { rowId: "11", qty: 1, reason: "Too small", outcome: "exchange", exchangeFor: "36R" },
-    { rowId: "12", qty: 1, reason: "Changed my mind", outcome: "refund", exchangeFor: "ignored" },
+    { rowId: "11", qty: 1, outcome: "exchange", exchangeChoice: "One size up", exchangeFor: "ignored" },
+    { rowId: "12", qty: 1, outcome: "refund", reason: "Changed my mind", exchangeChoice: "Two sizes up" },
   ]);
   assertTrue("a valid pick passes", ok.ok);
-  assertEq("exchange text kept only on exchanges", ok.lines.map((l) => l.exchangeFor), ["36R", ""]);
+  assertEq("exchange choice kept only on the exchange", ok.lines.map((l) => l.exchangeChoice), ["One size up", ""]);
+  assertEq("free text only kept for 'Something else'", ok.lines.map((l) => l.exchangeFor), ["", ""]);
+  assertEq("an exchange's reason says what it is", ok.lines[0].reason, "Exchange: one size up");
+  const other = validateSelection(a, [{ rowId: "12", qty: 1, outcome: "exchange", exchangeChoice: "Something else", exchangeFor: "Black instead" }]);
+  assertEq("'Something else' keeps their words", other.lines[0].exchangeFor, "Black instead");
 }
+
+// --- the email on the order, shown masked -------------------------------------
+assertEq("order email found on the customer", orderEmail({ parties: { customer: { email: "jo.bloggs@gmail.com" } } }), "jo.bloggs@gmail.com");
+assertEq("falls back to the billing email", orderEmail({ parties: { customer: { email: "" }, billing: { email: "a@b.co" } } }), "a@b.co");
+assertEq("no email on the order", orderEmail({ parties: { customer: {} } }), null);
+assertEq("masked for the page", maskEmail("jo.bloggs@gmail.com"), "jo•••@gmail.com");
+assertEq("a one-letter name still masks", maskEmail("j@x.com"), "j•••@x.com");
 
 // --- what the customer and the order note say --------------------------------
 {
-  const lines = [{ name: "Snickers <6241>", sku: "624", qty: 1, reason: "Faulty or damaged", outcome: "refund", exchangeFor: "" }];
-  const html = returnEmailHtml({ ref: "WR29092601", orderRef: "000124559", name: "Jo", lines, lastDay: "2026-10-10", address: ["Tuff Workwear Ltd", "LS26 8LG"] });
+  const lines = [
+    { name: "Snickers <6241>", sku: "624", qty: 1, reason: "Faulty or damaged", outcome: "refund", exchangeChoice: "", exchangeFor: "" },
+    { name: "Boots", sku: "B1", qty: 1, reason: "Exchange: one size up", outcome: "exchange", exchangeChoice: "One size up", exchangeFor: "" },
+  ];
+  const html = returnEmailHtml({ ref: "WR29092601", orderRef: "000124559", name: "Jo", lines, lastDay: "2026-10-12", address: ["Customer Returns", "LS26 8LG"] });
   assertTrue("email carries the reference", html.includes("WR29092601"));
   assertTrue("email uses the agreed wording", html.includes("Please write this reference on your invoice and send it back"));
   assertTrue("item names are escaped", html.includes("Snickers &lt;6241&gt;"));
-  assertTrue("faulty items get the postage line", html.includes("in touch about the postage"));
-  assertTrue("the send-by date is in words", html.includes("10 October 2026"));
+  assertTrue("faulty items are asked to ring first", html.includes("Give us a call on 0113 288 7713 before you send it back"));
+  assertTrue("the send-by date is in words", html.includes("Monday 12 October"));
+  assertTrue("exchanges go out free", html.includes("free standard delivery"));
+  assertTrue("the exchange says what they want", html.includes("Exchange &ndash; One size up"));
   const note = returnNoteText({ ref: "WR29092601", email: "jo@x.com", lines, comments: "" });
   assertTrue("note starts with the reference", note.startsWith("RETURN REQUESTED ONLINE — WR29092601"));
+  assertTrue("note spells out the exchange", note.includes("EXCHANGE: One size up"));
 }
 
 assertEq("despatchDate takes the earliest invoice",

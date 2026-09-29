@@ -18,10 +18,13 @@
 import path from "path";
 import nodemailer from "nodemailer";
 import { graphConfigured, salesMailbox, sendNew } from "./graphMail.js";
-import { returnRef, RETURNS_ADDRESS } from "./salesHub.js";
+import { returnRef } from "./salesHub.js";
+import { getSiteChrome, wrapInChrome, wrapForEmbed, siteChromeStatus } from "./siteChrome.js";
+import fs from "fs";
 import {
   assessReturn, validateSelection, postcodeMatches, returnEmailHtml, returnNoteText,
-  RETURN_REASONS, RETURN_WINDOW_DAYS, prettyDate,
+  RETURN_WINDOW_DAYS, prettyDate, EXCHANGE_CHOICES, REFUND_REASONS, WEB_RETURNS_ADDRESS,
+  orderEmail, maskEmail,
 } from "./returns.js";
 
 const STATUSES = ["requested", "received", "refunded", "exchanged", "rejected", "cancelled"];
@@ -185,8 +188,25 @@ export function registerReturnsRoutes(app, deps) {
   }
 
   // ---- routes: customer --------------------------------------------------------
-  const page = path.join(rootDir, "returns-page", "index.html");
-  app.get(["/returns", "/returns/"], (req, res) => res.sendFile(page));
+  const dir = path.join(rootDir, "returns-page");
+  const part = (f) => fs.readFileSync(path.join(dir, f), "utf8");
+  app.get(["/returns", "/returns/"], async (req, res) => {
+    try {
+      const chrome = await getSiteChrome();
+      res.set("Cache-Control", "no-cache");
+      // ?embed=1 is the version framed inside tuffshop.co.uk/returns-form.
+      res.type("html").send((req.query.embed ? wrapForEmbed : wrapInChrome)(chrome, {
+        title: "Returns & Exchanges | Tuffshop",
+        headExtra: `<style>${part("returns.css")}</style>`,
+        content: part("content.html"),
+        scripts: `<script>${part("returns-client.js")}</script>`,
+      }));
+    } catch (e) {
+      console.error("[returns] page failed:", e.message);
+      res.status(500).send("Sorry, the returns page isn't available right now. Please call 0113 288 7713.");
+    }
+  });
+  app.get("/api/returns/site-chrome", (req, res) => res.json(siteChromeStatus()));
 
   app.post("/api/returns/lookup", async (req, res) => {
     if (limited(req)) return res.status(429).json({ ok: false, message: "Too many attempts. Please wait a few minutes and try again." });
@@ -200,7 +220,10 @@ export function registerReturnsRoutes(app, deps) {
         despatchedOn: assessment.despatchedOn ? prettyDate(assessment.despatchedOn) : null,
         lastDay: assessment.lastDay ? prettyDate(assessment.lastDay) : null,
         lines: assessment.lines.map((l) => ({ rowId: l.rowId, name: l.name, qty: l.qty, available: l.available })),
-        reasons: RETURN_REASONS, windowDays: RETURN_WINDOW_DAYS,
+        exchangeChoices: EXCHANGE_CHOICES, refundReasons: REFUND_REASONS, windowDays: RETURN_WINDOW_DAYS,
+        // Masked: whoever typed the order number and postcode sees where the email is
+        // going, never the address itself.
+        emailHint: maskEmail(orderEmail(order)), needsEmail: !orderEmail(order),
       });
     } catch (e) {
       console.error("[returns] lookup failed:", e.message);
@@ -213,13 +236,14 @@ export function registerReturnsRoutes(app, deps) {
     const b = req.body || {};
     try {
       if (!(useDatabase && getPool())) throw new Error("returns database unavailable");
-      const email = String(b.email || "").trim().slice(0, 200);
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, message: "Please enter a valid email address." });
+      const typed = String(b.email || "").trim().slice(0, 200);
       const comments = String(b.comments || "").trim().slice(0, 1000);
 
       // Everything is re-checked here — never trust what the page sent.
       const { order, assessment } = await assessFor(b.orderNumber, b.postcode);
       if (!order) return res.status(404).json({ ok: false, message: assessment.message });
+      const email = orderEmail(order) || typed;
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, message: "We need an email address to send your returns reference to." });
       const sel = validateSelection(assessment, b.lines);
       if (!sel.ok) return res.status(400).json({ ok: false, message: sel.error });
 
@@ -238,7 +262,7 @@ export function registerReturnsRoutes(app, deps) {
         await sendMail({
           to: email,
           subject: `Your return ${ref} - order ${order.reference || order.id}`,
-          html: returnEmailHtml({ ref, orderRef: order.reference || order.id, name, lines: sel.lines, lastDay: assessment.lastDay, address: RETURNS_ADDRESS }),
+          html: returnEmailHtml({ ref, orderRef: order.reference || order.id, name, lines: sel.lines, lastDay: assessment.lastDay, address: WEB_RETURNS_ADDRESS }),
           replyTo: salesMailbox(),
         });
         emailed = true;
@@ -258,7 +282,8 @@ export function registerReturnsRoutes(app, deps) {
         }).catch((e) => console.error(`[returns] ${ref} inbox notice failed:`, e.message));
       }
 
-      res.json({ ok: true, ref, emailed, lastDay: prettyDate(assessment.lastDay), address: RETURNS_ADDRESS, lines: sel.lines });
+      res.json({ ok: true, ref, emailed, emailHint: maskEmail(email), lastDay: prettyDate(assessment.lastDay), address: WEB_RETURNS_ADDRESS,
+        exchanging: sel.lines.some((l) => l.outcome === "exchange"), needsContact: sel.lines.some((l) => /faulty|wrong item/i.test(l.reason)) });
     } catch (e) {
       console.error("[returns] submit failed:", e.message);
       res.status(500).json({ ok: false, message: "Something went wrong submitting your return. Please try again, or contact our sales team." });
