@@ -16,6 +16,30 @@ export function registerReturnsBpSandbox(app, { bpTest }) {
     try {
       const customerId = Number(req.query.customer || 128071);
       const pid = Number(req.query.product || 143061);
+      if (req.query.step === "notes") {
+        // Are non-ASCII characters mangled in notes, and does \u-escaping the JSON fix it?
+        const id = await tryStep("create SO", () => bpTest("POST", "/order-service/order", {
+          orderTypeCode: "SO", reference: "RETURNS SANDBOX NOTES", priceListId: 3, priceModeCode: "EXC", warehouseId: 2,
+          currency: { orderCurrencyCode: "GBP" }, parties: { customer: { contactId: customerId } } }));
+        const text = "RAW — dash × times £9.99 ‘quotes’";
+        await tryStep("note raw", () => bpTest("POST", `/order-service/order/${id}/note`, { text }));
+        // Same text, every non-ASCII character sent as a \u escape.
+        const base = process.env.BP_TEST_DATACENTER || "euw1";
+        await tryStep("note escaped", async () => {
+          const body = JSON.stringify({ text: text.replace("RAW", "ESC") }).replace(/[\u0080-￿]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+          const r = await fetch(`https://${base}.brightpearlconnect.com/public-api/${process.env.BP_TEST_ACCOUNT || "tuffbsitc"}/order-service/order/${id}/note`, {
+            method: "POST", headers: { "brightpearl-app-ref": process.env.BP_TEST_APP_REF, "brightpearl-account-token": process.env.BP_TEST_TOKEN, "Content-Type": "application/json" }, body });
+          return r.status + " " + (await r.text()).slice(0, 100);
+        });
+        await tryStep("note utf-8 charset header", async () => {
+          const r = await fetch(`https://${base}.brightpearlconnect.com/public-api/${process.env.BP_TEST_ACCOUNT || "tuffbsitc"}/order-service/order/${id}/note`, {
+            method: "POST", headers: { "brightpearl-app-ref": process.env.BP_TEST_APP_REF, "brightpearl-account-token": process.env.BP_TEST_TOKEN, "Content-Type": "application/json; charset=utf-8" },
+            body: JSON.stringify({ text: text.replace("RAW", "UTF8HDR") }) });
+          return r.status;
+        });
+        await tryStep("read notes back", async () => ((await bpTest("GET", `/order-service/order/${id}/note`)) || []).map((n) => n.text));
+        return res.json({ log });
+      }
       if (req.query.step === "addr") {
         // An order delivered to an address that is NOT the customer's default, with a delivery method.
         const id = await tryStep("create SO with delivery address + method", () => bpTest("POST", "/order-service/order", {
