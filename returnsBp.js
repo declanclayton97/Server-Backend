@@ -201,6 +201,8 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
       orderTypeCode: "SO", reference: note, ...(o.shippingMethodId ? { delivery: { shippingMethodId: o.shippingMethodId } } : {}),
     }));
     done.exchangeId = ex; await progress({ bp_exchange_id: ex });
+    // First line, as on the team's own exchange orders (SO 492360): which credit pays for it.
+    await bp("POST", `/order-service/order/${ex}/row`, rowBody({ productId: 1000, productName: note, qty: 1, net: 0, tax: 0, taxCode: "T20", nominalCode: "4000" }));
     let exGross = 0;
     for (const l of plan.exchange.lines) {
       const pick = Object.prototype.hasOwnProperty.call(choices, l.key) ? choices[l.key] : l.suggested;
@@ -216,7 +218,6 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
         await bp("POST", `/order-service/order/${ex}/row`, rowBody({ productId: 1000, productName: `TO ADD: customer wants ${wants} (instead of ${l.name})`, qty: l.qty, net: 0, tax: 0, taxCode: l.taxCode, nominalCode: l.nominalCode }));
       }
     }
-    await bp("POST", `/order-service/order/${ex}/row`, rowBody({ productId: 1000, productName: note, qty: 1, net: 0, tax: 0, taxCode: "T20", nominalCode: "4000" }));
     done.steps.push("exchange order");
 
     // No payments between the two (Dec, 30 Sep): the credit (money owed back) and the
@@ -237,11 +238,13 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
     catch (e) { done.warnings = [`Credit status ${status} not set: ${String(e.message).slice(0, 160)}`]; }
   }
 
-  // 5. Notes, so each record says where it came from.
-  const summary = `Online return ${returnRef}: credit SC#${sc} (GBP ${money(plan.credit.gross)})${done.exchangeId ? `, exchange order SO#${done.exchangeId}` : ""}.`;
+  // 4. Notes: the cross-reference the team writes by hand (SO 492360), on all three
+  // orders, then where it came from.
+  const xref = [`ORIGINAL ORDER SO#${o.id}`, ...(done.exchangeId ? [`REPLACED VIA SO#${done.exchangeId}`] : []), `CREDITED VIA SC#${sc}`].join("\n");
+  const from = `Online return ${returnRef} (GBP ${money(plan.credit.gross)} credited)`;
   const note = (id, text) => bp("POST", `/order-service/order/${id}/note`, { text: bpSafeText(text) }).catch(() => null);
-  await note(o.id, summary);
-  await note(sc, `${summary}${refund ? " REFUND STILL TO BE PAID to the customer." : ""}`);
-  if (done.exchangeId) await note(done.exchangeId, `${summary} Replacement for the customer - free standard delivery.`);
+  await note(o.id, `${xref}\n${from}`);
+  await note(sc, `${xref}\n${from}${refund ? "\nREFUND STILL TO BE PAID to the customer." : ""}`);
+  if (done.exchangeId) await note(done.exchangeId, `${xref}\n${from}\nReplacement for the customer - free standard delivery.`);
   return done;
 }
