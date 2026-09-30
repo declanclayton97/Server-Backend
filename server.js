@@ -12605,7 +12605,9 @@ ${SIGNATURE_TEXT || ''}`;
         try { return await makeTransport(port).sendMail(mail); }
         catch (e) {
           lastErr = e;
-          const transient = /greeting never received|timeout|ETIMEDOUT|ECONNRESET|ECONNECTION|ESOCKET|EAI_AGAIN|connection closed/i.test(e.message || '');
+          // ECONNREFUSED is the one that matters most: a port refused at the door is exactly the
+          // case the rotation exists for (2525 refused 2026-09-30 while 587 was fine).
+          const transient = /greeting never received|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|ECONNECTION|ESOCKET|EAI_AGAIN|connection closed/i.test(`${e.code || ''} ${e.message || ''}`);
           if (!transient || i === tries - 1) throw e;
           console.warn(`[proof-email] transient send error on port ${port} (retry ${i + 1}/${tries - 1}):`, e.message);
           await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
