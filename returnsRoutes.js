@@ -186,8 +186,16 @@ export function registerReturnsRoutes(app, deps) {
   }
 
   // ---- email ------------------------------------------------------------------
-  async function sendMail({ to, subject, html, replyTo }) {
-    if (graphConfigured()) return sendNew({ to, subject, html, replyTo });
+  // TEST MODE (Dec, 30 Sep): until RETURNS_LIVE=on is set on Render, EVERY email this
+  // module sends — customer confirmations, status emails, the accounts refund request,
+  // the sales-inbox notice — goes to RETURNS_TEST_EMAIL (Dec) instead, subject marked
+  // with where it would have gone. Nothing reaches a customer or accounts while testing.
+  const RETURNS_LIVE = () => String(process.env.RETURNS_LIVE || "").toLowerCase() === "on";
+  const testAddress = () => process.env.RETURNS_TEST_EMAIL || "dec@tuffshop.co.uk";
+  const redirect = (to, subject) => (RETURNS_LIVE() ? { to, subject } : { to: testAddress(), subject: `[TEST - would go to ${to}] ${subject}` });
+  async function sendMail({ to, subject, html, replyTo, attachments }) {
+    ({ to, subject } = redirect(to, subject));
+    if (graphConfigured()) return sendNew({ to, subject, html, replyTo, attachments });
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
       port: parseInt(process.env.SMTP_PORT || "2525", 10), secure: false,
@@ -287,7 +295,7 @@ export function registerReturnsRoutes(app, deps) {
       // A heads-up in the shared sales inbox, where the team already works.
       if ((process.env.RETURNS_NOTIFY_INBOX !== "off" || ph.photos.length) && graphConfigured()) {
         const n = ph.photos.length;
-        sendNew({
+        sendMail({
           to: salesMailbox(),
           subject: `${n ? "PHOTOS - " : ""}Online return ${ref} - order ${order.reference || order.id}${n ? ` (${n} photo${n === 1 ? "" : "s"} attached)` : ""}`,
           html: `<p>A customer has requested a return online.${n ? ` They've attached <b>${n} photo${n === 1 ? "" : "s"}</b> (below).` : ""}</p><pre style="font-family:Arial,sans-serif;">${
@@ -411,11 +419,8 @@ export function registerReturnsRoutes(app, deps) {
       } else if (refundLines.length) {
         const unit = Object.fromEntries(plan.credit.rows.map((r) => [r.rowId, r.unitNet + r.unitTax]));
         const amount = Math.round(refundLines.reduce((a, l) => a + (unit[String(l.rowId)] || 0) * Number(l.qty), 0) * 100) / 100;
-        // TESTING (Dec, 30 Sep): refund emails go to Dec until he says go live. Going live = set
-        // RETURNS_ACCOUNTS_EMAIL=accounts@tuffshop.co.uk on Render (or change this default).
-        const live = "accounts@tuffshop.co.uk";
-        accounts = { to: process.env.RETURNS_ACCOUNTS_EMAIL || "dec@tuffshop.co.uk", amount, sent: false };
-        accounts.test = accounts.to.toLowerCase() !== live;
+        // accounts@ confirmed by Dec (30 Sep). While RETURNS_LIVE is off, sendMail redirects it to him.
+        accounts = { to: process.env.RETURNS_ACCOUNTS_EMAIL || "accounts@tuffshop.co.uk", amount, sent: false, test: !RETURNS_LIVE() };
         let paidBy = "";
         try {
           const methods = Object.fromEntries(((await bpLive("GET", "/accounting-service/payment-method")) || []).map((m) => [m.code, m.name]));
@@ -428,7 +433,7 @@ export function registerReturnsRoutes(app, deps) {
         try {
           await sendMail({
             to: accounts.to, replyTo: salesMailbox(),
-            subject: `${accounts.test ? "[TEST - would go to " + live + "] " : ""}Refund to process: GBP ${amount.toFixed(2)} - return ${row.ref} - order ${row.order_ref || row.order_id}`,
+            subject: `Refund to process: GBP ${amount.toFixed(2)} - return ${row.ref} - order ${row.order_ref || row.order_id}`,
             html: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;">
               <p>Hi,</p>
               <p>A return has come back and needs refunding.</p>
@@ -446,7 +451,7 @@ export function registerReturnsRoutes(app, deps) {
           });
           accounts.sent = true;
         } catch (e) { accounts.error = String(e.message).slice(0, 200); console.error(`[returns] ${row.ref} accounts email failed:`, e.message); }
-        summary.push(`Refund GBP ${amount.toFixed(2)}: ${accounts.sent ? "accounts emailed (" + accounts.to + ")" : "accounts email FAILED - tell them yourself"}`);
+        summary.push(`Refund GBP ${amount.toFixed(2)}: ${accounts.sent ? "accounts emailed (" + (accounts.test ? "TEST: sent to " + testAddress() : accounts.to) + ")" : "accounts email FAILED - tell them yourself"}`);
       }
       const result = { ...done, by, at: new Date().toISOString(), creditGross: plan.credit.gross, creditRef: plan.credit.reference,
         summary, accounts, warnings: [...(plan.warnings || []), ...(done.warnings || [])] };
