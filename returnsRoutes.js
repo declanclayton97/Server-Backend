@@ -346,7 +346,14 @@ export function registerReturnsRoutes(app, deps) {
       .catch((e) => console.error(`[returns] report build (${days}d) failed:`, e.message))
       .finally(() => building.delete(days));
   }
+  // The report is Dec's only (30 Sep). Enforced HERE, not just by hiding the button:
+  // RETURNS_REPORT_USERS is a comma list of Sales Hub account names (key or display name).
+  const reportUsers = () => String(process.env.RETURNS_REPORT_USERS || "dec,dec clayton,declan,declan clayton")
+    .toLowerCase().split(",").map((s) => s.trim()).filter(Boolean);
+  const canReport = (u) => !!u && [u.key, u.name].some((v) => reportUsers().includes(String(v || "").trim().toLowerCase()));
+  app.get("/api/returns/me", requireUser, (req, res) => res.json({ canReport: canReport(req.hubUser) }));
   app.get("/api/returns/report", requireUser, async (req, res) => {
+    if (!canReport(req.hubUser)) return res.status(403).json({ error: "The returns report isn't available on your account." });
     try {
       await ensureTables();
       const days = [30, 90, 180, 365].includes(Number(req.query.days)) ? Number(req.query.days) : 90;
