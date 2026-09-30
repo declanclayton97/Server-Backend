@@ -814,7 +814,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
       supplier: 'FRISTADS', step: 'out-of-stock-dropped', severity: 'error',
       message: `${shortLines.length} line(s) are out of stock at Fristads and were taken OFF PO#${poId} so the rest of the order could go through. `
         + (bo.created
-          ? `They are on back-order PO#${bo.poId} and will be placed with Fristads as back-order lines — on the SAME order where the basket takes them (one carriage), otherwise as a separate back order:\n`
+          ? `They are on back-order PO#${bo.poId} and will be placed with Fristads as back-order lines — on the SAME order (one carriage). If the basket will not take them they are flagged to add to the next Fristads order — never a separate order:\n`
           : `The back-order PO could NOT be created (${bo.error || bo.reason}) — these are NOT ordered and nothing will chase them automatically:\n`)
         + shortLines.map((s) => `      ${s.qty} × ${s.sku} (${s.size || '?'}) ${s.name || ''} — Fristads have ${s.avail}`
           + (s.deldate ? `, next delivery ${s.deldate}` : '')).join('\n'),
@@ -1021,40 +1021,20 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
       context: { poId: boPoId, parentPoId: poId, reservationNo, orderNo: orderNo || null, combined: true },
     }).catch(() => {});
   } else if (steps.backorder && steps.backorder.created) {
+    // NEVER a separate Fristads order (user, 2026-09-30: "not worth the £30 shipping charge"). The
+    // back-order lines would not join the main basket, so they are NOT placed at Fristads at all —
+    // the child PO stays at 45, noted, and the error below makes someone add them to the next
+    // Fristads order. The in-stock order above has gone through regardless.
     const boPoId = steps.backorder.poId;
     const boLines = shortLines.map((s) => ({ sku: s.sku, size: s.size, qty: s.qty }));
-    const boUnits = boLines.reduce((a, l) => a + l.qty, 0);
-    try {
-      const bcart = await jfetch('backorder-cart', `${altItemsUrl}/api/fristads-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: boLines }) });
-      const brefused = (bcart.results || []).filter((r) => !r.ok);
-      if ((bcart.unresolved || []).length || bcart.cartCount !== boUnits) {
-        throw new Error(`basket holds ${bcart.cartCount}, expected ${boUnits}` + (brefused.length ? `; refused: ${brefused.map((r) => `${r.key} — ${JSON.stringify(r.resp && r.resp.messages || r.reason || r.status)}`).join('; ').slice(0, 300)}` : ''));
-      }
-      const bco = await jfetch('backorder-checkout', `${altItemsUrl}/api/fristads-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goodsMark: 'WORKWEAR', orderRef: String(boPoId), execute: true }) });
-      if (!bco.placed) throw new Error(`checkout not confirmed (status ${bco.status}, messageType ${bco.messageType}, confirmed ${bco.confirmed})`);
-      const boRes = bco.reservationNo;
-      steps.backorder.fristads = { placed: true, reservationNo: boRes, cartCount: bcart.cartCount, backOrdered: (bcart.results || []).filter((r) => r.backOrdered).length };
-      // Reference = the reservation for now (the order# indexes later, same as the main order);
-      // status stays 45 On Back Order — that is the point of the PO.
-      await bp.setOrderReferenceLive(boPoId, `Fristads reservation ${boRes}`).catch((e) => { steps.backorder.fristads.refWarn = e.message; });
-      await bp.addOrderNoteLive(boPoId, `PLACED at Fristads on back order ${new Date().toISOString().slice(0, 10)} — reservation ${boRes}, our PO#${boPoId} on the order as ExternalVerificationNo. `
-        + shortLines.map((s) => `${s.qty} × ${s.sku} (${s.size || '?'})${s.deldate ? ` expected ${s.deldate}` : ''}`).join('; ')
-        + `. Order number will index at Fristads shortly. Status left at On Back Order deliberately.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
-      await logPurchasingError(pool, {
-        supplier: 'FRISTADS', step: 'back-order-placed', severity: 'info', placed: true,
-        message: `Back order placed with Fristads for PO#${boPoId} (reservation ${boRes}): ` + shortLines.map((s) => `${s.qty} × ${s.sku}${s.deldate ? ` due ${s.deldate}` : ''}`).join(', '),
-        context: { poId: boPoId, parentPoId: poId, reservationNo: boRes, lines: boLines },
-      }).catch(() => {});
-    } catch (e) {
-      steps.backorder.fristads = { placed: false, error: e.message };
-      await bp.addOrderNoteLive(boPoId, `NOT YET PLACED at Fristads — the automatic back order failed: ${e.message}. Place this PO with Fristads by hand (basket answers the phase-out prompt with "add the original").`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
-      await logPurchasingError(pool, {
-        supplier: 'FRISTADS', step: 'back-order-not-placed', severity: 'error', placed: false,
-        message: `Main order PO#${poId} placed, but the back order PO#${boPoId} did NOT place with Fristads: ${e.message}. Place it by hand — `
-          + shortLines.map((s) => `${s.qty} × ${s.sku} (${s.size || '?'})`).join(', '),
-        context: { poId: boPoId, parentPoId: poId, lines: boLines, backorderPoId: boPoId },
-      }).catch(() => {});
-    }
+    steps.backorder.fristads = { placed: false, separateOrderSkipped: true, reason: steps.backorder.combineFailed || "not combined" };
+    await bp.addOrderNoteLive(boPoId, `NOT PLACED at Fristads — these out-of-stock lines would not go on the same order as PO#${poId} (${steps.backorder.combineFailed || "basket refused them"}), and a separate Fristads order is never placed (its own carriage). Add them to the next Fristads order, then this PO can be received against it: ` + shortLines.map((s) => `${s.qty} × ${s.sku} (${s.size || "?"})`).join(", "), FRISTADS_SUPPLIER_CONTACT).catch(() => {});
+    await logPurchasingError(pool, {
+      supplier: "FRISTADS", step: "back-order-not-placed", severity: "error", placed: false,
+      message: `Main order PO#${poId} placed. The out-of-stock lines on back-order PO#${boPoId} would NOT join that order (${steps.backorder.combineFailed || "basket refused them"}) and were deliberately NOT placed as a separate Fristads order (it would carry its own carriage). Add them to the next Fristads order: `
+        + shortLines.map((s) => `${s.qty} × ${s.sku} (${s.size || "?"})`).join(", "),
+      context: { poId: boPoId, parentPoId: poId, lines: boLines, backorderPoId: boPoId, combineFailed: steps.backorder.combineFailed || null },
+    }).catch(() => {});
   }
 
   // 6. finalize the contributing SOs (clear tag, status 22, "ordered via PO#" note)
