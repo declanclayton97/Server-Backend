@@ -160,8 +160,11 @@ assertEq("a one-letter name still masks", maskEmail("j@x.com"), "j•••@x.co
   const got = statusEmail('received', row);
   assertTrue('arrived email names the return', got.subject.includes('WR29092601') && got.html.includes('has arrived'));
   assertTrue('arrived email says both things will happen', got.html.includes('send your replacement out and sort your refund'));
-  assertTrue('refund email', statusEmail('refunded', row).html.includes('processed the refund'));
+  assertTrue('refund email says it is with accounts, with the amount', statusEmail('refunded', row, '', { refundAmount: 6.99 }).html.includes('passed your refund of <b>&pound;6.99</b> to our accounts team'));
   assertTrue('exchange email lists only the swapped items', statusEmail('exchanged', row).html.includes('Boots') && !statusEmail('exchanged', row).html.includes('Hat'));
+  const sw = statusEmail('exchanged', row, '', { swaps: [{ name: 'Boots', size: 'UK 9', inStock: false }] }).html;
+  assertTrue('exchange email names the new size', sw.includes('<b>UK 9</b>'));
+  assertTrue('out of stock says it comes in first', sw.includes('come in from our supplier first'));
   assertEq('a rejection with no reason is not sent', statusEmail('rejected', row, ''), null);
   assertTrue('a rejection carries the reason, escaped', statusEmail('rejected', row, 'Worn <b>').html.includes('Worn &lt;b&gt;'));
   assertEq('cancelling emails nobody', statusEmail('cancelled', row), null);

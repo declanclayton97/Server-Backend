@@ -24,7 +24,7 @@ import fs from "fs";
 import {
   assessReturn, validateSelection, postcodeMatches, returnEmailHtml, returnNoteText,
   RETURN_WINDOW_DAYS, prettyDate, EXCHANGE_CHOICES, REFUND_REASONS, WEB_RETURNS_ADDRESS,
-  orderEmail, maskEmail, statusEmail, validatePhotos,
+  orderEmail, maskEmail, statusEmail, validatePhotos, styleName,
 } from "./returns.js";
 import { buildBrightpearlReport, summariseOnline } from "./returnsReport.js";
 import { planBrightpearl, executeBrightpearl } from "./returnsBp.js";
@@ -400,9 +400,12 @@ export function registerReturnsRoutes(app, deps) {
 
       // What happened, in one line per thing, for the hub row.
       const summary = [`Credit SC#${done.creditId} (GBP ${plan.credit.gross.toFixed(2)})`];
+      const swaps = [];
       for (const l of (plan.exchange && plan.exchange.lines) || []) {
         const pick = Object.prototype.hasOwnProperty.call(choices, l.key) ? choices[l.key] : l.suggested;
         const opt = pick && (l.options || []).find((o) => Number(o.productId) === Number(pick));
+        swaps.push(opt ? { name: styleName(l.name), size: opt.size || opt.sku, inStock: opt.inStock > 0 }
+          : { name: styleName(l.name), size: l.choice === "Something else" ? l.text : "", inStock: false });
         summary.push(opt
           ? `Exchange SO#${done.exchangeId}: sending ${opt.size || opt.sku}${l.from ? ` (${String(l.choice).toLowerCase()} from ${l.from.size})` : ""}${opt.inStock > 0 ? "" : " - NOT IN STOCK, needs ordering"}`
           : `Exchange SO#${done.exchangeId}: ADD THE ITEM - customer wants ${l.choice === "Something else" ? l.text : String(l.choice).toLowerCase()}`);
@@ -413,12 +416,13 @@ export function registerReturnsRoutes(app, deps) {
 
       // Refunds: accounts pay the money back. Tell them what, how much and how it was paid.
       const refundLines = (row.lines || []).filter((l) => l.outcome === "refund");
+      const unitGross = Object.fromEntries(plan.credit.rows.map((r) => [r.rowId, r.unitNet + r.unitTax]));
+      const refundAmount = Math.round(refundLines.reduce((a, l) => a + (unitGross[String(l.rowId)] || 0) * Number(l.qty), 0) * 100) / 100;
       let accounts = null;
       if (refundLines.length && unpaid) {
         summary.push("Accounts NOT emailed: nothing was paid on the original order, so there is nothing to refund");
       } else if (refundLines.length) {
-        const unit = Object.fromEntries(plan.credit.rows.map((r) => [r.rowId, r.unitNet + r.unitTax]));
-        const amount = Math.round(refundLines.reduce((a, l) => a + (unit[String(l.rowId)] || 0) * Number(l.qty), 0) * 100) / 100;
+        const amount = refundAmount;
         // accounts@ confirmed by Dec (30 Sep). While RETURNS_LIVE is off, sendMail redirects it to him.
         accounts = { to: process.env.RETURNS_ACCOUNTS_EMAIL || "accounts@tuffshop.co.uk", amount, sent: false, test: !RETURNS_LIVE() };
         let paidBy = "";
@@ -453,12 +457,28 @@ export function registerReturnsRoutes(app, deps) {
         } catch (e) { accounts.error = String(e.message).slice(0, 200); console.error(`[returns] ${row.ref} accounts email failed:`, e.message); }
         summary.push(`Refund GBP ${amount.toFixed(2)}: ${accounts.sent ? "accounts emailed (" + (accounts.test ? "TEST: sent to " + testAddress() : accounts.to) + ")" : "accounts email FAILED - tell them yourself"}`);
       }
+      // The customer already said what they wanted, so Process finishes the return:
+      // a swap becomes "Exchanged", a refund "Refunded" (with accounts), and the customer
+      // is told. An unpaid original order with a refund is left for a person to look at.
+      const holdForUnpaid = refundLines.length && unpaid;
+      const newStatus = holdForUnpaid ? row.status : done.exchangeId ? "exchanged" : "refunded";
+      let customerEmailed = null;
+      const mail = holdForUnpaid ? null : statusEmail(newStatus, row, "", { refundAmount: refundLines.length ? refundAmount : 0, swaps });
+      if (mail) {
+        try { await sendMail({ to: row.email, subject: mail.subject, html: mail.html, replyTo: salesMailbox() }); customerEmailed = true; }
+        catch (e) { customerEmailed = false; console.error(`[returns] ${row.ref} customer email failed:`, e.message); }
+        summary.push(customerEmailed ? `Customer emailed (${RETURNS_LIVE() ? row.email : "TEST: sent to " + testAddress()})` : "Customer email FAILED - let them know yourself");
+      }
       const result = { ...done, by, at: new Date().toISOString(), creditGross: plan.credit.gross, creditRef: plan.credit.reference,
         summary, accounts, warnings: [...(plan.warnings || []), ...(done.warnings || [])] };
       const upd = await getPool().query(
-        `UPDATE returns_requests SET bp_result = $2, updated_at = now(), history = history || $3::jsonb WHERE ref = $1 RETURNING *`,
-        [row.ref, JSON.stringify(result), JSON.stringify([{ at: result.at, status: row.status, by,
-          note: `Brightpearl: credit SC#${done.creditId}${done.exchangeId ? ", exchange order SO#" + done.exchangeId : ""}` }])]);
+        `UPDATE returns_requests SET bp_result = $2, status = $4, updated_at = now(), history = history || $3::jsonb WHERE ref = $1 RETURNING *`,
+        [row.ref, JSON.stringify(result), JSON.stringify([{ at: result.at, status: newStatus, by, emailed: customerEmailed,
+          note: `Processed: credit SC#${done.creditId}${done.exchangeId ? ", exchange order SO#" + done.exchangeId : ""}${refundLines.length ? (holdForUnpaid ? ", refund NOT requested (order unpaid)" : ", refund GBP " + refundAmount.toFixed(2) + " requested from accounts") : ""}` }]), newStatus]);
+      if (newStatus !== row.status) {
+        postBpOrderNote(row.order_id, `RETURN ${row.ref} processed by ${by} - ${newStatus === "exchanged" ? "exchange order SO#" + done.exchangeId + " created" : "refund requested from accounts"}` +
+          (mail ? (customerEmailed ? `\nCustomer emailed: "${mail.subject}"` : "\nCustomer email FAILED") : "")).catch(() => {});
+      }
       res.json({ request: upd.rows[0], result });
     } catch (e) {
       console.error(`[returns] ${req.params.ref} bp-create failed:`, e.message);

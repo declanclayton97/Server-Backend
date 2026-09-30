@@ -242,7 +242,10 @@ const itemList = (lines) => "<ul>" + (lines || []).map((l) =>
 
 export const STATUS_EMAILS = ["received", "refunded", "exchanged", "rejected"];
 
-export function statusEmail(status, row, message = "") {
+// ctx (sent by Process, which is what now moves a return to refunded/exchanged):
+//   refundAmount  the refund requested from accounts, inc VAT
+//   swaps         [{ name, size, inStock }] what is being sent in place of what
+export function statusEmail(status, row, message = "", ctx = {}) {
   const ref = esc(row.ref), msg = String(message || "").trim();
   const extra = msg ? `<p style="background:#f5f5f5;padding:10px 14px;">${esc(msg).replace(/\n/g, "<br>")}</p>` : "";
   const exchanging = (row.lines || []).some((l) => l.outcome === "exchange");
@@ -255,15 +258,24 @@ export function statusEmail(status, row, message = "") {
       html: emailShell(name, `<p>Just to let you know your return <b>${ref}</b> has arrived with us:</p>${itemList(row.lines)}
         <p>We'll check it over and ${next} as soon as we can. We'll email you again when that's done.</p>${extra}`) };
   }
+  // Sent the moment Process has run: the refund has been PASSED TO ACCOUNTS (not paid
+  // yet) and the replacement has been SET UP (not necessarily sent) — worded to be true
+  // at that moment.
+  const amount = ctx.refundAmount ? ` of <b>&pound;${Number(ctx.refundAmount).toFixed(2)}</b>` : "";
+  const refundPara = `<p>We've checked the items you sent back and passed your refund${amount} to our accounts team. It goes back the same way you paid &ndash; once it's been processed it can take a few working days to show on your account, depending on your bank.</p>`;
   if (status === "refunded") {
     return { subject: `Your refund for return ${row.ref}`,
-      html: emailShell(name, `<p>Good news &ndash; we've processed the refund for your return <b>${ref}</b>.</p>
-        <p>It goes back the same way you paid. It can take a few working days to show on your account, depending on your bank.</p>${extra}`) };
+      html: emailShell(name, `<p>Thanks for sending back return <b>${ref}</b>.</p>${refundPara}${extra}`) };
   }
   if (status === "exchanged") {
-    return { subject: `Your replacement is on its way (${row.ref})`,
-      html: emailShell(name, `<p>Your replacement for return <b>${ref}</b> is on its way to you, with free standard delivery.</p>${itemList((row.lines || []).filter((l) => l.outcome === "exchange"))}
-        ${refunding ? "<p>The refund for the rest of your return has been processed too.</p>" : ""}${extra}`) };
+    const swaps = (ctx.swaps || []).length
+      ? "<ul>" + ctx.swaps.map((s) => `<li>${esc(s.name)}${s.size ? " &ndash; <b>" + esc(s.size) + "</b>" : ""}</li>`).join("") + "</ul>"
+      : itemList((row.lines || []).filter((l) => l.outcome === "exchange"));
+    const waiting = (ctx.swaps || []).some((s) => s.inStock === false);
+    return { subject: `Your replacement for return ${row.ref}`,
+      html: emailShell(name, `<p>Thanks for sending back return <b>${ref}</b>. We've checked it over and set up your replacement:</p>${swaps}
+        <p>${waiting ? "Some of it needs to come in from our supplier first, so we'll send it out with free standard delivery as soon as it arrives." : "We'll send it out to you with free standard delivery."}</p>
+        ${refunding ? refundPara : ""}${extra}`) };
   }
   if (status === "rejected") {
     if (!msg) return null;
