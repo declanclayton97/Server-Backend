@@ -51,7 +51,7 @@
 
   function render() {
     $("rt-ref").textContent = found.orderRef;
-    $("rt-sent").textContent = found.despatchedOn;
+    $("rt-sent").textContent = found.orderedOn || found.despatchedOn;
     $("rt-last").textContent = found.lastDay;
     $("rt-items").innerHTML = found.lines.map(function (l, i) {
       // One obvious button per item. A quantity is only asked for when they bought

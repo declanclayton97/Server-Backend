@@ -38,6 +38,7 @@ const meta = {
 const order = (over = {}) => ({
   id: 492331, orderTypeCode: "SO", reference: "000124559",
   parties: { delivery: { postalCode: "LS26 8LG" }, billing: { postalCode: "WF1 2AB" }, customer: { addressFullName: "Jo Bloggs" } },
+  placedOn: "2026-09-08T14:20:00.000+01:00",
   invoices: [{ taxDate: "2026-09-10T00:00:00.000+01:00" }],
   orderRows: {
     11: { productId: 100, productName: "Snickers 6241 Trousers 34R", productSku: "62410404034", quantity: { magnitude: "2.0000" } },
@@ -63,7 +64,8 @@ assertFalse("a fragment is not a postcode", postcodeMatches(order(), "LS2"));
   assertEq("only the goods are offered, not carriage or notes", a.lines.map((l) => l.rowId), ["11", "12"]);
   assertEq("quantities come through as whole numbers", a.lines.map((l) => l.qty), [2, 1]);
   assertEq("despatch = invoice tax date (UK day)", a.despatchedOn, "2026-09-10");
-  assertEq("last day is 30 days after it arrived (sent + 2)", a.lastDay, "2026-10-12");
+  assertEq("last day is 30 days after the ORDER date", a.lastDay, "2026-10-08");
+  assertEq("order date reported", a.orderedOn, "2026-09-08");
 }
 
 // --- the policy -------------------------------------------------------------
@@ -79,10 +81,10 @@ assertEq("Amazon goes back to Amazon",
 }
 assertEq("not invoiced = not sent yet",
   assessReturn(order({ invoices: [] }), { productMeta: meta, today }).code, "not-sent");
-assertEq("33 days after despatch is too late",
-  assessReturn(order(), { productMeta: meta, today: new Date("2026-10-13T12:00:00Z") }).code, "too-late");
+assertEq("31 days after the order is too late",
+  assessReturn(order(), { productMeta: meta, today: new Date("2026-10-09T12:00:00Z") }).code, "too-late");
 assertTrue("the last day is still in time",
-  assessReturn(order(), { productMeta: meta, today: new Date("2026-10-12T20:00:00Z") }).ok);
+  assessReturn(order(), { productMeta: meta, today: new Date("2026-10-08T20:00:00Z") }).ok);
 assertEq("a credit note is not an order",
   assessReturn(order({ orderTypeCode: "SC" }), { productMeta: meta, today }).code, "not-found");
 

@@ -237,6 +237,7 @@ export function registerReturnsRoutes(app, deps) {
         ok: assessment.ok, code: assessment.code, message: assessment.message,
         orderRef: order.reference || String(order.id),
         despatchedOn: assessment.despatchedOn ? prettyDate(assessment.despatchedOn) : null,
+        orderedOn: assessment.orderedOn ? prettyDate(assessment.orderedOn) : null,
         lastDay: assessment.lastDay ? prettyDate(assessment.lastDay) : null,
         lines: assessment.lines.map((l) => ({ rowId: l.rowId, name: l.name, qty: l.qty, available: l.available })),
         exchangeChoices: EXCHANGE_CHOICES, refundReasons: REFUND_REASONS, windowDays: RETURN_WINDOW_DAYS,

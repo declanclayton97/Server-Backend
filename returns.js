@@ -17,9 +17,8 @@
 import { classifyOrderRow } from "./salesHub.js";
 
 export const RETURN_WINDOW_DAYS = Number(process.env.RETURN_WINDOW_DAYS || 30);
-// The policy counts 30 days from RECEIVING the order. Brightpearl knows when it was
-// sent, not when it arrived, so allow for the delivery on top.
-export const DELIVERY_GRACE_DAYS = Number(process.env.RETURN_DELIVERY_GRACE_DAYS || 2);
+// 30 days from the ORDER date (Dec, 30 Sep: "check the order date, not the arrival date"),
+// matching the returns page's "30 days from your order date".
 export const EXCLUDED_CHANNEL_RE = /ebay|amazon/i;
 
 // Exchanges are nearly always a size (the policy page says so), so those come first.
@@ -88,7 +87,7 @@ export function maskEmail(email) {
  * requested    { [rowId]: qty already on an open return } so a line cannot be returned twice
  * today        for tests
  *
- * { ok, code, message, despatchedOn, lastDay, lines: [{ rowId, name, sku, qty, available }] }
+ * { ok, code, message, orderedOn, despatchedOn, lastDay, lines: [{ rowId, name, sku, qty, available }] }
  */
 export function assessReturn(order, { productMeta = {}, channelName = "", requested = {}, today = new Date() } = {}) {
   const fail = (code, message, extra = {}) => ({ ok: false, code, message, lines: [], ...extra });
@@ -113,11 +112,13 @@ export function assessReturn(order, { productMeta = {}, channelName = "", reques
   if (!despatchedOn) {
     return fail("not-sent", "This order hasn't left us yet. If you want to change or cancel it, give us a call or drop us an email.");
   }
-  const lastDay = addDays(despatchedOn, RETURN_WINDOW_DAYS + DELIVERY_GRACE_DAYS);
+  // Still has to have been sent (above) — but the clock runs from the order date.
+  const orderedOn = ukDate(order.placedOn || order.createdOn || despatchedOn);
+  const lastDay = addDays(orderedOn, RETURN_WINDOW_DAYS);
   if (ukDate(today) > lastDay) {
     return fail("too-late",
-      `We sent this order on ${prettyDate(despatchedOn)}, which is outside our ${RETURN_WINDOW_DAYS} day returns window. If something's wrong with it, give us a call and we'll see what we can do.`,
-      { despatchedOn, lastDay });
+      `You ordered this on ${prettyDate(orderedOn)}, which is outside our ${RETURN_WINDOW_DAYS} day returns window. If something's wrong with it, give us a call and we'll see what we can do.`,
+      { orderedOn, despatchedOn, lastDay });
   }
 
   const lines = rows
@@ -131,9 +132,9 @@ export function assessReturn(order, { productMeta = {}, channelName = "", reques
   if (!lines.length) return fail("nothing", "There's nothing on this order we can take back online. Give us a call or drop us an email and we'll help.");
   if (!lines.some((l) => l.available > 0)) {
     return fail("already", "You've already started a return for everything on this order. Your returns reference is in the email we sent you.",
-      { despatchedOn, lastDay });
+      { orderedOn, despatchedOn, lastDay });
   }
-  return { ok: true, code: "ok", message: "", despatchedOn, lastDay, lines };
+  return { ok: true, code: "ok", message: "", orderedOn, despatchedOn, lastDay, lines };
 }
 
 // What the customer submitted, checked against what assessReturn allows. Never trust
