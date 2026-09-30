@@ -8,12 +8,13 @@
 //              "EXCHANGE ORDER CREDITED VIA SC#<credit>", same channel / price list /
 //              delivery address / delivery method, the new size AT THE SAME PRICE, plus a
 //              £0 line "EXCHANGE ORDER CREDITED VIA SC#…".
-//   MONEY      the credit pays for the exchange: a PAYMENT out of the credit and a
-//              RECEIPT into the exchange order, method OTHER, same amount. Both then read
-//              PAID, exactly as the hand-made ones do.
-//   STATUS     credit 121 "Refund requested" when anything is being refunded (the money
-//              still has to go back), 11 "complete" when the exchange used all of it,
-//              otherwise left at 10 for staff.
+//   MONEY      no payments at all. The credit and the exchange order are both left
+//              owing and cancel each other out against the original paid sale — Dec,
+//              30 Sep: payments between them are "just extra noise". (The older hand-made
+//              pairs did carry an OTHER payment/receipt; that is deliberately not copied.)
+//   STATUS     credit 121 "Refund requested" when anything is being refunded (accounts
+//              are emailed to pay it), 11 "complete" for a swap whose replacement is on
+//              the exchange order, otherwise left at 10 for staff.
 //
 // "Something else" swaps get the exchange order with a text line saying what the
 // customer asked for and nothing priced — staff add the item themselves.
@@ -193,7 +194,7 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
   done.steps.push("credit");
 
   // 2. The exchange order.
-  let transferred = 0;
+  let exchangePriced = 0, allPriced = true;
   if (plan.exchange) {
     const note = `EXCHANGE ORDER CREDITED VIA SC#${sc}`;
     const ex = await bp("POST", "/order-service/order", header({
@@ -209,6 +210,7 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
         await bp("POST", `/order-service/order/${ex}/row`, rowBody({ productId: Number(pick), qty: l.qty, net, tax, taxCode: l.taxCode, nominalCode: l.nominalCode }));
         exGross += net + tax;
       } else {
+        allPriced = false;
         // Nothing to price: say what they want, at £0, for staff to turn into an item.
         const wants = l.choice === "Something else" ? l.text : `${String(l.choice || "").toLowerCase()} from ${l.from ? l.from.size : "the one returned"}`;
         await bp("POST", `/order-service/order/${ex}/row`, rowBody({ productId: 1000, productName: `TO ADD: customer wants ${wants} (instead of ${l.name})`, qty: l.qty, net: 0, tax: 0, taxCode: l.taxCode, nominalCode: l.nominalCode }));
@@ -217,22 +219,18 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
     await bp("POST", `/order-service/order/${ex}/row`, rowBody({ productId: 1000, productName: note, qty: 1, net: 0, tax: 0, taxCode: "T20", nominalCode: "4000" }));
     done.steps.push("exchange order");
 
-    // 3. The credit pays for the exchange — never more than the credit is worth.
-    transferred = round2(Math.min(exGross, plan.credit.gross));
-    if (transferred > 0) {
-      const today = new Date().toISOString().slice(0, 10);
-      const journalRef = bpSafeText(`Online return ${returnRef || ""} exchange`).trim();
-      await bp("POST", "/accounting-service/customer-payment", { paymentMethodCode: "OTHER", paymentType: "PAYMENT", orderId: sc, currencyIsoCode: "GBP", exchangeRate: 1, amountPaid: transferred, paymentDate: today, journalRef });
-      await progress({ bp_transfer_out: true });
-      await bp("POST", "/accounting-service/customer-payment", { paymentMethodCode: "OTHER", paymentType: "RECEIPT", orderId: ex, currencyIsoCode: "GBP", exchangeRate: 1, amountPaid: transferred, paymentDate: today, journalRef });
-      done.steps.push(`moved GBP ${money(transferred)} from the credit to the exchange order`);
-    }
+    // No payments between the two (Dec, 30 Sep): the credit (money owed back) and the
+    // exchange order (money owed in) are left unpaid and cancel each other out against the
+    // original, already-paid sale. A PAYMENT/RECEIPT pair is just two more transactions.
+    exchangePriced = round2(exGross);
   }
-  done.transferred = transferred;
+  done.exchangeGross = exchangePriced;
 
-  // 4. Credit status: refunds still owe money; a fully-used exchange credit is finished.
+  // 3. Credit status: a refund still has money to pay back (accounts are emailed); a
+  // swap whose replacement is fully on the exchange order is finished; anything with a
+  // "TO ADD" line is left open for staff.
   const refund = plan.credit.rows.some((r) => (r.outcomes || [r.outcome]).includes("refund"));
-  const status = refund ? 121 : (transferred >= plan.credit.gross - 0.005 ? 11 : null);
+  const status = refund ? 121 : (plan.exchange && allPriced ? 11 : null);
   if (status) {
     // Everything exists by now; a status that will not set is reported, not fatal.
     try { await bp("PUT", `/order-service/order/${sc}/status`, { orderStatusId: status }); done.creditStatus = status; }

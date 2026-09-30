@@ -400,10 +400,15 @@ export function registerReturnsRoutes(app, deps) {
           : `Exchange SO#${done.exchangeId}: ADD THE ITEM - customer wants ${l.choice === "Something else" ? l.text : String(l.choice).toLowerCase()}`);
       }
 
+      const unpaid = !/^PAID$/i.test(String(plan.order.paid || ""));
+      if (unpaid) summary.push(`ORIGINAL ORDER NOT PAID (${plan.order.paid || "unknown"}) - check before any refund`);
+
       // Refunds: accounts pay the money back. Tell them what, how much and how it was paid.
       const refundLines = (row.lines || []).filter((l) => l.outcome === "refund");
       let accounts = null;
-      if (refundLines.length) {
+      if (refundLines.length && unpaid) {
+        summary.push("Accounts NOT emailed: nothing was paid on the original order, so there is nothing to refund");
+      } else if (refundLines.length) {
         const unit = Object.fromEntries(plan.credit.rows.map((r) => [r.rowId, r.unitNet + r.unitTax]));
         const amount = Math.round(refundLines.reduce((a, l) => a + (unit[String(l.rowId)] || 0) * Number(l.qty), 0) * 100) / 100;
         accounts = { to: process.env.RETURNS_ACCOUNTS_EMAIL || "accounts@tuffshop.co.uk", amount, sent: false };
@@ -432,7 +437,7 @@ export function registerReturnsRoutes(app, deps) {
                 <tr><td ${td}>Return</td><td ${td}>${row.ref}</td></tr>
               </table>
               <p>Items refunded:</p><ul>${refundLines.map((l) => `<li>${l.qty} &times; ${String(l.name).replace(/</g, "&lt;")} (${String(l.reason || "").replace(/</g, "&lt;")})</li>`).join("")}</ul>
-              ${done.exchangeId ? `<p>The rest of this return was a swap - exchange order SO ${link(done.exchangeId)} has been created and paid from the credit.</p>` : ""}
+              ${done.exchangeId ? `<p>The rest of this return was a swap - exchange order SO ${link(done.exchangeId)} has been created against the credit (no payment needed).</p>` : ""}
               <p>Please process the refund and mark the credit complete. Thanks.</p></div>`,
           });
           accounts.sent = true;
