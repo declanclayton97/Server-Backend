@@ -121,3 +121,8 @@
 .rt-thumb button { position: absolute; top: -8px; right: -8px; width: 24px; height: 24px; border-radius: 50%; border: 0 !important;
   background: #000 !important; color: #fff !important; font-weight: 700; line-height: 24px !important; padding: 0 !important; cursor: pointer; font-size: 14px; }
 .rt-thumb button::before, .rt-thumb button::after { display: none !important; }
+
+/* The theme's heading font is set tight (negative letter-spacing); on these short
+   uppercase headings it reads cramped (Dec, 30 Sep), so open it up a little. */
+.rt .page-title, .rt .rt-h, .rt .rt-steps h3, .rt .rt-side h3, .rt .rt-q, .rt .rt-bigref { letter-spacing: 0.04em !important; }
+.rt .page-title { letter-spacing: 0.02em !important; }
