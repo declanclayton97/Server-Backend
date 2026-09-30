@@ -190,6 +190,11 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
   // 1. The credit.
   const sc = await bp("POST", "/order-service/order", header({ orderTypeCode: "SC", reference: bpSafeText(plan.credit.reference) }));
   done.creditId = sc; await progress({ bp_credit_id: sc });
+  // First line says what kind of credit it is, so nobody refunds a swap by mistake
+  // (Dec, 30 Sep). £0, product 1000, like the exchange order's own marker line.
+  const kinds = new Set(plan.credit.rows.flatMap((r) => r.outcomes || [r.outcome]));
+  const kind = kinds.has("refund") && kinds.has("exchange") ? "REFUND & EXCHANGE" : kinds.has("exchange") ? "EXCHANGE" : "REFUND";
+  await bp("POST", `/order-service/order/${sc}/row`, rowBody({ productId: 1000, productName: kind, qty: 1, net: 0, tax: 0, taxCode: "T20", nominalCode: "4000" }));
   for (const r of plan.credit.rows) await bp("POST", `/order-service/order/${sc}/row`, rowBody(r));
   done.steps.push("credit");
 
