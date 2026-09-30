@@ -271,10 +271,11 @@ export function statusEmail(status, row, message = "", ctx = {}) {
     const swaps = (ctx.swaps || []).length
       ? "<ul>" + ctx.swaps.map((s) => `<li>${esc(s.name)}${s.size ? " &ndash; <b>" + esc(s.size) + "</b>" : ""}</li>`).join("") + "</ul>"
       : itemList((row.lines || []).filter((l) => l.outcome === "exchange"));
-    const waiting = (ctx.swaps || []).some((s) => s.inStock === false);
-    return { subject: `Your replacement for return ${row.ref}`,
-      html: emailShell(name, `<p>Thanks for sending back return <b>${ref}</b>. We've checked it over and set up your replacement:</p>${swaps}
-        <p>${waiting ? "Some of it needs to come in from our supplier first, so we'll send it out with free standard delivery as soon as it arrives." : "We'll send it out to you with free standard delivery."}</p>
+    // Deliberately says nothing about stock or dates: the replacement may have to be
+    // ordered in again (Dec, 30 Sep), so "being processed" is all that is certain.
+    return { subject: `Your exchange for return ${row.ref}`,
+      html: emailShell(name, `<p>Thanks for sending back return <b>${ref}</b>. We've checked it over and your exchange is now being processed:</p>${swaps}
+        <p>It'll be sent out to you with free standard delivery.</p>
         ${refunding ? refundPara : ""}${extra}`) };
   }
   if (status === "rejected") {

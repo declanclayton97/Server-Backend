@@ -164,7 +164,8 @@ assertEq("a one-letter name still masks", maskEmail("j@x.com"), "j•••@x.co
   assertTrue('exchange email lists only the swapped items', statusEmail('exchanged', row).html.includes('Boots') && !statusEmail('exchanged', row).html.includes('Hat'));
   const sw = statusEmail('exchanged', row, '', { swaps: [{ name: 'Boots', size: 'UK 9', inStock: false }] }).html;
   assertTrue('exchange email names the new size', sw.includes('<b>UK 9</b>'));
-  assertTrue('out of stock says it comes in first', sw.includes('come in from our supplier first'));
+  assertTrue('exchange is "being processed"', sw.includes('your exchange is now being processed'));
+  assertFalse('no stock or timing promises', /supplier|in stock|on its way/i.test(sw));
   assertEq('a rejection with no reason is not sent', statusEmail('rejected', row, ''), null);
   assertTrue('a rejection carries the reason, escaped', statusEmail('rejected', row, 'Worn <b>').html.includes('Worn &lt;b&gt;'));
   assertEq('cancelling emails nobody', statusEmail('cancelled', row), null);
