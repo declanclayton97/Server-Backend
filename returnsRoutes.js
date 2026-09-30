@@ -411,7 +411,11 @@ export function registerReturnsRoutes(app, deps) {
       } else if (refundLines.length) {
         const unit = Object.fromEntries(plan.credit.rows.map((r) => [r.rowId, r.unitNet + r.unitTax]));
         const amount = Math.round(refundLines.reduce((a, l) => a + (unit[String(l.rowId)] || 0) * Number(l.qty), 0) * 100) / 100;
-        accounts = { to: process.env.RETURNS_ACCOUNTS_EMAIL || "accounts@tuffshop.co.uk", amount, sent: false };
+        // TESTING (Dec, 30 Sep): refund emails go to Dec until he says go live. Going live = set
+        // RETURNS_ACCOUNTS_EMAIL=accounts@tuffshop.co.uk on Render (or change this default).
+        const live = "accounts@tuffshop.co.uk";
+        accounts = { to: process.env.RETURNS_ACCOUNTS_EMAIL || "dec@tuffshop.co.uk", amount, sent: false };
+        accounts.test = accounts.to.toLowerCase() !== live;
         let paidBy = "";
         try {
           const methods = Object.fromEntries(((await bpLive("GET", "/accounting-service/payment-method")) || []).map((m) => [m.code, m.name]));
@@ -424,7 +428,7 @@ export function registerReturnsRoutes(app, deps) {
         try {
           await sendMail({
             to: accounts.to, replyTo: salesMailbox(),
-            subject: `Refund to process: GBP ${amount.toFixed(2)} - return ${row.ref} - order ${row.order_ref || row.order_id}`,
+            subject: `${accounts.test ? "[TEST - would go to " + live + "] " : ""}Refund to process: GBP ${amount.toFixed(2)} - return ${row.ref} - order ${row.order_ref || row.order_id}`,
             html: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;">
               <p>Hi,</p>
               <p>A return has come back and needs refunding.</p>
