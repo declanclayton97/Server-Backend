@@ -159,6 +159,33 @@ export async function planBrightpearl(bp, ret) {
   };
 }
 
+// PCF_CRDTRSN is a SELECT: its option ids come from the field's own definition
+// (182 "Return for Exchange", 183 "Return for Refund" when read on 30 Sep), looked up
+// by NAME so a renumbered list cannot set the wrong reason. Brightpearl's write format
+// for a select is not something we have proven, so each form is tried and the value is
+// read back — it only counts once Brightpearl shows the right option.
+let reasonOptions = null;
+async function setCreditReason(bp, sc, name) {
+  try {
+    if (!reasonOptions) {
+      const meta = (await bp("GET", "/order-service/sale/custom-field-meta-data")) || [];
+      const f = meta.find((x) => x.code === "PCF_CRDTRSN");
+      reasonOptions = Object.fromEntries(Object.values((f && f.options) || {}).map((o) => [o.value, Number(o.id)]));
+    }
+  } catch { reasonOptions = null; }
+  const id = (reasonOptions && reasonOptions[name]) || { "Return for Exchange": 182, "Return for Refund": 183 }[name];
+  if (!id) return false;
+  for (const value of [{ id }, id, String(id)]) {
+    try { await bp("PATCH", `/order-service/order/${sc}/custom-field`, [{ op: "add", path: "/PCF_CRDTRSN", value }]); }
+    catch { continue; }
+    try {
+      const cf = (await bp("GET", `/order-service/order/${sc}/custom-field`)) || {};
+      if (cf.PCF_CRDTRSN && Number(cf.PCF_CRDTRSN.id) === Number(id)) return true;
+    } catch { /* try the next form */ }
+  }
+  return false;
+}
+
 const addressOf = (d) => d && {
   addressFullName: d.addressFullName || "", companyName: d.companyName || "",
   addressLine1: d.addressLine1 || "", addressLine2: d.addressLine2 || "", addressLine3: d.addressLine3 || "", addressLine4: d.addressLine4 || "",
@@ -196,6 +223,12 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
   const kind = kinds.has("refund") && kinds.has("exchange") ? "REFUND & EXCHANGE" : kinds.has("exchange") ? "EXCHANGE" : "REFUND";
   await bp("POST", `/order-service/order/${sc}/row`, rowBody({ productId: 1000, productName: kind, qty: 1, net: 0, tax: 0, taxCode: "T20", nominalCode: "4000" }));
   for (const r of plan.credit.rows) await bp("POST", `/order-service/order/${sc}/row`, rowBody(r));
+  // Credit Reason (PCF_CRDTRSN, a dropdown) as the team sets it by hand. Mixed returns
+  // count as a refund: money is owed back, and the first line says REFUND & EXCHANGE.
+  const reasonName = kinds.has("refund") ? "Return for Refund" : "Return for Exchange";
+  if (!(await setCreditReason(bp, sc, reasonName))) {
+    (done.warnings = done.warnings || []).push(`Credit Reason not set on SC#${sc} - set it to "${reasonName}" by hand`);
+  } else done.creditReason = reasonName;
   done.steps.push("credit");
 
   // 2. The exchange order.
@@ -240,7 +273,7 @@ export async function executeBrightpearl(bp, plan, { choices = {}, returnRef, pr
   if (status) {
     // Everything exists by now; a status that will not set is reported, not fatal.
     try { await bp("PUT", `/order-service/order/${sc}/status`, { orderStatusId: status }); done.creditStatus = status; }
-    catch (e) { done.warnings = [`Credit status ${status} not set: ${String(e.message).slice(0, 160)}`]; }
+    catch (e) { (done.warnings = done.warnings || []).push(`Credit status ${status} not set: ${String(e.message).slice(0, 160)}`); }
   }
 
   // 4. Notes: the cross-reference the team writes by hand (SO 492360), on all three
