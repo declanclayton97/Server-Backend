@@ -211,6 +211,19 @@ assertEq('style name drops Size-', styleName('Snickers 6241 Trousers (Black) Siz
   assertEq("XL up one is 2XL", moveSize({ size: "XL", colourId: 1 }, [{ size: "XL", colourId: 1, productId: 1 }, { size: "2XL", colourId: 1, productId: 2 }, { size: "2XL", colourId: 9, productId: 3 }], 1).productId, 2);
 }
 
+
+// --- delivery is never refunded (Dec, 30 Sep) ----------------------------------
+{
+  const { planBrightpearl } = await import("./returnsBp.js");
+  const order = { id: 500, reference: "000124530", orderPaymentStatus: "PAID", parties: { customer: { contactId: 1 } }, orderRows: {
+    11: { productId: 18404, productName: "Uneek UC301 XL", quantity: { magnitude: "1" }, rowValue: { taxCode: "T20", rowNet: { value: "5.83" }, rowTax: { value: "1.16" } }, nominalCode: "4000" },
+    12: { productId: 1001, productName: "Shipping: Delivery - Mainland UK", quantity: { magnitude: "1" }, rowValue: { taxCode: "T20", rowNet: { value: "4.16" }, rowTax: { value: "0.83" } }, nominalCode: "4040" } } };
+  const plan = await planBrightpearl(async (m, path) => { if (path === "/order-service/order/500") return [order]; throw new Error(path); },
+    { order_id: 500, lines: [{ rowId: "11", qty: 1, name: "Uneek UC301 XL", outcome: "refund", reason: "Changed my mind" }] });
+  assertEq("a one-item order credits the item only", plan.credit.rows.map((r) => r.productId), [18404]);
+  assertEq("no delivery in the credit", plan.credit.gross, 6.99);
+}
+
 assertEq("despatchDate takes the earliest invoice",
   despatchDate({ invoices: [{ taxDate: "2026-09-12T00:00:00+01:00" }, { taxDate: "2026-09-05T00:00:00+01:00" }] }), "2026-09-05");
 
