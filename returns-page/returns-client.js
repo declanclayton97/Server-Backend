@@ -4,16 +4,22 @@
   // supplies the header. Embedded, it reports its height so the frame fits it.
   var embedded = document.documentElement.classList.contains("rt-embed");
   var API = embedded ? (window.RT_API_BASE || "") : "";
+  // Messages go only to the Tuffshop page framing us, never "*" (security review, 30 Sep).
+  var PARENT = (function () {
+    try { var o = (location.ancestorOrigins && location.ancestorOrigins[0]) || new URL(document.referrer).origin; return /^https:\/\/([a-z0-9-]+\.)*tuffshop\.co\.uk$/.test(o) ? o : null; }
+    catch (e) { return null; }
+  })();
+  function tell(msg) { if (embedded && PARENT && window.parent !== window) window.parent.postMessage(msg, PARENT); }
   function fit() {
     if (!embedded || window.parent === window) return;
     // The form's own bottom edge: the theme gives the page a minimum height, so the
     // document's height overstates it and leaves a gap under the form.
     var rt = document.querySelector(".rt");
     var h = rt ? Math.ceil(rt.getBoundingClientRect().bottom + window.pageYOffset) + 10 : document.documentElement.scrollHeight;
-    window.parent.postMessage({ tuffReturnsHeight: h }, "*");
+    tell({ tuffReturnsHeight: h });
   }
   function top() {
-    if (embedded) window.parent.postMessage({ tuffReturnsScrollTop: true }, "*");
+    if (embedded) tell({ tuffReturnsScrollTop: true });
     else window.scrollTo({ top: 0, behavior: "smooth" });
   }
 

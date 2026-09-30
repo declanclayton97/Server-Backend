@@ -213,6 +213,8 @@ export function registerReturnsRoutes(app, deps) {
     try {
       const chrome = await getSiteChrome();
       res.set("Cache-Control", "no-cache");
+      // Only Tuffshop's own pages may frame the form (no clickjacking from other sites).
+      res.set("Content-Security-Policy", "frame-ancestors 'self' https://tuffshop.co.uk https://*.tuffshop.co.uk");
       // ?embed=1 is the version framed inside tuffshop.co.uk/returns-form.
       res.type("html").send((req.query.embed ? wrapForEmbed : wrapInChrome)(chrome, {
         title: "Returns & Exchanges | Tuffshop",

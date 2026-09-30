@@ -1,14 +1,46 @@
-<!-- Tuffshop returns form. Paste into the Magento CMS page "returns-form" (HTML Code element). -->
-<iframe id="tuff-returns" src="https://server-backend-1i47.onrender.com/returns?embed=1" title="Returns form"
-        style="width:100%;border:0;min-height:600px;display:block;" scrolling="no"></iframe>
+<iframe
+  id="tuff-returns"
+  src="https://server-backend-1i47.onrender.com/returns?embed=1"
+  title="Returns form"
+  style="width:100%;border:0;min-height:600px;display:block;"
+></iframe>
+
 <script>
 (function () {
-  var f = document.getElementById('tuff-returns');
-  window.addEventListener('message', function (e) {
-    if (!/^https:\/\/(server-backend-1i47\.onrender\.com|returns\.tuffshop\.co\.uk)$/.test(e.origin) && e.origin !== location.origin) return;
-    var d = e.data || {};
-    if (d.tuffReturnsHeight) f.style.height = d.tuffReturnsHeight + 'px';
-    if (d.tuffReturnsScrollTop) window.scrollTo({ top: f.getBoundingClientRect().top + window.pageYOffset - 120, behavior: 'smooth' });
+  const frame = document.getElementById('tuff-returns');
+  if (!frame) return;
+
+  const allowedOrigin = new URL(frame.src).origin;
+  let lastScroll = -Infinity;
+
+  window.addEventListener('message', function (event) {
+    if (event.origin !== allowedOrigin) return;
+    if (event.source !== frame.contentWindow) return;
+
+    const data = event.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+
+    const height = data.tuffReturnsHeight;
+    if (
+      typeof height === 'number' &&
+      Number.isFinite(height) &&
+      height >= 200 &&
+      height <= 10000
+    ) {
+      frame.style.height = Math.ceil(height) + 'px';
+    }
+
+    const now = performance.now();
+    if (data.tuffReturnsScrollTop === true && now - lastScroll > 1000) {
+      lastScroll = now;
+      window.scrollTo({
+        top: Math.max(
+          0,
+          frame.getBoundingClientRect().top + window.scrollY - 120
+        ),
+        behavior: 'smooth'
+      });
+    }
   });
 })();
 </script>
