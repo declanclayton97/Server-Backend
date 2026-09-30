@@ -3626,7 +3626,57 @@ async function placePencarrieOrder(pool, altItemsUrl, { padToThreshold = 0, live
   catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with PenCarrie — order ${ref}. Reference-set failed: ${e.message}`, PENCARRIE_SUPPLIER_CONTACT).catch(() => {}); }
   steps.link = { reference: ref, refWritten, orderNo, status: 7 };
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'PENCARRIE', poId, noteContactId: PENCARRIE_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  // NOW, while the order is still editable (TW492805 was at 09:04 and was not by 10:08), pull every
+  // back order PenCarrie has marked available onto it. Never fatal: the order is placed and final.
+  // OFF until rebuilt (Dec, 2026-09-30 16:00): the site releases back orders into an open WEB basket
+  // that is then confirmed as its own order — they never join an API-placed order, so shipping them
+  // onto TUWO_TW<poId> is the wrong model. Enable with PENCARRIE_BO_RELEASE=true once rebuilt.
+  if (live && !sandbox && process.env.PENCARRIE_BO_RELEASE === 'true') steps.backorderRelease = await releasePencarrieBackorders(pool, poId).catch((e) => ({ error: e.message }));
   return { poId, orderNo, steps };
+}
+
+// PenCarrie back orders never ship by themselves: once stock lands they wait on the website's Back
+// Orders page to be ADDED to an open order (user, 2026-09-30). This releases every available one onto
+// today's order TUWO_TW<poId> via the web worker (the site's own "Add to order" call, verified by
+// reading the order back), then in Brightpearl moves each released line off its back-order PO onto
+// this PO, named and noted so it is traceable from the new PO (user: "removing from the original back
+// order PO, adding to the PO its been added on to, the reference adding to the order it is from").
+// `released` (a list of {sku, qty, fromRef, lineRef} already added at PenCarrie) skips the worker and
+// does only the Brightpearl moves — for a release done before this code was live.
+async function releasePencarrieBackorders(pool, poId, { execute = true, released = null } = {}) {
+  const job = Array.isArray(released) ? { ok: true, sent: released.map((l) => ({ ...l, verified: true })) } : await workerPlaceOrder({ supplier: 'PENCARRIEWEB', ref: `bo-release-${poId}`, lines: [{ x: 1 }], execute,
+    opts: { shipBackorders: { orderCode: `TUWO_TW${poId}` } } });
+  if (!execute) {
+    const plan = [];
+    for (const w of (job && job.wouldShip) || []) {
+      const parentPoId = Number(String(w.lineRef || w.fromRef || '').replace(/D/g, '')) || null;
+      plan.push({ ...w, bp: parentPoId ? await bp.moveBackorderToPoLive({ parentPoId, supplierSku: w.sku, qty: w.qty, toPoId: poId, supplierRef: `PenCarrie ${w.fromRef}`, contactId: PENCARRIE_SUPPLIER_CONTACT, execute: false }).catch((e) => ({ error: e.message })) : { refused: true, reason: 'no PO in reference' } });
+    }
+    return { dryRun: true, orderCode: `TUWO_TW${poId}`, worker: job && (job.error || job.orderStatus), plan };
+  }
+  const sent = (job && job.sent) || [];
+  const out = { jobId: job && job.jobId, released: [], notReleased: [], moved: [], moveProblems: [], error: (job && !job.ok && job.error) || null };
+  if (!sent.length) return out;
+  for (const s of sent) {
+    if (!s.verified) { out.notReleased.push({ sku: s.sku, from: s.fromRef, status: s.status, body: s.body }); continue; }
+    out.released.push({ sku: s.sku, qty: s.qty, from: s.fromRef });
+    const parentPoId = Number(String(s.lineRef || s.fromRef || '').replace(/\D/g, '')) || null;
+    try {
+      const m = parentPoId ? await bp.moveBackorderToPoLive({ parentPoId, supplierSku: s.sku, qty: s.qty, toPoId: poId, supplierRef: `PenCarrie ${s.fromRef}`, contactId: PENCARRIE_SUPPLIER_CONTACT, execute: true })
+        : { refused: true, reason: `can't tell the original PO from reference "${s.fromRef}"` };
+      (m.done ? out.moved : out.moveProblems).push({ sku: s.sku, qty: s.qty, from: s.fromRef, ...m });
+    } catch (e) { out.moveProblems.push({ sku: s.sku, qty: s.qty, from: s.fromRef, error: e.message }); }
+  }
+  const lines = (a) => a.map((x) => `${x.qty} × ${x.sku} (from ${x.from}${x.boPoId ? `, BO PO#${x.boPoId}` : ''}${x.reason || x.error ? ` — ${x.reason || x.error}` : ''})`).join('; ');
+  if (out.released.length) await logPurchasingError(pool, {
+    supplier: 'PENCARRIE', step: 'backorders-released', severity: out.moveProblems.length || out.notReleased.length ? 'review' : 'info', placed: true,
+    message: `Released ${out.released.length} PenCarrie back order(s) onto TW${poId}: ${lines(out.released)}.`
+      + (out.moved.length ? ` Moved in Brightpearl to PO#${poId}: ${lines(out.moved)}.` : '')
+      + (out.moveProblems.length ? ` NOT moved in Brightpearl — move by hand from the back-order PO to PO#${poId}: ${lines(out.moveProblems)}.` : '')
+      + (out.notReleased.length ? ` PenCarrie did not take: ${lines(out.notReleased)}.` : ''),
+    context: { poId, ...out },
+  }).catch(() => {});
+  return out;
 }
 
 // ── Blaklader placement chain (api.blaklader.com order API — no scraping) ─────
@@ -4396,6 +4446,45 @@ export async function portwestPrepare({ pool, altItemsUrl, poId = null, packSize
 export async function portwestPlaceExisting({ pool, altItemsUrl, poId, packSizes = {}, excludeSkus = [] }) { return placePortwestOrder(pool, altItemsUrl, { poId, packSizes, excludeSkus }); }
 // Fristads against an existing unsent auto-PO; `discontinued` runs the discontinued route for those SKUs.
 export async function fristadsPlaceExisting({ pool, altItemsUrl, poId, discontinued = [] }) { return placeFristadsOrder(pool, altItemsUrl, { poId, discontinued }); }
+// The discontinued route for a PO that has ALREADY been placed — the supplier says so afterwards,
+// usually by email (Hellberg PO 493057, 2026-09-30: "this item is now discontinued"). The SOs were
+// finalised as ordered, so beyond the usual (PO row off, recorded, sales emailed) each affected SO
+// must come back OFF "Ordered Stock Awaiting Delivery" onto DISCONTINUED_PARK_STATUS with a note,
+// or it sits looking complete. SOs come from the PO's own contributor note. Dry run unless execute.
+export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey, poId, skus = [], contactId, execute = false }) {
+  const want = new Set(skus.map((s) => String(s).toUpperCase()));
+  if (!poId || !want.size || !supplierKey) throw new Error('poId, supplierKey and skus required');
+  const contrib = await bp.getPoContributors(poId);
+  const rows = await bp.getOrderCartLines(poId);
+  const onPo = rows.filter((r) => want.has(String(r.sku).toUpperCase()));
+  if (onPo.length !== want.size) throw new Error(`not every SKU is on PO#${poId}: found ${onPo.map((r) => r.sku).join(', ') || 'none'}`);
+  const soLines = [];
+  for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
+    for (const it of items) { const r = rows.find((x) => String(x.sku).toUpperCase() === String(it.sku).toUpperCase()) || {}; soLines.push({ order: Number(order), sku: it.sku, qty: it.qty, name: r.name || null }); }
+  }
+  const affected = [...new Set(soLines.filter((l) => want.has(String(l.sku).toUpperCase())).map((l) => l.order))];
+  const plan = { poId, supplierKey, skus: onPo.map((r) => ({ sku: r.sku, qty: r.qty, name: r.name })), affectedOrders: affected, poLinesLeft: rows.length - onPo.length };
+  if (!execute) return { dryRun: true, ...plan };
+  const done = await handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, dead: onPo.map((r) => ({ sku: r.sku, name: r.name, status: 'Discontinued (supplier, after ordering)' })), po: { soLines } });
+  const em = done.emailed || null;
+  const emailLine = em && (em.accepted || []).length ? `sales@ have been emailed (${em.accepted.join(', ')}).` : 'THE EMAIL TO sales@ DID NOT SEND — this note is the only record, so tell them.';
+  const parked = [];
+  for (const id of affected) {
+    const what = soLines.filter((l) => l.order === id && want.has(String(l.sku).toUpperCase())).map((l) => `${l.sku}${l.qty > 1 ? ` x${l.qty}` : ''}${l.name ? ` (${l.name})` : ''}`).join(', ');
+    try {
+      await bp.addOrderNoteLive(id, `DISCONTINUED at ${supplierKey} (told us after it was ordered on PO#${poId}) — NOT coming: ${what}. ${emailLine} This order is on "${DISCONTINUED_PARK_LABEL}" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, contactId);
+      await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS);
+      parked.push({ id, status: DISCONTINUED_PARK_STATUS });
+    } catch (e) { parked.push({ id, error: e.message }); }
+  }
+  await bp.addOrderNoteLive(poId, `Supplier reported DISCONTINUED after ordering: ${plan.skus.map((s) => s.sku).join(', ')} — removed from this PO.${plan.poLinesLeft ? '' : ' This PO now has no lines — nothing will arrive against it.'}`, contactId).catch(() => {});
+  await logPurchasingError(pool, { supplier: supplierKey, step: 'discontinued-after-placing', severity: 'review', placed: true,
+    message: `${supplierKey} said ${plan.skus.map((s) => s.sku).join(', ')} is discontinued after PO#${poId} was sent. Removed from the PO; SO ${affected.join(', ') || '(none)'} moved to ${DISCONTINUED_PARK_LABEL}. ${emailLine}`,
+    context: { poId, ...plan, done, parked } }).catch(() => {});
+  return { ...plan, done, parked };
+}
+
+export async function pencarrieReleaseBackorders({ pool, poId, execute = false, released = null }) { return releasePencarrieBackorders(pool, poId, { execute: execute === true, released }); }
 // Blaklader against an existing unsent auto-PO (the basket step clears and verifies first).
 export async function blakladerPlaceExisting({ pool, altItemsUrl, poId }) { return placeBlakladerOrder(pool, altItemsUrl, { poId, live: true }); }
 // Snickers against an existing unsent auto-PO; `discontinued` runs the discontinued route for those SKUs.

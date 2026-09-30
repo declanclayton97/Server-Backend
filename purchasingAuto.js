@@ -20,6 +20,7 @@
 // fails on an empty field).
 
 import { getOrderAllocations } from './bpWebSession.js';
+import { bpSafeText } from './bpText.js';
 
 const DC = process.env.BP_TEST_DATACENTER || 'euw1';
 const ACCOUNT = process.env.BP_TEST_ACCOUNT || 'tuffbsitc';
@@ -360,6 +361,7 @@ export async function auditSupplierTags() {
 
 // ---- low-level API with throttle back-off ----
 async function api(method, path, body, attempt = 0) {
+  body = bpSafeBody(path, body);
   const opts = { method, headers: HEADERS() };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch(`${BASE()}${path}`, opts);
@@ -1002,6 +1004,55 @@ export async function debugLiveCustomFields(statusId, find) {
 // Add a private note to any order (PO or SO) via the API — the reliable way to record the
 // supplier's order number against a PO (the legacy web-form "reference" write only renders
 // its editable form when the PO is open in a real browser, so it fails from a headless run).
+// A PenCarrie back order released onto a NEW order (user, 2026-09-30): the line must leave its
+// back-order PO (status 45, child of the original PO) and join the PO it will now arrive on, named so
+// the new PO says where it came from. Order of writes: ADD to the new PO first, then take it off the
+// back-order PO — a failure in between leaves it on both (visible, fixable) rather than on neither.
+// Finds the back-order PO as a status-45 child of `parentPoId` for `contactId` whose row's PRODUCT
+// SKU matches the supplier SKU once separators are stripped ("GD05 CHA L" = "GD05-CHA-L"); the row's
+// own productSku is the per-supplier code (often bare "GD05") and can't be trusted to pick a size.
+// Refuses anything ambiguous. Dry-run unless { execute: true }.
+export async function moveBackorderToPoLive({ parentPoId, supplierSku, qty, toPoId, supplierRef = '', contactId, execute = false } = {}) {
+  const norm = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const q = Number(qty);
+  if (!parentPoId || !supplierSku || !(q > 0) || !toPoId || !contactId) throw new Error('parentPoId, supplierSku, qty>0, toPoId and contactId required');
+  const s = await liveGet(`/order-service/order-search?orderTypeId=2&contactId=${contactId}&orderStatusId=45&pageSize=500`);
+  const cols = ((s && s.metaData && s.metaData.columns) || []).map((c) => c.name);
+  const kids = ((s && s.results) || []).filter((r) => Number(r[cols.indexOf('parentOrderId')]) === Number(parentPoId)).map((r) => r[cols.indexOf('orderId')]).sort((a, b) => a - b);
+  if (!kids.length) return { refused: true, reason: `no back-order PO (status 45) under PO#${parentPoId}` };
+  const pos = await liveGet(`/order-service/order/${kids.join(',')}`);
+  const rows = [];
+  for (const po of pos || []) for (const [rowId, r] of Object.entries(po.orderRows || {})) if (Number(r.productId) > 1001) rows.push({ boPoId: po.id, rowId, r });
+  const pids = [...new Set(rows.map((x) => Number(x.r.productId)))].sort((a, b) => a - b);
+  const prods = pids.length ? await liveGet(`/product-service/product/${pids.join(',')}`) : [];
+  const skuOf = new Map((prods || []).map((p) => [Number(p.id), (p.identity && p.identity.sku) || '']));
+  const hits = rows.filter((x) => norm(skuOf.get(Number(x.r.productId))) === norm(supplierSku));
+  if (!hits.length) return { refused: true, reason: `no row for ${supplierSku} on back-order PO(s) ${kids.join(', ')}` };
+  if (hits.length > 1) return { refused: true, reason: `${hits.length} back-order rows match ${supplierSku} — refusing to guess` };
+  const { boPoId, rowId, r } = hits[0];
+  const rowQty = parseFloat(r.quantity.magnitude);
+  if (rowQty < q) return { refused: true, reason: `back-order row has ${rowQty}, released ${q}` };
+  const unit = parseFloat(r.rowValue.rowNet.value) / rowQty;
+  const taxCode = r.rowValue.taxCode || (await productTaxCodeLive(r.productId));
+  const rate = taxRate(taxCode);
+  const name = `${r.productName} — back order from PO#${boPoId} (orig PO#${parentPoId}${supplierRef ? `, ${supplierRef}` : ''})`;
+  const plan = { boPoId, rowId, productId: r.productId, sku: skuOf.get(Number(r.productId)), qty: q, rowQty, unitCost: Number(unit.toFixed(4)), toPoId, name };
+  if (!execute) return { dryRun: true, ...plan };
+  const rowBody = (n) => ({ productId: r.productId, quantity: { magnitude: String(n) },
+    rowValue: { taxCode, rowNet: { currency: 'GBP', value: (unit * n).toFixed(2) }, rowTax: { currency: 'GBP', value: (unit * n * rate).toFixed(2) } } });
+  await liveWrite('POST', `/order-service/order/${toPoId}/row`, { ...rowBody(q), productName: name });
+  await liveWrite('DELETE', `/order-service/order/${boPoId}/row/${rowId}`);
+  if (rowQty > q) await liveWrite('POST', `/order-service/order/${boPoId}/row`, { ...rowBody(rowQty - q), productName: r.productName });
+  const [to, bo] = await Promise.all([liveGet(`/order-service/order/${toPoId}`), liveGet(`/order-service/order/${boPoId}`)]);
+  const onTo = Object.values((to[0] && to[0].orderRows) || {}).some((x) => Number(x.productId) === Number(r.productId) && bpSafeText(x.productName) === bpSafeText(name));
+  const boLeft = Object.values((bo[0] && bo[0].orderRows) || {}).filter((x) => Number(x.productId) > 1001).length;
+  const tag = `${plan.sku} x${q}`;
+  await addOrderNoteLive(toPoId, `Back order added to this PO: ${tag} from back-order PO#${boPoId} (orig PO#${parentPoId}${supplierRef ? `, ${supplierRef}` : ''}). Released at the supplier onto this order.`, contactId).catch(() => {});
+  await addOrderNoteLive(boPoId, `${tag} released at the supplier and MOVED to PO#${toPoId} — it arrives on that PO now.${boLeft ? '' : ' This back-order PO has no lines left.'}`, contactId).catch(() => {});
+  await addOrderNoteLive(parentPoId, `Back order ${tag} (from PO#${boPoId}) moved to PO#${toPoId}.`, contactId).catch(() => {});
+  return { done: onTo, ...plan, boPoLinesLeft: boLeft };
+}
+
 export async function addOrderNoteLive(orderId, text, contactId) {
   const addedOn = new Date().toISOString().replace('Z', '+00:00');
   return liveWrite('POST', `/order-service/order/${orderId}/note`, { text: String(text), addedOn, contactId: contactId || 1, isPublic: false });
@@ -1241,7 +1292,17 @@ export async function previewLive(supplierKey, orderIds) {
 
 // Live WRITE client (POST/PATCH/PUT). Only reachable through createComboPOLive,
 // which is itself gated behind an explicit execute flag on the route.
+// Brightpearl's order screen shows notes and row names as Latin-1, so "—" reads "â€”" and "£" reads
+// "Â£" (Dec, 30 Sep: "notes on orders still use the unmapped characters"). Every note and every row
+// name this module writes goes through here, in whichever client sends it.
+function bpSafeBody(path, body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+  if (/\/note$/.test(path) && typeof body.text === 'string') return { ...body, text: bpSafeText(body.text) };
+  if (/\/row(\/\d+)?$/.test(path) && typeof body.productName === 'string') return { ...body, productName: bpSafeText(body.productName) };
+  return body;
+}
 async function liveWrite(method, path, body, attempt = 0) {
+  body = bpSafeBody(path, body);
   const opts = { method, headers: LIVE_HEADERS() };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch(`${LIVE_BASE()}${path}`, opts);
