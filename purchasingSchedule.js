@@ -814,7 +814,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
       supplier: 'FRISTADS', step: 'out-of-stock-dropped', severity: 'error',
       message: `${shortLines.length} line(s) are out of stock at Fristads and were taken OFF PO#${poId} so the rest of the order could go through. `
         + (bo.created
-          ? `They are on back-order PO#${bo.poId} and will be placed with Fristads as a separate back order once this order is through:\n`
+          ? `They are on back-order PO#${bo.poId} and will be placed with Fristads as back-order lines — on the SAME order where the basket takes them (one carriage), otherwise as a separate back order:\n`
           : `The back-order PO could NOT be created (${bo.error || bo.reason}) — these are NOT ordered and nothing will chase them automatically:\n`)
         + shortLines.map((s) => `      ${s.qty} × ${s.sku} (${s.size || '?'}) ${s.name || ''} — Fristads have ${s.avail}`
           + (s.deldate ? `, next delivery ${s.deldate}` : '')).join('\n'),
@@ -833,6 +833,32 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
   if (cart.cartCount !== expectUnits) throw stepErr('cart', `cart quantity mismatch: portal shows ${cart.cartCount}, expected ${expectUnits} — some lines didn't add`
     + (refused.length ? `. Fristads refused ${refused.length} group(s): ${refused.map((r) => `${r.key} — ${JSON.stringify(r.resp && r.resp.messages || r.reason || r.status)}`).join('; ').slice(0, 300)}` : ''),
     { poId, cartCount: cart.cartCount, expectUnits, refused, sent: orderable.map((l) => ({ sku: l.sku, size: l.size, qty: l.qty })) });
+
+  // ONE ORDER, ONE CARRIAGE (user, 2026-09-30). The out-of-stock lines used to go as a SECOND
+  // Fristads order after this one, and each order is charged carriage — the small back-order one
+  // almost always under the free threshold. They cannot share the in-stock POST (a zero-stock size
+  // turns its whole article+colour group into the phase-out question), but they CAN share the
+  // basket: a second add, clearFirst:false, puts them in as back-order lines, answered with "the
+  // original". One checkout then places the lot as a single order. Brightpearl still splits them
+  // onto the child PO at 45 for receiving. If the second add does not verify exactly, the basket is
+  // rebuilt in-stock-only and the old separate back order runs below — never a short main order.
+  let boCombined = false;
+  if (shortLines.length && steps.backorder && steps.backorder.created) {
+    const boLinesAdd = shortLines.map((s) => ({ sku: s.sku, size: s.size, qty: s.qty }));
+    const boUnitsAdd = boLinesAdd.reduce((a, l) => a + l.qty, 0);
+    try {
+      const bcart = await jfetch('backorder-cart', `${altItemsUrl}/api/fristads-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: false, lines: boLinesAdd }) });
+      if ((bcart.unresolved || []).length || bcart.cartCount !== expectUnits + boUnitsAdd) {
+        throw new Error(`basket holds ${bcart.cartCount}, expected ${expectUnits + boUnitsAdd} (${expectUnits} in stock + ${boUnitsAdd} back order)`);
+      }
+      boCombined = true;
+      steps.backorder.combined = { cartCount: bcart.cartCount, backOrdered: (bcart.results || []).filter((r) => r.backOrdered).length };
+    } catch (e) {
+      steps.backorder.combineFailed = e.message;
+      const again = await jfetch('cart', `${altItemsUrl}/api/fristads-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: orderable }) });
+      if (again.cartCount !== expectUnits) throw stepErr('cart', `the back-order lines would not join the basket (${e.message}), and rebuilding it in-stock-only left ${again.cartCount}, expected ${expectUnits} — NOT ordering`, { poId, cartCount: again.cartCount, expectUnits });
+    }
+  }
 
   // 3. checkout / placeorder (Mark of goods=WORKWEAR, order ref = our PO#)
   const co = await jfetch('checkout', `${altItemsUrl}/api/fristads-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goodsMark: 'WORKWEAR', orderRef: String(poId), execute: true }) });
@@ -878,7 +904,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
   // that was simply the coverall we deliberately left off. A check that cries wolf on our own drop
   // is worse than none, because the real drift (£1.70 of stale costs) is invisible underneath it.
   const poNet = [...(po.soLines || []), ...(po.lowLines || [])]
-    .filter((l) => !droppedPids.has(String(l.productId)))
+    .filter((l) => boCombined || !droppedPids.has(String(l.productId)))   // combined: the back-order lines ARE on this order
     .reduce((a, l) => a + (l.cost || 0) * l.qty, 0);
   const fristadsTotal = parseFloat(String((order && order.sum) || '').replace(/[^\d.]/g, '')) || 0; // 0 if order# not indexed yet (skips the check)
   const priceGap = fristadsTotal ? +(fristadsTotal - poNet).toFixed(2) : 0;
@@ -892,7 +918,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
     // their line reads "100222-900" + a display size of "L" where ours is 100222-910-407 — a
     // different colour code AND a numeric size code. The article is the only key both sides share.
     // Non-fatal throughout: the order is placed and Fristads charge their price regardless.
-    const ourLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => !droppedPids.has(String(l.productId)));
+    const ourLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => boCombined || !droppedPids.has(String(l.productId)));
     const breakdown = ourLines.map((l) => `${l.qty} × ${l.sku} — our £${(l.cost || 0).toFixed(2)}/ea (${l.name})`);
     const artOf = (sku) => (String(sku).match(/^(\d{6})/) || [])[1] || null;
     let changes = [];
@@ -980,7 +1006,21 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
   // phase-out question for each zero-stock size. Proven by hand on POs 489968/489969 (2026-09-17).
   // Non-fatal: the main order is placed and linked; a back order that did not go through is logged
   // as its own error so someone places it, and the BO PO stays at 45 with no "PLACED" note.
-  if (steps.backorder && steps.backorder.created) {
+  if (boCombined) {
+    // Same Fristads order as the main one — link the child PO to it and say so; nothing more to place.
+    const boPoId = steps.backorder.poId;
+    const ref = `Fristads ${orderNo || `reservation ${reservationNo}`} (same order as PO#${poId})`;
+    steps.backorder.fristads = { placed: true, combined: true, reservationNo, orderNo: orderNo || null };
+    await bp.setOrderReferenceLive(boPoId, ref).catch((e) => { steps.backorder.fristads.refWarn = e.message; });
+    await bp.addOrderNoteLive(boPoId, `PLACED at Fristads on back order ${new Date().toISOString().slice(0, 10)} — on the SAME Fristads order as PO#${poId} (${orderNo ? `order ${orderNo}` : `reservation ${reservationNo}`}), one carriage charge. `
+      + shortLines.map((s) => `${s.qty} × ${s.sku} (${s.size || "?"})${s.deldate ? ` expected ${s.deldate}` : ""}`).join("; ")
+      + `. Status left at On Back Order deliberately.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
+    await logPurchasingError(pool, {
+      supplier: "FRISTADS", step: "back-order-placed", severity: "info", placed: true,
+      message: `Back order for PO#${boPoId} placed on the SAME Fristads order as PO#${poId} (${orderNo || `reservation ${reservationNo}`}) — one carriage: ` + shortLines.map((s) => `${s.qty} × ${s.sku}${s.deldate ? ` due ${s.deldate}` : ""}`).join(", "),
+      context: { poId: boPoId, parentPoId: poId, reservationNo, orderNo: orderNo || null, combined: true },
+    }).catch(() => {});
+  } else if (steps.backorder && steps.backorder.created) {
     const boPoId = steps.backorder.poId;
     const boLines = shortLines.map((s) => ({ sku: s.sku, size: s.size, qty: s.qty }));
     const boUnits = boLines.reduce((a, l) => a + l.qty, 0);
