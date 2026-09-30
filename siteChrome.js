@@ -141,6 +141,7 @@ export function wrapForEmbed(chrome, { title, headExtra = "", content, scripts =
   const links = chrome ? chrome.links.join("\n") + "\n" + chrome.styles.join("\n") : "";
   return `<!doctype html><html lang="en" class="rt-embed"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title><meta name="robots" content="noindex">
+<base target="_top">
 ${links}
 ${headExtra}
 <style>html.rt-embed, html.rt-embed body { background: transparent; } html.rt-embed .rt-hero .page-title { display: none; } html.rt-embed .rt { padding-left: 0; padding-right: 0; max-width: none; }</style>

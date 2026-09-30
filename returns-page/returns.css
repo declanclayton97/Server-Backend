@@ -126,3 +126,5 @@
    uppercase headings it reads cramped (Dec, 30 Sep), so open it up a little. */
 .rt .page-title, .rt .rt-h, .rt .rt-steps h3, .rt .rt-side h3, .rt .rt-q, .rt .rt-bigref { letter-spacing: 0.04em !important; }
 .rt .page-title { letter-spacing: 0.02em !important; }
+
+.rt-intro-lead { font-weight: 700; color: #000; margin-bottom: 4px !important; }
