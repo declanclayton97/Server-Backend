@@ -76,6 +76,17 @@ export function registerReturnsRoutes(app, deps) {
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_credit_id bigint`);
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_exchange_id bigint`);
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_result jsonb`);
+    // ONE-OFF (Dec, 30 Sep): clear the test returns made on his unpaid test order 490003.
+    // Runs once only - the marker row stops it ever running again, so returns made later
+    // (even on 490003) are untouched. Brightpearl is not touched.
+    await pool.query(`CREATE TABLE IF NOT EXISTS returns_maintenance (key text PRIMARY KEY, done_at timestamptz NOT NULL DEFAULT now(), detail text)`);
+    const once = await pool.query(`INSERT INTO returns_maintenance (key) VALUES ('clear-test-returns-490003-2026-09-30') ON CONFLICT (key) DO NOTHING RETURNING key`);
+    if (once.rowCount) {
+      const gone = await pool.query(`DELETE FROM returns_requests WHERE order_id = 490003 RETURNING ref`);
+      const refs = gone.rows.map((r) => r.ref).join(", ");
+      await pool.query(`UPDATE returns_maintenance SET detail = $2 WHERE key = $1`, ["clear-test-returns-490003-2026-09-30", `deleted ${gone.rowCount}: ${refs}`]);
+      console.log(`[returns] one-off: cleared ${gone.rowCount} test return(s) on order 490003: ${refs}`);
+    }
     await pool.query(`CREATE TABLE IF NOT EXISTS returns_report_cache (days int PRIMARY KEY, built_at timestamptz NOT NULL, data jsonb NOT NULL)`);
   })().catch((e) => { ready = null; throw e; }));
 
