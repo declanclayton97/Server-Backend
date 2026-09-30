@@ -429,7 +429,8 @@ export function registerReturnsRoutes(app, deps) {
       const unitGross = Object.fromEntries(plan.credit.rows.map((r) => [r.rowId, r.unitNet + r.unitTax]));
       const refundAmount = Math.round(refundLines.reduce((a, l) => a + (unitGross[String(l.rowId)] || 0) * Number(l.qty), 0) * 100) / 100;
       let accounts = null;
-      if (refundLines.length && unpaid) {
+      const testUnpaid = unpaid && !RETURNS_LIVE();   // test mode: send anyway, marked, so it can be tried
+      if (refundLines.length && unpaid && !testUnpaid) {
         summary.push("Accounts NOT emailed: nothing was paid on the original order, so there is nothing to refund");
       } else if (refundLines.length) {
         const amount = refundAmount;
@@ -450,6 +451,7 @@ export function registerReturnsRoutes(app, deps) {
             subject: `Refund to process: GBP ${amount.toFixed(2)} - return ${row.ref} - order ${row.order_ref || row.order_id}`,
             html: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;">
               <p>Hi,</p>
+              ${testUnpaid ? '<p style="background:#fff4e0;padding:8px 10px;"><b>TEST MODE:</b> the original order was never paid. Once live, this email would NOT be sent for an unpaid order.</p>' : ''}
               <p>A return has come back and needs refunding.</p>
               <table style="border-collapse:collapse;font-size:13px;">
                 <tr><td ${td}><b>Refund</b></td><td ${td}><b>&pound;${amount.toFixed(2)}</b> inc VAT</td></tr>
@@ -470,7 +472,7 @@ export function registerReturnsRoutes(app, deps) {
       // The customer already said what they wanted, so Process finishes the return:
       // a swap becomes "Exchanged", a refund "Refunded" (with accounts), and the customer
       // is told. An unpaid original order with a refund is left for a person to look at.
-      const holdForUnpaid = refundLines.length && unpaid;
+      const holdForUnpaid = refundLines.length && unpaid && RETURNS_LIVE();
       const newStatus = holdForUnpaid ? row.status : done.exchangeId ? "exchanged" : "refunded";
       let customerEmailed = null;
       const mail = holdForUnpaid ? null : statusEmail(newStatus, row, "", { refundAmount: refundLines.length ? refundAmount : 0, swaps });
