@@ -426,7 +426,7 @@ const ppsReply = buildSalesReply({ intent: "eta", order: { ...order, status: "In
 assertTrue("in stock: within 48 hours", ppsReply.text.includes("within the next 48 hours"));
 assertEq("in stock: source", ppsReply.eta.source, "in-stock");
 assertFalse("in stock: no 'date you need this by' offer", ppsReply.text.includes("date you need this by"));
-assertTrue("still offered when waiting on stock", keep.text.includes("date you need this by"));
+assertFalse("never offered, even waiting on stock (Dec, 1 Oct)", keep.text.includes("date you need this by"));
 const partReply = buildSalesReply({ intent: "part_shipped", order: { ...order, timeline: shippedNotes, lines: [{ name: "Jacket", outstanding: 2 }] }, po: mascotPo, salesperson: { name: "Bob" }, today: THU24, promised });
 assertTrue("part shipped: tracking for what went", partReply.text.includes("VJ210582045GB"));
 assertTrue("part shipped: window for the rest", partReply.text.includes("mid next week"));

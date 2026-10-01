@@ -1006,10 +1006,8 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
     proposedDates = eta.dates;
   }
 
-  // Only offer to work to their date when there is still a date to work to — not once
-  // it has been sent (tracking) or is being packed today.
-  const alreadyGoing = eta && (eta.source === "tracking" || eta.source === "in-stock");
-  if (intent !== "returns" && intent !== "plain" && !alreadyGoing) lines.push("If there is a date you need this by, tell me and I will do what I can to work to it.");
+  // No "if there is a date you need this by" offer (Dec, 1 Oct): we cannot go any
+  // quicker than the suppliers allow, so it promises something we cannot do.
   // Whoever is signed in signs it; the order's salesperson is only a fallback
   // for a draft built outside the hub.
   lines.push(`Kind regards,<br>${esc(String(signedBy || "").trim() || salesperson?.name || "")}`);
