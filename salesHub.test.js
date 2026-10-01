@@ -494,5 +494,27 @@ assertEq("plain: promises nothing", plain.proposedDates, []);
 const withFiles = buildSalesNote({ intent: "plain", to: "a@b.com", subject: "RE: hi", body: "Hi", attachments: ["proof.pdf", "photo.jpg"] });
 assertTrue("note lists attachments", withFiles.includes("Attached: proof.pdf, photo.jpg"));
 
+// --- supplier back-orders (Dec, 1 Oct: SO 491385) -------------------------------
+{
+  const { backorderSentence, parseSupplierDate } = await import("./salesHub.js");
+  const OCT1 = new Date("2026-10-01T12:00:00+01:00");
+  assertEq("supplier date dd/mm/yy", parseSupplierDate("22/01/27", OCT1), "2027-01-22");
+  assertEq("supplier date ISO", parseSupplierDate("2026-10-14", OCT1), "2026-10-14");
+  assertEq("a past date is no date", parseSupplierDate("01/09/26", OCT1), null);
+  assertEq("words are no date", parseSupplierDate("soon", OCT1), null);
+  const belt = { name: "Portwest C105 Elasticated Work Belt - (Black)", sku: "C105BKR", supplier: "PORTWEST", avail: 0, deldate: "22/01/27" };
+  const bo = backorderSentence([belt], OCT1);
+  assertEq("491385: says out of stock at Portwest, due late January 2027",
+    bo.text, "Portwest are out of stock of the C105 Elasticated Work Belt at the moment, and they're expecting more in late January 2027. As soon as it reaches us we'll get it straight out to you.");
+  assertEq("its window is recorded for the guard", bo.dates, ["2027-01-18/late"]);
+  assertEq("in stock at the supplier: no back-order wording", backorderSentence([{ ...belt, avail: 12 }], OCT1), null);
+  assertTrue("no date: says so and chases", backorderSentence([{ ...belt, deldate: null }], OCT1).text.includes("haven't given us a date"));
+  // It wins over a PO date, which says nothing about whether the supplier has it.
+  const portwestPo = { supplier: "PORTWEST", expectedDate: "2026-09-26" };
+  const reply = buildSalesReply({ intent: "eta", order: { ...order, timeline: [], supplierStock: [belt] }, po: portwestPo, salesperson: { name: "Bob" }, today: OCT1 });
+  assertTrue("the reply uses the supplier's date", reply.text.includes("late January 2027"));
+  assertFalse("not 'running a little later than expected'", reply.text.includes("later than expected"));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

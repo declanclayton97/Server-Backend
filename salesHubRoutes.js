@@ -161,6 +161,7 @@ export function registerSalesHubRoutes(app, deps) {
               placedOn: p.placedOn || p.createdOn || null,
               supplierContactId: (p.parties && p.parties.supplier && p.parties.supplier.contactId) || null,
               expectedDate: (p.delivery && p.delivery.deliveryDate) || null,
+              stockStatus: p.stockStatusCode || null,   // POA = everything received
             }))
             // A CANCELLED PO is not a commitment to anything. demand_log keeps a
             // row for every attempt, so a rebuilt order leaves the abandoned PO
@@ -321,6 +322,39 @@ export function registerSalesHubRoutes(app, deps) {
     // the instruction rows staff type onto an order are not items.
     const rows = allRows.filter((r) => r.kind === "goods");
 
+    // What the SUPPLIER has, for each item still waiting on a purchase order: their
+    // own stock feed / portal via Alternate-Items (/api/supplier-stock). A PO's date
+    // says nothing about whether the supplier can fill it — SO 491385's Portwest belt
+    // read "running a little later than expected" while Portwest had none until
+    // 22/01/27 (Dec, 1 Oct). Only lines that went onto a PO not yet fully received
+    // are checked; items in our own stock never are. Best-effort: a feed that is slow
+    // or down just leaves the line unchecked.
+    let supplierStock = [];
+    if (useDatabase && getPool() && pos.length) {
+      try {
+        const open = new Map(pos.filter((p) => p.stockStatus !== "POA").map((p) => [Number(p.id), p]));
+        const dl = await getPool().query(
+          `SELECT DISTINCT po_id, supplier, sku FROM demand_log WHERE so_id = $1 AND po_id IS NOT NULL AND sku IS NOT NULL`, [order.id]);
+        const waiting = dl.rows.filter((d) => open.has(Number(d.po_id)))
+          .map((d) => ({ d, line: rows.find((r) => String(r.sku || "").toUpperCase() === String(d.sku).toUpperCase() && r.outstanding > 0) }))
+          .filter((x) => x.line)
+          .slice(0, 5);
+        const ALT = process.env.ALT_ITEMS_URL || "https://alternate-items.onrender.com";
+        supplierStock = (await Promise.all(waiting.map(async ({ d, line }) => {
+          const ctl = new AbortController();
+          const timer = setTimeout(() => ctl.abort(), 12000);
+          try {
+            const supplier = String(d.supplier || (open.get(Number(d.po_id)) || {}).supplier || "");
+            const q = new URLSearchParams({ supplier, sku: line.sku, name: line.name || "" });
+            const r = await fetch(`${ALT}/api/supplier-stock?${q}`, { signal: ctl.signal });
+            const j = await r.json();
+            if (!j || !j.found) return null;
+            return { name: line.name, sku: line.sku, supplier, poId: Number(d.po_id), avail: Number(j.avail), deldate: j.deldate || null };
+          } catch { return null; } finally { clearTimeout(timer); }
+        }))).filter(Boolean);
+      } catch (e) { console.error("[sales-hub] supplier stock check failed:", e.message); }
+    }
+
     return {
       id: order.id,
       reference: order.reference || String(order.id),
@@ -336,6 +370,7 @@ export function registerSalesHubRoutes(app, deps) {
       total: (order.totalValue && order.totalValue.total) || null,
       salesperson,
       lines: rows,
+      supplierStock,
       // Everything on the order, kinds included, for the UI to show in full.
       allRows,
       pos,

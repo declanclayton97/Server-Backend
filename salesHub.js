@@ -795,6 +795,71 @@ const trackingLine = (t) =>
  *   2. it is in stock and being picked — with them within 48 hours;
  *   3. otherwise the window from the notes / purchase order (etaSentence).
  */
+// ---------------------------------------------------------------------------
+// Supplier back-orders. order.supplierStock = [{ name, sku, supplier, avail, deldate }]
+// for the items still waiting on a purchase order, read from the supplier's own stock
+// feed or portal (Alternate-Items /api/supplier-stock). avail 0 = they have none.
+// ---------------------------------------------------------------------------
+
+// A supplier's "due back" date as a UK day (YYYY-MM-DD), or null. Feeds write it as
+// 22/01/27, 22/01/2027 or 2027-01-22; anything else, or a date already past, is no date.
+export function parseSupplierDate(s, today = new Date()) {
+  const str = String(s || "").trim();
+  let y, m, d;
+  let mt = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2}|\d{4})$/.exec(str);
+  if (mt) { d = +mt[1]; m = +mt[2]; y = mt[3].length === 2 ? 2000 + +mt[3] : +mt[3]; }
+  else if ((mt = /^(\d{4})-(\d{2})-(\d{2})/.exec(str))) { y = +mt[1]; m = +mt[2]; d = +mt[3]; }
+  else return null;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const when = new Date(y, m - 1, d);
+  const t = ukDay(today);
+  if (!t || when < t) return null;
+  return isoDay(when);
+}
+
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+// Far-off dates read better as part of a month ("late January") than as weeks.
+function phraseDue(iso, today) {
+  const when = new Date(iso + "T12:00:00");
+  const t = ukDay(today);
+  const weeks = (when - t) / (7 * 86400000);
+  if (weeks <= 4) { const p = phraseWindow(windowOf(iso), today); if (p) return p; }
+  const part = when.getDate() <= 10 ? "early" : when.getDate() <= 20 ? "mid" : "late";
+  const sameYear = when.getFullYear() === t.getFullYear();
+  return `in ${part} ${MONTH_NAMES[when.getMonth()]}${sameYear ? "" : " " + when.getFullYear()}`;
+}
+
+// "Portwest C105 Elasticated Work Belt - (Black)" -> "Portwest C105 Elasticated Work Belt"
+const shortItem = (name) => String(name || "the item").replace(/\s*-\s*\(.*$/, "").replace(/\s*\([^)]*\)\s*$/, "").trim();
+
+export function backorderSentence(stock, today = new Date()) {
+  const out = (stock || []).filter((s) => s && s.found !== false && Number(s.avail) === 0);
+  if (!out.length) return null;
+  const lines = out.slice(0, 3).map((s) => {
+    const due = parseSupplierDate(s.deldate, today);
+    // The supplier is the subject ("Portwest are out of stock of the …"), so no is/are guess
+    // on the item, and its brand is not said twice.
+    const who = supplierLabel(s.supplier) || "Our supplier";
+    let item = shortItem(s.name);
+    if (item.toLowerCase().startsWith(who.toLowerCase() + " ")) item = item.slice(who.length + 1);
+    const head = `${esc(who)} are out of stock of the ${esc(item)} at the moment`;
+    return due
+      ? { text: `${head}, and they're expecting more ${phraseDue(due, today)}.`, due }
+      : { text: `${head}, and they haven't given us a date for more yet.`, due: null };
+  });
+  const dated = lines.filter((l) => l.due);
+  const anyUndated = lines.some((l) => !l.due);
+  const tail = anyUndated
+    ? "I'm chasing them and will come straight back to you as soon as I have a date."
+    : "As soon as it reaches us we'll get it straight out to you.";
+  const latest = dated.map((l) => l.due).sort().pop();
+  return {
+    text: `${lines.map((l) => l.text).join(" ")} ${tail}`,
+    dates: latest ? [windowKey(windowOf(latest))] : [],
+    source: "supplier-backorder",
+  };
+}
+
 export function deliverySentence(order, po, etaOpts = {}) {
   const tracking = trackingFromNotes(order && order.timeline);
   if (tracking) {
@@ -806,6 +871,11 @@ export function deliverySentence(order, po, etaOpts = {}) {
       dates: [], source: "in-stock",
     };
   }
+  // An item the supplier has NOT GOT is the real hold-up, whatever date the PO carries:
+  // SO 491385's Portwest belt read "running a little later than expected, I am chasing"
+  // while Portwest's own feed said none in stock until 22/01/27 (Dec, 1 Oct).
+  const bo = backorderSentence(order && order.supplierStock, etaOpts.today);
+  if (bo) return bo;
   const eta = etaSentence(po, etaOpts);
   // No purchase order and no colleague's promise: fall back to how long orders
   // like this one actually take, rather than just "I am chasing it".
