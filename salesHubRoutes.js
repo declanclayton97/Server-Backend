@@ -326,19 +326,31 @@ export function registerSalesHubRoutes(app, deps) {
     // own stock feed / portal via Alternate-Items (/api/supplier-stock). A PO's date
     // says nothing about whether the supplier can fill it — SO 491385's Portwest belt
     // read "running a little later than expected" while Portwest had none until
-    // 22/01/27 (Dec, 1 Oct). Only lines that went onto a PO not yet fully received
-    // are checked; items in our own stock never are. Best-effort: a feed that is slow
-    // or down just leaves the line unchecked.
+    // 22/01/27 (Dec, 1 Oct). Which lines: anything not yet sent that Brightpearl has NOT
+    // reserved from our own stock — whatever state its PO is in. 491385's belt had been
+    // DROPPED from its PO (PO 491669 arrived without it), so "lines on an open PO" missed
+    // it entirely. The supplier is the one it was ordered from (demand_log). Items in our
+    // own stock are never checked. Best-effort: a slow or failing feed leaves it unchecked.
     let supplierStock = [];
-    if (useDatabase && getPool() && pos.length) {
+    if (useDatabase && getPool()) {
       try {
-        const open = new Map(pos.filter((p) => p.stockStatus !== "POA").map((p) => [Number(p.id), p]));
+        const reserved = {};
+        try {
+          const res = (await bpLive("GET", `/warehouse-service/order/${order.id}/reservation`)) || [];
+          for (const w of Array.isArray(res) ? res : [res]) {
+            for (const [rowId, r] of Object.entries((w && w.orderRows) || {})) {
+              const sku = String(((order.orderRows || {})[rowId] || {}).productSku || "").toUpperCase();
+              if (sku) reserved[sku] = (reserved[sku] || 0) + Number(r.quantity || 0);
+            }
+          }
+        } catch { /* no reservation read: treat nothing as reserved, the supplier check still helps */ }
         const dl = await getPool().query(
-          `SELECT DISTINCT po_id, supplier, sku FROM demand_log WHERE so_id = $1 AND po_id IS NOT NULL AND sku IS NOT NULL`, [order.id]);
-        const waiting = dl.rows.filter((d) => open.has(Number(d.po_id)))
-          .map((d) => ({ d, line: rows.find((r) => String(r.sku || "").toUpperCase() === String(d.sku).toUpperCase() && r.outstanding > 0) }))
-          .filter((x) => x.line)
+          `SELECT DISTINCT ON (upper(sku)) po_id, supplier, sku FROM demand_log WHERE so_id = $1 AND sku IS NOT NULL AND supplier IS NOT NULL ORDER BY upper(sku), po_id DESC NULLS LAST`, [order.id]);
+        const waiting = dl.rows
+          .map((d) => ({ d, line: rows.find((r) => String(r.sku || "").toUpperCase() === String(d.sku).toUpperCase()) }))
+          .filter((x) => x.line && x.line.outstanding - (reserved[String(x.line.sku).toUpperCase()] || 0) > 0)
           .slice(0, 5);
+        const open = new Map(pos.map((p) => [Number(p.id), p]));
         const ALT = process.env.ALT_ITEMS_URL || "https://alternate-items.onrender.com";
         supplierStock = (await Promise.all(waiting.map(async ({ d, line }) => {
           const ctl = new AbortController();
