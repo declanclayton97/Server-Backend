@@ -60,7 +60,8 @@ const POLLERS = [
   { name: 'Buckler', h: 12, m: 30, days: 'Mon-Fri' },
   { name: 'Chadwick', h: 12, m: 40, days: 'Mon-Fri' },
   { name: 'Sterling', h: 13, m: 0, days: 'Mon-Fri' },
-  { name: 'Carhartt', h: 13, m: 30, days: 'Mon/Wed/Fri' },
+  { name: 'Carhartt', h: 13, m: 20, days: 'Mon/Wed/Fri' },   // moved from 13:30 for BeeSwift (2026-10-01)
+  { name: 'BeeSwift', h: 13, m: 40, days: 'Mon-Fri' },
   { name: 'Scruffs', h: 14, m: 0, days: 'Mon-Fri' },
   { name: 'Performance Brands', h: 14, m: 30, days: 'Mon-Fri' },
   { name: 'Portwest', h: 15, m: 0, days: 'Mon-Fri' },

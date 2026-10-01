@@ -4488,13 +4488,92 @@ export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey,
   return { ...plan, done, parked };
 }
 
-// BeeSwift placement is NOT built yet — only the demand plan (dry run) is. This refuses before
-// anything is created so a forced run cannot leave a draft PO behind. The chain to build, from Dec's
-// checkout HAR (2026-10-01): fresh login token → addtobasket per line → POST basket.html Process=yes
-// → processorder.html (assert lines, prices, LS26 8LG) → GetDuplicatePo(TW<po>) → submit.
-async function placeBeeswiftOrder() {
-  throw stepErr('preflight', 'BeeSwift ordering is not enabled yet — dry runs only (placement chain still to be built and rehearsed)');
+// ── BeeSwift (user, 2026-10-01) ───────────────────────────────────────────────────────────────
+// Same principle as the other lanes: wait for £150 (free carriage), order on day 3 regardless and
+// put the carriage on the PO when under. The checkout chain lives in Alt-Items (/api/beeswift-
+// checkout): basket → order page checked (lines, qty, LS26 8LG) → BeeSwift's own duplicate-PO guard
+// → submit, PROVEN by BeeSwift then knowing our PO ref. Our PO number is the ref, so a second run
+// for the same PO is refused by BeeSwift itself.
+// Two gates: the 13:40 poller needs BEESWIFT_LIVE=true here, and Alt-Items needs
+// BEESWIFT_PLACE_ENABLED=true to submit. The PO-creating path refuses before creating anything if
+// BEESWIFT_LIVE is off, so a forced run cannot leave a draft behind.
+// The token: BeeSwift allows ONE session, so a staff login after the VM's refresh kills it. A dead
+// token fails at the basket (step 'cart'), before anything is ordered.
+const BEESWIFT_SUPPLIER_CONTACT = 326;
+const BEESWIFT_CARRIAGE = () => Number(process.env.BEESWIFT_CARRIAGE_CHARGE || 6.95);
+const beeswiftLines = (po) => mergePoLinesBySku(po).map((l) => ({ sku: l.sku, name: l.name, qty: l.qty, cost: l.cost }));
+
+async function beeswiftRehearsal(pool, altItemsUrl) {
+  const plan = await bp.createComboPOLive({ supplierKey: 'BEESWIFT', execute: false, logPool: pool });
+  const lines = beeswiftLines(plan);
+  if (!lines.length) return { rehearsal: true, lines: [], note: 'no BeeSwift demand right now' };
+  const goodsNet = +lines.reduce((a, l) => a + (Number(l.cost) || 0) * l.qty, 0).toFixed(2);
+  const co = await jfetch('checkout', `${altItemsUrl}/api/beeswift-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customerPO: `REHEARSAL-${Date.now()}`.slice(0, 30), lines, execute: false }) });
+  const pv = co.preview || {};
+  return { rehearsal: true, ok: !!co.ok, reason: co.reason || null, lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0),
+    ourGoodsNet: goodsNet, theirSubTotal: pv.subTotal ?? null, theirCarriage: pv.carriage ?? null, theirTotal: pv.orderTotal ?? null,
+    carriageWeWouldAdd: goodsNet < (SCHEDULED_SUPPLIERS.BEESWIFT.threshold || 150) ? BEESWIFT_CARRIAGE() : 0,
+    deliverTo: pv.deliverTo || null, orderPage: pv.lines || [], added: co.added || [], problems: co.problems || [], cleared: co.cleared || null, basketBefore: co.basketBefore || [] };
 }
+
+async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  if (process.env.BEESWIFT_LIVE !== 'true') throw stepErr('preflight', 'BeeSwift live ordering is off (BEESWIFT_LIVE != true) — rehearse with /api/purchasing/beeswift-rehearse');
+  const steps = {};
+  let po;
+  try { po = await createPo({ supplierKey: 'BEESWIFT', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw createPoErr(e); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  const lines = beeswiftLines(po);
+  const goodsNet = +lines.reduce((a, l) => a + (Number(l.cost) || 0) * l.qty, 0).toFixed(2);
+  const freeOver = SCHEDULED_SUPPLIERS.BEESWIFT.threshold || 150;
+
+  // checkout — customerPO = our PO number (BeeSwift's duplicate guard keys on it)
+  const co = await jfetch('checkout', `${altItemsUrl}/api/beeswift-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customerPO: String(poId), lines, execute: live }) });
+  const pv = co.preview || {};
+  steps.checkout = { placed: !!co.placed, orderNo: (co.submit && co.submit.orderNo) || null, subTotal: pv.subTotal ?? null, carriage: pv.carriage ?? null, total: pv.orderTotal ?? null, problems: co.problems || [] };
+  if (co.alreadyOrdered) throw stepErr('checkout', `BeeSwift ALREADY has an order for PO ref ${poId} — do NOT resubmit; finalise PO#${poId} by hand once confirmed on BeeSwift's Orders page`, { poId, alreadyOrdered: true });
+  if (!co.placed) throw stepErr(/token/i.test(co.reason || co.error || '') ? 'cart' : 'checkout', `BeeSwift did not place PO#${poId}: ${co.reason || co.error || 'no confirmation'}`, { poId, problems: co.problems || [], added: co.added || [], basketBefore: co.basketBefore || [], submit: co.submit || null });
+
+  // carriage on the PO when the goods are under the free-carriage level (the order still goes on
+  // day 3 regardless — that is the point of the wait rule — but the PO must carry the charge).
+  if (goodsNet > 0 && goodsNet < freeOver) {
+    try {
+      const c = await bp.addPoMiscRowLive({ poId, name: `Carriage (order under £${freeOver} ex-VAT)`, net: BEESWIFT_CARRIAGE(), qty: 1, execute: true });
+      steps.carriage = c && c.refused ? { added: false, reason: c.reason } : { added: true, net: BEESWIFT_CARRIAGE(), goodsNet, freeOver, theirs: pv.carriage ?? null };
+    } catch (e) {
+      steps.carriage = { added: false, error: e.message };
+      await logPurchasingError(pool, { supplier: 'BEESWIFT', step: 'carriage', severity: 'review', placed: true,
+        message: `BeeSwift PO#${poId} placed, but the £${BEESWIFT_CARRIAGE()} carriage line could not be added (goods £${goodsNet}): ${e.message}`, context: { poId, goodsNet } }).catch(() => {});
+    }
+  } else steps.carriage = { added: false, reason: `goods £${goodsNet} at or over the £${freeOver} free-carriage level`, theirs: pv.carriage ?? null };
+
+  // price check (NON-FATAL): BeeSwift's goods sub-total vs our PO goods
+  if (pv.subTotal != null && Math.abs(pv.subTotal - goodsNet) > 0.5) {
+    steps.priceCheck = { theirs: pv.subTotal, ours: goodsNet, gap: +(pv.subTotal - goodsNet).toFixed(2) };
+    await logPurchasingError(pool, { supplier: 'BEESWIFT', step: 'price-check', severity: 'review', placed: true,
+      message: `Prices don't match: BeeSwift goods £${pv.subTotal} vs our PO goods £${goodsNet} (diff £${steps.priceCheck.gap}). A Brightpearl cost price (list 20) may need adjusting. PO#${poId} still placed.`,
+      context: { poId, theirs: (pv.lines || []).map((l) => `${l.code} x${l.qty} @ £${l.price}`), ours: lines.map((l) => `${l.sku} x${l.qty} @ £${(Number(l.cost) || 0).toFixed(2)}`) } }).catch(() => {});
+  }
+
+  const ref = (co.submit && co.submit.orderNo) || `BeeSwift ${poId}`;
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, ref); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; }
+  await bp.addOrderNoteLive(poId, `Placed with BeeSwift online (Your P/O ${poId}). BeeSwift totals: goods GBP ${pv.subTotal ?? '?'}, carriage GBP ${pv.carriage ?? '?'}, total GBP ${pv.orderTotal ?? '?'}.`, BEESWIFT_SUPPLIER_CONTACT).catch(() => {});
+  steps.link = { reference: ref, refWritten, status: 7 };
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'BEESWIFT', poId, noteContactId: BEESWIFT_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo: ref, steps };
+}
+export async function beeswiftRehearse({ pool, altItemsUrl }) { return beeswiftRehearsal(pool, altItemsUrl); }
 
 export async function pencarrieReleaseBackorders({ pool, poId, execute = false, released = null }) { return releasePencarrieBackorders(pool, poId, { execute: execute === true, released }); }
 // Blaklader against an existing unsent auto-PO (the basket step clears and verifies first).
