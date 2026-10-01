@@ -245,6 +245,17 @@ export const SUPPLIERS = {
   // licensed DeWalt workwear range. Their products are NOT named "castle" — detect by
   // brand. No dedicated PO custom field yet, so re-pickup is prevented by clearing the
   // CASTLE tag on finalize.
+  // BeeSwift (user, 2026-10-01): normal BeeSwift stock only. NEW BALANCE (brand 287, NWB… codes) is
+  // bought through BeeSwift but is "not fully released yet" — it must never be ordered by this lane,
+  // neither for customers nor as low-inventory, so it is a hard excludeIf veto. BeeSwift's own
+  // products are mostly brand 103 and are often named with no "BeeSwift" in them ("Lined Rigger Boot
+  // with Scuff Cap RBLSSC", "Click SW2011 …"), hence brandIds. Contact 326 belongs to BeeSwift alone,
+  // so its low-inventory report is all ours (lowInvOwnsAll) — the name detect would miss most of it.
+  // The generic hi-vis waistcoats are claimed here as well as by Uneek; the order TAG decides.
+  BEESWIFT: { contactId: 326, costList: 20, poField: 'PCF_BEESPO', lowInvSupplierId: 326, brandIds: [103], lowInvOwnsAll: true,
+    excludeIf: (n, s) => /new\s*balance/i.test(n || '') || /^NWB0/i.test(s || ''),
+    claimProductIds: [53344, 53345, 53346, 53347, 53348, 53349, 53350, 53351, 53352, 53353, 53354, 53355, 53356, 53357, 53358, 53359, 53360, 53361, 56975, 56976],
+    detect: (n) => /bee\s*swift|\bb[-\s]?brand\b|\bb[-\s]?seen\b|\bclimax\b|\bclick\b/i.test(n || '') },
   CASTLE:       { contactId: 332,   costList: 20, poField: 'PCF_CASTLEPO', lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|(?<![-\w])fort\b/i.test(n || '') && !/\bcarhartt\b/i.test(n || '') }, // DeWalt moved to Sterling (Castle no longer sells it). NOT Carhartt's "Fort" shirt (107012) nor Base "T-Fort" boots (SO 489391, 2026-09-25)
   // Sterling Safetywear — brands Apache / City Knights / DeWalt. ⚠ DeWalt ALSO comes
   // via Castle, so on a multi-supplier order a DeWalt row is ambiguous — the
@@ -319,7 +330,7 @@ const _SUPPLIER_NAME_HINTS = {
   CHADWICK: /chadwick/i, CARHARTT: /carhartt/i, MASCOT: /mascot/i, SCRUFFS: /scruffs/i,
   BLAKLADER: /bl[aå]kl[aä]der/i, SNICKERS: /snickers/i, FRISTADS: /fristads/i,
   'HELLY HANSEN': /helly/i, STERLING: /sterling/i, 'PERFORMANCE BRANDS': /performance\s*brands/i,
-  BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i,
+  BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i, BEESWIFT: /bee\s*swift/i,
 };
 export function tagFailsToMatch(rawTag) {
   const out = [];
@@ -2002,6 +2013,8 @@ export async function createComboPOLive(opts = {}) {
   const ownsRow = (d) => {
     const name = String(d.name || ''), sku = String(d.sku || '');
     if (reg.excludeIf && reg.excludeIf(name, sku)) return false;
+    // A lane whose supplier id is its own (BEESWIFT) owns its whole report, minus the veto above.
+    if (reg.lowInvOwnsAll) return true;
     return !!detect(name, sku);
   };
   const lowRowsAll = li.rows || [];

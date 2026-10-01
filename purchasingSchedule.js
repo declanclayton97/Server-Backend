@@ -3948,6 +3948,10 @@ const SCHEDULED_SUPPLIERS = {
   // That is the point of the split: these take ~2 weeks through customs, so holding them back to reach
   // a carriage threshold would add a fortnight to a line that is already the slowest on the order.
   HELLBERG: { supplierKey: 'HELLBERG', stateId: 19, placeFn: placeHellbergOrder, threshold: 0 },
+  // BeeSwift (user, 2026-10-01): free carriage at £150 ex-VAT (a £71.40 basket showed £6.95 carriage).
+  // DRY-RUN ONLY until the basket → processorder → submit chain is built and rehearsed; NO poller
+  // window in server.js yet, so nothing runs on its own. New Balance is vetoed in the registry.
+  BEESWIFT: { supplierKey: 'BEESWIFT', stateId: 20, placeFn: placeBeeswiftOrder, threshold: Number(process.env.BEESWIFT_FREESHIP_THRESHOLD || 150) },
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
@@ -4482,6 +4486,14 @@ export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey,
     message: `${supplierKey} said ${plan.skus.map((s) => s.sku).join(', ')} is discontinued after PO#${poId} was sent. Removed from the PO; SO ${affected.join(', ') || '(none)'} moved to ${DISCONTINUED_PARK_LABEL}. ${emailLine}`,
     context: { poId, ...plan, done, parked } }).catch(() => {});
   return { ...plan, done, parked };
+}
+
+// BeeSwift placement is NOT built yet — only the demand plan (dry run) is. This refuses before
+// anything is created so a forced run cannot leave a draft PO behind. The chain to build, from Dec's
+// checkout HAR (2026-10-01): fresh login token → addtobasket per line → POST basket.html Process=yes
+// → processorder.html (assert lines, prices, LS26 8LG) → GetDuplicatePo(TW<po>) → submit.
+async function placeBeeswiftOrder() {
+  throw stepErr('preflight', 'BeeSwift ordering is not enabled yet — dry runs only (placement chain still to be built and rehearsed)');
 }
 
 export async function pencarrieReleaseBackorders({ pool, poId, execute = false, released = null }) { return releasePencarrieBackorders(pool, poId, { execute: execute === true, released }); }
