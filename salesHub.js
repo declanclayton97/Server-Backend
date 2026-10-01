@@ -854,7 +854,8 @@ export function backorderSentence(stock, today = new Date()) {
     : "As soon as it reaches us we'll get it straight out to you.";
   const latest = dated.map((l) => l.due).sort().pop();
   return {
-    text: `${lines.map((l) => l.text).join(" ")} ${tail}`,
+    // Always offer the way out of a long wait (Dec, 1 Oct).
+    text: `${lines.map((l) => l.text).join(" ")} ${tail} Or if you'd like, we can try to source an alternative for you.`,
     dates: latest ? [windowKey(windowOf(latest))] : [],
     source: "supplier-backorder",
   };
