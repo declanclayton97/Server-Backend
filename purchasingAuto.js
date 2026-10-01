@@ -730,6 +730,12 @@ export function parseTagScope(tag) {
       const q = /^[X×](\d+)$/.exec(toks[i]);
       if (q) { qty = Number(q[1]); continue; }
       if (/^[X×]$/.test(toks[i]) && /^\d+$/.test(toks[i + 1] || '')) { qty = Number(toks[++i]); continue; }
+      // The quantity written FIRST — "(1x 28009500008 ONLY)", "(2 x K241)". Read as an item term it
+      // matched no row, so the whole scope "named nothing" and SO 491640 sat unordered (2026-10-01).
+      // "2XL"/"3XL" never match: the X must end the token.
+      const qf = /^(\d+)[X×]$/.exec(toks[i]);
+      if (qf) { qty = Number(qf[1]); continue; }
+      if (/^\d+$/.test(toks[i]) && /^[X×]$/.test(toks[i + 1] || '')) { qty = Number(toks[i]); i++; continue; }
       if (SCOPE_NOISE.has(toks[i])) continue;
       group.push(toks[i]); terms.push(toks[i]);
     }
