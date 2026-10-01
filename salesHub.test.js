@@ -265,10 +265,10 @@ assertEq("PO without a date proposes nothing",
   etaSentence({ supplier: "Blaklader", placedOn: "2026-09-10" }).dates, []);
 // Windows, never dates. Today is fixed so the wording is testable.
 const THU24 = new Date("2026-09-24T12:00:00+01:00"), MON28 = new Date("2026-09-28T09:00:00+01:00");
-// A supplier date on a Saturday rolls to Monday, + 2 working days allowance = Wednesday.
+// A supplier date on a Saturday rolls to Monday, + 1 working day (plain order) = Tuesday.
 const weekend = etaSentence({ supplier: "CHADWICK", expectedDate: "2026-09-26" }, { today: THU24 });
-assertEq("Saturday PO date -> window mid next week", weekend.dates, ["2026-09-28/mid"]);
-assertTrue("worded as a window", weekend.text.includes("mid next week"));
+assertEq("Saturday PO date -> window early next week", weekend.dates, ["2026-09-28/early"]);
+assertTrue("worded as a window", weekend.text.includes("early next week"));
 assertFalse("never names a day", /monday|tuesday|wednesday|thursday|friday|saturday|sunday/i.test(weekend.text));
 assertFalse("never names a date", /\b\d{1,2}(st|nd|rd|th)?\s+(sep|oct)/i.test(weekend.text));
 assertTrue("supplier name is not shouted", weekend.text.includes("Chadwick"));
@@ -515,6 +515,19 @@ assertTrue("note lists attachments", withFiles.includes("Attached: proof.pdf, ph
   const reply = buildSalesReply({ intent: "eta", order: { ...order, timeline: [], supplierStock: [belt] }, po: portwestPo, salesperson: { name: "Bob" }, today: OCT1 });
   assertTrue("the reply uses the supplier's date", reply.text.includes("late January 2027"));
   assertFalse("not 'running a little later than expected'", reply.text.includes("later than expected"));
+}
+
+// --- allowance after the goods reach us (Dec, 1 Oct: Carhartt PO 492484) -------
+{
+  const OCT1 = new Date("2026-10-01T12:00:00+01:00");
+  // Carhartt measured p75 = 8 working days; Brightpearl's due date is its 11-day default.
+  // (An earlier test clears the measured table, so put Carhartt's row back for this one.)
+  setSupplierLeadTimes([{ supplier: "Carhartt UK LTD", contactId: 65173, pos: 185, median: 7, p75: 8, p90: 16, bpLeadTimeDays: 11 }]);
+  const carhartt = { supplier: "CARHARTT", supplierContactId: 65173, placedOn: "2026-09-28T13:39:01+01:00", expectedDate: "2026-10-09T13:39:01+01:00" };
+  const plain = buildSalesReply({ intent: "eta", order: { ...order, timeline: [], allRows: [{ kind: "goods" }] }, po: carhartt, salesperson: { name: "Bob" }, today: OCT1 });
+  assertTrue("plain order: in Thu 8 Oct, with them late next week", plain.text.includes("late next week"));
+  const logo = buildSalesReply({ intent: "eta", order: { ...order, timeline: [], allRows: [{ kind: "goods" }, { kind: "service" }] }, po: carhartt, salesperson: { name: "Bob" }, today: OCT1 });
+  assertTrue("logo order: 3 days for decoration -> the week after next", logo.text.includes("the week after next"));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

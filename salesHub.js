@@ -947,7 +947,13 @@ const supplierLabel = (s) => String(s || "").trim().toLowerCase().replace(/\b[a-
 
 // Working days from the goods reaching us to reaching the customer: goods-in,
 // decoration, courier. Tunable without a deploy of the logic.
-export const DELIVERY_ALLOWANCE_DAYS = Number(process.env.SALES_HUB_ALLOWANCE_DAYS || 2);
+export const DELIVERY_ALLOWANCE_DAYS = Number(process.env.SALES_HUB_ALLOWANCE_DAYS || 1);
+// A logo order still has to be embroidered or printed once the garments are in.
+export const LOGO_ALLOWANCE_DAYS = Number(process.env.SALES_HUB_LOGO_ALLOWANCE_DAYS || 3);
+// Plain orders: supplier deliveries are booked in early morning (Carhartt: 7-11am on 36
+// POs, Aug-Sep 2026), so a plain order goes out the same day and lands the next - one
+// working day, not two. The old flat 2 read Carhartt placed Mon 28 Sep as "early the week
+// after next" (12-13 Oct) when it lands Fri 9 Oct (Dec, 1 Oct).
 
 /**
  * When the customer should have it, as a window, from the supplier's date plus
@@ -1011,7 +1017,7 @@ export function prettyWindow(key) {
  * colleague's name to their own words.
  */
 export function buildSalesReply({ intent, order, po, blockedLines = [], salesperson, signedBy, tone = "warm", today = new Date(), promised = null, returnsRef = null }) {
-  const etaOpts = { today, promised };
+  const etaOpts = { today, promised, allowanceDays: isLogoOrder(order) ? LOGO_ALLOWANCE_DAYS : DELIVERY_ALLOWANCE_DAYS };
   let eta = null;
   // Same rule as the subject: quote the NUMBER to the customer, never the
   // internal reference. Fall back to the reference only if there is no id.
