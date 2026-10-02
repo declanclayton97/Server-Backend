@@ -6,7 +6,8 @@
 // salesHub.js; this module only gathers facts and performs the send.
 
 import nodemailer from "nodemailer";
-import { graphConfigured, salesMailbox, listInbox, getMessage, replyToMessage, sendNew, markRead, setRead, getAttachment } from "./graphMail.js";
+import { graphConfigured, salesMailbox, listInbox, getMessage, composeAndSend, splitAddresses, FOLDERS, markRead, setRead, getAttachment } from "./graphMail.js";
+import { SIGNATURE_HTML } from "./emailSignature.js";
 import {
   SALES_INTENTS,
   detectIntent,
@@ -65,12 +66,26 @@ export function registerSalesHubRoutes(app, deps) {
     // drop the zeros — but 123384 is ALSO a real Brightpearl id, of an order from
     // years ago. So try it both ways and take the more recent order, rather than
     // letting the id win just because it was tried first.
-    let byId = null;
+    let byId = null, notSale = null;
     if (looksLikeOrderId(raw)) {
       try {
         const r = await bpLive("GET", `/order-service/order/${raw}`);
         const o = Array.isArray(r) ? r[0] : r;
-        if (o && o.id) byId = { id: o.id, via: "id", createdOn: o.createdOn || o.placedOn };
+        // SALES orders only (Dec, 2 Oct: a supplier's email naming a PO number linked the
+        // hub to the PO). A purchase order is followed to the one sale it was raised for.
+        const type = String((o && (o.orderTypeCode || o.orderTypeId)) || "");
+        if (o && o.id && (type === "SO" || type === "1")) byId = { id: o.id, via: "id", createdOn: o.createdOn || o.placedOn };
+        else if (o && o.id) {
+          notSale = { id: o.id, type };
+          if ((type === "PO" || type === "2") && useDatabase && getPool()) {
+            const sos = (await getPool().query(`SELECT DISTINCT so_id FROM demand_log WHERE po_id = $1 AND so_id IS NOT NULL`, [o.id])).rows.map((x) => x.so_id);
+            if (sos.length === 1) {
+              const so = await bpLive("GET", `/order-service/order/${sos[0]}`).catch(() => null);
+              const s = Array.isArray(so) ? so[0] : so;
+              if (s && s.id) byId = { id: s.id, via: "po", poId: o.id, createdOn: s.createdOn || s.placedOn };
+            } else notSale.sales = sos.length;
+          }
+        }
       } catch (e) { /* not an id, or gone — try it as a reference */ }
     }
     const refs = [raw];
@@ -84,7 +99,7 @@ export function registerSalesHubRoutes(app, deps) {
       const [win, other] = new Date(byRef.createdOn) > new Date(byId.createdOn) ? [byRef, byId] : [byId, byRef];
       return { ...win, alsoMatched: (win.alsoMatched || 0) + 1, otherMatch: { id: other.id, via: other.via } };
     }
-    return byId || byRef;
+    return byId || byRef || (notSale ? { notSale } : null);
   }
 
   // Sales orders whose customer reference (the web / Magento order number) is this.
@@ -472,15 +487,17 @@ export function registerSalesHubRoutes(app, deps) {
     } catch (err) { res.status(err.status === 404 ? 404 : 500).json({ error: err.message }); }
   });
 
-  // GET /api/sales-hub/inbox?top=30&unread=1 — the sales mailbox, newest first, each with the
-  // order number it names (if any) so the list shows which emails the hub can answer.
+  // GET /api/sales-hub/inbox?top=30&unread=1&folder=inbox|sent|drafts|deleted|junk|archive —
+  // a folder of the sales mailbox, newest first, each with the order number it names (if any).
   app.get("/api/sales-hub/inbox", requireUser, async (req, res) => {
     if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected — set MS_TENANT_ID, MS_CLIENT_ID and MS_CLIENT_SECRET" });
     try {
-      const msgs = await listInbox({ top: req.query.top, unreadOnly: req.query.unread === "1" });
+      const folder = FOLDERS[req.query.folder] ? String(req.query.folder) : "inbox";
+      const msgs = await listInbox({ top: req.query.top, unreadOnly: req.query.unread === "1", folder });
       const locks = await othersLocks(req.hubUser.key).catch(() => ({}));
       res.json({
         mailbox: salesMailbox(),
+        folder,
         messages: msgs.map((m) => ({
           ...m,
           orderNumber: extractOrderNumber(`${m.subject}\n${m.preview}`) || null,
@@ -504,6 +521,9 @@ export function registerSalesHubRoutes(app, deps) {
       res.status(err.status === 404 ? 404 : 500).json({ error: err.message });
     }
   });
+
+  // GET /api/sales-hub/signature — the signature a new email or forward starts with.
+  app.get("/api/sales-hub/signature", requireUser, (req, res) => res.json({ html: SIGNATURE_HTML }));
 
   // GET /api/sales-hub/inbox/:id/attachments/:aid — one attachment's bytes.
   // Customer-supplied files are served defensively: only real raster image types keep
@@ -551,6 +571,15 @@ export function registerSalesHubRoutes(app, deps) {
       }
 
       const resolved = await resolveOrderId(orderNumber);
+      if (resolved && resolved.notSale) {
+        const ns = resolved.notSale, po = ns.type === "PO" || ns.type === "2";
+        return res.json({
+          found: false,
+          reason: po
+            ? `${orderNumber} is purchase order ${ns.id}, not a sales order` + (ns.sales > 1 ? ` (it covers ${ns.sales} sales orders)` : "") + ". Link the customer's order by hand."
+            : `${orderNumber} is a ${ns.type === "SC" || ns.type === "3" ? "credit note" : "non-sales order"} in Brightpearl, not a sales order. Link the right order by hand.`,
+        });
+      }
       if (!resolved) {
         return res.json({
           found: false,
@@ -690,13 +719,16 @@ export function registerSalesHubRoutes(app, deps) {
   app.post("/api/sales-hub/send", requireUser, async (req, res) => {
     const b = req.body || {};
     try {
+      // reply / replyAll / forward need the email they answer; new needs nothing else.
+      const mode = ["reply", "replyAll", "forward", "new"].includes(b.mode) ? b.mode : (b.messageId ? "reply" : "new");
       const orderId = num(b.orderId);
-      const to = String(b.to || "").trim();
+      const toList = splitAddresses(b.to), ccList = splitAddresses(b.cc), bccList = splitAddresses(b.bcc);
+      const to = toList.join("; ");
       const subject = String(b.subject || "").trim();
       const html = String(b.html || "");
-      if ((!orderId && !b.messageId) || !to || !subject || !html) {
-        return res.status(400).json({ error: "to, subject and html are required, and an order or an inbox email to reply to" });
-      }
+      if (!toList.length || !subject || !html) return res.status(400).json({ error: "To, subject and a message are required" });
+      if (mode !== "new" && !b.messageId) return res.status(400).json({ error: "Which email is this a " + mode + " to?" });
+      if (mode === "new" && !orderId && b.requireOrder) return res.status(400).json({ error: "No order linked" });
       // Files from the compose box, base64. Outlook's own limits: 20 MB a file.
       const attachments = Array.isArray(b.attachments) ? b.attachments.slice(0, 10) : [];
       let total = 0;
@@ -707,16 +739,15 @@ export function registerSalesHubRoutes(app, deps) {
         if (n > 20 * 1024 * 1024) return res.status(413).json({ error: `${a.name} is over 20 MB` });
       }
       if (total > 25 * 1024 * 1024) return res.status(413).json({ error: "Attachments come to more than 25 MB" });
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
-        return res.status(400).json({ error: `"${to}" is not an email address` });
-      }
+      const bad = [...toList, ...ccList, ...bccList].find((a) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a));
+      if (bad) return res.status(400).json({ error: `"${bad}" is not an email address` });
       if (String(b.acknowledgedLevel) === "blocked" && !b.overrideBlocked) {
         return res.status(409).json({
           error: "This draft was blocked. Re-check it and tick the override if you are sure.",
         });
       }
 
-      if (b.messageId) {
+      if (b.messageId && mode !== "forward") {
         const held = (await othersLocks(req.hubUser.key).catch(() => ({})))[String(b.messageId)];
         if (held) return res.status(423).json({ error: `${held.name} is working on this email — not sent.` });
       }
@@ -738,14 +769,13 @@ export function registerSalesHubRoutes(app, deps) {
       // Graph is not configured.
       let via;
       if (graphConfigured()) {
-        const r = b.messageId
-          ? await replyToMessage(String(b.messageId), { html, to, replyTo, subject, attachments })
-          : await sendNew({ to, subject, html, replyTo, attachments });
+        const r = await composeAndSend({ mode, sourceId: b.messageId ? String(b.messageId) : undefined,
+          to: toList, cc: ccList, bcc: bccList, subject, html, replyTo, attachments });
         via = r.via;
         // Outlook marks an email read once it has been replied to; do the same so the
         // shared inbox shows it as dealt with. Never on merely OPENING it — a colleague
         // may be relying on it staying unread.
-        if (b.messageId) markRead(String(b.messageId)).catch((e) => console.error("[sales-hub] markRead:", e.message));
+        if (b.messageId && mode !== "forward") markRead(String(b.messageId)).catch((e) => console.error("[sales-hub] markRead:", e.message));
       } else {
         const transporter = nodemailer.createTransport({
           host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",
@@ -753,7 +783,7 @@ export function registerSalesHubRoutes(app, deps) {
           secure: false,
           auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS },
         });
-        await transporter.sendMail({ from: `"${fromName}" <${fromAddress}>`, replyTo, to, subject, html,
+        await transporter.sendMail({ from: `"${fromName}" <${fromAddress}>`, replyTo, to: toList, cc: ccList, bcc: bccList, subject, html,
           attachments: attachments.map((a) => ({ filename: a.name, content: Buffer.from(String(a.base64), "base64"), contentType: a.contentType })) });
         via = "smtp2go";
       }

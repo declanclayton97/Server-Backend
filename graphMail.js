@@ -9,6 +9,10 @@
 // Env: MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET (secret expires 23/03/2027),
 //      SALES_MAILBOX (default sales@tuffshop.co.uk).
 
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
 export const graphConfigured = () =>
@@ -65,21 +69,34 @@ async function graph(method, path, body, { html = false } = {}) {
 
 const mb = () => `/users/${encodeURIComponent(salesMailbox())}`;
 
+const addr = (r) => ({ name: (r && r.emailAddress && r.emailAddress.name) || "", address: (r && r.emailAddress && r.emailAddress.address) || "" });
+// "a@x.com; b@y.com" or an array -> clean addresses.
+export function splitAddresses(v) {
+  const list = Array.isArray(v) ? v : String(v || "").split(/[;,]/);
+  return list.map((s) => String(s || "").trim()).map((s) => (/<([^>]+)>/.exec(s) || [null, s])[1].trim()).filter(Boolean);
+}
+const recipients = (list) => splitAddresses(list).map((address) => ({ emailAddress: { address } }));
+
+// The folders the hub shows, by Outlook's well-known names.
+export const FOLDERS = { inbox: "inbox", sent: "sentitems", drafts: "drafts", deleted: "deleteditems", junk: "junkemail", archive: "archive" };
+
 // Newest first. Summary fields only — the body is fetched when someone opens one.
-export async function listInbox({ top = 30, unreadOnly = false } = {}) {
+export async function listInbox({ top = 30, unreadOnly = false, folder = "inbox" } = {}) {
+  const sent = folder === "sent" || folder === "drafts";
   const q = new URLSearchParams({
     $top: String(Math.min(Number(top) || 30, 100)),
-    $orderby: "receivedDateTime desc",
-    $select: "id,subject,from,receivedDateTime,isRead,bodyPreview,conversationId,hasAttachments",
+    $orderby: `${sent ? "sentDateTime" : "receivedDateTime"} desc`,
+    $select: "id,subject,from,toRecipients,receivedDateTime,sentDateTime,isRead,bodyPreview,conversationId,hasAttachments",
   });
   if (unreadOnly) q.set("$filter", "isRead eq false");
-  const j = await graph("GET", `${mb()}/mailFolders/inbox/messages?${q}`);
+  const j = await graph("GET", `${mb()}/mailFolders/${FOLDERS[folder] || "inbox"}/messages?${q}`);
   return (j.value || []).map((m) => ({
     id: m.id,
     subject: m.subject || "",
-    fromName: (m.from && m.from.emailAddress && m.from.emailAddress.name) || "",
-    fromAddress: (m.from && m.from.emailAddress && m.from.emailAddress.address) || "",
-    receivedAt: m.receivedDateTime,
+    fromName: addr(m.from).name,
+    fromAddress: addr(m.from).address,
+    to: (m.toRecipients || []).map(addr),
+    receivedAt: (sent ? m.sentDateTime : m.receivedDateTime) || m.receivedDateTime,
     isRead: !!m.isRead,
     preview: m.bodyPreview || "",
     hasAttachments: !!m.hasAttachments,
@@ -87,27 +104,40 @@ export async function listInbox({ top = 30, unreadOnly = false } = {}) {
 }
 
 export async function getMessage(id) {
-  const m = await graph("GET", `${mb()}/messages/${encodeURIComponent(id)}?$select=id,subject,from,receivedDateTime,body,conversationId`);
+  const sel = "$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,body,conversationId,parentFolderId";
+  // Text for the order lookup, HTML for showing it the way Outlook does.
+  const [m, h] = await Promise.all([
+    graph("GET", `${mb()}/messages/${encodeURIComponent(id)}?${sel}`),
+    graph("GET", `${mb()}/messages/${encodeURIComponent(id)}?$select=body`, undefined, { html: true }),
+  ]);
   return {
     id: m.id,
     subject: m.subject || "",
-    fromName: (m.from && m.from.emailAddress && m.from.emailAddress.name) || "",
-    fromAddress: (m.from && m.from.emailAddress && m.from.emailAddress.address) || "",
+    fromName: addr(m.from).name,
+    fromAddress: addr(m.from).address,
+    to: (m.toRecipients || []).map(addr),
+    cc: (m.ccRecipients || []).map(addr),
     receivedAt: m.receivedDateTime,
-    // Inline images leave "[cid:image001.png@01DB…]" markers in the text body; the
-    // images themselves are listed below with the attachments.
+    sentAt: m.sentDateTime,
+    // Inline images leave "[cid:image001.png@01DB…]" markers in the text body.
     text: ((m.body && m.body.content) || "").replace(/\[cid:[^\]]+\]/g, "").replace(/\n{3,}/g, "\n\n"),
+    // Shown in a sandboxed frame (no scripts) with cid: images swapped for the real ones.
+    html: (h.body && h.body.contentType === "html" && h.body.content) || "",
     attachments: await listAttachments(id).catch(() => []),
   };
 }
 
 // File attachments only (an attached EMAIL or calendar item has no bytes to show).
-// contentBytes is left out of the list — a few photos would make it megabytes.
+// contentBytes is left out of the list — a few photos would make it megabytes. The
+// contentId is what the HTML body points at (src="cid:…") for an inline image.
 export async function listAttachments(id) {
-  const j = await graph("GET", `${mb()}/messages/${encodeURIComponent(id)}/attachments?$select=id,name,contentType,size,isInline`);
+  const base = `${mb()}/messages/${encodeURIComponent(id)}/attachments?$select=id,name,contentType,size,isInline`;
+  let j;
+  try { j = await graph("GET", `${base},microsoft.graph.fileAttachment/contentId`); }
+  catch { j = await graph("GET", base); }
   return (j.value || [])
     .filter((a) => !a["@odata.type"] || a["@odata.type"] === "#microsoft.graph.fileAttachment")
-    .map((a) => ({ id: a.id, name: a.name || "attachment", contentType: a.contentType || "", size: a.size || 0, isInline: !!a.isInline }));
+    .map((a) => ({ id: a.id, name: a.name || "attachment", contentType: a.contentType || "", size: a.size || 0, isInline: !!a.isInline, contentId: a.contentId || null }));
 }
 
 // The raw bytes of one attachment, plus what it says it is.
@@ -119,33 +149,77 @@ export async function getAttachment(id, attachmentId) {
   return { name: meta.name || "attachment", contentType: meta.contentType || "", buf: Buffer.from(await r.arrayBuffer()) };
 }
 
-// Reply inside the customer's thread: createReply sets the threading headers and quotes the
-// original; our text goes ABOVE that quote, the way a person replying in Outlook would.
-export async function replyToMessage(id, { html, to, replyTo, subject, attachments = [] }) {
-  const draft = await graph("POST", `${mb()}/messages/${encodeURIComponent(id)}/createReply`, {}, { html: true });
-  const quoted = (draft.body && draft.body.content) || "";
-  const content = /<body[^>]*>/i.test(quoted) ? quoted.replace(/<body[^>]*>/i, (tag) => `${tag}${html}<br>`) : `${html}<br>${quoted}`;
-  const patch = { body: { contentType: "HTML", content } };
-  if (subject) patch.subject = subject;
-  if (to) patch.toRecipients = [{ emailAddress: { address: to } }];
-  if (replyTo) patch.replyTo = [{ emailAddress: { address: replyTo } }];
-  await graph("PATCH", `${mb()}/messages/${encodeURIComponent(draft.id)}`, patch);
-  await addAttachments(draft.id, attachments);
-  await graph("POST", `${mb()}/messages/${encodeURIComponent(draft.id)}/send`);
-  return { via: "graph-reply", mailbox: salesMailbox() };
+// Our signature's logo and icons, embedded the way Outlook's own signature does it: as
+// inline attachments the body points at with cid:, so the customer sees them straight
+// away instead of a "download pictures" bar or a hosted image a mail client blocks.
+const ASSET_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "email-assets");
+export function embedSignatureImages(html) {
+  const inline = [];
+  const seen = new Map();
+  const out = String(html || "").replace(/(src=["'])https?:\/\/[^"']*\/email-assets\/(image\d{3}\.png)(["'])/gi, (all, a, file, b) => {
+    let cid = seen.get(file);
+    if (!cid) {
+      let bytes;
+      try { bytes = fs.readFileSync(path.join(ASSET_DIR, file)); } catch { return all; }   // unknown file: leave the link
+      cid = `${file}@tuffshop`;
+      seen.set(file, cid);
+      inline.push({ name: file, contentType: "image/png", base64: bytes.toString("base64"), isInline: true, contentId: cid });
+    }
+    return `${a}cid:${cid}${b}`;
+  });
+  return { html: out, inline };
 }
 
-// A new message (not a reply): built as a draft so attachments can go on it first.
-export async function sendNew({ to, subject, html, replyTo, attachments = [] }) {
-  const draft = await graph("POST", `${mb()}/messages`, {
-    subject,
-    body: { contentType: "HTML", content: html },
-    toRecipients: [{ emailAddress: { address: to } }],
-    ...(replyTo ? { replyTo: [{ emailAddress: { address: replyTo } }] } : {}),
-  });
-  await addAttachments(draft.id, attachments);
+// Every outgoing email, the way Outlook builds it:
+//   new      a fresh message
+//   reply    createReply      — threaded, the original quoted below our text
+//   replyAll createReplyAll   — same, to everyone on it
+//   forward  createForward    — the original quoted AND its attachments carried over
+// Our text goes ABOVE the quote. to/cc/bcc take an address, a "a; b" list, or an array;
+// when given they replace what Graph filled in (the page shows and lets you edit them).
+export async function composeAndSend({ mode = "new", sourceId, to, cc, bcc, subject, html, replyTo, attachments = [] }) {
+  const { html: body, inline } = embedSignatureImages(html);
+  let draft;
+  if (mode === "new" || !sourceId) {
+    draft = await graph("POST", `${mb()}/messages`, { subject, body: { contentType: "HTML", content: body } });
+  } else {
+    const action = { reply: "createReply", replyAll: "createReplyAll", forward: "createForward" }[mode];
+    if (!action) throw new Error(`Unknown email mode "${mode}"`);
+    draft = await graph("POST", `${mb()}/messages/${encodeURIComponent(sourceId)}/${action}`, {}, { html: true });
+    const quoted = (draft.body && draft.body.content) || "";
+    const content = /<body[^>]*>/i.test(quoted) ? quoted.replace(/<body[^>]*>/i, (tag) => `${tag}${body}<br>`) : `${body}<br>${quoted}`;
+    await graph("PATCH", `${mb()}/messages/${encodeURIComponent(draft.id)}`, { body: { contentType: "HTML", content } });
+  }
+  const patch = {};
+  if (subject) patch.subject = subject;
+  if (to !== undefined && splitAddresses(to).length) patch.toRecipients = recipients(to);
+  if (cc !== undefined) patch.ccRecipients = recipients(cc);
+  if (bcc !== undefined) patch.bccRecipients = recipients(bcc);
+  if (replyTo) patch.replyTo = recipients(replyTo);
+  if (Object.keys(patch).length) await graph("PATCH", `${mb()}/messages/${encodeURIComponent(draft.id)}`, patch);
+  // A reply quotes the original, but Graph does not carry its inline images (a forward
+  // does) — copy them over so the quoted signature/logos still show, as in Outlook.
+  const quotedImages = [];
+  if ((mode === "reply" || mode === "replyAll") && sourceId) {
+    try {
+      for (const a of (await listAttachments(sourceId)).filter((x) => x.isInline && x.contentId).slice(0, 15)) {
+        const f = await getAttachment(sourceId, a.id);
+        quotedImages.push({ name: f.name, contentType: f.contentType, base64: f.buf.toString("base64"), isInline: true, contentId: a.contentId });
+      }
+    } catch (e) { console.error("[graph] quoted images not copied:", e.message); }   // the reply still goes
+  }
+  await addAttachments(draft.id, [...inline, ...quotedImages, ...attachments]);
   await graph("POST", `${mb()}/messages/${encodeURIComponent(draft.id)}/send`);
-  return { via: "graph", mailbox: salesMailbox() };
+  return { via: mode === "new" ? "graph" : `graph-${mode}`, mailbox: salesMailbox() };
+}
+
+// Kept for the other senders (returns, call report).
+export async function replyToMessage(id, { html, to, replyTo, subject, attachments = [] }) {
+  const r = await composeAndSend({ mode: "reply", sourceId: id, to, subject, html, replyTo, attachments });
+  return { ...r, via: "graph-reply" };
+}
+export async function sendNew({ to, subject, html, replyTo, attachments = [] }) {
+  return composeAndSend({ mode: "new", to, subject, html, replyTo, attachments });
 }
 
 // Files onto a draft. Graph takes up to 3 MB in one call; anything bigger goes
@@ -160,6 +234,7 @@ export async function addAttachments(draftId, files = []) {
     if (bytes.length <= SIMPLE_MAX) {
       await graph("POST", `${mb()}/messages/${encodeURIComponent(draftId)}/attachments`, {
         "@odata.type": "#microsoft.graph.fileAttachment", name, contentType, contentBytes: bytes.toString("base64"),
+        ...(f.isInline ? { isInline: true, contentId: String(f.contentId || name) } : {}),
       });
       continue;
     }
