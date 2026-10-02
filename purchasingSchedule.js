@@ -4662,16 +4662,22 @@ async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     }
   }
 
-  if (goodsNet > 0 && goodsNet < freeOver) {
+  // Carriage follows what BeeSwift ACTUALLY charged on the order page, not our goods value: their
+  // prices are often below our list-20 costs, so PO 493633 was £156.60 ours / £147.00 theirs and they
+  // charged £6.95 while we added nothing. Only when their figure is unreadable do we fall back to ours.
+  const theirCarriage = pv.carriage == null ? null : Number(pv.carriage);
+  const chargeCarriage = theirCarriage != null ? theirCarriage > 0 : (goodsNet > 0 && goodsNet < freeOver);
+  const carriageNet = theirCarriage > 0 ? theirCarriage : BEESWIFT_CARRIAGE();
+  if (chargeCarriage) {
     try {
-      const c = await bp.addPoMiscRowLive({ poId, name: `Carriage (order under £${freeOver} ex-VAT)`, net: BEESWIFT_CARRIAGE(), qty: 1, execute: true });
-      steps.carriage = c && c.refused ? { added: false, reason: c.reason } : { added: true, net: BEESWIFT_CARRIAGE(), goodsNet, freeOver, theirs: pv.carriage ?? null };
+      const c = await bp.addPoMiscRowLive({ poId, name: `Carriage (BeeSwift goods under £${freeOver} ex-VAT)`, net: carriageNet, qty: 1, execute: true });
+      steps.carriage = c && c.refused ? { added: false, reason: c.reason } : { added: true, net: carriageNet, goodsNet, freeOver, theirs: theirCarriage };
     } catch (e) {
       steps.carriage = { added: false, error: e.message };
       await logPurchasingError(pool, { supplier: 'BEESWIFT', step: 'carriage', severity: 'review', placed: true,
         message: `BeeSwift PO#${poId} placed, but the £${BEESWIFT_CARRIAGE()} carriage line could not be added (goods £${goodsNet}): ${e.message}`, context: { poId, goodsNet } }).catch(() => {});
     }
-  } else steps.carriage = { added: false, reason: `goods £${goodsNet} at or over the £${freeOver} free-carriage level`, theirs: pv.carriage ?? null };
+  } else steps.carriage = { added: false, reason: theirCarriage === 0 ? 'BeeSwift charged no carriage' : `goods £${goodsNet} at or over the £${freeOver} free-carriage level`, theirs: theirCarriage };
 
   // price check (NON-FATAL): BeeSwift's goods sub-total vs our PO goods
   if (pv.subTotal != null && Math.abs(pv.subTotal - goodsNet) > 0.5) {
