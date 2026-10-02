@@ -1600,6 +1600,15 @@ const EMAIL_SUPPLIER_CONFIG = {
     // Added under the standard PO email, every time (user, 2026-09-28).
     messageExtra: 'Free of Charge carriage as agreed with Ben',
   },
+  // AS Apparel (user, 2026-10-02) — emailed PO at 14:40. No carriage line on any of the last 25
+  // POs (several under £10), so no threshold and no charge. Address from the BP contact's primary
+  // email; PO_EMAIL_ASAPPAREL overrides once their order desk is confirmed.
+  'AS APPAREL': {
+    label: 'AS Apparel', contactId: 47921,
+    email: () => process.env.PO_EMAIL_ASAPPAREL || 'info@asapparel.co.uk',
+    carriageNet: () => Number(process.env.ASAPPAREL_CARRIAGE_CHARGE || 0),
+    freeOver: () => Number(process.env.ASAPPAREL_FREESHIP_THRESHOLD || 0),
+  },
   BUCKLER: {
     label: 'Buckler Boots', contactId: 8981,
     email: () => process.env.PO_EMAIL_BUCKLER || 'orders@bucklerboots.com',
@@ -1739,6 +1748,7 @@ async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToTh
 const placeV12Order = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('V12', pool, altItemsUrl, opts);
 const placeBucklerOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('BUCKLER', pool, altItemsUrl, opts);
 const placeHellbergOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('HELLBERG', pool, altItemsUrl, opts);
+const placeAsApparelOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('AS APPAREL', pool, altItemsUrl, opts);
 
 
 // ── Scruffs placement chain (email supplier) ─────────────────────────────────
@@ -3951,6 +3961,7 @@ const SCHEDULED_SUPPLIERS = {
   // BeeSwift (user, 2026-10-01): free carriage at £150 ex-VAT (a £71.40 basket showed £6.95 carriage).
   // DRY-RUN ONLY until the basket → processorder → submit chain is built and rehearsed; NO poller
   // window in server.js yet, so nothing runs on its own. New Balance is vetoed in the registry.
+  'AS APPAREL': { supplierKey: 'AS APPAREL', stateId: 21, placeFn: placeAsApparelOrder, threshold: Number(process.env.ASAPPAREL_FREESHIP_THRESHOLD || 0) }, // emailed PO, 14:40 (user, 2026-10-02)
   BEESWIFT: { supplierKey: 'BEESWIFT', stateId: 20, placeFn: placeBeeswiftOrder, threshold: Number(process.env.BEESWIFT_FREESHIP_THRESHOLD || 150) },
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20

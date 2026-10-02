@@ -63,7 +63,8 @@ const POLLERS = [
   { name: 'Carhartt', h: 13, m: 20, days: 'Mon/Wed/Fri' },   // moved from 13:30 for BeeSwift (2026-10-01)
   { name: 'BeeSwift', h: 13, m: 40, days: 'Mon-Fri' },
   { name: 'Scruffs', h: 14, m: 0, days: 'Mon-Fri' },
-  { name: 'Performance Brands', h: 14, m: 30, days: 'Mon-Fri' },
+  { name: 'Performance Brands', h: 14, m: 20, days: 'Mon-Fri' },   // moved from 14:30 (2026-10-02)
+  { name: 'AS Apparel', h: 14, m: 40, days: 'Mon-Fri' },
   { name: 'Portwest', h: 15, m: 0, days: 'Mon-Fri' },
   { name: 'Hellberg', h: 15, m: 20, days: 'Mon-Fri' },   // emailed PO, split from Snickers 2026-09-16 — runs on Purchasing-Automation
   { name: 'PenCarrie', h: 15, m: 40, days: 'Mon-Fri' },

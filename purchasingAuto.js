@@ -245,6 +245,11 @@ export const SUPPLIERS = {
   // licensed DeWalt workwear range. Their products are NOT named "castle" — detect by
   // brand. No dedicated PO custom field yet, so re-pickup is prevented by clearing the
   // CASTLE tag on finalize.
+  // AS Apparel (user, 2026-10-02): an EMAIL supplier like Buckler/V12. Their own styles are brand
+  // 237 (AS033/AS044/AS066/AS99…) and brand 234 (GW0102 etc.); brandNeedsOwnSupplier so a brand
+  // product BP attributes to another supplier is not swept onto an AS Apparel PO.
+  'AS APPAREL': { contactId: 47921, costList: 20, poField: 'PCF_ASAPPRPO', lowInvSupplierId: 47921, brandIds: [237, 234], brandNeedsOwnSupplier: true,
+    detect: (n) => /\bas\s*apparel\b|^AS\d{2,3}\b/i.test(n || '') },
   // BeeSwift (user, 2026-10-01): normal BeeSwift stock only. NEW BALANCE (brand 287, NWB… codes) is
   // bought through BeeSwift but is "not fully released yet" — it must never be ordered by this lane,
   // neither for customers nor as low-inventory, so it is a hard excludeIf veto. BeeSwift's own
@@ -330,7 +335,7 @@ const _SUPPLIER_NAME_HINTS = {
   CHADWICK: /chadwick/i, CARHARTT: /carhartt/i, MASCOT: /mascot/i, SCRUFFS: /scruffs/i,
   BLAKLADER: /bl[aå]kl[aä]der/i, SNICKERS: /snickers/i, FRISTADS: /fristads/i,
   'HELLY HANSEN': /helly/i, STERLING: /sterling/i, 'PERFORMANCE BRANDS': /performance\s*brands/i,
-  BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i, BEESWIFT: /bee\s*swift/i,
+  BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i, BEESWIFT: /bee\s*swift/i, 'AS APPAREL': /\bas\s*apparel\b/i,
 };
 export function tagFailsToMatch(rawTag) {
   const out = [];
