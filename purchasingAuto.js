@@ -2540,6 +2540,28 @@ export async function addPoMiscRowLive({ poId, name, net, qty = 1, taxCode = 'T2
     .some((r) => (String(r.productId) === '1001' || String(r.productId) === '1000') && sameText(r.productName, name));
   return { done: landed, ...plan, poNetNow: after && after.totalValue && after.totalValue.net };
 }
+// Add a PRODUCT row to a PO (not a misc line). Used when a supplier sells by the pack and we bought
+// more singles than the demand (BeeSwift UV9302245 is "PK 4": one goggle needed = one pack = 4 on
+// the PO), so goods-in receives what actually arrives. Read back by productId.
+export async function addPoProductUnitsLive({ poId, productId, qty, unitCost, execute = false } = {}) {
+  const q = Number(qty), cost = Number(unitCost);
+  if (!poId || !productId || !(q > 0) || !(cost >= 0)) throw new Error('poId, productId, qty > 0 and unitCost required');
+  const code = await productTaxCodeLive(productId);
+  const rate = taxRate(code);
+  const net = cost * q;
+  const plan = { poId, productId, qty: q, unitCost: cost, net: Number(net.toFixed(2)), taxCode: code };
+  if (!execute) return { dryRun: true, ...plan };
+  const before = (await liveGet(`/order-service/order/${poId}`))[0];
+  const countOf = (o) => Object.values((o && o.orderRows) || {}).filter((r) => String(r.productId) === String(productId)).reduce((a, r) => a + parseFloat(r.quantity.magnitude), 0);
+  const was = countOf(before);
+  await liveWrite('POST', `/order-service/order/${poId}/row`, {
+    productId, quantity: { magnitude: String(q) },
+    rowValue: { taxCode: code, rowNet: { currency: 'GBP', value: net.toFixed(2) }, rowTax: { currency: 'GBP', value: (net * rate).toFixed(2) } },
+  });
+  const after = (await liveGet(`/order-service/order/${poId}`))[0];
+  return { done: Math.abs(countOf(after) - was - q) < 0.001, ...plan, unitsWas: was, unitsNow: countOf(after) };
+}
+
 // Remove ONE row from a PO, addressed by SKU rather than rowId. Needed when a line turns out to be
 // unorderable and the PO should stop claiming it is on order — on PO 483708 the Y-Shield H3 White
 // hard hat was out of stock at Performance Brands with no back-order route (their out-of-stock grid

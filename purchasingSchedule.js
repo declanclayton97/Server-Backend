@@ -4527,7 +4527,23 @@ export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey,
 // token fails at the basket (step 'cart'), before anything is ordered.
 const BEESWIFT_SUPPLIER_CONTACT = 326;
 const BEESWIFT_CARRIAGE = () => Number(process.env.BEESWIFT_CARRIAGE_CHARGE || 6.95);
-const beeswiftLines = (po) => mergePoLinesBySku(po).map((l) => ({ sku: l.sku, name: l.name, qty: l.qty, cost: l.cost }));
+// Order rows freeze the SKU and name at the time of sale, so a product fixed in BP since (Yale 60628 ->
+// BBYS) still reads as the old row. Send the product's CURRENT sku + name alongside; Alt-Items tries
+// those first. Ids must be ascending or BP 400s the whole set.
+async function beeswiftLines(po) {
+  const lines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, name: l.name, qty: l.qty, cost: l.cost, productId: l.productId }));
+  const ids = [...new Set(lines.map((l) => Number(l.productId)).filter((n) => n > 1001))].sort((a, b) => a - b);
+  const cur = new Map();
+  for (let i = 0; i < ids.length; i += 100) {
+    try {
+      for (const p of (await bp.bpLiveGet(`/product-service/product/${ids.slice(i, i + 100).join(',')}`)) || []) {
+        const sc = p.salesChannels && p.salesChannels[0];
+        cur.set(Number(p.id), { productSku: (p.identity && p.identity.sku) || null, productName: (sc && sc.productName) || null });
+      }
+    } catch { /* fall back to the row text */ }
+  }
+  return lines.map((l) => ({ ...l, ...(cur.get(Number(l.productId)) || {}) }));
+}
 
 // A fresh token, logged in by the Playwright worker seconds before the basket. The login is TLS-
 // fingerprint gated (Chrome passes, Node does not) and BeeSwift keeps ONE session per account, so a
@@ -4543,7 +4559,7 @@ async function beeswiftFreshToken() {
 
 async function beeswiftRehearsal(pool, altItemsUrl) {
   const plan = await bp.createComboPOLive({ supplierKey: 'BEESWIFT', execute: false, logPool: pool });
-  const lines = beeswiftLines(plan);
+  const lines = await beeswiftLines(plan);
   if (!lines.length) return { rehearsal: true, lines: [], note: 'no BeeSwift demand right now' };
   const goodsNet = +lines.reduce((a, l) => a + (Number(l.cost) || 0) * l.qty, 0).toFixed(2);
   const token = await beeswiftFreshToken();
@@ -4553,7 +4569,7 @@ async function beeswiftRehearsal(pool, altItemsUrl) {
   return { rehearsal: true, ok: !!co.ok, reason: co.reason || null, lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0),
     ourGoodsNet: goodsNet, theirSubTotal: pv.subTotal ?? null, theirCarriage: pv.carriage ?? null, theirTotal: pv.orderTotal ?? null,
     carriageWeWouldAdd: goodsNet < (SCHEDULED_SUPPLIERS.BEESWIFT.threshold || 150) ? BEESWIFT_CARRIAGE() : 0,
-    deliverTo: pv.deliverTo || null, orderPage: pv.lines || [], added: co.added || [], problems: co.problems || [], cleared: co.cleared || null, basketBefore: co.basketBefore || [] };
+    deliverTo: pv.deliverTo || null, orderPage: pv.lines || [], packs: co.packs || [], added: co.added || [], problems: co.problems || [], cleared: co.cleared || null, basketBefore: co.basketBefore || [] };
 }
 
 async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
@@ -4572,8 +4588,8 @@ async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
-  const lines = beeswiftLines(po);
-  const goodsNet = +lines.reduce((a, l) => a + (Number(l.cost) || 0) * l.qty, 0).toFixed(2);
+  const lines = await beeswiftLines(po);
+  let goodsNet = +lines.reduce((a, l) => a + (Number(l.cost) || 0) * l.qty, 0).toFixed(2);
   const freeOver = SCHEDULED_SUPPLIERS.BEESWIFT.threshold || 150;
 
   // checkout — customerPO = our PO number (BeeSwift's duplicate guard keys on it)
@@ -4586,6 +4602,24 @@ async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 
   // carriage on the PO when the goods are under the free-carriage level (the order still goes on
   // day 3 regardless — that is the point of the wait rule — but the PO must carry the charge).
+  // Pack lines: BeeSwift sold us whole packs, so the PO carries the extra singles (as stock) and
+  // goods-in receives what turns up. Ours-is-the-pack lines need nothing.
+  steps.packs = [];
+  for (const p of (co.packs || [])) {
+    const l = lines.find((x) => String(x.sku) === String(p.sku));
+    if (!(p.extraUnits > 0) || !l) { steps.packs.push({ ...p, poRow: 'none needed' }); continue; }
+    try {
+      const r = await bp.addPoProductUnitsLive({ poId, productId: l.productId, qty: p.extraUnits, unitCost: l.cost, execute: live });
+      steps.packs.push({ ...p, poRow: r });
+      if (r.done) goodsNet = +(goodsNet + p.extraUnits * (Number(l.cost) || 0)).toFixed(2);
+      else throw new Error('row did not read back');
+    } catch (e) {
+      steps.packs.push({ ...p, poRowError: e.message });
+      await logPurchasingError(pool, { supplier: 'BEESWIFT', step: 'pack-row', severity: 'review', placed: true,
+        message: `BeeSwift PO#${poId} placed with ${p.packs} x ${p.unit} of ${p.code} (${p.packs * p.packSize} units, we needed ${p.ourQty}) — add ${p.extraUnits} more ${p.sku} to the PO by hand: ${e.message}`, context: { poId, pack: p } }).catch(() => {});
+    }
+  }
+
   if (goodsNet > 0 && goodsNet < freeOver) {
     try {
       const c = await bp.addPoMiscRowLive({ poId, name: `Carriage (order under £${freeOver} ex-VAT)`, net: BEESWIFT_CARRIAGE(), qty: 1, execute: true });
