@@ -6,7 +6,7 @@
 // salesHub.js; this module only gathers facts and performs the send.
 
 import nodemailer from "nodemailer";
-import { graphConfigured, salesMailbox, listInbox, getMessage, composeAndSend, splitAddresses, FOLDERS, moveMessage, markRead, setRead, getAttachment } from "./graphMail.js";
+import { graphConfigured, salesMailbox, listInbox, getMessage, composeAndSend, saveDraft, deleteDraft, listThread, splitAddresses, FOLDERS, moveMessage, markRead, setRead, getAttachment } from "./graphMail.js";
 import { SIGNATURE_HTML } from "./emailSignature.js";
 import {
   SALES_INTENTS,
@@ -495,13 +495,19 @@ export function registerSalesHubRoutes(app, deps) {
   app.get("/api/sales-hub/inbox", requireUser, async (req, res) => {
     if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected — set MS_TENANT_ID, MS_CLIENT_ID and MS_CLIENT_SECRET" });
     try {
+      // ?search= searches the whole folder on the server; ?next= is the page after the last one.
       const folder = FOLDERS[req.query.folder] ? String(req.query.folder) : "inbox";
-      const msgs = await listInbox({ top: req.query.top, unreadOnly: req.query.unread === "1", folder });
+      const page = await listInbox({ top: req.query.top, unreadOnly: req.query.unread === "1", folder,
+        search: String(req.query.search || ""), next: String(req.query.next || "") });
+      const msgs = page.messages;
       const locks = await othersLocks(req.hubUser.key).catch(() => ({}));
+      const drafting = await draftsBySource(msgs.map((m) => m.id)).catch(() => ({}));
       res.json({
         mailbox: salesMailbox(),
         folder,
+        next: page.next,
         messages: msgs.map((m) => ({
+          draft: drafting[m.id] || null,
           ...m,
           orderNumber: extractOrderNumber(`${m.subject}\n${m.preview}`) || null,
           viewing: locks[m.id] || null,
@@ -540,6 +546,89 @@ export function registerSalesHubRoutes(app, deps) {
       console.log(`[sales-hub] ${req.hubUser.name} moved an email to ${to}`);
       res.json({ ok: true, id: r.id, to });
     } catch (err) { res.status(err.status === 404 ? 404 : 500).json({ error: err.message }); }
+  });
+
+  // GET /api/sales-hub/thread/:conversationId — the whole conversation, every folder, oldest first.
+  app.get("/api/sales-hub/thread/:conversationId", requireUser, async (req, res) => {
+    if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected" });
+    try { res.json({ messages: await listThread(req.params.conversationId) }); }
+    catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Drafts ─────────────────────────────────────────────────────────────────
+  // A compose is saved as a real Outlook draft as it is typed (it shows in Drafts in Outlook
+  // too). The row here remembers what Outlook cannot tell us back: our text apart from the
+  // quoted original it sits on, which email it answers, and who is writing it.
+  let draftsReady = null;
+  const ensureDrafts = () => (draftsReady ||= getPool().query(`CREATE TABLE IF NOT EXISTS sales_hub_drafts (
+      draft_id text PRIMARY KEY, source_id text, mode text NOT NULL, quoted text NOT NULL DEFAULT '',
+      body text NOT NULL DEFAULT '', subject text, to_list text, cc_list text, bcc_list text,
+      order_id bigint, intent text, user_key text, user_name text,
+      updated_at timestamptz NOT NULL DEFAULT now())`)
+    .then(() => getPool().query(`CREATE INDEX IF NOT EXISTS sales_hub_drafts_source ON sales_hub_drafts (source_id)`))
+    .catch((e) => { draftsReady = null; throw e; }));
+  const draftRow = (r) => r && ({ draftId: r.draft_id, sourceId: r.source_id, mode: r.mode, body: r.body, subject: r.subject,
+    to: r.to_list, cc: r.cc_list, bcc: r.bcc_list, orderId: r.order_id ? Number(r.order_id) : null, intent: r.intent,
+    by: r.user_name, byKey: r.user_key, at: r.updated_at });
+  async function draftsBySource(ids) {
+    if (!(useDatabase && getPool()) || !ids.length) return {};
+    await ensureDrafts();
+    const r = await getPool().query(`SELECT source_id, user_name, updated_at FROM sales_hub_drafts WHERE source_id = ANY($1)`, [ids]);
+    return Object.fromEntries(r.rows.map((x) => [x.source_id, { by: x.user_name, at: x.updated_at }]));
+  }
+
+  // POST /api/sales-hub/drafts { draftId?, mode, messageId?, to, cc, bcc, subject, html, orderId?, intent? }
+  app.post("/api/sales-hub/drafts", requireUser, async (req, res) => {
+    if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected" });
+    if (!(useDatabase && getPool())) return res.status(503).json({ error: "Drafts need the database" });
+    const b = req.body || {};
+    try {
+      await ensureDrafts();
+      const prev = b.draftId ? (await getPool().query(`SELECT * FROM sales_hub_drafts WHERE draft_id = $1`, [String(b.draftId)])).rows[0] : null;
+      const mode = prev ? prev.mode : (["reply", "replyAll", "forward", "new"].includes(b.mode) ? b.mode : "new");
+      const sourceId = prev ? prev.source_id : (mode !== "new" && b.messageId ? String(b.messageId) : null);
+      if (sourceId && (mode === "reply" || mode === "replyAll")) {
+        const held = (await othersLocks(req.hubUser.key).catch(() => ({})))[sourceId];
+        if (held) return res.status(423).json({ error: `${held.name} is working on this email.` });
+      }
+      const html = String(b.html || "");
+      const saved = await saveDraft({ draftId: b.draftId || undefined, quoted: prev ? prev.quoted : "", mode, sourceId,
+        to: splitAddresses(b.to), cc: splitAddresses(b.cc), bcc: splitAddresses(b.bcc), subject: String(b.subject || ""), html });
+      await getPool().query(
+        `INSERT INTO sales_hub_drafts (draft_id, source_id, mode, quoted, body, subject, to_list, cc_list, bcc_list, order_id, intent, user_key, user_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         ON CONFLICT (draft_id) DO UPDATE SET body = EXCLUDED.body, subject = EXCLUDED.subject, to_list = EXCLUDED.to_list,
+           cc_list = EXCLUDED.cc_list, bcc_list = EXCLUDED.bcc_list, order_id = EXCLUDED.order_id, intent = EXCLUDED.intent,
+           user_key = EXCLUDED.user_key, user_name = EXCLUDED.user_name, updated_at = now()`,
+        [saved.draftId, sourceId, mode, saved.quoted || "", html, String(b.subject || ""), String(b.to || ""), String(b.cc || ""), String(b.bcc || ""),
+         num(b.orderId) || null, b.intent ? String(b.intent) : null, req.hubUser.key, req.hubUser.name]);
+      res.json({ ok: true, draftId: saved.draftId, savedAt: new Date().toISOString() });
+    } catch (err) {
+      console.error("[sales-hub] draft save failed:", err.message);
+      res.status(err.status === 404 ? 404 : 500).json({ error: err.message });
+    }
+  });
+
+  // GET /api/sales-hub/drafts?source=<messageId> | ?draft=<draftId> — the saved draft to carry on with.
+  app.get("/api/sales-hub/drafts", requireUser, async (req, res) => {
+    if (!(useDatabase && getPool())) return res.json({ draft: null });
+    try {
+      await ensureDrafts();
+      const r = req.query.draft
+        ? await getPool().query(`SELECT * FROM sales_hub_drafts WHERE draft_id = $1`, [String(req.query.draft)])
+        : await getPool().query(`SELECT * FROM sales_hub_drafts WHERE source_id = $1 ORDER BY updated_at DESC LIMIT 1`, [String(req.query.source || "")]);
+      res.json({ draft: draftRow(r.rows[0]) || null });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // DELETE /api/sales-hub/drafts/:draftId — Discard: deletes the Outlook draft (only ever a draft).
+  app.delete("/api/sales-hub/drafts/:draftId", requireUser, async (req, res) => {
+    try {
+      try { await deleteDraft(req.params.draftId); }
+      catch (e) { if (e.status !== 404) throw e; }   // already gone (sent or deleted in Outlook)
+      if (useDatabase && getPool()) { await ensureDrafts(); await getPool().query(`DELETE FROM sales_hub_drafts WHERE draft_id = $1`, [req.params.draftId]); }
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   // GET /api/sales-hub/signature — the signature a new email or forward starts with.
@@ -744,14 +833,23 @@ export function registerSalesHubRoutes(app, deps) {
     const b = req.body || {};
     try {
       // reply / replyAll / forward need the email they answer; new needs nothing else.
-      const mode = ["reply", "replyAll", "forward", "new"].includes(b.mode) ? b.mode : (b.messageId ? "reply" : "new");
+      // A saved draft carries its own mode and the email it answers; one written in Outlook
+      // (no row here) is sent as it stands.
+      let draftRec = null;
+      if (b.draftId && useDatabase && getPool()) {
+        await ensureDrafts();
+        draftRec = (await getPool().query(`SELECT * FROM sales_hub_drafts WHERE draft_id = $1`, [String(b.draftId)])).rows[0] || null;
+      }
+      const mode = draftRec ? draftRec.mode : b.draftId ? "draft"
+        : ["reply", "replyAll", "forward", "new"].includes(b.mode) ? b.mode : (b.messageId ? "reply" : "new");
+      if (draftRec && draftRec.source_id) b.messageId = draftRec.source_id;
       const orderId = num(b.orderId);
       const toList = splitAddresses(b.to), ccList = splitAddresses(b.cc), bccList = splitAddresses(b.bcc);
       const to = toList.join("; ");
       const subject = String(b.subject || "").trim();
       const html = String(b.html || "");
       if (!toList.length || !subject || !html) return res.status(400).json({ error: "To, subject and a message are required" });
-      if (mode !== "new" && !b.messageId) return res.status(400).json({ error: "Which email is this a " + mode + " to?" });
+      if (mode !== "new" && mode !== "draft" && !b.messageId) return res.status(400).json({ error: "Which email is this a " + mode + " to?" });
       if (mode === "new" && !orderId && b.requireOrder) return res.status(400).json({ error: "No order linked" });
       // Files from the compose box, base64. Outlook's own limits: 20 MB a file.
       const attachments = Array.isArray(b.attachments) ? b.attachments.slice(0, 10) : [];
@@ -771,7 +869,7 @@ export function registerSalesHubRoutes(app, deps) {
         });
       }
 
-      if (b.messageId && mode !== "forward") {
+      if (b.messageId && (mode === "reply" || mode === "replyAll")) {
         const held = (await othersLocks(req.hubUser.key).catch(() => ({})))[String(b.messageId)];
         if (held) return res.status(423).json({ error: `${held.name} is working on this email — not sent.` });
       }
@@ -794,12 +892,14 @@ export function registerSalesHubRoutes(app, deps) {
       let via;
       if (graphConfigured()) {
         const r = await composeAndSend({ mode, sourceId: b.messageId ? String(b.messageId) : undefined,
+          draftId: b.draftId ? String(b.draftId) : undefined, quoted: draftRec ? draftRec.quoted : "",
           to: toList, cc: ccList, bcc: bccList, subject, html, replyTo, attachments });
         via = r.via;
         // Outlook marks an email read once it has been replied to; do the same so the
         // shared inbox shows it as dealt with. Never on merely OPENING it — a colleague
         // may be relying on it staying unread.
-        if (b.messageId && mode !== "forward") markRead(String(b.messageId)).catch((e) => console.error("[sales-hub] markRead:", e.message));
+        if (b.draftId && useDatabase && getPool()) getPool().query(`DELETE FROM sales_hub_drafts WHERE draft_id = $1`, [String(b.draftId)]).catch(() => {});
+        if (b.messageId && (mode === "reply" || mode === "replyAll")) markRead(String(b.messageId)).catch((e) => console.error("[sales-hub] markRead:", e.message));
       } else {
         const transporter = nodemailer.createTransport({
           host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com",

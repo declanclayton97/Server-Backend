@@ -80,31 +80,57 @@ const recipients = (list) => splitAddresses(list).map((address) => ({ emailAddre
 // The folders the hub shows, by Outlook's well-known names.
 export const FOLDERS = { inbox: "inbox", sent: "sentitems", drafts: "drafts", deleted: "deleteditems", junk: "junkemail", archive: "archive" };
 
-// Newest first. Summary fields only — the body is fetched when someone opens one.
-export async function listInbox({ top = 30, unreadOnly = false, folder = "inbox" } = {}) {
-  const sent = folder === "sent" || folder === "drafts";
-  const q = new URLSearchParams({
-    $top: String(Math.min(Number(top) || 30, 100)),
-    $orderby: `${sent ? "sentDateTime" : "receivedDateTime"} desc`,
-    $select: "id,subject,from,toRecipients,receivedDateTime,sentDateTime,isRead,bodyPreview,conversationId,hasAttachments",
-  });
-  if (unreadOnly) q.set("$filter", "isRead eq false");
-  const j = await graph("GET", `${mb()}/mailFolders/${FOLDERS[folder] || "inbox"}/messages?${q}`);
-  return (j.value || []).map((m) => ({
-    id: m.id,
-    subject: m.subject || "",
-    fromName: addr(m.from).name,
-    fromAddress: addr(m.from).address,
-    to: (m.toRecipients || []).map(addr),
-    receivedAt: (sent ? m.sentDateTime : m.receivedDateTime) || m.receivedDateTime,
-    isRead: !!m.isRead,
-    preview: m.bodyPreview || "",
-    hasAttachments: !!m.hasAttachments,
-  }));
+const LIST_SELECT = "id,subject,from,toRecipients,receivedDateTime,sentDateTime,lastModifiedDateTime,isRead,isDraft,bodyPreview,conversationId,hasAttachments,parentFolderId";
+const summary = (m, folder) => ({
+  id: m.id,
+  subject: m.subject || "",
+  fromName: addr(m.from).name,
+  fromAddress: addr(m.from).address,
+  to: (m.toRecipients || []).map(addr),
+  // Sent Items by when it went, Drafts by when it was last touched, the rest by arrival.
+  receivedAt: (folder === "drafts" ? m.lastModifiedDateTime : folder === "sent" ? m.sentDateTime : m.receivedDateTime) || m.receivedDateTime || m.lastModifiedDateTime,
+  isRead: !!m.isRead,
+  isDraft: !!m.isDraft,
+  preview: m.bodyPreview || "",
+  hasAttachments: !!m.hasAttachments,
+  conversationId: m.conversationId || null,
+});
+
+// A page of a folder, newest first, plus `next` (Graph's nextLink) for the page after it.
+// `search` searches the WHOLE folder on the server (subject, body, people), Outlook-style —
+// not just the emails already loaded. Graph will not sort a search, so results come back
+// newest-first by its own ranking. `next` is only accepted if it points back at this mailbox.
+export async function listInbox({ top = 50, unreadOnly = false, folder = "inbox", search = "", next = "" } = {}) {
+  let j;
+  if (next) {
+    const base = `${GRAPH}${mb()}/`;
+    if (!String(next).startsWith(base)) throw new Error("Bad page link");
+    j = await graph("GET", String(next).slice(GRAPH.length));
+  } else {
+    const q = new URLSearchParams({ $top: String(Math.min(Number(top) || 50, 100)), $select: LIST_SELECT });
+    const term = String(search || "").replace(/["\\]/g, " ").trim().slice(0, 100);
+    if (term) q.set("$search", `"${term}"`);
+    else {
+      q.set("$orderby", `${folder === "drafts" ? "lastModifiedDateTime" : folder === "sent" ? "sentDateTime" : "receivedDateTime"} desc`);
+      if (unreadOnly) q.set("$filter", "isRead eq false");
+    }
+    j = await graph("GET", `${mb()}/mailFolders/${FOLDERS[folder] || "inbox"}/messages?${q}`);
+  }
+  return { messages: (j.value || []).map((m) => summary(m, folder)), next: j["@odata.nextLink"] || null };
+}
+
+// Every email in one conversation, whatever folder it is in (the customer's in the Inbox,
+// our replies in Sent Items), oldest first — Outlook's conversation view.
+export async function listThread(conversationId) {
+  const q = new URLSearchParams({ $filter: `conversationId eq '${String(conversationId).replace(/'/g, "''")}'`, $select: LIST_SELECT, $top: "50" });
+  const j = await graph("GET", `${mb()}/messages?${q}`);
+  return (j.value || [])
+    .map((m) => ({ ...summary(m), receivedAt: m.isDraft ? m.lastModifiedDateTime : (m.receivedDateTime || m.sentDateTime) }))
+    .sort((a, b) => new Date(a.receivedAt) - new Date(b.receivedAt));
 }
 
 export async function getMessage(id) {
-  const sel = "$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,body,conversationId,parentFolderId";
+  const sel = "$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,lastModifiedDateTime,isDraft,body,conversationId,parentFolderId";
   // Text for the order lookup, HTML for showing it the way Outlook does.
   const [m, h] = await Promise.all([
     graph("GET", `${mb()}/messages/${encodeURIComponent(id)}?${sel}`),
@@ -117,7 +143,10 @@ export async function getMessage(id) {
     fromAddress: addr(m.from).address,
     to: (m.toRecipients || []).map(addr),
     cc: (m.ccRecipients || []).map(addr),
-    receivedAt: m.receivedDateTime,
+    bcc: (m.bccRecipients || []).map(addr),
+    receivedAt: m.receivedDateTime || (m.isDraft ? m.lastModifiedDateTime : null),
+    isDraft: !!m.isDraft,
+    conversationId: m.conversationId || null,
     sentAt: m.sentDateTime,
     // Inline images leave "[cid:image001.png@01DB…]" markers in the text body.
     text: ((m.body && m.body.content) || "").replace(/\[cid:[^\]]+\]/g, "").replace(/\n{3,}/g, "\n\n"),
@@ -177,26 +206,75 @@ export function embedSignatureImages(html) {
 //   forward  createForward    — the original quoted AND its attachments carried over
 // Our text goes ABOVE the quote. to/cc/bcc take an address, a "a; b" list, or an array;
 // when given they replace what Graph filled in (the page shows and lets you edit them).
-export async function composeAndSend({ mode = "new", sourceId, to, cc, bcc, subject, html, replyTo, attachments = [] }) {
-  const { html: body, inline } = embedSignatureImages(html);
-  let draft;
+// Our text on top of Outlook's quoted original (inside its <body>, as Outlook lays it out).
+export function onTopOf(quoted, body) {
+  if (!quoted) return body;
+  return /<body[^>]*>/i.test(quoted) ? quoted.replace(/<body[^>]*>/i, (tag) => `${tag}${body}<br>`) : `${body}<br>${quoted}`;
+}
+
+// Create the Outlook draft for a compose: a blank message, or createReply / createReplyAll /
+// createForward (which fill in the recipients, subject and the quoted original). Returns the
+// draft and the quoted original, which our text is laid on top of at every save and the send.
+async function createDraft(mode, sourceId, subject) {
   if (mode === "new" || !sourceId) {
-    draft = await graph("POST", `${mb()}/messages`, { subject, body: { contentType: "HTML", content: body } });
-  } else {
-    const action = { reply: "createReply", replyAll: "createReplyAll", forward: "createForward" }[mode];
-    if (!action) throw new Error(`Unknown email mode "${mode}"`);
-    draft = await graph("POST", `${mb()}/messages/${encodeURIComponent(sourceId)}/${action}`, {}, { html: true });
-    const quoted = (draft.body && draft.body.content) || "";
-    const content = /<body[^>]*>/i.test(quoted) ? quoted.replace(/<body[^>]*>/i, (tag) => `${tag}${body}<br>`) : `${body}<br>${quoted}`;
-    await graph("PATCH", `${mb()}/messages/${encodeURIComponent(draft.id)}`, { body: { contentType: "HTML", content } });
+    const d = await graph("POST", `${mb()}/messages`, { subject: subject || "", body: { contentType: "HTML", content: "" } });
+    return { draft: d, quoted: "" };
   }
+  const action = { reply: "createReply", replyAll: "createReplyAll", forward: "createForward" }[mode];
+  if (!action) throw new Error(`Unknown email mode "${mode}"`);
+  const d = await graph("POST", `${mb()}/messages/${encodeURIComponent(sourceId)}/${action}`, {}, { html: true });
+  return { draft: d, quoted: (d.body && d.body.content) || "" };
+}
+
+function headerPatch({ subject, to, cc, bcc, replyTo }) {
   const patch = {};
   if (subject) patch.subject = subject;
   if (to !== undefined && splitAddresses(to).length) patch.toRecipients = recipients(to);
   if (cc !== undefined) patch.ccRecipients = recipients(cc);
   if (bcc !== undefined) patch.bccRecipients = recipients(bcc);
   if (replyTo) patch.replyTo = recipients(replyTo);
-  if (Object.keys(patch).length) await graph("PATCH", `${mb()}/messages/${encodeURIComponent(draft.id)}`, patch);
+  return patch;
+}
+
+// Save (create or update) the Outlook draft for a compose, as Outlook does while you type.
+// The signature images stay as hosted links in a draft; they are embedded at send.
+export async function saveDraft({ draftId, quoted = "", mode = "new", sourceId, to, cc, bcc, subject, html }) {
+  let id = draftId;
+  if (!id) {
+    const c = await createDraft(mode, sourceId, subject);
+    id = c.draft.id; quoted = c.quoted;
+  }
+  await graph("PATCH", `${mb()}/messages/${encodeURIComponent(id)}`, {
+    body: { contentType: "HTML", content: onTopOf(quoted, String(html || "")) },
+    ...headerPatch({ subject, to, cc, bcc }),
+  });
+  return { draftId: id, quoted };
+}
+
+// Discard: only ever a message that is still a draft.
+export async function deleteDraft(id) {
+  const m = await graph("GET", `${mb()}/messages/${encodeURIComponent(id)}?$select=isDraft`);
+  if (!m || !m.isDraft) throw new Error("That is not a draft");
+  await graph("DELETE", `${mb()}/messages/${encodeURIComponent(id)}`);
+}
+
+// Every outgoing email, the way Outlook builds it:
+//   new      a fresh message
+//   reply    createReply      — threaded, the original quoted below our text
+//   replyAll createReplyAll   — same, to everyone on it
+//   forward  createForward    — the original quoted AND its attachments carried over
+// Our text goes ABOVE the quote. to/cc/bcc take an address, a "a; b" list, or an array;
+// when given they replace what Graph filled in (the page shows and lets you edit them).
+// With draftId it sends that saved draft (quoted = the original it was created with).
+export async function composeAndSend({ mode = "new", sourceId, draftId, quoted = "", to, cc, bcc, subject, html, replyTo, attachments = [] }) {
+  const { html: body, inline } = embedSignatureImages(html);
+  let draft;
+  if (draftId) draft = { id: draftId };
+  else ({ draft, quoted } = await createDraft(mode, sourceId, subject));
+  await graph("PATCH", `${mb()}/messages/${encodeURIComponent(draft.id)}`, {
+    body: { contentType: "HTML", content: onTopOf(quoted, body) },
+    ...headerPatch({ subject, to, cc, bcc, replyTo }),
+  });
   // A reply quotes the original, but Graph does not carry its inline images (a forward
   // does) — copy them over so the quoted signature/logos still show, as in Outlook.
   const quotedImages = [];
