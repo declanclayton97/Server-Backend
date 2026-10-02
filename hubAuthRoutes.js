@@ -52,7 +52,12 @@ export function registerHubAuthRoutes(app, deps) {
         attempts   INT NOT NULL DEFAULT 0,
         expires_at TIMESTAMPTZ NOT NULL
       );
-    `);
+    `).catch((e) => {
+      // Not cached: a failure here (a deadlock with the outgoing instance while a deploy
+      // overlaps, 2 Oct) used to be kept forever, failing every sign-in until a restart.
+      ready = null;
+      throw e;
+    });
     // Sessions issued under a longer limit are held to the current one, counted from
     // when they signed in — shortening SESSION_DAYS applies to everyone, not just new sign-ins.
     ready.then(() => getPool().query(
