@@ -103,8 +103,9 @@ const summary = (m, folder) => ({
 export async function listInbox({ top = 50, unreadOnly = false, folder = "inbox", search = "", next = "" } = {}) {
   let j;
   if (next) {
-    const base = `${GRAPH}${mb()}/`;
-    if (!String(next).startsWith(base)) throw new Error("Bad page link");
+    // Graph writes the mailbox in its nextLink unencoded (sales@…); accept either spelling.
+    const bases = [`${GRAPH}${mb()}/`, `${GRAPH}/users/${salesMailbox()}/`].map((s) => s.toLowerCase());
+    if (!bases.some((b) => String(next).toLowerCase().startsWith(b))) throw new Error("Bad page link");
     j = await graph("GET", String(next).slice(GRAPH.length));
   } else {
     const q = new URLSearchParams({ $top: String(Math.min(Number(top) || 50, 100)), $select: LIST_SELECT });
