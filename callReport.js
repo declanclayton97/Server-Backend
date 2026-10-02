@@ -12,10 +12,17 @@
 // detail, so every day is pulled overnight and kept in webex_cdr: the report is built from
 // our copy, and history grows from the day this went in.
 //
-// What counts (the Webex record is one row per person per call leg):
-//   - internal calls (Call type SIP_ENTERPRISE) are left out of everything;
-//   - a hunt-group call rings several people: only the person who ANSWERED gets it, so the
-//     unanswered legs on everyone else's phone are not counted as anything;
+// What counts (the Webex record is one row per phone per call leg). The phones are Webex
+// users named "Nicky Sales", "Jack Sales"... with no personal email, so people are matched
+// on that name (webexName). A customer's call arrives on the main number (leg type
+// SIP_INBOUND), goes through the auto attendant "Main AA" to the "Work Wear" hunt group, and
+// reaches each sales phone as an SIP_ENTERPRISE leg — the same type as a colleague calling.
+// So a leg is a CUSTOMER call when any leg sharing its Correlation / Interaction ID is not
+// SIP_ENTERPRISE; a call with only enterprise legs is internal and counts for nothing.
+//   - calls in: answered TERMINATING legs of customer calls. The hunt group rings several
+//     phones; only the one that ANSWERED gets it.
+//   - calls out: ORIGINATING legs dialled outside (call type not SIP_ENTERPRISE).
+//   - time on phone: answered legs of both.
 //   - orders: createdById = the person, and no installedIntegrationInstanceId (web, Amazon,
 //     eBay orders are created by the integrations under Tim's id and are not anyone's work).
 //
@@ -33,11 +40,11 @@
 import { graphConfigured, sendNew } from "./graphMail.js";
 
 const DEFAULT_PEOPLE = [
-  { key: "nicky", name: "Nicky Everall", first: "Nicky", email: "nicky@tuffshop.co.uk", bpId: 61342 },
-  { key: "jack", name: "Jack Ellis-Haynes", first: "Jack", email: "jack@tuffshop.co.uk", bpId: 82710 },
-  { key: "helen", name: "Helen Jackson", first: "Helen", email: "helen@tuffshop.co.uk", bpId: 59339 },
-  { key: "bob", name: "Robert Lodge", first: "Bob", email: "bob@tuffshop.co.uk", bpId: 445 },
-  { key: "laura", name: "Laura Jackson", first: "Laura", email: "laura@tuffshop.co.uk", bpId: 137062 },
+  { key: "nicky", webexName: "Nicky Sales", name: "Nicky Everall", first: "Nicky", email: "nicky@tuffshop.co.uk", bpId: 61342 },
+  { key: "jack", webexName: "Jack Sales", name: "Jack Ellis-Haynes", first: "Jack", email: "jack@tuffshop.co.uk", bpId: 82710 },
+  { key: "helen", webexName: "Helen Sales", name: "Helen Jackson", first: "Helen", email: "helen@tuffshop.co.uk", bpId: 59339 },
+  { key: "bob", webexName: "Bob Sales", name: "Robert Lodge", first: "Bob", email: "bob@tuffshop.co.uk", bpId: 445 },
+  { key: "laura", webexName: "Laura Sales", name: "Laura Jackson", first: "Laura", email: "laura@tuffshop.co.uk", bpId: 137062 },
 ];
 export function reportPeople() {
   try { if (process.env.CALL_REPORT_PEOPLE) return JSON.parse(process.env.CALL_REPORT_PEOPLE); } catch { /* fall back */ }
@@ -146,7 +153,11 @@ async function ensureTables(pool) {
       id text PRIMARY KEY, day date NOT NULL, user_uuid text, user_name text,
       direction text, answered boolean, duration int, call_type text, start_time timestamptz)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS webex_cdr_day ON webex_cdr (day)`);
+  await pool.query(`ALTER TABLE webex_cdr ADD COLUMN IF NOT EXISTS correlation_id text`);
+  await pool.query(`ALTER TABLE webex_cdr ADD COLUMN IF NOT EXISTS interaction_id text`);
   await pool.query(`CREATE TABLE IF NOT EXISTS webex_cdr_days (day date PRIMARY KEY, fetched_at timestamptz NOT NULL DEFAULT now(), records int)`);
+  // Days pulled before the call ids were kept (2 Oct) are pulled again.
+  await pool.query(`DELETE FROM webex_cdr_days d WHERE EXISTS (SELECT 1 FROM webex_cdr c WHERE c.day = d.day AND c.correlation_id IS NULL AND c.interaction_id IS NULL) AND d.fetched_at < '2026-10-02T11:05:00Z'`);
   await pool.query(`CREATE TABLE IF NOT EXISTS call_report_runs (week date PRIMARY KEY, ran_at timestamptz NOT NULL DEFAULT now(), result jsonb)`);
 }
 
@@ -167,11 +178,13 @@ export async function collectDay(pool, day) {
         const id = field(rec, "Report ID", "reportId") || [field(rec, "Correlation ID"), field(rec, "Local call ID", "Call ID"), field(rec, "User UUID")].join("|");
         const start = field(rec, "Start time", "startTime");
         await pool.query(
-          `INSERT INTO webex_cdr (id, day, user_uuid, user_name, direction, answered, duration, call_type, start_time)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (id) DO NOTHING`,
+          `INSERT INTO webex_cdr (id, day, user_uuid, user_name, direction, answered, duration, call_type, start_time, correlation_id, interaction_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+           ON CONFLICT (id) DO UPDATE SET correlation_id = EXCLUDED.correlation_id, interaction_id = EXCLUDED.interaction_id`,
           [id, start ? ukDay(start) : day, String(field(rec, "User UUID", "userUuid") || "").toLowerCase(), field(rec, "User", "user"),
            field(rec, "Direction", "direction"), String(field(rec, "Answered", "answered")).toLowerCase() === "true",
-           Number(field(rec, "Duration", "duration") || 0), field(rec, "Call type", "callType"), start]);
+           Number(field(rec, "Duration", "duration") || 0), field(rec, "Call type", "callType"), start,
+           field(rec, "Correlation ID", "correlationId"), field(rec, "Interaction ID", "interactionId")]);
         n++;
       }
       url = next;
@@ -224,16 +237,20 @@ async function ordersCreated(bpLive, people, first, last) {
 const blank = () => ({ callsIn: 0, callsOut: 0, talk: 0, orders: 0 });
 
 export function tallyCalls(rows, uuidToKey, nameToKey = {}) {
+  // Calls that touched the outside world on any leg.
+  const outside = new Set();
+  for (const r of rows) if (r.call_type && r.call_type !== INTERNAL) for (const id of [r.correlation_id, r.interaction_id]) if (id) outside.add(id);
+  const isCustomerCall = (r) => (r.call_type && r.call_type !== INTERNAL) || [r.correlation_id, r.interaction_id].some((id) => id && outside.has(id));
   const out = {};
   for (const r of rows) {
-    if (r.call_type === INTERNAL) continue;
+    if (!isCustomerCall(r)) continue;
     const key = uuidToKey[String(r.user_uuid || "").toLowerCase()] || nameToKey[String(r.user_name || "").trim().toLowerCase()];
     if (!key) continue;
     const day = typeof r.day === "string" ? r.day.slice(0, 10) : ukDay(r.day);
     const t = ((out[key] = out[key] || {})[day] = out[key][day] || blank());
     const dir = String(r.direction || "").toUpperCase();
     if (dir === "TERMINATING") { if (r.answered) { t.callsIn++; t.talk += r.duration || 0; } }
-    else if (dir === "ORIGINATING") { t.callsOut++; if (r.answered) t.talk += r.duration || 0; }
+    else if (dir === "ORIGINATING" && r.call_type !== INTERNAL) { t.callsOut++; if (r.answered) t.talk += r.duration || 0; }
   }
   return out;
 }
@@ -245,10 +262,12 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
   const collected = collect ? await collectMissing(pool, first, last) : [];
   const uuids = await webexUuids(pool, people);
   const uuidToKey = Object.fromEntries(Object.entries(uuids).map(([k, u]) => [u, k]));
-  const nameToKey = Object.fromEntries(people.map((p) => [p.name.toLowerCase(), p.key]));
-  const rows = (await pool.query(`SELECT to_char(day,'YYYY-MM-DD') AS day, user_uuid, user_name, direction, answered, duration, call_type
-                                    FROM webex_cdr WHERE day BETWEEN $1 AND $2`, [first, last])).rows;
+  const nameToKey = Object.fromEntries(people.flatMap((p) => [[p.name.toLowerCase(), p.key], ...(p.webexName ? [[p.webexName.toLowerCase(), p.key]] : [])]));
+  // A day either side, so a call's legs either side of midnight still link up.
+  const rows = (await pool.query(`SELECT to_char(day,'YYYY-MM-DD') AS day, user_uuid, user_name, direction, answered, duration, call_type, correlation_id, interaction_id
+                                    FROM webex_cdr WHERE day BETWEEN $1 AND $2`, [addDays(first, -1), addDays(last, 1)])).rows;
   const calls = tallyCalls(rows, uuidToKey, nameToKey);
+  const seenNames = new Set(rows.map((r) => String(r.user_name || "").trim().toLowerCase()));
   const orders = await ordersCreated(bpLive, people, first, last);
   const daysWithData = new Set((await pool.query(`SELECT to_char(day,'YYYY-MM-DD') d FROM webex_cdr_days WHERE day BETWEEN $1 AND $2`, [first, last])).rows.map((r) => r.d));
 
@@ -256,7 +275,7 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
   const report = people.map((p) => {
     const perDay = days.map((day) => ({ day, ...blank(), ...((calls[p.key] || {})[day] || {}), orders: (orders[p.key] || {})[day] || 0, noCallData: !daysWithData.has(day) }));
     const total = perDay.reduce((a, d) => ({ callsIn: a.callsIn + d.callsIn, callsOut: a.callsOut + d.callsOut, talk: a.talk + d.talk, orders: a.orders + d.orders }), blank());
-    return { ...p, webexMatched: !!uuids[p.key], days: perDay, total };
+    return { ...p, webexMatched: !!uuids[p.key] || seenNames.has(String(p.webexName || p.name).toLowerCase()), days: perDay, total };
   });
   return { week: first, weekEnd: last, people: report, collected, missingCallDays: days.filter((d) => !daysWithData.has(d)) };
 }

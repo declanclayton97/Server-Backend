@@ -24,18 +24,28 @@ eq("prev week from Sun", previousWeekStart(new Date("2026-10-04T12:00:00Z")), "2
 eq("dur min", fmtDuration(125), "2m");
 eq("dur hours", fmtDuration(3 * 3600 + 7 * 60), "3h 07m");
 
+// As Webex records it: a customer rings the main number (SIP_INBOUND leg on "Holiday Check"),
+// the auto attendant passes it to the hunt group, which rings each sales phone with an
+// SIP_ENTERPRISE leg. Same correlation id throughout.
 const rows = [
-  { day: "2026-09-28", user_uuid: "U1", direction: "TERMINATING", answered: true, duration: 100, call_type: "SIP_INBOUND" },
-  { day: "2026-09-28", user_uuid: "u1", direction: "TERMINATING", answered: false, duration: 0, call_type: "SIP_INBOUND" },   // rang, not answered (hunt group)
-  { day: "2026-09-28", user_uuid: "u1", direction: "ORIGINATING", answered: true, duration: 50, call_type: "SIP_NATIONAL" },
-  { day: "2026-09-28", user_uuid: "u1", direction: "ORIGINATING", answered: false, duration: 0, call_type: "SIP_MOBILE" },     // no answer: still a call made
-  { day: "2026-09-28", user_uuid: "u1", direction: "ORIGINATING", answered: true, duration: 999, call_type: "SIP_ENTERPRISE" }, // internal: ignored
-  { day: "2026-09-29", user_uuid: "zz", user_name: "Helen Jackson", direction: "TERMINATING", answered: true, duration: 30, call_type: "SIP_INBOUND" },
-  { day: "2026-09-29", user_uuid: "other", direction: "TERMINATING", answered: true, duration: 30, call_type: "SIP_INBOUND" },  // not in the list
+  { day: "2026-09-28", user_name: "Holiday Check", direction: "TERMINATING", answered: true, duration: 300, call_type: "SIP_INBOUND", correlation_id: "c1" },
+  { day: "2026-09-28", user_name: "Jack Sales", direction: "TERMINATING", answered: true, duration: 100, call_type: "SIP_ENTERPRISE", correlation_id: "c1" },
+  { day: "2026-09-28", user_name: "Helen Sales", direction: "TERMINATING", answered: false, duration: 0, call_type: "SIP_ENTERPRISE", correlation_id: "c1" },   // rang, Jack got it
+  // Linked only through the interaction id (a transfer gets a new correlation id).
+  { day: "2026-09-28", user_name: "Main AA", direction: "TERMINATING", answered: true, duration: 5, call_type: "SIP_INBOUND", correlation_id: "c2", interaction_id: "i2" },
+  { day: "2026-09-28", user_uuid: "U1", direction: "TERMINATING", answered: true, duration: 40, call_type: "SIP_ENTERPRISE", correlation_id: "c3", interaction_id: "i2" },
+  // Jack dials out: once answered, once not.
+  { day: "2026-09-28", user_name: "Jack Sales", direction: "ORIGINATING", answered: true, duration: 50, call_type: "SIP_NATIONAL", correlation_id: "c4" },
+  { day: "2026-09-28", user_name: "Jack Sales", direction: "ORIGINATING", answered: false, duration: 0, call_type: "SIP_MOBILE", correlation_id: "c5" },
+  // Jack rings Helen: internal on both legs, counts for nobody.
+  { day: "2026-09-28", user_name: "Jack Sales", direction: "ORIGINATING", answered: true, duration: 999, call_type: "SIP_ENTERPRISE", correlation_id: "c6" },
+  { day: "2026-09-28", user_name: "Helen Sales", direction: "TERMINATING", answered: true, duration: 999, call_type: "SIP_ENTERPRISE", correlation_id: "c6" },
+  // Someone not on the list.
+  { day: "2026-09-29", user_name: "Abigail Sales", direction: "TERMINATING", answered: true, duration: 30, call_type: "SIP_ENTERPRISE", correlation_id: "c1" },
 ];
-eq("tally", tallyCalls(rows, { u1: "jack" }, { "helen jackson": "helen" }), {
-  jack: { "2026-09-28": { callsIn: 1, callsOut: 2, talk: 150, orders: 0 } },
-  helen: { "2026-09-29": { callsIn: 1, callsOut: 0, talk: 30, orders: 0 } },
+eq("tally", tallyCalls(rows, { u1: "jack" }, { "jack sales": "jack", "helen sales": "helen" }), {
+  jack: { "2026-09-28": { callsIn: 2, callsOut: 2, talk: 190, orders: 0 } },
+  helen: { "2026-09-28": { callsIn: 0, callsOut: 0, talk: 0, orders: 0 } },
 });
 
 const day = (d, x = {}) => ({ day: d, callsIn: 0, callsOut: 0, talk: 0, orders: 0, noCallData: false, ...x });
