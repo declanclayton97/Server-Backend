@@ -26,7 +26,7 @@
 //
 // Env: WEBEX_CLIENT_ID, WEBEX_CLIENT_SECRET, WEBEX_REFRESH_TOKEN (seed; the latest one
 //      Webex hands back is kept in webex_auth), WEBEX_CDR_BASE (default
-//      https://analytics-calling.webexapis.com), CALL_REPORT_PEOPLE (JSON to override the
+//      https://analytics-calling-eu.webexapis.com), CALL_REPORT_PEOPLE (JSON to override the
 //      list below), CALL_REPORT_ENABLED=on (the overnight pull + Monday send),
 //      CALL_REPORT_LIVE=on, CALL_REPORT_TEST_EMAIL, CALL_REPORT_MANAGER.
 
@@ -49,7 +49,10 @@ const INTERNAL = "SIP_ENTERPRISE";
 const isLive = () => String(process.env.CALL_REPORT_LIVE || "").toLowerCase() === "on";
 const testEmail = () => process.env.CALL_REPORT_TEST_EMAIL || "dec@tuffshop.co.uk";
 const managerEmail = () => process.env.CALL_REPORT_MANAGER || "dec@tuffshop.co.uk";
-const cdrBase = () => (process.env.WEBEX_CDR_BASE || "https://analytics-calling.webexapis.com").replace(/\/$/, "");
+// Tuffshop is an EU org (the global host answers 451 and names this one); a 451 also
+// switches host at run time, so a region move fixes itself.
+let cdrHost = null;
+const cdrBase = () => cdrHost || (process.env.WEBEX_CDR_BASE || "https://analytics-calling-eu.webexapis.com").replace(/\/$/, "");
 const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
 
 // ---- dates (UK days) ------------------------------------------------------------------
@@ -110,6 +113,13 @@ async function webexGet(pool, url) {
       continue;
     }
     const j = await r.json().catch(() => null);
+    // 451 = this org's call records live in another region; Webex names the right host.
+    const region = r.status === 451 && /https:\/\/analytics-calling[\w-]*\.webexapis\.com/.exec((j && j.message) || "");
+    if (region && attempt < 6) {
+      cdrHost = region[0];
+      url = url.replace(/^https:\/\/analytics-calling[\w-]*\.webexapis\.com/, cdrHost);
+      continue;
+    }
     if (!r.ok) throw new Error(`Webex ${url.split("?")[0]} -> ${r.status}: ${(j && (j.message || JSON.stringify(j.errors || ""))) || ""}`);
     const next = /<([^>]+)>;\s*rel="next"/.exec(r.headers.get("link") || "");
     return { json: j, next: next ? next[1] : null };
