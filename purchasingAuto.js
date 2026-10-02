@@ -238,7 +238,10 @@ export const SUPPLIERS = {
   // is a Brightpearl data job, not a code one.
   PULSAR: { contactId: 11807, costList: 20, poField: 'PCF_PULSARPO', lowInvSupplierId: 11807, brandIds: [168], detect: (n) => /pulsar/i.test(n || '') }, // PCF_PULSARPO ("PULSAR PO") existed already; this pointed at the shared box instead
   V12: { contactId: 92811, costList: 20, poField: 'PCF_STOCKPO' /* ⚠ no PCF_V12PO exists in BP yet — create one and move this over */, lowInvSupplierId: 92811, brandIds: [279], detect: (n) => /\bv\s*12\b/i.test(n || '') },
-  CARHARTT:     { contactId: 65173, costList: 20, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
+  // portalNeverRaises: the portal is net EXCEPT markdown/outlet lines, which show the ORIGINAL
+  // wholesale and take the markdown at invoice (104670 outlet: portal £85.50, our cost £42.75 = 50%
+  // off — user, 2026-10-02). So a portal price ABOVE our cost is the markdown, never a correction.
+  CARHARTT:     { contactId: 65173, costList: 20, portalNeverRaises: true, poField: 'PCF_CARHARTT', detect: (n) => /carhartt/i.test(n || '') }, // Carhartt UK LTD; no dedicated cost list → Launch(20) fallback, portal wholesale price is the real cost source
   // Live-automated suppliers below (contactId + Launch cost list 20 + low-inv supplierId).
   FRISTADS:     { contactId: 37419, costList: 20, poField: 'PCF_FRISTPO', lowInvSupplierId: 37419, detect: (n) => /fristads/i.test(n || '') },
   // Castle Clothing distributes TuffStuff / Makita / Fort (+ Fort Footwear) and the
@@ -2080,10 +2083,15 @@ export async function createComboPOLive(opts = {}) {
   // positive price overrides. Applied before the pad so the threshold maths use it too.
   const priceOverrides = opts.priceOverrides && typeof opts.priceOverrides === 'object' ? opts.priceOverrides : null;
   const priceOverridesApplied = [];
+  const markdownKept = [];
   if (priceOverrides) {
     const applyOverride = (l) => {
       const p = Number(priceOverrides[String(l.sku || '').toUpperCase()]);
-      if (Number.isFinite(p) && p > 0 && p !== l.cost) { priceOverridesApplied.push({ sku: l.sku, was: l.cost, now: p }); l.cost = p; }
+      if (!(Number.isFinite(p) && p > 0 && p !== l.cost)) return;
+      // Carhartt markdowns: keep our (marked-down) cost on the PO and in BP — the discount lands at
+      // invoice. A £0 cost is still overridden: that is a missing cost, not a markdown.
+      if (reg.portalNeverRaises && Number(l.cost) > 0 && p > Number(l.cost)) { markdownKept.push({ sku: l.sku, ours: l.cost, portal: p }); return; }
+      priceOverridesApplied.push({ sku: l.sku, was: l.cost, now: p }); l.cost = p;
     };
     for (const l of soLines) applyOverride(l);
     for (const l of lowLines) applyOverride(l);
@@ -2158,6 +2166,7 @@ export async function createComboPOLive(opts = {}) {
     soLines, separator: '=====LOW INV====', lowLines, padInfo, includeLowInv, includeSalesOrders,
     carryLines: carryLines.map((l) => ({ pendingId: l.pendingId, sku: l.sku, qty: l.qty, cost: l.cost, soId: l.soId, note: l.note })), carryUnresolved,
     priceOverridesApplied,                                          // portal-price overrides applied to line costs (Elastic suppliers)
+    markdownKept,                                                   // Carhartt: portal above our cost = markdown, our cost kept
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
     lowUnits: lowLines.reduce((a, l) => a + l.qty, 0),
     unresolvedSkus: lowLines.filter((l) => l.unresolved).map((l) => l.sku),
