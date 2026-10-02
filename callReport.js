@@ -349,6 +349,25 @@ export function registerCallReport(app, { getPool, bpLive }) {
     res.json(collecting);
   });
 
+  // Who the stored call records belong to (counts only, no numbers), and what the Webex
+  // people lookup returns for each person, so a name/email mismatch can be seen.
+  app.get("/api/call-report/who", requireUser, guard, async (req, res) => {
+    try {
+      const pool = getPool();
+      await ensureTables(pool);
+      const users = (await pool.query(`SELECT user_name, user_uuid, direction, call_type, count(*)::int n FROM webex_cdr
+                                        GROUP BY 1,2,3,4 ORDER BY n DESC LIMIT 200`)).rows;
+      const lookups = [];
+      for (const p of reportPeople()) {
+        try {
+          const { json } = await webexGet(pool, `https://webexapis.com/v1/people?email=${encodeURIComponent(p.email)}`);
+          lookups.push({ key: p.key, found: ((json && json.items) || []).map((x) => ({ name: x.displayName, uuid: uuidFromPersonId(x.id), emails: x.emails })) });
+        } catch (e) { lookups.push({ key: p.key, error: e.message }); }
+      }
+      res.json({ lookups, users });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // ?week=YYYY-MM-DD (a Monday; default last week). ?html=manager|<person key> shows an email.
   // Built from the days already pulled; ?collect=1 pulls missing ones first (slow).
   app.get("/api/call-report/preview", requireUser, guard, async (req, res) => {
