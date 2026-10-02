@@ -245,6 +245,8 @@ export const SUPPLIERS = {
   // licensed DeWalt workwear range. Their products are NOT named "castle" — detect by
   // brand. No dedicated PO custom field yet, so re-pickup is prevented by clearing the
   // CASTLE tag on finalize.
+  // Tranemo (user, 2026-10-02): EMAIL supplier, all brand 175.
+  TRANEMO: { contactId: 11780, costList: 20, poField: 'PCF_TRANEMPO', lowInvSupplierId: 11780, brandIds: [175], detect: (n) => /tranemo/i.test(n || '') },
   // AS Apparel (user, 2026-10-02): an EMAIL supplier like Buckler/V12. Their own styles are brand
   // 237 (AS033/AS044/AS066/AS99…) and brand 234 (GW0102 etc.); brandNeedsOwnSupplier so a brand
   // product BP attributes to another supplier is not swept onto an AS Apparel PO.
@@ -335,7 +337,7 @@ const _SUPPLIER_NAME_HINTS = {
   CHADWICK: /chadwick/i, CARHARTT: /carhartt/i, MASCOT: /mascot/i, SCRUFFS: /scruffs/i,
   BLAKLADER: /bl[aå]kl[aä]der/i, SNICKERS: /snickers/i, FRISTADS: /fristads/i,
   'HELLY HANSEN': /helly/i, STERLING: /sterling/i, 'PERFORMANCE BRANDS': /performance\s*brands/i,
-  BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i, BEESWIFT: /bee\s*swift/i, 'AS APPAREL': /\bas\s*apparel\b/i,
+  BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i, BEESWIFT: /bee\s*swift/i, 'AS APPAREL': /\bas\s*apparel\b/i, TRANEMO: /tranemo/i,
 };
 export function tagFailsToMatch(rawTag) {
   const out = [];

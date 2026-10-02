@@ -1609,6 +1609,15 @@ const EMAIL_SUPPLIER_CONFIG = {
     carriageNet: () => Number(process.env.ASAPPAREL_CARRIAGE_CHARGE || 9.90),
     freeOver: () => Number(process.env.ASAPPAREL_FREESHIP_THRESHOLD || 175),
   },
+  // Tranemo (user, 2026-10-02) — emailed PO at 11:20, our PO lines as they are (Tranemo work from
+  // them fine — user). Free carriage at £250 ex-VAT "until we get told otherwise" (user; the BRANDS
+  // sheet says £300), £15 below onto the PO. Address = the contact's primary email.
+  TRANEMO: {
+    label: 'Tranemo', contactId: 11780,
+    email: () => process.env.PO_EMAIL_TRANEMO || 'sales@tranemo.co.uk',
+    carriageNet: () => Number(process.env.TRANEMO_CARRIAGE_CHARGE || 15),
+    freeOver: () => Number(process.env.TRANEMO_FREESHIP_THRESHOLD || 250),
+  },
   BUCKLER: {
     label: 'Buckler Boots', contactId: 8981,
     email: () => process.env.PO_EMAIL_BUCKLER || 'orders@bucklerboots.com',
@@ -1749,6 +1758,7 @@ const placeV12Order = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('V12'
 const placeBucklerOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('BUCKLER', pool, altItemsUrl, opts);
 const placeHellbergOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('HELLBERG', pool, altItemsUrl, opts);
 const placeAsApparelOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('AS APPAREL', pool, altItemsUrl, opts);
+const placeTranemoOrder = (pool, altItemsUrl, opts) => placeEmailSupplierOrder('TRANEMO', pool, altItemsUrl, opts);
 
 
 // ── Scruffs placement chain (email supplier) ─────────────────────────────────
@@ -3961,6 +3971,7 @@ const SCHEDULED_SUPPLIERS = {
   // BeeSwift (user, 2026-10-01): free carriage at £150 ex-VAT (a £71.40 basket showed £6.95 carriage).
   // DRY-RUN ONLY until the basket → processorder → submit chain is built and rehearsed; NO poller
   // window in server.js yet, so nothing runs on its own. New Balance is vetoed in the registry.
+  TRANEMO: { supplierKey: 'TRANEMO', stateId: 22, placeFn: placeTranemoOrder, threshold: Number(process.env.TRANEMO_FREESHIP_THRESHOLD || 250) }, // emailed PO, 11:20; free carriage @ £250 ex-VAT (user, until told otherwise), £15 below onto the PO
   'AS APPAREL': { supplierKey: 'AS APPAREL', stateId: 21, placeFn: placeAsApparelOrder, threshold: Number(process.env.ASAPPAREL_FREESHIP_THRESHOLD || 175) }, // emailed PO, 14:40; free carriage @ £175 ex-VAT, £9.90 below it onto the PO (user, 2026-10-02)
   BEESWIFT: { supplierKey: 'BEESWIFT', stateId: 20, placeFn: placeBeeswiftOrder, threshold: Number(process.env.BEESWIFT_FREESHIP_THRESHOLD || 150) },
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
@@ -3998,7 +4009,7 @@ const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
   SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811, BUCKLER: 8981,
-  BEESWIFT: 326, 'AS APPAREL': 47921,
+  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
@@ -4006,7 +4017,8 @@ const WINDOW_DISPLAY = {
   SNICKERS: { at: '10:00' },
   FRISTADS: { at: '10:30' },
   'HELLY HANSEN': { at: '11:00' },
-  MASCOT: { at: '11:30' },
+  TRANEMO: { at: '11:20' },
+  MASCOT: { at: '11:40' },
   CASTLE: { at: '12:00' },
   STERLING: { at: '13:00' },
   CARHARTT: { at: '13:20', days: ['Mon', 'Wed', 'Fri'] },
@@ -4517,13 +4529,26 @@ const BEESWIFT_SUPPLIER_CONTACT = 326;
 const BEESWIFT_CARRIAGE = () => Number(process.env.BEESWIFT_CARRIAGE_CHARGE || 6.95);
 const beeswiftLines = (po) => mergePoLinesBySku(po).map((l) => ({ sku: l.sku, name: l.name, qty: l.qty, cost: l.cost }));
 
+// A fresh token, logged in by the Playwright worker seconds before the basket. The login is TLS-
+// fingerprint gated (Chrome passes, Node does not) and BeeSwift keeps ONE session per account, so a
+// token from the VM's 06:20 refresh is dead the moment anyone logs in during the morning. Called only
+// when there is something to order — it logs out whoever is on BeeSwift at that moment.
+async function beeswiftFreshToken() {
+  const r = await jfetch('login', `${STERLING_WORKER_URL}/place-order`, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-worker-secret': STERLING_WORKER_SECRET },
+    body: JSON.stringify({ supplier: 'beeswift', ref: 'login', lines: [{ sku: 'login', qty: 1 }], opts: { sessionToken: true } }) });
+  if (!r || !r.ok || !r.token) throw stepErr('login', `BeeSwift login via the worker failed: ${(r && r.error) || 'no token returned'}`);
+  return r.token;
+}
+
 async function beeswiftRehearsal(pool, altItemsUrl) {
   const plan = await bp.createComboPOLive({ supplierKey: 'BEESWIFT', execute: false, logPool: pool });
   const lines = beeswiftLines(plan);
   if (!lines.length) return { rehearsal: true, lines: [], note: 'no BeeSwift demand right now' };
   const goodsNet = +lines.reduce((a, l) => a + (Number(l.cost) || 0) * l.qty, 0).toFixed(2);
+  const token = await beeswiftFreshToken();
   const co = await jfetch('checkout', `${altItemsUrl}/api/beeswift-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customerPO: `REHEARSAL-${Date.now()}`.slice(0, 30), lines, execute: false }) });
+    body: JSON.stringify({ customerPO: `REHEARSAL-${Date.now()}`.slice(0, 30), lines, execute: false, token }) });
   const pv = co.preview || {};
   return { rehearsal: true, ok: !!co.ok, reason: co.reason || null, lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0),
     ourGoodsNet: goodsNet, theirSubTotal: pv.subTotal ?? null, theirCarriage: pv.carriage ?? null, theirTotal: pv.orderTotal ?? null,
@@ -4534,6 +4559,9 @@ async function beeswiftRehearsal(pool, altItemsUrl) {
 async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
   if (process.env.BEESWIFT_LIVE !== 'true') throw stepErr('preflight', 'BeeSwift live ordering is off (BEESWIFT_LIVE != true) — rehearse with /api/purchasing/beeswift-rehearse');
   const steps = {};
+  // Log in BEFORE the PO exists: a failed login then leaves nothing behind (no junk PO).
+  const token = await beeswiftFreshToken();
+  steps.login = { tokenTail: token.slice(-6) };
   let po;
   try { po = await createPo({ supplierKey: 'BEESWIFT', execute: live, padToThreshold, logPool: pool }); }
   catch (e) { throw createPoErr(e); }
@@ -4550,7 +4578,7 @@ async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 
   // checkout — customerPO = our PO number (BeeSwift's duplicate guard keys on it)
   const co = await jfetch('checkout', `${altItemsUrl}/api/beeswift-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customerPO: String(poId), lines, execute: live }) });
+    body: JSON.stringify({ customerPO: String(poId), lines, execute: live, token }) });
   const pv = co.preview || {};
   steps.checkout = { placed: !!co.placed, orderNo: (co.submit && co.submit.orderNo) || null, subTotal: pv.subTotal ?? null, carriage: pv.carriage ?? null, total: pv.orderTotal ?? null, problems: co.problems || [] };
   if (co.alreadyOrdered) throw stepErr('checkout', `BeeSwift ALREADY has an order for PO ref ${poId} — do NOT resubmit; finalise PO#${poId} by hand once confirmed on BeeSwift's Orders page`, { poId, alreadyOrdered: true });
