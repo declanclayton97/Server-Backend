@@ -258,6 +258,15 @@ export async function addAttachments(draftId, files = []) {
 
 export async function markRead(id) { return setRead(id, true); }
 
+// Outlook's Delete: MOVE to Deleted Items (recoverable), never a hard delete. Also used to
+// restore (move back to the inbox). Graph gives the moved message a new id.
+export async function moveMessage(id, folder) {
+  const dest = FOLDERS[folder];
+  if (!dest) throw new Error(`Unknown folder "${folder}"`);
+  const m = await graph("POST", `${mb()}/messages/${encodeURIComponent(id)}/move`, { destinationId: dest });
+  return { id: m && m.id };
+}
+
 export async function setRead(id, isRead) {
   await graph("PATCH", `${mb()}/messages/${encodeURIComponent(id)}`, { isRead: !!isRead });
 }

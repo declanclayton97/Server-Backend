@@ -6,7 +6,7 @@
 // salesHub.js; this module only gathers facts and performs the send.
 
 import nodemailer from "nodemailer";
-import { graphConfigured, salesMailbox, listInbox, getMessage, composeAndSend, splitAddresses, FOLDERS, markRead, setRead, getAttachment } from "./graphMail.js";
+import { graphConfigured, salesMailbox, listInbox, getMessage, composeAndSend, splitAddresses, FOLDERS, moveMessage, markRead, setRead, getAttachment } from "./graphMail.js";
 import { SIGNATURE_HTML } from "./emailSignature.js";
 import {
   SALES_INTENTS,
@@ -523,6 +523,23 @@ export function registerSalesHubRoutes(app, deps) {
     } catch (err) {
       res.status(err.status === 404 ? 404 : 500).json({ error: err.message });
     }
+  });
+
+  // POST /api/sales-hub/inbox/:id/move { to: "deleted" | "inbox" | ... } — Delete is a move to
+  // Deleted Items (Outlook's own behaviour, recoverable); Restore moves it back. Refused while
+  // a colleague is working on it, so nobody's half-written reply loses its email.
+  app.post("/api/sales-hub/inbox/:id/move", requireUser, async (req, res) => {
+    if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected" });
+    const to = String((req.body && req.body.to) || "");
+    if (!FOLDERS[to]) return res.status(400).json({ error: "Unknown folder" });
+    try {
+      const held = (await othersLocks(req.hubUser.key).catch(() => ({})))[req.params.id];
+      if (held) return res.status(423).json({ error: `${held.name} is working on this email — not moved.` });
+      const r = await moveMessage(req.params.id, to);
+      if (useDatabase && getPool()) getPool().query(`DELETE FROM sales_hub_email_locks WHERE message_id = $1`, [req.params.id]).catch(() => {});
+      console.log(`[sales-hub] ${req.hubUser.name} moved an email to ${to}`);
+      res.json({ ok: true, id: r.id, to });
+    } catch (err) { res.status(err.status === 404 ? 404 : 500).json({ error: err.message }); }
   });
 
   // GET /api/sales-hub/signature — the signature a new email or forward starts with.
