@@ -32,6 +32,7 @@ import {
 import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
+import { registerPickingSheet } from './pickingSheet.js';
 import { bpSafeText } from './bpText.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -15377,6 +15378,9 @@ registerReturnsRoutes(app, {
   useDatabase,
   rootDir: __dirname,
 });
+
+// Storage-unit picking list -> Bob on WhatsApp, weekdays 15:00 (off until PICKING_ENABLED=on).
+registerPickingSheet(app, { getPool: () => pool, waPhoneNumberId });
 
 // Whether the SALES WhatsApp number is set up, so the dashboard can say why
 // the chat buttons are missing instead of failing on click.

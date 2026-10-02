@@ -186,3 +186,7 @@ export async function markRead(id) { return setRead(id, true); }
 export async function setRead(id, isRead) {
   await graph("PATCH", `${mb()}/messages/${encodeURIComponent(id)}`, { isRead: !!isRead });
 }
+
+// Generic Graph call for other modules (the picking sheet reads/colours a SharePoint
+// workbook with the same app credentials). Same retry and error handling as the mail calls.
+export async function graphRequest(method, path, body) { return graph(method, path, body); }
