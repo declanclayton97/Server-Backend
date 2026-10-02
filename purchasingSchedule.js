@@ -3998,6 +3998,7 @@ const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
   SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811, BUCKLER: 8981,
+  BEESWIFT: 326, 'AS APPAREL': 47921,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
@@ -4008,9 +4009,11 @@ const WINDOW_DISPLAY = {
   MASCOT: { at: '11:30' },
   CASTLE: { at: '12:00' },
   STERLING: { at: '13:00' },
-  CARHARTT: { at: '13:30', days: ['Mon', 'Wed', 'Fri'] },
+  CARHARTT: { at: '13:20', days: ['Mon', 'Wed', 'Fri'] },
+  BEESWIFT: { at: '13:40' },
   SCRUFFS: { at: '14:00' },
-  'PERFORMANCE BRANDS': { at: '14:30' },
+  'PERFORMANCE BRANDS': { at: '14:20' },
+  'AS APPAREL': { at: '14:40' },
   PORTWEST: { at: '15:00' },
   PENCARRIE: { at: '15:40' },
   UNEEK: { at: '16:00' },
