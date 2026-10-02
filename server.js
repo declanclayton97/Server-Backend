@@ -33,6 +33,7 @@ import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
 import { registerPickingSheet } from './pickingSheet.js';
+import { registerCallReport } from './callReport.js';
 import { bpSafeText } from './bpText.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -15381,6 +15382,9 @@ registerReturnsRoutes(app, {
 
 // Storage-unit picking list -> Bob on WhatsApp, weekdays 15:00 (off until PICKING_ENABLED=on).
 registerPickingSheet(app, { getPool: () => pool, waPhoneNumberId });
+
+// Weekly sales activity email (Webex calls + BP orders), Mondays. Off until CALL_REPORT_ENABLED=on.
+registerCallReport(app, { getPool: () => pool, bpLive });
 
 // Whether the SALES WhatsApp number is set up, so the dashboard can say why
 // the chat buttons are missing instead of failing on click.
