@@ -833,7 +833,8 @@ function phraseDue(iso, today) {
 const shortItem = (name) => String(name || "the item").replace(/\s*-\s*\(.*$/, "").replace(/\s*\([^)]*\)\s*$/, "").trim();
 
 export function backorderSentence(stock, today = new Date()) {
-  const out = (stock || []).filter((s) => s && s.found !== false && Number(s.avail) === 0);
+  // avail null = the feed gave no quantity (only a status) — never treat that as none.
+  const out = (stock || []).filter((s) => s && s.found !== false && s.avail !== null && s.avail !== undefined && s.avail !== "" && Number(s.avail) === 0);
   if (!out.length) return null;
   const lines = out.slice(0, 3).map((s) => {
     const due = parseSupplierDate(s.deldate, today);

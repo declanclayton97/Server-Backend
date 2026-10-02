@@ -376,7 +376,10 @@ export function registerSalesHubRoutes(app, deps) {
             const r = await fetch(`${ALT}/api/supplier-stock?${q}`, { signal: ctl.signal });
             const j = await r.json();
             if (!j || !j.found) return null;
-            return { name: line.name, sku: line.sku, supplier, poId: Number(d.po_id), avail: Number(j.avail), deldate: j.deldate || null };
+            // Some feeds give only a status (Snickers: avail null, "In stock"). Number(null) is 0,
+            // which read as OUT of stock on SO 491442 (Dec, 2 Oct): no number means no number.
+            const avail = j.avail === null || j.avail === undefined || j.avail === "" ? (/out of stock|no stock/i.test(String(j.status || "")) ? 0 : null) : Number(j.avail);
+            return { name: line.name, sku: line.sku, supplier, poId: Number(d.po_id), avail, status: j.status || null, deldate: j.deldate || null };
           } catch { return null; } finally { clearTimeout(timer); }
         }))).filter(Boolean);
       } catch (e) { console.error("[sales-hub] supplier stock check failed:", e.message); }

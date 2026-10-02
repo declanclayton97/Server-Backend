@@ -508,6 +508,8 @@ assertTrue("note lists attachments", withFiles.includes("Attached: proof.pdf, ph
     bo.text, "Portwest are out of stock of the C105 Elasticated Work Belt at the moment, and they're expecting more in late January 2027. As soon as it reaches us we'll get it straight out to you. Or if you'd like, we can try to source an alternative for you.");
   assertEq("its window is recorded for the guard", bo.dates, ["2027-01-18/late"]);
   assertEq("in stock at the supplier: no back-order wording", backorderSentence([{ ...belt, avail: 12 }], OCT1), null);
+  // Snickers gives a status but no quantity (SO 491442): that is NOT out of stock.
+  assertEq("no quantity from the feed: no back-order wording", backorderSentence([{ ...belt, avail: null, status: "In stock" }], OCT1), null);
   assertTrue("no date: says so and chases", backorderSentence([{ ...belt, deldate: null }], OCT1).text.includes("haven't given us a date"));
   assertTrue("no date: still offers an alternative", backorderSentence([{ ...belt, deldate: null }], OCT1).text.endsWith("we can try to source an alternative for you."));
   // It wins over a PO date, which says nothing about whether the supplier has it.
