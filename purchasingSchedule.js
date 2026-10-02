@@ -4525,9 +4525,10 @@ export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey,
 // checkout): basket → order page checked (lines, qty, LS26 8LG) → BeeSwift's own duplicate-PO guard
 // → submit, PROVEN by BeeSwift then knowing our PO ref. Our PO number is the ref, so a second run
 // for the same PO is refused by BeeSwift itself.
-// Two gates: the 13:40 poller needs BEESWIFT_LIVE=true here, and Alt-Items needs
-// BEESWIFT_PLACE_ENABLED=true to submit. The PO-creating path refuses before creating anything if
-// BEESWIFT_LIVE is off, so a forced run cannot leave a draft behind.
+// LIVE since 2026-10-02 (rehearsed end to end: 14/14 lines, packs converted, basket cleared). The
+// env gates were removed at the owner's request; the safeguards are in the flow itself (non-empty
+// basket refused, order page checked line by line, BeeSwift's duplicate-PO guard before and after
+// submit). BEESWIFT_SCHEDULE_ENABLED=false still turns the 13:40 window off, like every supplier.
 // The token: BeeSwift allows ONE session, so the run logs in via the worker first (see
 // beeswiftFreshToken); a failed login stops it before any PO exists.
 const BEESWIFT_SUPPLIER_CONTACT = 326;
@@ -4614,7 +4615,6 @@ async function beeswiftRehearsal(pool, altItemsUrl) {
 }
 
 async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
-  if (process.env.BEESWIFT_LIVE !== 'true') throw stepErr('preflight', 'BeeSwift live ordering is off (BEESWIFT_LIVE != true) — rehearse with /api/purchasing/beeswift-rehearse');
   const steps = {};
   // Log in BEFORE the PO exists: a failed login then leaves nothing behind (no junk PO).
   const token = await beeswiftFreshToken();
