@@ -3973,7 +3973,7 @@ const SCHEDULED_SUPPLIERS = {
   // window in server.js yet, so nothing runs on its own. New Balance is vetoed in the registry.
   TRANEMO: { supplierKey: 'TRANEMO', stateId: 22, placeFn: placeTranemoOrder, threshold: Number(process.env.TRANEMO_FREESHIP_THRESHOLD || 250) }, // emailed PO, 11:20; free carriage @ £250 ex-VAT (user, until told otherwise), £15 below onto the PO
   'AS APPAREL': { supplierKey: 'AS APPAREL', stateId: 21, placeFn: placeAsApparelOrder, threshold: Number(process.env.ASAPPAREL_FREESHIP_THRESHOLD || 175) }, // emailed PO, 14:40; free carriage @ £175 ex-VAT, £9.90 below it onto the PO (user, 2026-10-02)
-  BEESWIFT: { supplierKey: 'BEESWIFT', stateId: 20, placeFn: placeBeeswiftOrder, threshold: Number(process.env.BEESWIFT_FREESHIP_THRESHOLD || 150) },
+  BEESWIFT: { supplierKey: 'BEESWIFT', stateId: 20, placeFn: placeBeeswiftOrder, extraNet: (pool, lines) => beeswiftPackExtraNet(pool, lines), threshold: Number(process.env.BEESWIFT_FREESHIP_THRESHOLD || 150) },
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
@@ -4079,7 +4079,7 @@ export async function schedulerState(pool) {
 // duplicate rows into the shared purchasing_error_log, where the hub would count them as real
 // failures and the triage routine would wake up to fix a service that is not live yet.
 // Defaults to TRUE, so the live schedule's behaviour is unchanged.
-export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false, forcePlace = false, excludeSkus = [], notify = true } = {}) {
+export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRISTADS', dryRun = false, force = false, forcePlace = false, topUp = false, excludeSkus = [], notify = true } = {}) {
   const cfg = SCHEDULED_SUPPLIERS[String(supplier).toUpperCase()];
   if (!cfg) return { error: `unknown scheduled supplier ${supplier}` };
   const threshold = cfg.threshold ?? THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier — `??` so a deliberate 0 (no minimum, e.g. Snickers) is honoured, not treated as "unset"
@@ -4111,7 +4111,10 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     catch (e) { throw stepErr('value-check', `couldn't value the demand (Brightpearl down or demand read failed): ${e.message}`); }
     if (plan.unresolvedSkus && plan.unresolvedSkus.length) throw stepErr('value-check', `low-inventory item codes don't match any Brightpearl product: ${plan.unresolvedSkus.join(', ')}`);
     const lines = [...(plan.soLines || []), ...(plan.lowLines || [])];
-    const netValue = Number(lines.reduce((a, l) => a + (l.cost || 0) * l.qty, 0).toFixed(2));
+    // Pack suppliers (BeeSwift): whole packs cost more than the demand, and that spend counts toward
+    // free carriage — one goggle needed is a pack of 4. extraNet() is what the packs add on top.
+    const packExtra = cfg.extraNet ? await cfg.extraNet(pool, lines).catch(() => 0) : 0;
+    const netValue = Number((lines.reduce((a, l) => a + (l.cost || 0) * l.qty, 0) + packExtra).toFixed(2));
     const units = (plan.soUnits || 0) + (plan.lowUnits || 0);
 
     // A tag is a human saying "this supplier is needed on this order". Contributing no rows means
@@ -4144,7 +4147,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       // forcePlace: a deliberate MANUAL override to place NOW regardless of the free-carriage
       // threshold (e.g. an URGENT back-order of a single OOS line). Never set by the pollers.
       if (over) { willPlace = true; reason = 'over-threshold'; }
-      else if (forcePlace) { willPlace = true; reason = `forced place (manual — under £${threshold}, threshold ignored)`; }
+      else if (forcePlace) { willPlace = true; padOnPlace = !!topUp; reason = topUp ? `forced place (manual — topped up with low-inv toward £${threshold})` : `forced place (manual — under £${threshold}, threshold ignored)`; }
       else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS) { willPlace = true; padOnPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — top up low-inv to reach free delivery, else carriage)`; }
       else { decision = `waiting — day ${wouldBeDay} of ${MAX_WAIT_WORKING_DAYS} (£${netValue} < £${threshold})`; newWaitDays = wouldBeDay; }
     }
@@ -4153,7 +4156,9 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     if (willPlace) {
       // On the final wait day (under threshold) pass the threshold so createComboPOLive
       // pads low-inv up to +40% above min to reach free delivery — else normal + carriage.
-      const padTo = padOnPlace ? threshold : 0;
+      // The pad works on the goods value alone, so take the pack extra off its target — otherwise it
+      // tops up to £150 and the packs then carry the order past it with stock nobody asked for.
+      const padTo = padOnPlace ? Math.max(0, +(threshold - packExtra).toFixed(2)) : 0;
       if (dryRun) { decision = `WOULD place (${reason})`; }
       else {
         // CLAIM THE DAY BEFORE TOUCHING THE SUPPLIER. last_run_date used to be written only at the
@@ -4523,8 +4528,8 @@ export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey,
 // Two gates: the 13:40 poller needs BEESWIFT_LIVE=true here, and Alt-Items needs
 // BEESWIFT_PLACE_ENABLED=true to submit. The PO-creating path refuses before creating anything if
 // BEESWIFT_LIVE is off, so a forced run cannot leave a draft behind.
-// The token: BeeSwift allows ONE session, so a staff login after the VM's refresh kills it. A dead
-// token fails at the basket (step 'cart'), before anything is ordered.
+// The token: BeeSwift allows ONE session, so the run logs in via the worker first (see
+// beeswiftFreshToken); a failed login stops it before any PO exists.
 const BEESWIFT_SUPPLIER_CONTACT = 326;
 const BEESWIFT_CARRIAGE = () => Number(process.env.BEESWIFT_CARRIAGE_CHARGE || 6.95);
 // Order rows freeze the SKU and name at the time of sale, so a product fixed in BP since (Yale 60628 ->
@@ -4557,6 +4562,41 @@ async function beeswiftFreshToken() {
   return r.token;
 }
 
+// Pack sizes are only visible on BeeSwift's order page, so every checkout records what it saw and
+// the next run's value-check uses it. Seeded with the two proven on 2026-10-02.
+const BEESWIFT_PACK_SEED = [
+  { sku: 'UV9302245', code: 'UV9302245', packSize: 4, oursIsPack: false },   // "PK 4" @ £34, ours is one goggle
+  { sku: 'BBP3VN', code: 'BBP3VN', packSize: 5, oursIsPack: true },           // "Bx 5", ours is the box
+];
+async function beeswiftPacksTable(pool) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS beeswift_packs (sku TEXT PRIMARY KEY, code TEXT, pack_size INT NOT NULL, ours_is_pack BOOLEAN NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+}
+async function rememberBeeswiftPacks(pool, packs) {
+  if (!pool) return;
+  await beeswiftPacksTable(pool);
+  for (const p of packs || []) {
+    if (!p.sku || !(p.packSize > 1)) continue;
+    await pool.query(`INSERT INTO beeswift_packs (sku, code, pack_size, ours_is_pack, updated_at) VALUES ($1,$2,$3,$4,NOW())
+      ON CONFLICT (sku) DO UPDATE SET code=EXCLUDED.code, pack_size=EXCLUDED.pack_size, ours_is_pack=EXCLUDED.ours_is_pack, updated_at=NOW()`,
+      [String(p.sku), p.code || null, p.packSize, !!p.oursIsPack]);
+  }
+}
+// £ the packs add on top of the demand: a single bought in packs rounds UP to whole packs.
+async function beeswiftPackExtraNet(pool, rawLines) {
+  const known = new Map(BEESWIFT_PACK_SEED.map((p) => [p.sku.toUpperCase(), p]));
+  if (pool) {
+    try { await beeswiftPacksTable(pool); for (const r of (await pool.query('SELECT sku, pack_size, ours_is_pack FROM beeswift_packs')).rows) known.set(String(r.sku).toUpperCase(), { packSize: r.pack_size, oursIsPack: r.ours_is_pack }); }
+    catch { /* seed only */ }
+  }
+  let extra = 0;
+  for (const l of mergePoLinesBySku({ soLines: rawLines, lowLines: [] })) {
+    const p = known.get(String(l.sku).toUpperCase());
+    if (!p || p.oursIsPack || !(p.packSize > 1)) continue;
+    extra += (Math.ceil(l.qty / p.packSize) * p.packSize - l.qty) * (Number(l.cost) || 0);
+  }
+  return +extra.toFixed(2);
+}
+
 async function beeswiftRehearsal(pool, altItemsUrl) {
   const plan = await bp.createComboPOLive({ supplierKey: 'BEESWIFT', execute: false, logPool: pool });
   const lines = await beeswiftLines(plan);
@@ -4566,6 +4606,7 @@ async function beeswiftRehearsal(pool, altItemsUrl) {
   const co = await jfetch('checkout', `${altItemsUrl}/api/beeswift-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ customerPO: `REHEARSAL-${Date.now()}`.slice(0, 30), lines, execute: false, token }) });
   const pv = co.preview || {};
+  await rememberBeeswiftPacks(pool, co.packs).catch(() => {});
   return { rehearsal: true, ok: !!co.ok, reason: co.reason || null, lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0),
     ourGoodsNet: goodsNet, theirSubTotal: pv.subTotal ?? null, theirCarriage: pv.carriage ?? null, theirTotal: pv.orderTotal ?? null,
     carriageWeWouldAdd: goodsNet < (SCHEDULED_SUPPLIERS.BEESWIFT.threshold || 150) ? BEESWIFT_CARRIAGE() : 0,
@@ -4596,6 +4637,7 @@ async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const co = await jfetch('checkout', `${altItemsUrl}/api/beeswift-checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ customerPO: String(poId), lines, execute: live, token }) });
   const pv = co.preview || {};
+  await rememberBeeswiftPacks(pool, co.packs).catch(() => {});
   steps.checkout = { placed: !!co.placed, orderNo: (co.submit && co.submit.orderNo) || null, subTotal: pv.subTotal ?? null, carriage: pv.carriage ?? null, total: pv.orderTotal ?? null, problems: co.problems || [] };
   if (co.alreadyOrdered) throw stepErr('checkout', `BeeSwift ALREADY has an order for PO ref ${poId} — do NOT resubmit; finalise PO#${poId} by hand once confirmed on BeeSwift's Orders page`, { poId, alreadyOrdered: true });
   if (!co.placed) throw stepErr(/token/i.test(co.reason || co.error || '') ? 'cart' : 'checkout', `BeeSwift did not place PO#${poId}: ${co.reason || co.error || 'no confirmation'}`, { poId, problems: co.problems || [], added: co.added || [], basketBefore: co.basketBefore || [], submit: co.submit || null });
