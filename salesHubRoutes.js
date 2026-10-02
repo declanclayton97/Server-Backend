@@ -574,6 +574,10 @@ export function registerSalesHubRoutes(app, deps) {
   // `query` is either a bare order number or a whole email.
   app.post("/api/sales-hub/lookup", requireUser, async (req, res) => {
     try {
+      // Every answer carries the template list, so an email with no order can still pick one
+      // (the page then asks for the order it needs).
+      const intentList = SALES_INTENTS.map((i) => ({ key: i.key, label: i.label }));
+      
       const raw = String((req.body && req.body.query) || "").trim();
       if (!raw) return res.status(400).json({ error: "Nothing to look up" });
 
@@ -583,7 +587,7 @@ export function registerSalesHubRoutes(app, deps) {
       const orderNumber = looksLikeBareNumber ? raw : extractOrderNumber(raw);
       if (!orderNumber) {
         return res.json({
-          found: false,
+          found: false, intents: intentList,
           reason:
             "No order number in that email. Search Brightpearl by the customer's " +
             "address instead, then paste the number in on its own.",
@@ -594,7 +598,7 @@ export function registerSalesHubRoutes(app, deps) {
       if (resolved && resolved.notSale) {
         const ns = resolved.notSale, po = ns.type === "PO" || ns.type === "2";
         return res.json({
-          found: false,
+          found: false, intents: intentList,
           reason: po
             ? `${orderNumber} is purchase order ${ns.id}, not a sales order` + (ns.sales > 1 ? ` (it covers ${ns.sales} sales orders)` : "") + ". Link the customer's order by hand."
             : `${orderNumber} is a ${ns.type === "SC" || ns.type === "3" ? "credit note" : "non-sales order"} in Brightpearl, not a sales order. Link the right order by hand.`,
@@ -602,13 +606,13 @@ export function registerSalesHubRoutes(app, deps) {
       }
       if (!resolved) {
         return res.json({
-          found: false,
+          found: false, intents: intentList,
           reason: `Nothing in Brightpearl matches ${orderNumber} — not as an order number, nor as a web order reference.`,
         });
       }
 
       const order = await gatherOrder(resolved.id);
-      if (!order) return res.json({ found: false, reason: `Order ${resolved.id} could not be loaded.` });
+      if (!order) return res.json({ found: false, intents: intentList, reason: `Order ${resolved.id} could not be loaded.` });
 
       // The email's own date drives the whole "have we already told them" check.
       // If we cannot find one, say so rather than assuming now() — assuming now
