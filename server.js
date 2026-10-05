@@ -11654,6 +11654,10 @@ app.post("/api/approval-sessions", async (req, res) => {
     // error, so the id is minted HERE and every write is idempotent — a retry can then never make a
     // second session. One retry, only for connection-level errors.
     const sessionId = crypto.randomUUID();
+    // Size first, so a crash that follows can be tied to the payload (2026-10-05: inserts here
+    // coincided with "the database system is in recovery mode").
+    const mb = (b) => b ? +(b.length / 1048576).toFixed(2) : 0;
+    console.log(`[approval-session] creating ${sessionId} for ${orderNumber || '?'}: pdf ${mb(pdfBuffer)}MB, logo ${mb(primaryLogoBuffer)}MB, promo ${mb(promoDarkBuffer)}+${mb(promoLightBuffer)}MB`);
     const transient = (e) => /Connection terminated|ECONNRESET|terminating connection|Client has encountered a connection error/i.test(String(e && (e.message || e.code) || ''));
     const q = async (sql, params) => {
       try { return await pool.query(sql, params); }
