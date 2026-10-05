@@ -1049,7 +1049,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
     try {
       steps.finalizePartial = await bp.finalizeSupplierTagsLive({ orderIds: partIds, supplierKey: 'FRISTADS', poId, noteContactId: FRISTADS_SUPPLIER_CONTACT, setOrderedStatus: false, linesByOrder, execute: true });
       const em = steps.discontinued && steps.discontinued.emailed;
-      const emailLine = em && (em.accepted || []).length ? `sales@ have been emailed (${em.accepted.join(', ')}).` : 'THE EMAIL TO sales@ DID NOT SEND — this note is the only record, so tell them.';
+      const emailLine = em && (em.accepted || []).length ? `Emailed (${em.accepted.join(', ')}).` : 'THE DISCONTINUED EMAIL DID NOT SEND — this note is the only record, so tell them.';
       for (const id of partIds) {
         const what = (((steps.discontinued && steps.discontinued.deadByOrder) || {})[id] || []).map((d) => `${d.sku}${d.qty > 1 ? ` x${d.qty}` : ''}${d.name ? ` (${d.name})` : ''}`).join(', ');
         await bp.addOrderNoteLive(id, `DISCONTINUED at Fristads — NOT ordered and cannot be: ${what}. Everything else on this order from Fristads was ordered on PO#${poId}. ${emailLine} This order is on "${DISCONTINUED_PARK_LABEL}" until a substitute or refund is agreed with the customer.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
@@ -1064,8 +1064,12 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
 // ── Castle placement chain ───────────────────────────────────────────────────
 // Same skeleton as Fristads, but Castle's checkout POST *places directly* (no
 // separate placeorder step) and the reference we write is Castle's order number.
-async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
+async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0, excludeSkus = [] } = {}) {
   const steps = {};
+  // excludeSkus: lines Castle cannot sell (style 187 had no add-to-cart form on 2026-10-05, so one
+  // £1 hoodie held a 92-unit order twice). Explicit instruction only — kept off the basket, taken
+  // off the PO, and left UNFINALISED on its sales order so a person still deals with it.
+  const excl = new Set((excludeSkus || []).map((x) => String(x).trim().toUpperCase()).filter(Boolean));
   // 1. combined PO (allocation-aware demand + low-inv + separator)
   let po;
   try { po = await createPo({ supplierKey: 'CASTLE', execute: true, padToThreshold, logPool: pool }); }
@@ -1085,7 +1089,18 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   // SKU on two rows, and a basket that does not accumulate repeat adds keeps the LAST qty rather
   // than the sum, leaving the cart short. Castle's cartCount check below would then stall the run
   // — a safe failure, but an avoidable one, and this shape has already cost three orders.
-  const cartLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty }));
+  const cartLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty })).filter((l) => !excl.has(String(l.sku).toUpperCase()));
+  if (excl.size) {
+    steps.excluded = [];
+    for (const sku of excl) {
+      const r = await bp.removePoRowLive({ poId, sku, execute: true }).catch((e) => ({ error: e.message }));
+      steps.excluded.push({ sku, removedFromPo: !!(r && r.done), note: r && (r.reason || r.error) });
+    }
+    for (const id of Object.keys(linesByOrder)) {
+      linesByOrder[id] = linesByOrder[id].filter((x) => !excl.has(String(x.sku).toUpperCase()));
+      if (!linesByOrder[id].length) delete linesByOrder[id];
+    }
+  }
   const expectUnits = cartLines.reduce((a, l) => a + l.qty, 0);
   const cart = await jfetch('cart', `${altItemsUrl}/api/castle-basket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearFirst: true, lines: cartLines }) });
   // `results` is one entry per STYLE — Castle adds a whole style's variants in a single form POST,
@@ -1159,7 +1174,8 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) 
   steps.link = { reference: order.orderNo, refWritten: castleRefWritten, orderNo: order.orderNo, status: 7 };
 
   // 6. finalize the contributing SOs (clear CASTLE tag, status 22 when fully ordered, note)
-  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'CASTLE', poId, noteContactId: CASTLE_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  const finalIds = excl.size ? soIds.filter((id) => linesByOrder[id]) : soIds;   // an SO whose only Castle line was excluded keeps its tag
+  if (finalIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: finalIds, supplierKey: 'CASTLE', poId, noteContactId: CASTLE_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: true }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
 
   return { poId, orderNo: order.orderNo, steps };
 }
@@ -2426,8 +2442,8 @@ async function snickersAlternativeSizes(altItemsUrl, sku) {
   return out;
 }
 
-async function emailDiscontinued({ supplierKey, poId, items }) {
-  const to = process.env.DISCONTINUED_EMAIL_TO || 'sales@tuffshop.co.uk';
+async function sendDiscontinuedEmail({ supplierKey, poId, items, to: toArg }) {
+  const to = toArg || process.env.DISCONTINUED_EMAIL_TO || 'sales@tuffshop.co.uk';
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   const block = items.map((it) => {
     const orders = (it.orders || []).length
@@ -2469,6 +2485,27 @@ async function emailDiscontinued({ supplierKey, poId, items }) {
     messageId: (info && info.messageId) || null,
     response: (info && info.response) || null,
   };
+}
+
+// Internet orders go to Bob, not sales@ (user, 2026-10-05). Brightpearl channels: 2 www.tuffshop,
+// 3 www.tuffkids, 7 eBay, 9 Amazon UK, 14 TuffShop.co.uk (Online), 17 Magento. An item goes to Bob
+// if ANY order wanting it came in online; everything else (trade, low-inv top-ups) stays on sales@.
+const INTERNET_CHANNEL_IDS = new Set((process.env.INTERNET_CHANNEL_IDS || '2,3,7,9,14,17').split(',').map(Number));
+const INTERNET_DISCONTINUED_TO = process.env.INTERNET_DISCONTINUED_TO || 'bob@tuffshop.co.uk';
+async function emailDiscontinued({ supplierKey, poId, items }) {
+  const ids = [...new Set(items.flatMap((it) => (it.orders || []).map((o) => Number(o.id))).filter((n) => n > 0))].sort((a, b) => a - b);
+  const channelOf = new Map();
+  if (ids.length) {
+    try { for (const o of (await bp.bpLiveGet(`/order-service/order/${ids.join(',')}`)) || []) channelOf.set(Number(o.id), Number(o.assignment && o.assignment.current && o.assignment.current.channelId)); }
+    catch (e) { console.error('[discontinued] channel lookup failed, all to sales@:', e.message); }
+  }
+  const online = (it) => (it.orders || []).some((o) => INTERNET_CHANNEL_IDS.has(channelOf.get(Number(o.id))));
+  const groups = [[INTERNET_DISCONTINUED_TO, items.filter(online)], [null, items.filter((it) => !online(it))]].filter(([, g]) => g.length);
+  const sends = [];
+  for (const [to, g] of groups) sends.push(await sendDiscontinuedEmail({ supplierKey, poId, items: g, to }).catch((e) => ({ to: to || 'sales@', error: e.message, accepted: [], rejected: [] })));
+  // Same shape as one send, so every caller (and the "sales@ have been emailed" notes) keeps working.
+  return { to: sends.map((s) => s.to).join(', '), accepted: sends.flatMap((s) => s.accepted || []), rejected: sends.flatMap((s) => s.rejected || []),
+    messageId: sends.map((s) => s.messageId).filter(Boolean).join(', ') || null, response: sends.map((s) => s.response || s.error).filter(Boolean).join(' | ') || null, sends };
 }
 
 // Remove the dead rows, settle the tags, tell sales, remember the SKUs. Returns what it did.
@@ -3045,8 +3082,8 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
           // sitting exactly where someone would rely on it.
           const em = (steps.discontinued && steps.discontinued.emailed) || null;
           const emailLine = em && (em.accepted || []).length
-            ? `sales@ have been emailed (${em.accepted.join(', ')}).`
-            : 'THE EMAIL TO sales@ DID NOT SEND — this note is the only record, so tell them.';
+            ? `Emailed (${em.accepted.join(', ')}).`
+            : 'THE DISCONTINUED EMAIL DID NOT SEND — this note is the only record, so tell them.';
           if (live) await bp.addOrderNoteLive(id, `DISCONTINUED at Snickers — NOT ordered and cannot be: ${what}. Everything else on this order was ordered on PO#${poId}. ${emailLine} This order is on "${DISCONTINUED_PARK_LABEL}" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, SNICKERS_SUPPLIER_CONTACT);
           if (live) await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS);
           parked.push({ id, status: DISCONTINUED_PARK_STATUS, dead: deadHere.map((d) => d.sku) });
@@ -4502,7 +4539,7 @@ export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey,
   if (!execute) return { dryRun: true, ...plan };
   const done = await handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, dead: onPo.map((r) => ({ sku: r.sku, name: r.name, status: 'Discontinued (supplier, after ordering)' })), po: { soLines } });
   const em = done.emailed || null;
-  const emailLine = em && (em.accepted || []).length ? `sales@ have been emailed (${em.accepted.join(', ')}).` : 'THE EMAIL TO sales@ DID NOT SEND — this note is the only record, so tell them.';
+  const emailLine = em && (em.accepted || []).length ? `Emailed (${em.accepted.join(', ')}).` : 'THE DISCONTINUED EMAIL DID NOT SEND — this note is the only record, so tell them.';
   const parked = [];
   for (const id of affected) {
     const what = soLines.filter((l) => l.order === id && want.has(String(l.sku).toUpperCase())).map((l) => `${l.sku}${l.qty > 1 ? ` x${l.qty}` : ''}${l.name ? ` (${l.name})` : ''}`).join(', ');
