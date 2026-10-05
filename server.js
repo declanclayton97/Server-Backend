@@ -11649,14 +11649,25 @@ app.post("/api/approval-sessions", async (req, res) => {
     const promoDarkBuffer = promoLogoDarkBase64 ? Buffer.from(promoLogoDarkBase64, "base64") : null;
     const promoLightBuffer = promoLogoLightBase64 ? Buffer.from(promoLogoLightBase64, "base64") : null;
 
-    const sessionResult = await pool.query(
+    // A pooled socket Render has just reaped fails the query with "Connection terminated
+    // unexpectedly" (seen 2026-10-05, and before). Whether the row committed is unknowable from the
+    // error, so the id is minted HERE and every write is idempotent — a retry can then never make a
+    // second session. One retry, only for connection-level errors.
+    const sessionId = crypto.randomUUID();
+    const transient = (e) => /Connection terminated|ECONNRESET|terminating connection|Client has encountered a connection error/i.test(String(e && (e.message || e.code) || ''));
+    const q = async (sql, params) => {
+      try { return await pool.query(sql, params); }
+      catch (e) { if (!transient(e)) throw e; console.warn(`[approval-session] retrying after: ${e.message}`); return pool.query(sql, params); }
+    };
+    const sessionResult = await q(
       `INSERT INTO approval_sessions
-         (order_number, customer_name, recipient_name, pdf_data, logo_positions, created_by,
+         (id, order_number, customer_name, recipient_name, pdf_data, logo_positions, created_by,
           primary_logo_data, primary_logo_mime,
           promo_logo_dark_data, promo_logo_dark_mime,
           promo_logo_light_data, promo_logo_light_mime,
           promo_offer_disabled, crosssell_candidate)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       VALUES ($15, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id
        RETURNING id, status, created_at`,
       [
         orderNumber || null, customerName || null, recipientName || null, pdfBuffer,
@@ -11666,6 +11677,7 @@ app.post("/api/approval-sessions", async (req, res) => {
         promoLightBuffer, promoLogoLightMime || null,
         disablePromoOffer === true,
         crossSellCandidate ? JSON.stringify(crossSellCandidate) : null,
+        sessionId,
       ]
     );
 
@@ -11673,9 +11685,10 @@ app.post("/api/approval-sessions", async (req, res) => {
 
     for (let i = 0; i < logoPositions.length; i++) {
       const pos = logoPositions[i];
-      await pool.query(
+      await q(
         `INSERT INTO approval_items (session_id, position_index, label, page_number)
-         VALUES ($1, $2, $3, $4)`,
+         SELECT $1, $2, $3, $4
+         WHERE NOT EXISTS (SELECT 1 FROM approval_items WHERE session_id = $1 AND position_index = $2)`,
         [session.id, i, pos.label || `Position ${i + 1}`, pos.page || 1]
       );
     }
