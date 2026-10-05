@@ -113,27 +113,61 @@ const LAYOUT = [
   { k: "LOCATION", w: 150, max: 14 }, { k: "QTY", w: 56, max: 4, align: "middle" }, { k: "DESC", w: 480, max: 47 },
   { k: "SIZE", w: 120, max: 11 }, { k: "COLOUR", w: 170, max: 16 }, { k: "SKU", w: 230, max: 22 }, { k: "ORDER", w: 140, max: 12 },
 ];
+// Word-wrap to lines of at most n characters (a word longer than a line is split).
+export function wrap(s, n) {
+  const words = String(s || "").split(/\s+/).filter(Boolean), lines = [];
+  let cur = "";
+  for (let w of words) {
+    while (w.length > n) { if (cur) { lines.push(cur); cur = ""; } lines.push(w.slice(0, n)); w = w.slice(n); }
+    if (!cur) cur = w; else if ((cur + " " + w).length <= n) cur += " " + w; else { lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [""];
+}
+// A row with only words in it (no SKU, location or quantity) is a NOTE for Bob, e.g.
+// "CHECK IF STW.1.L.5 AT UNIT - BOX IN OFFICE ..." - it gets the full width of the table.
+const isNote = (r) => !r.SKU && !r.LOCATION && !r.QTY && !!(r.DESC || r.COLOUR || r.SIZE || r.ORDER);
+
+// Long text WRAPS onto more lines in its cell (Dec, 5 Oct: a long note was cut off); the
+// row grows to fit. Nothing is ever truncated.
 export function pickingSvg(rows, title) {
-  const pad = 16, rowH = 40, top = 64;
+  const pad = 16, lineH = 24, top = 64, headH = 40;
   const width = LAYOUT.reduce((a, c) => a + c.w, 0) + pad * 2;
-  const height = top + rowH * (rows.length + 1) + pad;
   let x = pad;
   const xs = LAYOUT.map((c) => { const at = x; x += c.w; return at; });
-  const cell = (c, i, text, y, bold) => {
+  const noteMax = Math.floor((width - pad * 2 - 20) / 11);
+  const laid = rows.map((r) => {
+    if (isNote(r)) {
+      const text = [r.DESC, r.SIZE, r.COLOUR, r.ORDER].filter(Boolean).join("  ");
+      const lines = wrap(text, noteMax);
+      return { r, note: lines, h: Math.max(40, lines.length * lineH + 16) };
+    }
+    const cells = LAYOUT.map((c) => wrap(r[c.k] || "", c.max));
+    return { r, cells, h: Math.max(40, Math.max(...cells.map((l) => l.length)) * lineH + 16) };
+  });
+  const bodyH = laid.reduce((a, l) => a + l.h, 0);
+  const height = top + headH + bodyH + pad;
+  const textAt = (c, i, lines, y, bold) => {
     const tx = c.align === "middle" ? xs[i] + c.w / 2 : xs[i] + 10;
-    return `<text x="${tx}" y="${y}" font-size="19" ${bold ? 'font-weight="700"' : ""} text-anchor="${c.align === "middle" ? "middle" : "start"}" fill="#111">${esc(clip(text, c.max))}</text>`;
+    return lines.map((ln, k) => `<text x="${tx}" y="${y + 27 + k * lineH}" font-size="19" ${bold ? 'font-weight="700"' : ""} text-anchor="${c.align === "middle" ? "middle" : "start"}" fill="#111">${esc(ln)}</text>`).join("");
   };
   let out = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="DejaVu Sans">`;
   out += `<rect width="${width}" height="${height}" fill="#ffffff"/>`;
   out += `<text x="${pad}" y="40" font-size="24" font-weight="700" fill="#111">${esc(title)}</text>`;
-  out += `<rect x="${pad}" y="${top}" width="${width - pad * 2}" height="${rowH}" fill="#FFFF00" stroke="#000"/>`;
-  LAYOUT.forEach((c, i) => { out += cell(c, i, c.k, top + 27, true); });
-  rows.forEach((r, n) => {
-    const y = top + rowH * (n + 1);
-    out += `<rect x="${pad}" y="${y}" width="${width - pad * 2}" height="${rowH}" fill="${n % 2 ? "#f4f4f4" : "#ffffff"}" stroke="#999"/>`;
-    LAYOUT.forEach((c, i) => { out += cell(c, i, r[c.k] || "", y + 27, c.k === "LOCATION" || c.k === "QTY"); });
+  out += `<rect x="${pad}" y="${top}" width="${width - pad * 2}" height="${headH}" fill="#FFFF00" stroke="#000"/>`;
+  LAYOUT.forEach((c, i) => { out += textAt(c, i, [c.k], top, true); });
+  xs.slice(1).forEach((cx) => { out += `<line x1="${cx}" y1="${top}" x2="${cx}" y2="${top + headH}" stroke="#999"/>`; });
+  let y = top + headH;
+  laid.forEach((l, n) => {
+    out += `<rect x="${pad}" y="${y}" width="${width - pad * 2}" height="${l.h}" fill="${n % 2 ? "#f4f4f4" : "#ffffff"}" stroke="#999"/>`;
+    if (l.note) {
+      out += l.note.map((ln, k) => `<text x="${pad + 10}" y="${y + 27 + k * lineH}" font-size="19" font-weight="700" fill="#111">${esc(ln)}</text>`).join("");
+    } else {
+      LAYOUT.forEach((c, i) => { out += textAt(c, i, l.cells[i], y, c.k === "LOCATION" || c.k === "QTY"); });
+      xs.slice(1).forEach((cx) => { out += `<line x1="${cx}" y1="${y}" x2="${cx}" y2="${y + l.h}" stroke="#999"/>`; });
+    }
+    y += l.h;
   });
-  xs.slice(1).forEach((cx) => { out += `<line x1="${cx}" y1="${top}" x2="${cx}" y2="${top + rowH * (rows.length + 1)}" stroke="#999"/>`; });
   return out + "</svg>";
 }
 export async function pickingPng(rows, title) {
@@ -175,10 +209,12 @@ export async function runPicking({ waPhoneNumberId, dryRun = false, to = null, m
   const c = cfg();
   const { pending, green, totalRows } = await readPickingSheet();
   const day = ukToday();
-  const units = pending.reduce((a, r) => a + (Number(r.QTY) || 1), 0);
-  const title = pending.length
-    ? `Storage unit picking list - ${day} - ${pending.length} line${pending.length === 1 ? "" : "s"} (${units} unit${units === 1 ? "" : "s"})`
-    : `Nothing to pick - ${day}`;
+  // Notes (a row with words but no item) go to Bob too, but are not items to count.
+  const items = pending.filter((r) => !isNote(r)), notes = pending.length - items.length;
+  const units = items.reduce((a, r) => a + (Number(r.QTY) || 1), 0);
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const summary = (items.length ? `${plural(items.length, "line")}, ${plural(units, "unit")}` : "no items") + (notes ? ` + ${plural(notes, "note")}` : "");
+  const title = pending.length ? `Storage unit picking list - ${day} - ${summary}` : `Nothing to pick - ${day}`;
   const result = { day, totalRows, pending: pending.map(({ fill, ...r }) => r), units, green, title, sent: false, marked: 0 };
   if (dryRun) return result;
   const recipient = (to || c.to || "").replace(/[^\d]/g, "");
@@ -195,7 +231,7 @@ export async function runPicking({ waPhoneNumberId, dryRun = false, to = null, m
   const mediaId = await waUploadPng(phoneNumberId, png);
   result.messageId = await waTemplate(phoneNumberId, recipient, c.template, c.lang, [
     { type: "header", parameters: [{ type: "image", image: { id: mediaId } }] },
-    { type: "body", parameters: [{ type: "text", text: day }, { type: "text", text: `${pending.length} line${pending.length === 1 ? "" : "s"}, ${units} unit${units === 1 ? "" : "s"}` }] },
+    { type: "body", parameters: [{ type: "text", text: day }, { type: "text", text: summary }] },
   ]);
   result.sent = true;
   if (markGreen) {
