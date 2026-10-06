@@ -4651,8 +4651,12 @@ async function beeswiftRehearsal(pool, altItemsUrl) {
     deliverTo: pv.deliverTo || null, orderPage: pv.lines || [], packs: co.packs || [], added: co.added || [], problems: co.problems || [], cleared: co.cleared || null, basketBefore: co.basketBefore || [] };
 }
 
-async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [] } = {}) {
   const steps = {};
+  // excludeSkus: same as Castle — explicit instruction only. Kept off the basket, taken off the PO,
+  // and left UNFINALISED on its sales order so a person still deals with it (SW2011 brogue, 6 Oct:
+  // BeeSwift no longer list size 9 under SW2011 and one £19 shoe held an 11-line order).
+  const excl = new Set((excludeSkus || []).map((x) => String(x).trim().toUpperCase()).filter(Boolean));
   // Log in BEFORE the PO exists: a failed login then leaves nothing behind (no junk PO).
   const token = await beeswiftFreshToken();
   steps.login = { tokenTail: token.slice(-6) };
@@ -4666,7 +4670,23 @@ async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
-  const lines = await beeswiftLines(po);
+  let lines = await beeswiftLines(po);
+  if (excl.size) {
+    const isEx = (l) => excl.has(String(l.sku || '').toUpperCase()) || excl.has(String(l.productSku || '').toUpperCase());
+    const gone = lines.filter(isEx);
+    lines = lines.filter((l) => !isEx(l));
+    steps.excluded = [];
+    for (const l of gone) {
+      const r = await bp.removePoRowLive({ poId, sku: l.sku, execute: live }).catch((e) => ({ error: e.message }));
+      steps.excluded.push({ sku: l.sku, productId: l.productId, removedFromPo: !!(r && r.done), note: r && (r.reason || r.error) });
+    }
+    const goneIds = new Set(gone.map((l) => String(l.productId)));
+    for (const id of Object.keys(linesByOrder)) {
+      linesByOrder[id] = linesByOrder[id].filter((x) => !excl.has(String(x.sku).toUpperCase()) && !goneIds.has(String(x.productId)));
+      if (!linesByOrder[id].length) delete linesByOrder[id];
+    }
+    if (!lines.length) throw stepErr('cart', `every BeeSwift line on PO#${poId} was excluded — nothing to order`, { poId });
+  }
   let goodsNet = +lines.reduce((a, l) => a + (Number(l.cost) || 0) * l.qty, 0).toFixed(2);
   const freeOver = SCHEDULED_SUPPLIERS.BEESWIFT.threshold || 150;
 
@@ -4731,7 +4751,8 @@ async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; }
   await bp.addOrderNoteLive(poId, `Placed with BeeSwift online (Your P/O ${poId}). BeeSwift totals: goods GBP ${pv.subTotal ?? '?'}, carriage GBP ${pv.carriage ?? '?'}, total GBP ${pv.orderTotal ?? '?'}.`, BEESWIFT_SUPPLIER_CONTACT).catch(() => {});
   steps.link = { reference: ref, refWritten, status: 7 };
-  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'BEESWIFT', poId, noteContactId: BEESWIFT_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  const finalIds = excl.size ? soIds.filter((id) => linesByOrder[id]) : soIds;   // an SO whose only BeeSwift line was excluded keeps its tag
+  if (finalIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: finalIds, supplierKey: 'BEESWIFT', poId, noteContactId: BEESWIFT_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
   return { poId, orderNo: ref, steps };
 }
 export async function beeswiftRehearse({ pool, altItemsUrl }) { return beeswiftRehearsal(pool, altItemsUrl); }
