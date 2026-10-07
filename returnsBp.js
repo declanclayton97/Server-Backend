@@ -44,7 +44,9 @@ async function stockFor(bp, ids) {
   for (let i = 0; i < list.length; i += 200) {
     try {
       const r = (await bp("GET", `/warehouse-service/product-availability/${list.slice(i, i + 200).join(",")}`)) || {};
-      for (const [id, a] of Object.entries(r)) out[id] = Number((a && a.total && a.total.inStock) || 0);
+      // onHand = free to sell. inStock counts stock already ALLOCATED to other orders (SO 494767:
+      // inStock 22, onHand 0) - using it promised a T-shirt we did not have.
+      for (const [id, a] of Object.entries(r)) out[id] = Math.max(0, Number((a && a.total && a.total.onHand) || 0));
     } catch { /* stock is advice for the dropdown, not a blocker */ }
   }
   return out;
