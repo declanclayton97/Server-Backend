@@ -27,7 +27,7 @@ import {
   orderEmail, maskEmail, statusEmail, validatePhotos, styleName,
 } from "./returns.js";
 import { buildBrightpearlReport, summariseOnline } from "./returnsReport.js";
-import { planBrightpearl, executeBrightpearl } from "./returnsBp.js";
+import { planBrightpearl, executeBrightpearl, raiseExchangeEarly } from "./returnsBp.js";
 
 
 const STATUSES = ["requested", "received", "refunded", "exchanged", "rejected", "cancelled"];
@@ -76,6 +76,10 @@ export function registerReturnsRoutes(app, deps) {
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_credit_id bigint`);
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_exchange_id bigint`);
     await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS bp_result jsonb`);
+    // The exchange order raised when the customer asks (7 Oct), and who checked it.
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS exchange_early jsonb`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS exchange_checked_by text`);
+    await pool.query(`ALTER TABLE returns_requests ADD COLUMN IF NOT EXISTS exchange_checked_at timestamptz`);
     // ONE-OFF (Dec, 30 Sep): clear the test returns made on his unpaid test order 490003.
     // Runs once only - the marker row stops it ever running again, so returns made later
     // (even on 490003) are untouched. Brightpearl is not touched.
@@ -349,6 +353,27 @@ export function registerReturnsRoutes(app, deps) {
           });
       }
 
+      // Swaps: raise the exchange order NOW (Dec + team, 7 Oct) so the new item can be got ready /
+      // ordered while the old one is in the post. In the background - the customer never waits on
+      // Brightpearl - and a failure only means Process makes it later, as before.
+      // OFF for customers until RETURNS_EARLY_EXCHANGE=on (it writes real Brightpearl orders, so it is
+      // proven first); RETURNS_EARLY_EXCHANGE_TEST_ORDERS (default Dec's test order 490003) always try it.
+      const earlyOn = process.env.RETURNS_EARLY_EXCHANGE === "on"
+        || String(process.env.RETURNS_EARLY_EXCHANGE_TEST_ORDERS || "490003").split(",").map((s) => s.trim()).includes(String(order.id));
+      if (sel.lines.some((l) => l.outcome === "exchange") && earlyOn) {
+        (async () => {
+          const row = await getReturn(ref);
+          const r = await raiseExchangeEarly(bpLive, row, { returnRef: ref });
+          if (!r) return;
+          await getPool().query(`UPDATE returns_requests SET bp_exchange_id = $2, exchange_early = $3, updated_at = now() WHERE ref = $1`,
+            [ref, r.exchangeId, JSON.stringify({ ...r, at: new Date().toISOString() })]);
+          console.log(`[returns] ${ref} exchange raised early: SO#${r.exchangeId} status ${r.status}${r.supplierTag ? " tag " + r.supplierTag : ""}`);
+        })().catch(async (e) => {
+          console.error(`[returns] ${ref} early exchange failed:`, e.message);
+          await getPool().query(`UPDATE returns_requests SET exchange_early = $2 WHERE ref = $1`, [ref, JSON.stringify({ error: e.message, at: new Date().toISOString() })]).catch(() => {});
+        });
+      }
+
       res.json({ ok: true, ref, emailed, emailHint: maskEmail(email), lastDay: prettyDate(assessment.lastDay), address: WEB_RETURNS_ADDRESS,
         exchanging: sel.lines.some((l) => l.outcome === "exchange"), needsContact: sel.lines.some((l) => /faulty|wrong item/i.test(l.reason)) });
     } catch (e) {
@@ -415,6 +440,20 @@ export function registerReturnsRoutes(app, deps) {
   // exists, so a failure part-way shows what was made instead of inviting a re-run.
   const getReturn = async (ref) => (await getPool().query(`SELECT * FROM returns_requests WHERE ref = $1`, [ref])).rows[0] || null;
 
+  // POST .../exchange-checked - someone has looked at the early exchange order (right size,
+  // right item) - the Sales Hub stops flagging it.
+  app.post("/api/returns/requests/:ref/exchange-checked", requireUser, async (req, res) => {
+    try {
+      await ensureTables();
+      const by = (req.hubUser && req.hubUser.name) || "staff";
+      const r = await getPool().query(`UPDATE returns_requests SET exchange_checked_by = $2, exchange_checked_at = now(),
+          history = history || $3::jsonb, updated_at = now() WHERE ref = $1 AND bp_exchange_id IS NOT NULL RETURNING *`,
+        [req.params.ref, by, JSON.stringify([{ at: new Date().toISOString(), status: "exchange checked", by }])]);
+      if (!r.rowCount) return res.status(404).json({ error: "No exchange order on that return" });
+      res.json({ ok: true, request: r.rows[0] });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.get("/api/returns/requests/:ref/bp-plan", requireUser, async (req, res) => {
     try {
       await ensureTables();
@@ -443,12 +482,16 @@ export function registerReturnsRoutes(app, deps) {
         if (patch.bp_credit_id) await getPool().query(`UPDATE returns_requests SET bp_credit_id = $2 WHERE ref = $1`, [row.ref, patch.bp_credit_id]);
         if (patch.bp_exchange_id) await getPool().query(`UPDATE returns_requests SET bp_exchange_id = $2 WHERE ref = $1`, [row.ref, patch.bp_exchange_id]);
       };
-      const done = await executeBrightpearl(bpLive, plan, { choices, returnRef: row.ref, progress });
+      const done = await executeBrightpearl(bpLive, plan, { choices, returnRef: row.ref, progress,
+        existingExchangeId: row.exchange_early && row.exchange_early.exchangeId ? row.bp_exchange_id : null });
 
       // What happened, in one line per thing, for the hub row.
       const summary = [`Credit SC#${done.creditId} (GBP ${plan.credit.gross.toFixed(2)})`];
       const swaps = [];
-      for (const l of (plan.exchange && plan.exchange.lines) || []) {
+      if (done.exchangeEarly) {
+        summary.push(`Exchange SO#${done.exchangeId} (raised when the customer asked) ${done.exchangeReleased ? "released to pick/pack/ship" : "left as it was - it is still waiting on stock"}`);
+      }
+      for (const l of done.exchangeEarly ? [] : (plan.exchange && plan.exchange.lines) || []) {
         const pick = Object.prototype.hasOwnProperty.call(choices, l.key) ? choices[l.key] : l.suggested;
         const opt = pick && (l.options || []).find((o) => Number(o.productId) === Number(pick));
         swaps.push(opt ? { name: styleName(l.name), size: opt.size || opt.sku, inStock: opt.inStock > 0 }
