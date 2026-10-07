@@ -240,19 +240,45 @@ export function registerReturnsRoutes(app, deps) {
   });
   app.get("/api/returns/site-chrome", (req, res) => res.json(siteChromeStatus()));
 
+  // Each line's colour and size (Dec, 7 Oct: three of the same item looked identical). From the
+  // product's Brightpearl variations ("Colour" / "Size"), not the name - web order names often
+  // carry neither. Id lists must be ascending or Brightpearl refuses them. Best effort: a
+  // failure just leaves the lines as they were.
+  async function variantsFor(order, lines) {
+    const rows = order.orderRows || {};
+    const ids = [...new Set(lines.map((l) => Number((rows[l.rowId] || {}).productId)).filter((n) => n > 1000))].sort((a, b) => a - b);
+    const out = {};
+    for (let i = 0; i < ids.length; i += 50) {
+      try {
+        const r = await bpLive("GET", `/product-service/product/${ids.slice(i, i + 50).join(",")}`);
+        for (const p of Array.isArray(r) ? r : [r]) {
+          const v = {};
+          for (const x of p.variations || []) {
+            if (/colou?r/i.test(x.optionName)) v.colour = x.optionValue;
+            else if (/size|fit/i.test(x.optionName)) v.size = v.size ? v.size + " " + x.optionValue : x.optionValue;
+          }
+          out[p.id] = v;
+        }
+      } catch (e) { console.error("[returns] variants:", e.message); }
+    }
+    return out;
+  }
+
   app.post("/api/returns/lookup", async (req, res) => {
     if (limited(req)) return res.status(429).json({ ok: false, message: "Too many attempts. Please wait a few minutes and try again." });
     try {
       const b = req.body || {};
       const { order, assessment } = await assessFor(b.orderNumber, b.postcode);
       if (!order) return res.json({ ok: false, code: "not-found", message: assessment.message });
+      const variants = assessment.lines.length ? await variantsFor(order, assessment.lines) : {};
+      const vOf = (l) => variants[Number(((order.orderRows || {})[l.rowId] || {}).productId)] || {};
       res.json({
         ok: assessment.ok, code: assessment.code, message: assessment.message,
         orderRef: order.reference || String(order.id),
         despatchedOn: assessment.despatchedOn ? prettyDate(assessment.despatchedOn) : null,
         orderedOn: assessment.orderedOn ? prettyDate(assessment.orderedOn) : null,
         lastDay: assessment.lastDay ? prettyDate(assessment.lastDay) : null,
-        lines: assessment.lines.map((l) => ({ rowId: l.rowId, name: l.name, qty: l.qty, available: l.available })),
+        lines: assessment.lines.map((l) => ({ rowId: l.rowId, name: l.name, qty: l.qty, available: l.available, colour: vOf(l).colour || null, size: vOf(l).size || null })),
         exchangeChoices: EXCHANGE_CHOICES, refundReasons: REFUND_REASONS, windowDays: RETURN_WINDOW_DAYS,
         // Masked: whoever typed the order number and postcode sees where the email is
         // going, never the address itself.

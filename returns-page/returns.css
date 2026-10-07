@@ -33,6 +33,7 @@
 .rt-item-head { display: flex; gap: 18px; justify-content: space-between; align-items: center; padding: 16px 18px; }
 .rt-item.is-on .rt-item-head { background: #000; color: #fff; }
 .rt-item-name { font-weight: 700; }
+.rt-item-variant { font-size: 14px; color: #333; margin-top: 2px; }
 .rt-item-sub { font-size: 12px; color: #888; margin-top: 2px; }
 .rt-item.is-on .rt-item-sub { color: #bbb; }
 .rt-item-qty { flex: 0 0 180px; }

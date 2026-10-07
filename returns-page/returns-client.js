@@ -1,4 +1,6 @@
 (function () {
+  // "Hoodie (Navy, L)" - the name with what tells identical items apart.
+  function itemLabel(l){ var v = [l.colour, l.size].filter(Boolean).join(", "); return v ? l.name + " (" + v + ")" : l.name; }
   // The page is served two ways: on its own (inside a copy of the site's header and
   // footer), and embedded in a page on tuffshop.co.uk (/returns-form) where the site
   // supplies the header. Embedded, it reports its height so the frame fits it.
@@ -73,6 +75,7 @@
       }
       return '<div class="rt-item" data-i="' + i + '">' +
         '<div class="rt-item-head"><div><div class="rt-item-name">' + esc(l.name) + '</div>' +
+          (l.colour || l.size ? '<div class="rt-item-variant">' + (l.colour ? 'Colour: <b>' + esc(l.colour) + '</b>' : '') + (l.colour && l.size ? ' &middot; ' : '') + (l.size ? 'Size: <b>' + esc(l.size) + '</b>' : '') + '</div>' : '') +
           '<div class="rt-item-sub">You ordered ' + l.qty + (l.available < l.qty ? " &middot; " + (l.qty - l.available) + " already being returned" : "") + "</div></div>" +
           pick + "</div>" +
         '<div class="rt-item-body">' + howMany +
@@ -135,15 +138,15 @@
       if (!el.classList.contains("is-on")) continue;
       var qty = q ? Number(q.value) : 1;
       var out = el.dataset.out;
-      if (!out) return msg("rt-submit-msg", 'Would you like to swap "' + l.name + '" or get a refund?');
+      if (!out) return msg("rt-submit-msg", 'Would you like to swap "' + itemLabel(l) + '" or get a refund?');
       if (out === "exchange") {
         var choice = el.querySelector(".rt-exchange").value, other = el.querySelector(".rt-exchange-for").value.trim();
-        if (!choice) return msg("rt-submit-msg", 'What would you like instead of "' + l.name + '"?');
-        if (choice === "Something else" && !other) return msg("rt-submit-msg", 'Tell us what you\'d like instead of "' + l.name + '".');
+        if (!choice) return msg("rt-submit-msg", 'What would you like instead of "' + itemLabel(l) + '"?');
+        if (choice === "Something else" && !other) return msg("rt-submit-msg", 'Tell us what you\'d like instead of "' + itemLabel(l) + '".');
         lines.push({ rowId: l.rowId, qty: qty, outcome: "exchange", exchangeChoice: choice, exchangeFor: other });
       } else {
         var reason = el.querySelector(".rt-reason").value;
-        if (!reason) return msg("rt-submit-msg", 'Let us know why "' + l.name + '" is coming back.');
+        if (!reason) return msg("rt-submit-msg", 'Let us know why "' + itemLabel(l) + '" is coming back.');
         lines.push({ rowId: l.rowId, qty: qty, outcome: "refund", reason: reason });
       }
     }
