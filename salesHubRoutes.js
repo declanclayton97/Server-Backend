@@ -85,6 +85,25 @@ export function registerSalesHubRoutes(app, deps) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // GET /api/sales-hub/mailbox-check - Dec only: for EVERY Sales Hub user, which mailbox the hub
+  // maps them to and whether Microsoft lets the app open it (unread count, or the refusal).
+  // Counts only - no mail is read.
+  app.get("/api/sales-hub/mailbox-check", requireUser, async (req, res) => {
+    const admins = String(process.env.CALL_REPORT_USERS || "dec,dec clayton,declan,declan clayton").split(",").map((s) => s.trim().toLowerCase());
+    if (![req.hubUser.key, req.hubUser.name].some((v) => admins.includes(String(v || "").toLowerCase()))) return res.status(403).json({ error: "Not available on your account" });
+    try {
+      const users = (await getPool().query(`SELECT name_key, display_name FROM hub_users ORDER BY display_name`)).rows;
+      const out = [];
+      for (const u of users) {
+        const box = await myMailbox({ key: u.name_key, name: u.display_name }).catch(() => null);
+        if (!box) { out.push({ user: u.display_name, mailbox: null, ok: false, why: "no mailbox mapped" }); continue; }
+        try { const n = await inboxUnread(box); out.push({ user: u.display_name, mailbox: box, ok: true, unread: n.unread }); }
+        catch (e) { out.push({ user: u.display_name, mailbox: box, ok: false, why: e.status === 403 ? "access denied" : e.message }); }
+      }
+      res.json({ users: out });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // GET /api/sales-hub/mailboxes - the accounts in the folder pane, with their unread counts.
   app.get("/api/sales-hub/mailboxes", requireUser, async (req, res) => {
     const out = [];
