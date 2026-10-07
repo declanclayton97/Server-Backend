@@ -6,7 +6,7 @@
 // salesHub.js; this module only gathers facts and performs the send.
 
 import nodemailer from "nodemailer";
-import { graphConfigured, salesMailbox, listInbox, getMessage, composeAndSend, saveDraft, deleteDraft, listThread, splitAddresses, FOLDERS, moveMessage, markRead, setRead, getAttachment } from "./graphMail.js";
+import { graphConfigured, salesMailbox, listInbox, getMessage, composeAndSend, saveDraft, deleteDraft, listThread, mailboxContext, currentMailbox, inboxUnread, splitAddresses, FOLDERS, moveMessage, markRead, setRead, getAttachment } from "./graphMail.js";
 import { SIGNATURE_HTML } from "./emailSignature.js";
 import {
   SALES_INTENTS,
@@ -39,6 +39,64 @@ export function registerSalesHubRoutes(app, deps) {
   // with `let` and assigns it separately; destructuring it here would capture
   // whatever it happened to be when the routes were mounted.
   const getPool = () => (typeof deps.pool === "function" ? deps.pool() : deps.pool);
+
+  // ── Your own mailbox as well as sales@ (Dec, 7 Oct) ────────────────────────
+  // ?box=me on any /api/sales-hub/* call runs it against the SIGNED-IN person's own mailbox.
+  // Never an address from the page: the server works out whose mailbox "me" is, so nobody
+  // can open a colleague's. Address: HUB_MAILBOXES (JSON {hubNameKey: "x@tuffshop.co.uk"})
+  // first, else Brightpearl's staff list matched on the hub name (email local part, full
+  // name, or a first name only one member of staff has). The Microsoft app must also be
+  // granted that mailbox in Exchange, or Graph refuses (the page says "not set up yet").
+  let staffCache = { at: 0, list: [] };
+  async function staffList() {
+    if (Date.now() - staffCache.at < 60 * 60e3 && staffCache.list.length) return staffCache.list;
+    const r = await bpLive("GET", "/contact-service/contact-search?isStaff=true&pageSize=200");
+    const cols = r.metaData.columns.map((c) => c.name);
+    const list = r.results.map((x) => Object.fromEntries(cols.map((c, i) => [c, x[i]])))
+      .map((c) => ({ first: String(c.firstName || "").trim().toLowerCase(), last: String(c.lastName || "").trim().toLowerCase(), email: String(c.primaryEmail || "").trim().toLowerCase() }))
+      .filter((c) => /@tuffshop\.co\.uk$/.test(c.email));
+    staffCache = { at: Date.now(), list };
+    return list;
+  }
+  async function myMailbox(user) {
+    if (!user) return null;
+    try {
+      const map = JSON.parse(process.env.HUB_MAILBOXES || "{}");
+      const hit = map[user.key] || map[String(user.name || "").toLowerCase()];
+      if (hit) return String(hit).toLowerCase();
+    } catch { /* bad JSON: fall through to the staff list */ }
+    const name = String(user.name || "").trim().toLowerCase().replace(/\s+/g, " "), key = String(user.key || "").toLowerCase();
+    const staff = await staffList().catch(() => []);
+    const byLocal = staff.filter((s) => [name, key].includes(s.email.split("@")[0]));
+    if (byLocal.length === 1) return byLocal[0].email;
+    const byFull = staff.filter((s) => `${s.first} ${s.last}` === name);
+    if (byFull.length === 1) return byFull[0].email;
+    const byFirst = staff.filter((s) => s.first === name.split(" ")[0]);
+    return byFirst.length === 1 ? byFirst[0].email : null;
+  }
+  app.use("/api/sales-hub", async (req, res, next) => {
+    if (req.query.box !== "me") return next();
+    try {
+      const user = await app.locals.hubUserFromToken(req);
+      if (!user) return res.status(401).json({ error: "Sign in to the Sales Hub first" });
+      const box = await myMailbox(user);
+      if (!box) return res.status(404).json({ error: "Couldn't work out which mailbox is yours - ask Dec to add you to HUB_MAILBOXES" });
+      mailboxContext.run({ box }, next);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/sales-hub/mailboxes - the accounts in the folder pane, with their unread counts.
+  app.get("/api/sales-hub/mailboxes", requireUser, async (req, res) => {
+    const out = [];
+    try { out.push({ key: "sales", label: "Tuffshop Sales", address: salesMailbox(), ...(await inboxUnread(salesMailbox())) }); }
+    catch (e) { out.push({ key: "sales", label: "Tuffshop Sales", address: salesMailbox(), error: e.message }); }
+    const mine = await myMailbox(req.hubUser).catch(() => null);
+    if (mine && mine !== salesMailbox().toLowerCase()) {
+      try { out.push({ key: "me", label: req.hubUser.name, address: mine, ...(await inboxUnread(mine)) }); }
+      catch (e) { out.push({ key: "me", label: req.hubUser.name, address: mine, error: e.status === 403 || e.status === 404 ? "Not set up yet - waiting on mailbox access" : e.message }); }
+    }
+    res.json({ mailboxes: out });
+  });
 
   // ---------------------------------------------------------------------
   // Gather everything we know about one order.
@@ -503,7 +561,7 @@ export function registerSalesHubRoutes(app, deps) {
       const locks = await othersLocks(req.hubUser.key).catch(() => ({}));
       const drafting = await draftsBySource(msgs.map((m) => m.id)).catch(() => ({}));
       res.json({
-        mailbox: salesMailbox(),
+        mailbox: currentMailbox(),
         folder,
         next: page.next,
         messages: msgs.map((m) => ({
@@ -883,7 +941,9 @@ export function registerSalesHubRoutes(app, deps) {
 
       // The customer replies to the person who owns the order, not a shared
       // address nobody watches.
-      const replyTo = salesperson.email || fromAddress;
+      // From a person's OWN mailbox, replies come back to them anyway - no Reply-To.
+      const ownBox = currentMailbox().toLowerCase() !== salesMailbox().toLowerCase();
+      const replyTo = ownBox ? undefined : (salesperson.email || fromAddress);
 
       // Through Outlook when connected: sent as the real sales mailbox (passes DMARC, which
       // smtp2go does not), kept in Sent Items, and — when the email came from the inbox —

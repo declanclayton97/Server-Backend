@@ -10,6 +10,7 @@
 //      SALES_MAILBOX (default sales@tuffshop.co.uk).
 
 import fs from "fs";
+import { AsyncLocalStorage } from "async_hooks";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -67,7 +68,18 @@ async function graph(method, path, body, { html = false } = {}) {
   }
 }
 
-const mb = () => `/users/${encodeURIComponent(salesMailbox())}`;
+// Which mailbox the calls in this request act on: the shared sales@ by default, or a person's
+// OWN mailbox when the Sales Hub route has resolved one (and only that person's - see
+// salesHubRoutes). AsyncLocalStorage carries it through every await of the request.
+export const mailboxContext = new AsyncLocalStorage();
+export const currentMailbox = () => (mailboxContext.getStore() && mailboxContext.getStore().box) || salesMailbox();
+const mb = () => `/users/${encodeURIComponent(currentMailbox())}`;
+
+// Unread count of a mailbox's inbox (for the badges in the folder pane).
+export async function inboxUnread(address) {
+  const j = await graph("GET", `/users/${encodeURIComponent(address)}/mailFolders/inbox?$select=unreadItemCount,totalItemCount`);
+  return { unread: Number(j && j.unreadItemCount) || 0, total: Number(j && j.totalItemCount) || 0 };
+}
 
 const addr = (r) => ({ name: (r && r.emailAddress && r.emailAddress.name) || "", address: (r && r.emailAddress && r.emailAddress.address) || "" });
 // "a@x.com; b@y.com" or an array -> clean addresses.
@@ -104,7 +116,7 @@ export async function listInbox({ top = 50, unreadOnly = false, folder = "inbox"
   let j;
   if (next) {
     // Graph writes the mailbox in its nextLink unencoded (sales@…); accept either spelling.
-    const bases = [`${GRAPH}${mb()}/`, `${GRAPH}/users/${salesMailbox()}/`].map((s) => s.toLowerCase());
+    const bases = [`${GRAPH}${mb()}/`, `${GRAPH}/users/${currentMailbox()}/`].map((s) => s.toLowerCase());
     if (!bases.some((b) => String(next).toLowerCase().startsWith(b))) throw new Error("Bad page link");
     j = await graph("GET", String(next).slice(GRAPH.length));
   } else {
@@ -289,7 +301,7 @@ export async function composeAndSend({ mode = "new", sourceId, draftId, quoted =
   }
   await addAttachments(draft.id, [...inline, ...quotedImages, ...attachments]);
   await graph("POST", `${mb()}/messages/${encodeURIComponent(draft.id)}/send`);
-  return { via: mode === "new" ? "graph" : `graph-${mode}`, mailbox: salesMailbox() };
+  return { via: mode === "new" ? "graph" : `graph-${mode}`, mailbox: currentMailbox() };
 }
 
 // Kept for the other senders (returns, call report).
