@@ -438,7 +438,7 @@ export function timelineSvg(r, p) {
       out += `<rect x="${x1}" y="${y + 8}" width="${Math.max(2, x2 - x1)}" height="${TL.rowH - 16}" rx="1" fill="${c.kind === "in" ? "#16a34a" : "#2563eb"}" fill-opacity="0.85"/>`;
     }
     for (const e of (p.timeline.emails || []).filter((e) => e.day === day)) {
-      out += `<rect x="${x(e.min) - 0.75}" y="${y + TL.rowH - 10}" width="1.5" height="6" fill="#0d9488"/>`;
+      out += `<rect x="${x(e.min) - 0.75}" y="${y + TL.rowH - 12}" width="2" height="9" fill="#0d9488"/>`;
     }
     for (const o of (p.timeline.returns || []).filter((o) => o.day === day)) {
       const ox = x(o.min);
@@ -450,14 +450,21 @@ export function timelineSvg(r, p) {
     }
   });
   const ly = TL.top + days.length * TL.rowH + 24;
-  const key = [["#16a34a", "Call in (answered)"], ["#2563eb", "Call out"], ["#9ca3af", "Call out, no answer"]];
-  let lx = TL.left;
-  for (const [col, label] of key) { out += `<rect x="${lx}" y="${ly - 9}" width="14" height="10" fill="${col}"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">${label}</text>`; lx += 160; }
-  out += `<rect x="${lx + 5}" y="${ly - 12}" width="2.5" height="15" fill="#ea580c"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">Order created</text>`;
-  lx += 130;
-  out += `<rect x="${lx + 5}" y="${ly - 12}" width="2.5" height="15" fill="#7c3aed"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">Return / exchange</text>`;
-  lx += 140;
-  out += `<rect x="${lx + 5}" y="${ly - 6}" width="1.5" height="6" fill="#0d9488"/><text x="${lx + 14}" y="${ly}" font-size="11" fill="#374151">Email sent</text>`;
+  // Each entry is spaced by its own label length (DejaVu 11px ~6.8px a character) so the
+  // whole key fits the picture's width (it ran off the edge once "Email sent" was added).
+  const key = [
+    [`<rect x="0" y="-9" width="14" height="10" fill="#16a34a"/>`, "Call in (answered)"],
+    [`<rect x="0" y="-9" width="14" height="10" fill="#2563eb"/>`, "Call out"],
+    [`<rect x="0" y="-9" width="14" height="10" fill="#9ca3af"/>`, "Call out, no answer"],
+    [`<rect x="6" y="-12" width="2.5" height="15" fill="#ea580c"/>`, "Order created"],
+    [`<rect x="6" y="-12" width="2.5" height="15" fill="#7c3aed"/>`, "Return / exchange"],
+    [`<rect x="6" y="-8" width="2" height="9" fill="#0d9488"/>`, "Email sent"],
+  ];
+  let lx = 12;
+  for (const [mark, label] of key) {
+    out += `<g transform="translate(${lx},${ly})">${mark}<text x="20" y="0" font-size="11" fill="#374151">${label}</text></g>`;
+    lx += 20 + Math.ceil(label.length * 6.8) + 22;
+  }
   return out + "</svg>";
 }
 let tlFont = null;
