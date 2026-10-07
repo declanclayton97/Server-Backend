@@ -414,42 +414,49 @@ const shown = (p) => p.days.filter((d, i) => i < 5 || d.callsIn || d.callsOut ||
 // is a thin grey tick); each order created is an orange line, each return/exchange a purple one.
 // Sent as an image because no email client draws charts from HTML reliably.
 const TL_FROM = 7 * 60, TL_TO = 18 * 60;
-const TL = { left: 92, right: 16, top: 52, rowH: 34, width: 900 };
-export function timelineSvg(r, p) {
+const TL = { left: 92, right: 26, top: 52, rowH: 34, width: 900 };
+const WEB_TL_WIDTH = 1400;
+export function timelineSvg(r, p, width = TL.width) {
+  // The web page draws it wider (Dec, 7 Oct) with taller rows; emails keep 900 for the reading pane.
+  const T = { ...TL, width, rowH: width > TL.width ? 44 : TL.rowH };
   const days = shown(p).map((d) => d.day);
-  const plotW = TL.width - TL.left - TL.right;
-  const x = (min) => TL.left + ((Math.min(Math.max(min, TL_FROM), TL_TO) - TL_FROM) / (TL_TO - TL_FROM)) * plotW;
-  const height = TL.top + days.length * TL.rowH + 40;
-  let out = `<svg xmlns="http://www.w3.org/2000/svg" width="${TL.width}" height="${height}" viewBox="0 0 ${TL.width} ${height}" font-family="DejaVu Sans">`;
-  out += `<rect width="${TL.width}" height="${height}" fill="#ffffff"/>`;
+  const plotW = T.width - T.left - T.right;
+  const x = (min) => T.left + ((Math.min(Math.max(min, TL_FROM), TL_TO) - TL_FROM) / (TL_TO - TL_FROM)) * plotW;
+  const height = T.top + days.length * T.rowH + 40;
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" width="${T.width}" height="${height}" viewBox="0 0 ${T.width} ${height}" font-family="DejaVu Sans">`;
+  out += `<rect width="${T.width}" height="${height}" fill="#ffffff"/>`;
   out += `<text x="12" y="22" font-size="15" font-weight="700" fill="#111">${esc(p.name)} - ${esc(weekTitle(r))}</text>`;
+  if (width > TL.width) for (let h = 7; h < 18; h++) {   // half-hour lines on the wide (web) version
+    const hx = x(h * 60 + 30);
+    out += `<line x1="${hx}" y1="${T.top}" x2="${hx}" y2="${T.top + days.length * T.rowH}" stroke="#eef0f2" stroke-dasharray="3,3"/>`;
+  }
   for (let h = 7; h <= 18; h++) {
     const hx = x(h * 60);
-    out += `<line x1="${hx}" y1="${TL.top - 6}" x2="${hx}" y2="${TL.top + days.length * TL.rowH}" stroke="${h % 3 === 0 ? "#c7ccd3" : "#e7e9ec"}"/>`;
-    out += `<text x="${hx}" y="${TL.top - 12}" font-size="11" text-anchor="middle" fill="#6b7280">${String(h).padStart(2, "0")}:00</text>`;
+    out += `<line x1="${hx}" y1="${T.top - 6}" x2="${hx}" y2="${T.top + days.length * T.rowH}" stroke="${h % 3 === 0 ? "#c7ccd3" : "#e7e9ec"}"/>`;
+    out += `<text x="${hx}" y="${T.top - 12}" font-size="11" text-anchor="middle" fill="#6b7280">${String(h).padStart(2, "0")}:00</text>`;
   }
   days.forEach((day, i) => {
-    const y = TL.top + i * TL.rowH;
-    out += `<rect x="${TL.left}" y="${y + 4}" width="${plotW}" height="${TL.rowH - 8}" fill="${i % 2 ? "#fafafa" : "#f4f6f8"}"/>`;
-    out += `<text x="12" y="${y + TL.rowH / 2 + 4}" font-size="12" fill="#111">${esc(dayLabel(day))}</text>`;
+    const y = T.top + i * T.rowH;
+    out += `<rect x="${T.left}" y="${y + 4}" width="${plotW}" height="${T.rowH - 8}" fill="${i % 2 ? "#fafafa" : "#f4f6f8"}"/>`;
+    out += `<text x="12" y="${y + T.rowH / 2 + 4}" font-size="12" fill="#111">${esc(dayLabel(day))}</text>`;
     for (const c of p.timeline.calls.filter((c) => c.day === day)) {
       const x1 = x(c.min), x2 = x(c.min + c.dur / 60);
-      if (!c.answered) { out += `<rect x="${x1}" y="${y + 10}" width="1.5" height="${TL.rowH - 20}" fill="#9ca3af"/>`; continue; }
-      out += `<rect x="${x1}" y="${y + 8}" width="${Math.max(2, x2 - x1)}" height="${TL.rowH - 16}" rx="1" fill="${c.kind === "in" ? "#16a34a" : "#2563eb"}" fill-opacity="0.85"/>`;
+      if (!c.answered) { out += `<rect x="${x1}" y="${y + 10}" width="1.5" height="${T.rowH - 20}" fill="#9ca3af"/>`; continue; }
+      out += `<rect x="${x1}" y="${y + 8}" width="${Math.max(2, x2 - x1)}" height="${T.rowH - 16}" rx="1" fill="${c.kind === "in" ? "#16a34a" : "#2563eb"}" fill-opacity="0.85"/>`;
     }
     for (const e of (p.timeline.emails || []).filter((e) => e.day === day)) {
-      out += `<rect x="${x(e.min) - 0.75}" y="${y + TL.rowH - 12}" width="2" height="9" fill="#0d9488"/>`;
+      out += `<rect x="${x(e.min) - 0.75}" y="${y + T.rowH - 12}" width="2" height="9" fill="#0d9488"/>`;
     }
     for (const o of (p.timeline.returns || []).filter((o) => o.day === day)) {
       const ox = x(o.min);
-      out += `<rect x="${ox - 1.25}" y="${y + 3}" width="2.5" height="${TL.rowH - 6}" fill="#7c3aed"/>`;
+      out += `<rect x="${ox - 1.25}" y="${y + 3}" width="2.5" height="${T.rowH - 6}" fill="#7c3aed"/>`;
     }
     for (const o of p.timeline.orders.filter((o) => o.day === day)) {
       const ox = x(o.min);
-      out += `<rect x="${ox - 1.25}" y="${y + 3}" width="2.5" height="${TL.rowH - 6}" fill="#ea580c"/>`;
+      out += `<rect x="${ox - 1.25}" y="${y + 3}" width="2.5" height="${T.rowH - 6}" fill="#ea580c"/>`;
     }
   });
-  const ly = TL.top + days.length * TL.rowH + 24;
+  const ly = T.top + days.length * T.rowH + 24;
   // Each entry is spaced by its own label length (DejaVu 11px ~6.8px a character) so the
   // whole key fits the picture's width (it ran off the edge once "Email sent" was added).
   const key = [
@@ -468,10 +475,10 @@ export function timelineSvg(r, p) {
   return out + "</svg>";
 }
 let tlFont = null;
-export async function timelinePng(r, p) {
+export async function timelinePng(r, p, width = TL.width) {
   const { Resvg } = await import("@resvg/resvg-js");
   if (!tlFont) tlFont = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "assets", "table-font.ttf"));
-  const png = new Resvg(timelineSvg(r, p), { fitTo: { mode: "width", value: TL.width * 2 }, font: { fontBuffers: [tlFont], defaultFontFamily: "DejaVu Sans", loadSystemFonts: false } }).render().asPng();
+  const png = new Resvg(timelineSvg(r, p, width), { fitTo: { mode: "width", value: width * 2 }, font: { fontBuffers: [tlFont], defaultFontFamily: "DejaVu Sans", loadSystemFonts: false } }).render().asPng();
   return Buffer.from(png);
 }
 // The picture's address in an email (cid:) or in the browser preview (data:).
@@ -482,7 +489,7 @@ const dayRows = (p) => shown(p).map((d) => `<tr><td ${TD}>${esc(dayLabel(d.day))
     <td ${TDN}>${d.noCallData ? "-" : fmtDuration(d.talk)}</td><td ${TDN}>${d.orders}</td><td ${TDN}>${d.returns}</td>
     <td ${TDN}>${d.noEmailData ? "-" : d.emailsIn}</td><td ${TDN}>${d.noEmailData ? "-" : d.emailsOut}</td></tr>`).join("");
 const mailCells = (p, s) => p.emailError ? `<td ${s}>-</td><td ${s}>-</td>` : `<td ${s}>${p.total.emailsIn}</td><td ${s}>${p.total.emailsOut}</td>`;
-const timelineImg = (p, src) => `<img src="${src(p)}" width="${TL.width}" alt="Timeline of calls and orders, 7am to 6pm" style="display:block;width:100%;max-width:${TL.width}px;height:auto;border:1px solid #e5e7eb;margin-top:10px">`;
+const timelineImg = (p, src, w = TL.width) => `<img src="${src(p)}" width="${w}" alt="Timeline of calls and orders, 7am to 6pm" style="display:block;width:100%;max-width:${w}px;height:auto;border:1px solid #e5e7eb;margin-top:10px">`;
 
 export function personEmailHtml(r, p, { imgSrc = (q) => "cid:" + cidFor(q) } = {}) {
   return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#111;max-width:${TL.width}px">
@@ -523,6 +530,7 @@ export async function viewLink(pool, week) {
 }
 
 export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUrl = null, web = false } = {}) {
+  const w = web ? WEB_TL_WIDTH : TL.width;
   const people = r.people.map((p) => `<tr><td ${TD}>${esc(p.name)}${p.webexMatched ? "" : ' <span style="color:#b91c1c">(not found in Webex)</span>'}</td>
     <td ${TDN}>${p.total.callsIn}</td><td ${TDN}>${p.total.callsOut}</td><td ${TDN}>${fmtDuration(p.total.talk)}</td><td ${TDN}>${p.total.orders}</td><td ${TDN}>${p.total.returns}</td>${mailCells(p, TDN)}</tr>`).join("");
   const sum = r.people.reduce((a, p) => ({ callsIn: a.callsIn + p.total.callsIn, callsOut: a.callsOut + p.total.callsOut, talk: a.talk + p.total.talk, orders: a.orders + p.total.orders, returns: a.returns + p.total.returns, emailsIn: a.emailsIn + p.total.emailsIn, emailsOut: a.emailsOut + p.total.emailsOut }), blank());
@@ -532,9 +540,9 @@ export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUr
   <div style="padding:10px 12px">
   <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>On phone</th><th ${THN}>Orders</th><th ${THN}>Returns</th><th ${THN}>Emails in</th><th ${THN}>Emails out</th></tr>
   ${dayRows(p)}</table>
-  ${timelineImg(p, imgSrc)}
+  ${timelineImg(p, imgSrc, w)}
   </div></details>`).join("");
-  return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#111;max-width:${TL.width}px">
+  return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#111;max-width:${w}px">
   <p>Sales activity for ${esc(weekTitle(r))}.</p>
   ${viewUrl ? `<p style="margin:0 0 14px"><a href="${esc(viewUrl)}" style="display:inline-block;background:#0f6cbd;color:#ffffff;text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px;border-radius:4px">Open the full report</a>
     <span style="color:#6b7280;font-size:12px">&nbsp;each person's days and 7am-6pm timeline</span></p>` : ""}
@@ -595,10 +603,10 @@ export function registerCallReport(app, { getPool, bpLive }) {
       if (got.length !== want.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want))) return res.status(403).send("This link isn't valid.");
       const r = await buildReport({ pool: getPool(), bpLive, week, collect: false });
       const pics = {};
-      for (const q of r.people) pics[q.key] = "data:image/png;base64," + (await timelinePng(r, q)).toString("base64");
+      for (const q of r.people) pics[q.key] = "data:image/png;base64," + (await timelinePng(r, q, WEB_TL_WIDTH)).toString("base64");
       res.set({ "Cache-Control": "private, no-store", "X-Robots-Tag": "noindex", "Referrer-Policy": "no-referrer" });
       res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sales activity - ${esc(weekTitle(r))}</title></head>
-<body style="margin:0;padding:24px;background:#f6f7f9"><div style="background:#fff;padding:20px 24px;border-radius:8px;max-width:960px;margin:0 auto">${managerEmailHtml(r, { imgSrc: (q) => pics[q.key] || "", web: true })}</div></body></html>`);
+<body style="margin:0;padding:24px;background:#f6f7f9"><div style="background:#fff;padding:20px 24px;border-radius:8px;max-width:1460px;margin:0 auto">${managerEmailHtml(r, { imgSrc: (q) => pics[q.key] || "", web: true })}</div></body></html>`);
     } catch (e) { res.status(500).send("Could not build the report: " + esc(e.message)); }
   });
 
