@@ -645,6 +645,26 @@ export function registerCallReport(app, { getPool, bpLive }) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // Call recordings (Dec, 7 Oct - trying Webex recording). Lists what the Webex org holds; the
+  // Service App needs spark-admin:recordings_read for this, so a 403 means that scope is missing.
+  app.get("/api/call-report/recordings", requireUser, guard, async (req, res) => {
+    const pool = getPool();
+    const from = new Date(Date.now() - 2 * 86400e3).toISOString(), to = new Date().toISOString();
+    const tries = [
+      `https://webexapis.com/v1/admin/convergedRecordings?from=${from}&to=${to}&max=50`,
+      `https://webexapis.com/v1/admin/convergedRecordings?serviceType=calling&from=${from}&to=${to}&max=50`,
+    ];
+    const out = [];
+    for (const url of tries) {
+      try {
+        const { json } = await webexGet(pool, url);
+        out.push({ url: url.split("?")[0], items: ((json && json.items) || []).map((x) => ({ id: x.id, topic: x.topic, created: x.createTime, duration: x.durationSeconds, owner: x.ownerEmail || x.ownerId, service: x.serviceType, status: x.status, storage: x.storageRegion })) });
+        break;
+      } catch (e) { out.push({ url: url.split("?")[0], error: e.message }); }
+    }
+    res.json(out);
+  });
+
   // Customer emails in / out per person per day for a week, from their own mailboxes (?week=).
   app.get("/api/call-report/emails", requireUser, guard, async (req, res) => {
     try {
