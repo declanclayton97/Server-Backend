@@ -319,6 +319,8 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
 // ---- emails ---------------------------------------------------------------------------
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const TH = 'style="text-align:left;padding:6px 10px;background:#1f2a37;color:#fff;font-weight:600;font-size:13px"';
+// Number columns are right-aligned, so their headings are too (Dec, 7 Oct: they did not line up).
+const THN = 'style="text-align:right;padding:6px 10px;background:#1f2a37;color:#fff;font-weight:600;font-size:13px"';
 const TD = 'style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:13px"';
 const TDN = 'style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:13px;text-align:right"';
 const TOT = 'style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37;text-align:right"';
@@ -386,7 +388,7 @@ export function personEmailHtml(r, p, { imgSrc = (q) => "cid:" + cidFor(q) } = {
   <p>Hi ${esc(p.first)},</p>
   <p>Here's your week on the phones and in Brightpearl, ${esc(weekTitle(r))}.</p>
   <table style="border-collapse:collapse;width:100%">
-    <tr><th ${TH}>Day</th><th ${TH} align="right">Calls in</th><th ${TH} align="right">Calls out</th><th ${TH} align="right">Time on phone</th><th ${TH} align="right">Orders created</th></tr>
+    <tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th></tr>
     ${dayRows(p)}
     <tr><td style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37">Week</td>
       <td ${TOT}>${p.total.callsIn}</td><td ${TOT}>${p.total.callsOut}</td><td ${TOT}>${fmtDuration(p.total.talk)}</td><td ${TOT}>${p.total.orders}</td></tr>
@@ -427,23 +429,23 @@ export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUr
   <summary style="cursor:pointer;padding:9px 12px;background:#f3f4f6;font-size:14px;font-weight:600">${esc(p.name)}
     <span style="font-weight:400;color:#4b5563">&nbsp;-&nbsp;${p.total.callsIn} in, ${p.total.callsOut} out, ${fmtDuration(p.total.talk)} on the phone, ${p.total.orders} order${p.total.orders === 1 ? "" : "s"}</span></summary>
   <div style="padding:10px 12px">
-  <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${TH}>Calls in</th><th ${TH}>Calls out</th><th ${TH}>On phone</th><th ${TH}>Orders</th></tr>
+  <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>On phone</th><th ${THN}>Orders</th></tr>
   ${dayRows(p)}</table>
   ${timelineImg(p, imgSrc)}
   </div></details>`).join("");
   return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#111;max-width:${TL.width}px">
   <p>Sales activity for ${esc(weekTitle(r))}.</p>
-  ${viewUrl ? `<p style="margin:0 0 14px"><a href="${esc(viewUrl)}" style="display:inline-block;background:#0f6cbd;color:#ffffff;text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px;border-radius:4px">Open the interactive version</a>
-    <span style="color:#6b7280;font-size:12px">&nbsp;each person folds open - Outlook desktop can't do that inside an email</span></p>` : ""}
+  ${viewUrl ? `<p style="margin:0 0 14px"><a href="${esc(viewUrl)}" style="display:inline-block;background:#0f6cbd;color:#ffffff;text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px;border-radius:4px">Open the full report</a>
+    <span style="color:#6b7280;font-size:12px">&nbsp;each person's days and 7am-6pm timeline</span></p>` : ""}
   <table style="border-collapse:collapse;width:100%">
-    <tr><th ${TH}>Person</th><th ${TH}>Calls in</th><th ${TH}>Calls out</th><th ${TH}>Time on phone</th><th ${TH}>Orders created</th></tr>
+    <tr><th ${TH}>Person</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th></tr>
     ${people}
     <tr><td style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37">Team</td>
       <td ${TOT}>${sum.callsIn}</td><td ${TOT}>${sum.callsOut}</td><td ${TOT}>${fmtDuration(sum.talk)}</td><td ${TOT}>${sum.orders}</td></tr>
   </table>
   ${r.missingCallDays.length ? `<p style="color:#b45309;font-size:12px">No Webex call data for: ${r.missingCallDays.map(dayLabel).join(", ")}.</p>` : ""}
-  <p style="font-size:13px;margin:18px 0 4px"><b>Each person</b> <span style="color:#6b7280">- ${web ? "click a name to open their days and timeline (7am to 6pm)" : "their days and timeline, 7am to 6pm"}</span></p>
-  ${sections}
+  ${web ? `<p style="font-size:13px;margin:18px 0 4px"><b>Each person</b> <span style="color:#6b7280">- click a name to open their days and timeline (7am to 6pm)</span></p>
+  ${sections}` : ""}
   <p style="color:#6b7280;font-size:12px;margin-top:14px">Internal calls excluded; hunt-group calls count only for whoever answered. Orders = sales orders created by that person in Brightpearl, excluding web/Amazon/eBay.</p>
 </div>`;
 }
@@ -468,7 +470,7 @@ export async function sendReport(r, { onlyTo, viewUrl = null } = {}) {
     try { await sendNew({ to, subject: subj, html, attachments }); sent.push({ to, realTo, subject: subj }); }
     catch (e) { sent.push({ to, realTo, subject: subj, error: e.message }); }
   };
-  await send(managerEmail(), `Sales activity - week of ${dayLabel(r.week)}`, managerEmailHtml(r, { viewUrl }), await timelineAttachments(r, r.people));
+  await send(managerEmail(), `Sales activity - week of ${dayLabel(r.week)}`, managerEmailHtml(r, { viewUrl }), []);
   for (const p of r.people) await send(p.email, `Your week - ${dayLabel(r.week)} to ${dayLabel(r.weekEnd)}`, personEmailHtml(r, p), await timelineAttachments(r, [p]));
   if (sent.every((s) => s.error)) throw new Error(`No report email could be sent: ${sent[0] && sent[0].error}`);
   return sent;
