@@ -31,7 +31,7 @@ import { graphConfigured, graphRequest } from "./graphMail.js";
 
 const COLS = ["DATE", "SKU", "DESC", "SIZE", "COLOUR", "LOCATION", "QTY", "ORDER"];   // A..H, what Bob needs
 const SCAN_ROWS = 150;        // fill colours are read for the last 150 data rows (older ones are long picked)
-const FALLBACK_GREEN = "#00B050";
+const SENT_PURPLE = "#CCC0DA";   // Excel's light purple: dark text stays readable on it
 
 const cfg = () => ({
   drive: process.env.PICKING_DRIVE_ID, item: process.env.PICKING_ITEM_ID,
@@ -85,7 +85,9 @@ export async function readPickingSheet() {
   }
   const unknown = recent.filter((r) => r.fillError);
   if (unknown.length) throw new Error(`Could not read the colour of ${unknown.length} row(s) - nothing sent`);
-  const green = (recent.find((r) => !isWhite(r.fill)) || {}).fill || FALLBACK_GREEN;
+  // Rows sent to Bob are coloured PURPLE (Dec, 7 Oct; was the sheet's own green), so the team
+  // can tell "sent to the unit" from "picked". Any non-white row is never sent again.
+  const green = process.env.PICKING_SENT_COLOUR || SENT_PURPLE;
   return { pending: recent.filter((r) => isWhite(r.fill)), green, totalRows: rows.length };
 }
 
