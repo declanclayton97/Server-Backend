@@ -40,6 +40,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import crypto from "crypto";
 import { graphConfigured, sendNew } from "./graphMail.js";
 
 const DEFAULT_PEOPLE = [
@@ -327,7 +328,7 @@ const shown = (p) => p.days.filter((d, i) => i < 5 || d.callsIn || d.callsOut ||
 // ---- timeline -------------------------------------------------------------------------
 // One chart per person: a row per day (Mon-Fri, plus a weekend day only if used), 07:00 to
 // 18:00. Each call is a bar as long as the call (green in, blue out; a call out nobody answered
-// is a thin grey tick); each order created is an orange diamond at the time it was made.
+// is a thin grey tick); each order created is an orange line at the time it was made.
 // Sent as an image because no email client draws charts from HTML reliably.
 const TL_FROM = 7 * 60, TL_TO = 18 * 60;
 const TL = { left: 92, right: 16, top: 52, rowH: 34, width: 900 };
@@ -354,15 +355,15 @@ export function timelineSvg(r, p) {
       out += `<rect x="${x1}" y="${y + 8}" width="${Math.max(2, x2 - x1)}" height="${TL.rowH - 16}" rx="1" fill="${c.kind === "in" ? "#16a34a" : "#2563eb"}" fill-opacity="0.85"/>`;
     }
     for (const o of p.timeline.orders.filter((o) => o.day === day)) {
-      const ox = x(o.min), oy = y + TL.rowH / 2;
-      out += `<path d="M${ox} ${oy - 7} L${ox + 6} ${oy} L${ox} ${oy + 7} L${ox - 6} ${oy} Z" fill="#f59e0b" stroke="#92400e" stroke-width="0.8"/>`;
+      const ox = x(o.min);
+      out += `<rect x="${ox - 1.25}" y="${y + 3}" width="2.5" height="${TL.rowH - 6}" fill="#ea580c"/>`;
     }
   });
   const ly = TL.top + days.length * TL.rowH + 24;
   const key = [["#16a34a", "Call in (answered)"], ["#2563eb", "Call out"], ["#9ca3af", "Call out, no answer"]];
   let lx = TL.left;
   for (const [col, label] of key) { out += `<rect x="${lx}" y="${ly - 9}" width="14" height="10" fill="${col}"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">${label}</text>`; lx += 160; }
-  out += `<path d="M${lx + 6} ${ly - 11} L${lx + 12} ${ly - 4} L${lx + 6} ${ly + 3} L${lx} ${ly - 4} Z" fill="#f59e0b" stroke="#92400e" stroke-width="0.8"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">Order created</text>`;
+  out += `<rect x="${lx + 5}" y="${ly - 12}" width="2.5" height="15" fill="#ea580c"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">Order created</text>`;
   return out + "</svg>";
 }
 let tlFont = null;
@@ -399,7 +400,26 @@ export function personEmailHtml(r, p, { imgSrc = (q) => "cid:" + cidFor(q) } = {
 
 // Overview first, then each person in a section that opens on click (<details>). Outlook on the
 // web / phone and Apple Mail fold them; Outlook desktop can't, and shows them all open.
-export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q) } = {}) {
+// Outlook desktop cannot fold <details>, so the email links to the same report as a web page
+// where it does. The link carries an HMAC of the week, so it opens that one report and cannot
+// be guessed or changed to another week. Secret: CALL_REPORT_LINK_SECRET, else one generated
+// once and kept in the database.
+let linkSecret = null;
+async function reportSecret(pool) {
+  if (process.env.CALL_REPORT_LINK_SECRET) return process.env.CALL_REPORT_LINK_SECRET;
+  if (linkSecret) return linkSecret;
+  await pool.query(`CREATE TABLE IF NOT EXISTS call_report_secret (id int PRIMARY KEY, secret text NOT NULL)`);
+  await pool.query(`INSERT INTO call_report_secret (id, secret) VALUES (1, $1) ON CONFLICT (id) DO NOTHING`, [crypto.randomBytes(32).toString("hex")]);
+  linkSecret = (await pool.query(`SELECT secret FROM call_report_secret WHERE id = 1`)).rows[0].secret;
+  return linkSecret;
+}
+const signWeek = (secret, week) => crypto.createHmac("sha256", secret).update("manager:" + week).digest("hex").slice(0, 40);
+export async function viewLink(pool, week) {
+  const base = (process.env.PUBLIC_BASE_URL || "https://server-backend-1i47.onrender.com").replace(/\/$/, "");
+  return `${base}/call-report/view?week=${week}&sig=${signWeek(await reportSecret(pool), week)}`;
+}
+
+export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUrl = null, web = false } = {}) {
   const people = r.people.map((p) => `<tr><td ${TD}>${esc(p.name)}${p.webexMatched ? "" : ' <span style="color:#b91c1c">(not found in Webex)</span>'}</td>
     <td ${TDN}>${p.total.callsIn}</td><td ${TDN}>${p.total.callsOut}</td><td ${TDN}>${fmtDuration(p.total.talk)}</td><td ${TDN}>${p.total.orders}</td></tr>`).join("");
   const sum = r.people.reduce((a, p) => ({ callsIn: a.callsIn + p.total.callsIn, callsOut: a.callsOut + p.total.callsOut, talk: a.talk + p.total.talk, orders: a.orders + p.total.orders }), blank());
@@ -413,6 +433,8 @@ export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q) } = {})
   </div></details>`).join("");
   return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#111;max-width:${TL.width}px">
   <p>Sales activity for ${esc(weekTitle(r))}.</p>
+  ${viewUrl ? `<p style="margin:0 0 14px"><a href="${esc(viewUrl)}" style="display:inline-block;background:#0f6cbd;color:#ffffff;text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px;border-radius:4px">Open the interactive version</a>
+    <span style="color:#6b7280;font-size:12px">&nbsp;each person folds open - Outlook desktop can't do that inside an email</span></p>` : ""}
   <table style="border-collapse:collapse;width:100%">
     <tr><th ${TH}>Person</th><th ${TH}>Calls in</th><th ${TH}>Calls out</th><th ${TH}>Time on phone</th><th ${TH}>Orders created</th></tr>
     ${people}
@@ -420,7 +442,7 @@ export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q) } = {})
       <td ${TOT}>${sum.callsIn}</td><td ${TOT}>${sum.callsOut}</td><td ${TOT}>${fmtDuration(sum.talk)}</td><td ${TOT}>${sum.orders}</td></tr>
   </table>
   ${r.missingCallDays.length ? `<p style="color:#b45309;font-size:12px">No Webex call data for: ${r.missingCallDays.map(dayLabel).join(", ")}.</p>` : ""}
-  <p style="font-size:13px;margin:18px 0 4px"><b>Each person</b> <span style="color:#6b7280">- click a name to open their days and timeline (7am to 6pm)</span></p>
+  <p style="font-size:13px;margin:18px 0 4px"><b>Each person</b> <span style="color:#6b7280">- ${web ? "click a name to open their days and timeline (7am to 6pm)" : "their days and timeline, 7am to 6pm"}</span></p>
   ${sections}
   <p style="color:#6b7280;font-size:12px;margin-top:14px">Internal calls excluded; hunt-group calls count only for whoever answered. Orders = sales orders created by that person in Brightpearl, excluding web/Amazon/eBay.</p>
 </div>`;
@@ -436,7 +458,7 @@ async function timelineAttachments(r, people) {
   return out;
 }
 
-export async function sendReport(r, { onlyTo } = {}) {
+export async function sendReport(r, { onlyTo, viewUrl = null } = {}) {
   if (!graphConfigured()) throw new Error("Graph mail not configured");
   const sent = [];
   const send = async (realTo, subject, html, attachments) => {
@@ -446,7 +468,7 @@ export async function sendReport(r, { onlyTo } = {}) {
     try { await sendNew({ to, subject: subj, html, attachments }); sent.push({ to, realTo, subject: subj }); }
     catch (e) { sent.push({ to, realTo, subject: subj, error: e.message }); }
   };
-  await send(managerEmail(), `Sales activity - week of ${dayLabel(r.week)}`, managerEmailHtml(r), await timelineAttachments(r, r.people));
+  await send(managerEmail(), `Sales activity - week of ${dayLabel(r.week)}`, managerEmailHtml(r, { viewUrl }), await timelineAttachments(r, r.people));
   for (const p of r.people) await send(p.email, `Your week - ${dayLabel(r.week)} to ${dayLabel(r.weekEnd)}`, personEmailHtml(r, p), await timelineAttachments(r, [p]));
   if (sent.every((s) => s.error)) throw new Error(`No report email could be sent: ${sent[0] && sent[0].error}`);
   return sent;
@@ -459,6 +481,22 @@ export function registerCallReport(app, { getPool, bpLive }) {
   const allowed = (u) => !!u && [u.key, u.name].some((v) => users().includes(String(v || "").trim().toLowerCase()));
   const guard = (req, res, next) => (allowed(req.hubUser) ? next() : res.status(403).json({ error: "Not available on your account." }));
   const weekOf = (q) => (/^\d{4}-\d{2}-\d{2}$/.test(String(q || "")) ? String(q) : previousWeekStart());
+
+  // GET /call-report/view?week=&sig= - the manager report as a web page with working fold-outs.
+  app.get("/call-report/view", async (req, res) => {
+    try {
+      const week = String(req.query.week || "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(week)) return res.status(400).send("Bad link");
+      const want = signWeek(await reportSecret(getPool()), week), got = String(req.query.sig || "");
+      if (got.length !== want.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want))) return res.status(403).send("This link isn't valid.");
+      const r = await buildReport({ pool: getPool(), bpLive, week, collect: false });
+      const pics = {};
+      for (const q of r.people) pics[q.key] = "data:image/png;base64," + (await timelinePng(r, q)).toString("base64");
+      res.set({ "Cache-Control": "private, no-store", "X-Robots-Tag": "noindex", "Referrer-Policy": "no-referrer" });
+      res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sales activity - ${esc(weekTitle(r))}</title></head>
+<body style="margin:0;padding:24px;background:#f6f7f9"><div style="background:#fff;padding:20px 24px;border-radius:8px;max-width:960px;margin:0 auto">${managerEmailHtml(r, { imgSrc: (q) => pics[q.key] || "", web: true })}</div></body></html>`);
+    } catch (e) { res.status(500).send("Could not build the report: " + esc(e.message)); }
+  });
 
   // Pull missing Webex days in the background (each day takes ~2 minutes of rate limit).
   // ?from=&to= (YYYY-MM-DD), default the last 7 days. GET again to see progress.
@@ -514,7 +552,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
   app.get("/api/call-report/send-test", requireUser, guard, async (req, res) => {
     try {
       const r = await buildReport({ pool: getPool(), bpLive, week: weekOf(req.query.week), collect: false });
-      res.json({ sent: await sendReport(r, { onlyTo: String(req.query.to || testEmail()) }), missingCallDays: r.missingCallDays });
+      res.json({ sent: await sendReport(r, { onlyTo: String(req.query.to || testEmail()), viewUrl: await viewLink(getPool(), r.week) }), missingCallDays: r.missingCallDays });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -539,7 +577,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
         if (claim.rowCount) {
           try {
             const r = await buildReport({ pool, bpLive, week });
-            const sent = await sendReport(r);
+            const sent = await sendReport(r, { viewUrl: await viewLink(pool, week) });
             await pool.query(`UPDATE call_report_runs SET result = $2 WHERE week = $1`, [week, JSON.stringify({ sent, missingCallDays: r.missingCallDays })]);
             console.log("[call-report]", week, "sent", sent.length);
           } catch (e) {
