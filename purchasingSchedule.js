@@ -1052,8 +1052,7 @@ async function placeFristadsOrder(pool, altItemsUrl, { padToThreshold = 0, poId:
       const emailLine = em && (em.accepted || []).length ? `Emailed (${em.accepted.join(', ')}).` : 'THE DISCONTINUED EMAIL DID NOT SEND — this note is the only record, so tell them.';
       for (const id of partIds) {
         const what = (((steps.discontinued && steps.discontinued.deadByOrder) || {})[id] || []).map((d) => `${d.sku}${d.qty > 1 ? ` x${d.qty}` : ''}${d.name ? ` (${d.name})` : ''}`).join(', ');
-        await bp.addOrderNoteLive(id, `DISCONTINUED at Fristads — NOT ordered and cannot be: ${what}. Everything else on this order from Fristads was ordered on PO#${poId}. ${emailLine} This order is on "${DISCONTINUED_PARK_LABEL}" until a substitute or refund is agreed with the customer.`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
-        await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS).catch(() => {});
+        await bp.parkOrDeferDiscontinued(id, `DISCONTINUED at Fristads — NOT ordered and cannot be: ${what}. Everything else on this order from Fristads was ordered on PO#${poId}. ${emailLine}`, FRISTADS_SUPPLIER_CONTACT).catch(() => {});
       }
     } catch (e) { steps.finalizePartialError = e.message; }
   }
@@ -3084,9 +3083,8 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
           const emailLine = em && (em.accepted || []).length
             ? `Emailed (${em.accepted.join(', ')}).`
             : 'THE DISCONTINUED EMAIL DID NOT SEND — this note is the only record, so tell them.';
-          if (live) await bp.addOrderNoteLive(id, `DISCONTINUED at Snickers — NOT ordered and cannot be: ${what}. Everything else on this order was ordered on PO#${poId}. ${emailLine} This order is on "${DISCONTINUED_PARK_LABEL}" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, SNICKERS_SUPPLIER_CONTACT);
-          if (live) await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS);
-          parked.push({ id, status: DISCONTINUED_PARK_STATUS, dead: deadHere.map((d) => d.sku) });
+          const r = live ? await bp.parkOrDeferDiscontinued(id, `DISCONTINUED at Snickers — NOT ordered and cannot be: ${what}. Everything else on this order from Snickers was ordered on PO#${poId}. ${emailLine}`, SNICKERS_SUPPLIER_CONTACT) : { id, dryRun: true };
+          parked.push({ ...r, dead: deadHere.map((d) => d.sku) });
         } catch (e) { parked.push({ id, error: e.message }); }
       }
       steps.parkedForDiscontinued = parked;
@@ -4544,9 +4542,7 @@ export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey,
   for (const id of affected) {
     const what = soLines.filter((l) => l.order === id && want.has(String(l.sku).toUpperCase())).map((l) => `${l.sku}${l.qty > 1 ? ` x${l.qty}` : ''}${l.name ? ` (${l.name})` : ''}`).join(', ');
     try {
-      await bp.addOrderNoteLive(id, `DISCONTINUED at ${supplierKey} (told us after it was ordered on PO#${poId}) — NOT coming: ${what}. ${emailLine} This order is on "${DISCONTINUED_PARK_LABEL}" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete — agree a substitute or a refund with the customer, then move it on.`, contactId);
-      await bp.setOrderStatusLive(id, DISCONTINUED_PARK_STATUS);
-      parked.push({ id, status: DISCONTINUED_PARK_STATUS });
+      parked.push(await bp.parkOrDeferDiscontinued(id, `DISCONTINUED at ${supplierKey} (told us after it was ordered on PO#${poId}) — NOT coming: ${what}. ${emailLine}`, contactId));
     } catch (e) { parked.push({ id, error: e.message }); }
   }
   await bp.addOrderNoteLive(poId, `Supplier reported DISCONTINUED after ordering: ${plan.skus.map((s) => s.sku).join(', ')} — removed from this PO.${plan.poLinesLeft ? '' : ' This PO now has no lines — nothing will arrive against it.'}`, contactId).catch(() => {});

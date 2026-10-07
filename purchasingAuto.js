@@ -1085,6 +1085,35 @@ export async function addOrderNoteLive(orderId, text, contactId) {
   return liveWrite('POST', `/order-service/order/${orderId}/note`, { text: String(text), addedOn, contactId: contactId || 1, isPublic: false });
 }
 
+// ── PARK ONLY ONCE EVERYTHING ELSE IS ORDERED ────────────────────────────────────────────────
+// A discontinued line parks its SO on "Item Out of Stock" (120) — but 120 is OFF the ordering
+// flow, so parking an order that still carries another supplier's tag strands that supplier's
+// lines. SO 493319 (user, 2026-10-07): Helly Hansen's discontinued route parked it on 2 Oct while
+// its BLAKLADER tag was still live, so the Blaklader lines sat unordered for five days.
+// So: if any supplier tag remains, leave the status alone and drop a MARKER note; the last
+// supplier's finalise (finalizeSupplierTagsLive) sees the marker and parks it then instead of
+// sending it to Ordered Stock.
+export const DISCONTINUED_PARK_STATUS_ID = Number(process.env.DISCONTINUED_PARK_STATUS_ID || 120);
+export const PARK_WHEN_ORDERED_MARKER = '[PARK WHEN ORDERED]';
+export async function parkOrDeferDiscontinued(orderId, noteText, contactId) {
+  const cf = (await liveGet(`/order-service/order/${orderId}/custom-field`)) || {};
+  const tag = cf.PCF_SUPPLIER == null ? '' : String(cf.PCF_SUPPLIER);
+  const remaining = tag && !isLeaveNote(tag) ? tagsOf(tag).map((t) => String(t).trim()).filter((t) => t && !isLeaveNoteToken(t)) : [];
+  if (remaining.length) {
+    await addOrderNoteLive(orderId, `${noteText} ${PARK_WHEN_ORDERED_MARKER} Still to order from: ${remaining.join(' / ')} - this order stays where it is and moves to "Item Out of Stock" automatically once those are ordered.`, contactId);
+    return { id: orderId, deferred: true, remaining };
+  }
+  await addOrderNoteLive(orderId, `${noteText} This order is on "Item Out of Stock" rather than "Ordered Stock Awaiting Delivery" because it is NOT complete - agree a substitute or a refund with the customer, then move it on.`, contactId);
+  await setOrderStatusLive(orderId, DISCONTINUED_PARK_STATUS_ID);
+  return { id: orderId, status: DISCONTINUED_PARK_STATUS_ID };
+}
+async function hasParkWhenOrderedMarker(orderId) {
+  try {
+    const notes = (await liveGet(`/order-service/order/${orderId}/note`)) || [];
+    return notes.some((n) => String(n && n.text || '').includes(PARK_WHEN_ORDERED_MARKER));
+  } catch { return false; }
+}
+
 // Set an order's Reference field via the API (JSON-Patch replace). SURGICAL — it touches ONLY
 // /reference, so unlike the legacy web-form re-submit (which zeroes row tax → needed a fragile
 // reprice) it can't disturb rows/tax. PUT is unsupported (405); PATCH replace works. Verified
@@ -2337,8 +2366,13 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     if (setOrderedStatus && p.willClear) {
       // an "ONCE ORDERED" instruction row decides the status; PROOF_REQUIRED_STATUS_ID still overrides the 34 case
       statusSet = p.instruction ? (p.instruction.statusId === 34 ? PROOF_REQUIRED_STATUS : p.instruction.statusId) : ORDERED_STATUS;
+      // An earlier discontinued line deferred its park until everything else was ordered — this
+      // is that moment, so it goes to Item Out of Stock, not Ordered Stock (see parkOrDeferDiscontinued).
+      const parkNow = await hasParkWhenOrderedMarker(p.id);
+      if (parkNow) statusSet = DISCONTINUED_PARK_STATUS_ID;
       await liveWrite('PUT', `/order-service/order/${p.id}/status`, { orderStatusId: statusSet });
       statusChanged = true;
+      if (parkNow) await addOrderNoteLive(p.id, `All suppliers on this order are now ordered. It goes to "Item Out of Stock" (not Ordered Stock) because of the discontinued line(s) noted earlier - agree a substitute or a refund with the customer, then move it on.`, noteContactId || 1).catch(() => {});
     }
     // note on the SO: the item names ordered for this SO, then "Ordered on PO#<poId>".
     // The '#' before the id is REQUIRED — BP only renders a clickable order link for
