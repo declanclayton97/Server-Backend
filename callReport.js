@@ -460,7 +460,7 @@ async function timelineAttachments(r, people) {
   return out;
 }
 
-export async function sendReport(r, { onlyTo, viewUrl = null } = {}) {
+export async function sendReport(r, { onlyTo, viewUrl = null, managerOnly = false } = {}) {
   if (!graphConfigured()) throw new Error("Graph mail not configured");
   const sent = [];
   const send = async (realTo, subject, html, attachments) => {
@@ -471,7 +471,7 @@ export async function sendReport(r, { onlyTo, viewUrl = null } = {}) {
     catch (e) { sent.push({ to, realTo, subject: subj, error: e.message }); }
   };
   await send(managerEmail(), `Sales activity - week of ${dayLabel(r.week)}`, managerEmailHtml(r, { viewUrl }), []);
-  for (const p of r.people) await send(p.email, `Your week - ${dayLabel(r.week)} to ${dayLabel(r.weekEnd)}`, personEmailHtml(r, p), await timelineAttachments(r, [p]));
+  if (!managerOnly) for (const p of r.people) await send(p.email, `Your week - ${dayLabel(r.week)} to ${dayLabel(r.weekEnd)}`, personEmailHtml(r, p), await timelineAttachments(r, [p]));
   if (sent.every((s) => s.error)) throw new Error(`No report email could be sent: ${sent[0] && sent[0].error}`);
   return sent;
 }
@@ -554,7 +554,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
   app.get("/api/call-report/send-test", requireUser, guard, async (req, res) => {
     try {
       const r = await buildReport({ pool: getPool(), bpLive, week: weekOf(req.query.week), collect: false });
-      res.json({ sent: await sendReport(r, { onlyTo: String(req.query.to || testEmail()), viewUrl: await viewLink(getPool(), r.week) }), missingCallDays: r.missingCallDays });
+      res.json({ sent: await sendReport(r, { onlyTo: String(req.query.to || testEmail()), viewUrl: await viewLink(getPool(), r.week), managerOnly: req.query.only === "manager" }), missingCallDays: r.missingCallDays });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
