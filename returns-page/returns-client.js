@@ -81,8 +81,8 @@
         '<div class="rt-item-body">' + howMany +
           '<p class="rt-q">What would you like?</p>' +
           '<div class="rt-toggle">' +
-            '<button type="button" data-out="exchange">Swap it<small>Free delivery on the new one</small></button>' +
-            '<button type="button" data-out="refund">Refund<small>Money back once it\'s with us</small></button>' +
+            '<button type="button" data-out="exchange">Swap it<small>We will send out your new items with free delivery</small></button>' +
+            '<button type="button" data-out="refund">Refund<small>We will refund you once the item is back with us</small></button>' +
           "</div>" +
           '<div class="rt-choice rt-hidden" data-for="exchange"><p class="rt-q">What would you like instead?</p>' +
             '<select class="rt-exchange">' + options(found.exchangeChoices, "Choose one...") + "</select>" +
