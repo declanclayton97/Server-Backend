@@ -100,6 +100,11 @@ export function registerSalesHubRoutes(app, deps) {
         try { const n = await inboxUnread(box); out.push({ user: u.display_name, mailbox: box, ok: true, unread: n.unread }); }
         catch (e) { out.push({ user: u.display_name, mailbox: box, ok: false, why: e.status === 403 ? "access denied" : e.message }); }
       }
+      // ?also=a@tuffshop.co.uk,b@... tests mailboxes of people with no hub account yet (our domain only).
+      for (const box of String(req.query.also || "").split(",").map((s) => s.trim().toLowerCase()).filter((s) => /^[^@s]+@tuffshop.co.uk$/.test(s))) {
+        try { const n = await inboxUnread(box); out.push({ user: "(no hub account)", mailbox: box, ok: true, unread: n.unread }); }
+        catch (e) { out.push({ user: "(no hub account)", mailbox: box, ok: false, why: e.status === 403 ? "access denied" : e.message }); }
+      }
       res.json({ users: out });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
