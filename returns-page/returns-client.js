@@ -86,7 +86,7 @@
           "</div>" +
           '<div class="rt-choice rt-hidden" data-for="exchange"><p class="rt-q">What would you like instead?</p>' +
             '<select class="rt-exchange">' + options(found.exchangeChoices, "Choose one...") + "</select>" +
-            '<div class="rt-other rt-hidden"><input type="text" class="input-text rt-exchange-for" maxlength="200" placeholder="e.g. the same trousers in 34R, or the black ones instead"></div></div>' +
+            '<div class="rt-other rt-hidden"><input type="text" class="input-text rt-exchange-for" maxlength="200"></div></div>' +
           '<div class="rt-choice rt-hidden" data-for="refund"><p class="rt-q">Why is it coming back?</p>' +
             '<select class="rt-reason">' + options(found.refundReasons, "Choose a reason...") + "</select>" +
             '<div class="rt-note rt-hidden">Sorry about that. Give us a call on 0113 288 7713 before you send it back and we\'ll get it sorted quickly.</div></div>' +
