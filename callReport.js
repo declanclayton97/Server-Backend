@@ -5,6 +5,7 @@
 //   calls out     outbound calls dialled to outside
 //   time on phone talk time across both
 //   orders        Brightpearl sales orders that person created by hand
+//   emails        customer emails received / sent in their own mailbox (Graph, 7 Oct)
 //
 // Calls come from the Webex Calling Detailed Call History API (cdr_feed), read by the
 // Service App "Tuffshop Sales Call Report" (scopes spark-admin:calling_cdr_read +
@@ -41,7 +42,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
-import { graphConfigured, sendNew } from "./graphMail.js";
+import { graphConfigured, sendNew, graphRequest } from "./graphMail.js";
 
 const DEFAULT_PEOPLE = [
   { key: "nicky", webexName: "Nicky Sales", name: "Nicky Everall", first: "Nicky", email: "nicky@tuffshop.co.uk", bpId: 61342 },
@@ -258,8 +259,67 @@ async function ordersCreated(bpLive, people, first, last) {
 }
 
 
+// ---- emails ---------------------------------------------------------------------------
+// Each person's OWN mailbox (nicky@...), read through Graph with the same app as the Sales Hub
+// (Exchange scoping grants it these boxes). Only customer mail counts (Dec, 7 Oct):
+//   received: anything that arrived in the week, in any folder (so mail filed or deleted
+//             still counts), except junk, drafts, their own sent mail, mail from a colleague
+//             (@tuffshop.co.uk) and automated senders (no-reply, notifications, bounces).
+//   sent:     Sent Items in the week with at least one customer recipient.
+// A mailbox we cannot read gives an error for that person, never a zero.
+const OURS = /@tuffshop\.co\.uk$/i;
+const AUTOMATED = /^(no-?reply|do-?not-?reply|notifications?|notify|alerts?|mailer-daemon|postmaster|bounces?|newsletters?|marketing)[@.+-]|@(.+\.)?(mailchimp|mcsv|hubspot|hubspotemail|sendgrid|amazonses|mailgun|klaviyo)\./i;
+const GRAPH_ROOT = "https://graph.microsoft.com/v1.0";
+async function graphAll(path) {
+  const out = [];
+  for (let url = path, pages = 0; url && pages < 40; pages++) {
+    const j = await graphRequest("GET", url);
+    out.push(...((j && j.value) || []));
+    url = j && j["@odata.nextLink"] ? j["@odata.nextLink"].replace(GRAPH_ROOT, "") : null;
+  }
+  return out;
+}
+export async function emailActivity(people, first, last) {
+  const from = ukMidnight(first).toISOString(), to = ukMidnight(addDays(last, 1)).toISOString();
+  const customer = (a) => !!a && !OURS.test(a) && !AUTOMATED.test(a);
+  const out = {};
+  for (const p of people) {
+    if (!p.email) continue;
+    const box = `/users/${encodeURIComponent(p.email)}`;
+    const me = p.email.toLowerCase();
+    try {
+      const skip = new Set();
+      for (const f of ["junkemail", "drafts", "sentitems"]) {
+        try { skip.add((await graphRequest("GET", `${box}/mailFolders/${f}?$select=id`)).id); } catch { /* folder missing */ }
+      }
+      const inF = encodeURIComponent(`receivedDateTime ge ${from} and receivedDateTime lt ${to}`);
+      const got = await graphAll(`${box}/messages?$filter=${inF}&$select=receivedDateTime,parentFolderId,from,isDraft&$top=500`);
+      const outF = encodeURIComponent(`sentDateTime ge ${from} and sentDateTime lt ${to}`);
+      const sent = await graphAll(`${box}/mailFolders/sentitems/messages?$filter=${outF}&$select=sentDateTime,toRecipients,ccRecipients&$top=500`);
+      const r = { in: {}, out: {}, sentTimes: [] };
+      for (const m of got) {
+        const sender = String((m.from && m.from.emailAddress && m.from.emailAddress.address) || "").toLowerCase();
+        if (m.isDraft || skip.has(m.parentFolderId) || sender === me || !customer(sender)) continue;
+        const day = ukDay(m.receivedDateTime);
+        r.in[day] = (r.in[day] || 0) + 1;
+      }
+      for (const m of sent) {
+        const rcpt = [...(m.toRecipients || []), ...(m.ccRecipients || [])].map((x) => String((x.emailAddress && x.emailAddress.address) || "").toLowerCase());
+        if (!rcpt.some(customer)) continue;
+        const day = ukDay(m.sentDateTime);
+        r.out[day] = (r.out[day] || 0) + 1;
+        r.sentTimes.push({ day, min: ukMinutes(m.sentDateTime) });
+      }
+      out[p.key] = r;
+    } catch (e) {
+      out[p.key] = { error: e.status === 403 ? "no access to " + p.email : e.message };
+    }
+  }
+  return out;
+}
+
 // ---- the report -----------------------------------------------------------------------
-const blank = () => ({ callsIn: 0, callsOut: 0, talk: 0, orders: 0, returns: 0 });
+const blank = () => ({ callsIn: 0, callsOut: 0, talk: 0, orders: 0, returns: 0, emailsIn: 0, emailsOut: 0 });
 
 // Calls that touched the outside world on any leg (see the header).
 function customerCallTest(rows) {
@@ -321,15 +381,18 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
   const events = callEvents(rows, uuidToKey, nameToKey);
   const seenNames = new Set(rows.map((r) => String(r.user_name || "").trim().toLowerCase()));
   const { counts: orders, times: orderTimes, returnCounts, returnTimes } = await ordersCreated(bpLive, people, first, last);
+  const mail = graphConfigured() ? await emailActivity(people, first, last).catch((e) => ({ _error: e.message })) : {};
   const daysWithData = new Set((await pool.query(`SELECT to_char(day,'YYYY-MM-DD') d FROM webex_cdr_days WHERE day BETWEEN $1 AND $2`, [first, last])).rows.map((r) => r.d));
 
   const days = Array.from({ length: 7 }, (_, i) => addDays(first, i));
   const report = people.map((p) => {
-    const perDay = days.map((day) => ({ day, ...blank(), ...((calls[p.key] || {})[day] || {}), orders: (orders[p.key] || {})[day] || 0, returns: (returnCounts[p.key] || {})[day] || 0, noCallData: !daysWithData.has(day) }));
-    const total = perDay.reduce((a, d) => ({ callsIn: a.callsIn + d.callsIn, callsOut: a.callsOut + d.callsOut, talk: a.talk + d.talk, orders: a.orders + d.orders, returns: a.returns + d.returns }), blank());
+    const m = mail[p.key] || { error: mail._error || "mailbox not read" };
+    const perDay = days.map((day) => ({ day, ...blank(), ...((calls[p.key] || {})[day] || {}), orders: (orders[p.key] || {})[day] || 0, returns: (returnCounts[p.key] || {})[day] || 0,
+      emailsIn: m.error ? 0 : m.in[day] || 0, emailsOut: m.error ? 0 : m.out[day] || 0, noCallData: !daysWithData.has(day), noEmailData: !!m.error }));
+    const total = perDay.reduce((a, d) => ({ callsIn: a.callsIn + d.callsIn, callsOut: a.callsOut + d.callsOut, talk: a.talk + d.talk, orders: a.orders + d.orders, returns: a.returns + d.returns, emailsIn: a.emailsIn + d.emailsIn, emailsOut: a.emailsOut + d.emailsOut }), blank());
     const inWeek = (e) => e.day >= first && e.day <= last;
-    return { ...p, webexMatched: !!uuids[p.key] || seenNames.has(String(p.webexName || p.name).toLowerCase()), days: perDay, total,
-      timeline: { calls: (events[p.key] || []).filter(inWeek), orders: (orderTimes[p.key] || []).filter(inWeek), returns: (returnTimes[p.key] || []).filter(inWeek) } };
+    return { ...p, emailError: m.error || null, webexMatched: !!uuids[p.key] || seenNames.has(String(p.webexName || p.name).toLowerCase()), days: perDay, total,
+      timeline: { calls: (events[p.key] || []).filter(inWeek), orders: (orderTimes[p.key] || []).filter(inWeek), returns: (returnTimes[p.key] || []).filter(inWeek), emails: (m.sentTimes || []).filter(inWeek) } };
   });
   return { week: first, weekEnd: last, people: report, collected, missingCallDays: days.filter((d) => !daysWithData.has(d)) };
 }
@@ -343,7 +406,7 @@ const TD = 'style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:13
 const TDN = 'style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:13px;text-align:right"';
 const TOT = 'style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37;text-align:right"';
 const weekTitle = (r) => `${dayLabel(r.week)} - ${dayLabel(r.weekEnd)}`;
-const shown = (p) => p.days.filter((d, i) => i < 5 || d.callsIn || d.callsOut || d.orders || d.returns);   // weekends only if used
+const shown = (p) => p.days.filter((d, i) => i < 5 || d.callsIn || d.callsOut || d.orders || d.returns || d.emailsOut);   // weekends only if used
 
 // ---- timeline -------------------------------------------------------------------------
 // One chart per person: a row per day (Mon-Fri, plus a weekend day only if used), 07:00 to
@@ -374,6 +437,9 @@ export function timelineSvg(r, p) {
       if (!c.answered) { out += `<rect x="${x1}" y="${y + 10}" width="1.5" height="${TL.rowH - 20}" fill="#9ca3af"/>`; continue; }
       out += `<rect x="${x1}" y="${y + 8}" width="${Math.max(2, x2 - x1)}" height="${TL.rowH - 16}" rx="1" fill="${c.kind === "in" ? "#16a34a" : "#2563eb"}" fill-opacity="0.85"/>`;
     }
+    for (const e of (p.timeline.emails || []).filter((e) => e.day === day)) {
+      out += `<rect x="${x(e.min) - 0.75}" y="${y + TL.rowH - 10}" width="1.5" height="6" fill="#0d9488"/>`;
+    }
     for (const o of (p.timeline.returns || []).filter((o) => o.day === day)) {
       const ox = x(o.min);
       out += `<rect x="${ox - 1.25}" y="${y + 3}" width="2.5" height="${TL.rowH - 6}" fill="#7c3aed"/>`;
@@ -390,6 +456,8 @@ export function timelineSvg(r, p) {
   out += `<rect x="${lx + 5}" y="${ly - 12}" width="2.5" height="15" fill="#ea580c"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">Order created</text>`;
   lx += 130;
   out += `<rect x="${lx + 5}" y="${ly - 12}" width="2.5" height="15" fill="#7c3aed"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">Return / exchange</text>`;
+  lx += 140;
+  out += `<rect x="${lx + 5}" y="${ly - 6}" width="1.5" height="6" fill="#0d9488"/><text x="${lx + 14}" y="${ly}" font-size="11" fill="#374151">Email sent</text>`;
   return out + "</svg>";
 }
 let tlFont = null;
@@ -404,7 +472,9 @@ const cidFor = (p) => `timeline-${p.key}@callreport`;
 
 const dayRows = (p) => shown(p).map((d) => `<tr><td ${TD}>${esc(dayLabel(d.day))}</td>
     <td ${TDN}>${d.noCallData ? "-" : d.callsIn}</td><td ${TDN}>${d.noCallData ? "-" : d.callsOut}</td>
-    <td ${TDN}>${d.noCallData ? "-" : fmtDuration(d.talk)}</td><td ${TDN}>${d.orders}</td><td ${TDN}>${d.returns}</td></tr>`).join("");
+    <td ${TDN}>${d.noCallData ? "-" : fmtDuration(d.talk)}</td><td ${TDN}>${d.orders}</td><td ${TDN}>${d.returns}</td>
+    <td ${TDN}>${d.noEmailData ? "-" : d.emailsIn}</td><td ${TDN}>${d.noEmailData ? "-" : d.emailsOut}</td></tr>`).join("");
+const mailCells = (p, s) => p.emailError ? `<td ${s}>-</td><td ${s}>-</td>` : `<td ${s}>${p.total.emailsIn}</td><td ${s}>${p.total.emailsOut}</td>`;
 const timelineImg = (p, src) => `<img src="${src(p)}" width="${TL.width}" alt="Timeline of calls and orders, 7am to 6pm" style="display:block;width:100%;max-width:${TL.width}px;height:auto;border:1px solid #e5e7eb;margin-top:10px">`;
 
 export function personEmailHtml(r, p, { imgSrc = (q) => "cid:" + cidFor(q) } = {}) {
@@ -412,15 +482,15 @@ export function personEmailHtml(r, p, { imgSrc = (q) => "cid:" + cidFor(q) } = {
   <p>Hi ${esc(p.first)},</p>
   <p>Here's your week on the phones and in Brightpearl, ${esc(weekTitle(r))}.</p>
   <table style="border-collapse:collapse;width:100%">
-    <tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th><th ${THN}>Returns</th></tr>
+    <tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th><th ${THN}>Returns</th><th ${THN}>Emails in</th><th ${THN}>Emails out</th></tr>
     ${dayRows(p)}
     <tr><td style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37">Week</td>
-      <td ${TOT}>${p.total.callsIn}</td><td ${TOT}>${p.total.callsOut}</td><td ${TOT}>${fmtDuration(p.total.talk)}</td><td ${TOT}>${p.total.orders}</td><td ${TOT}>${p.total.returns}</td></tr>
+      <td ${TOT}>${p.total.callsIn}</td><td ${TOT}>${p.total.callsOut}</td><td ${TOT}>${fmtDuration(p.total.talk)}</td><td ${TOT}>${p.total.orders}</td><td ${TOT}>${p.total.returns}</td>${mailCells(p, TOT)}</tr>
   </table>
   <p style="font-size:13px;margin:18px 0 0"><b>Your days, 7am to 6pm</b></p>
   ${timelineImg(p, imgSrc)}
   <p style="color:#6b7280;font-size:12px;margin-top:14px">Calls in are calls you answered; calls out are calls you made. Calls between colleagues aren't counted.
-  Orders are sales orders you created in Brightpearl (web, Amazon and eBay orders aren't included); returns are the exchange orders and credit notes you booked.${r.missingCallDays.length ? " A dash means there's no call data for that day." : ""}</p>
+  Orders are sales orders you created in Brightpearl (web, Amazon and eBay orders aren't included); returns are the exchange orders and credit notes you booked. Emails are customer emails in and out of your own mailbox (emails between colleagues and automated emails aren't counted).${r.missingCallDays.length ? " A dash means there's no call data for that day." : ""}</p>
 </div>`;
 }
 
@@ -447,13 +517,13 @@ export async function viewLink(pool, week) {
 
 export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUrl = null, web = false } = {}) {
   const people = r.people.map((p) => `<tr><td ${TD}>${esc(p.name)}${p.webexMatched ? "" : ' <span style="color:#b91c1c">(not found in Webex)</span>'}</td>
-    <td ${TDN}>${p.total.callsIn}</td><td ${TDN}>${p.total.callsOut}</td><td ${TDN}>${fmtDuration(p.total.talk)}</td><td ${TDN}>${p.total.orders}</td><td ${TDN}>${p.total.returns}</td></tr>`).join("");
-  const sum = r.people.reduce((a, p) => ({ callsIn: a.callsIn + p.total.callsIn, callsOut: a.callsOut + p.total.callsOut, talk: a.talk + p.total.talk, orders: a.orders + p.total.orders, returns: a.returns + p.total.returns }), blank());
+    <td ${TDN}>${p.total.callsIn}</td><td ${TDN}>${p.total.callsOut}</td><td ${TDN}>${fmtDuration(p.total.talk)}</td><td ${TDN}>${p.total.orders}</td><td ${TDN}>${p.total.returns}</td>${mailCells(p, TDN)}</tr>`).join("");
+  const sum = r.people.reduce((a, p) => ({ callsIn: a.callsIn + p.total.callsIn, callsOut: a.callsOut + p.total.callsOut, talk: a.talk + p.total.talk, orders: a.orders + p.total.orders, returns: a.returns + p.total.returns, emailsIn: a.emailsIn + p.total.emailsIn, emailsOut: a.emailsOut + p.total.emailsOut }), blank());
   const sections = r.people.map((p) => `<details style="margin:10px 0;border:1px solid #d1d5db;border-radius:6px">
   <summary style="cursor:pointer;padding:9px 12px;background:#f3f4f6;font-size:14px;font-weight:600">${esc(p.name)}
-    <span style="font-weight:400;color:#4b5563">&nbsp;-&nbsp;${p.total.callsIn} in, ${p.total.callsOut} out, ${fmtDuration(p.total.talk)} on the phone, ${p.total.orders} order${p.total.orders === 1 ? "" : "s"}, ${p.total.returns} return${p.total.returns === 1 ? "" : "s"}</span></summary>
+    <span style="font-weight:400;color:#4b5563">&nbsp;-&nbsp;${p.total.callsIn} in, ${p.total.callsOut} out, ${fmtDuration(p.total.talk)} on the phone, ${p.total.orders} order${p.total.orders === 1 ? "" : "s"}, ${p.total.returns} return${p.total.returns === 1 ? "" : "s"}${p.emailError ? "" : `, ${p.total.emailsOut} email${p.total.emailsOut === 1 ? "" : "s"} sent`}</span></summary>
   <div style="padding:10px 12px">
-  <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>On phone</th><th ${THN}>Orders</th><th ${THN}>Returns</th></tr>
+  <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>On phone</th><th ${THN}>Orders</th><th ${THN}>Returns</th><th ${THN}>Emails in</th><th ${THN}>Emails out</th></tr>
   ${dayRows(p)}</table>
   ${timelineImg(p, imgSrc)}
   </div></details>`).join("");
@@ -462,15 +532,16 @@ export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUr
   ${viewUrl ? `<p style="margin:0 0 14px"><a href="${esc(viewUrl)}" style="display:inline-block;background:#0f6cbd;color:#ffffff;text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px;border-radius:4px">Open the full report</a>
     <span style="color:#6b7280;font-size:12px">&nbsp;each person's days and 7am-6pm timeline</span></p>` : ""}
   <table style="border-collapse:collapse;width:100%">
-    <tr><th ${TH}>Person</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th><th ${THN}>Returns</th></tr>
+    <tr><th ${TH}>Person</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th><th ${THN}>Returns</th><th ${THN}>Emails in</th><th ${THN}>Emails out</th></tr>
     ${people}
     <tr><td style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37">Team</td>
-      <td ${TOT}>${sum.callsIn}</td><td ${TOT}>${sum.callsOut}</td><td ${TOT}>${fmtDuration(sum.talk)}</td><td ${TOT}>${sum.orders}</td><td ${TOT}>${sum.returns}</td></tr>
+      <td ${TOT}>${sum.callsIn}</td><td ${TOT}>${sum.callsOut}</td><td ${TOT}>${fmtDuration(sum.talk)}</td><td ${TOT}>${sum.orders}</td><td ${TOT}>${sum.returns}</td><td ${TOT}>${sum.emailsIn}</td><td ${TOT}>${sum.emailsOut}</td></tr>
   </table>
   ${r.missingCallDays.length ? `<p style="color:#b45309;font-size:12px">No Webex call data for: ${r.missingCallDays.map(dayLabel).join(", ")}.</p>` : ""}
+  ${r.people.filter((p) => p.emailError).map((p) => `<p style="color:#b45309;font-size:12px">Emails not counted for ${esc(p.name)}: ${esc(p.emailError)}.</p>`).join("")}
   ${web ? `<p style="font-size:13px;margin:18px 0 4px"><b>Each person</b> <span style="color:#6b7280">- click a name to open their days and timeline (7am to 6pm)</span></p>
   ${sections}` : ""}
-  <p style="color:#6b7280;font-size:12px;margin-top:14px">Internal calls excluded; hunt-group calls count only for whoever answered. Orders = sales orders created by that person in Brightpearl, excluding web/Amazon/eBay and exchange orders. Returns = exchange orders + credit notes they booked (both halves of one return count once).</p>
+  <p style="color:#6b7280;font-size:12px;margin-top:14px">Internal calls excluded; hunt-group calls count only for whoever answered. Orders = sales orders created by that person in Brightpearl, excluding web/Amazon/eBay and exchange orders. Returns = exchange orders + credit notes they booked (both halves of one return count once). Emails = customer emails in and out of their own mailbox (colleagues, automated senders, junk and the shared sales@ box not included).</p>
 </div>`;
 }
 
@@ -556,6 +627,15 @@ export function registerCallReport(app, { getPool, bpLive }) {
         } catch (e) { lookups.push({ key: p.key, error: e.message }); }
       }
       res.json({ lookups, users });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Customer emails in / out per person per day for a week, from their own mailboxes (?week=).
+  app.get("/api/call-report/emails", requireUser, guard, async (req, res) => {
+    try {
+      const week = weekOf(req.query.week);
+      const mail = await emailActivity(reportPeople(), week, addDays(week, 6));
+      res.json({ week, people: Object.fromEntries(Object.entries(mail).map(([k, v]) => [k, v.error ? { error: v.error } : { in: v.in, out: v.out }])) });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
