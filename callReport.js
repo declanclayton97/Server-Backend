@@ -655,7 +655,10 @@ export function registerCallReport(app, { getPool, bpLive }) {
     // ?id= one recording's details: which files Webex offers (audio, transcript...), links withheld.
     if (req.query.id) {
       try {
-        const { json } = await webexGet(pool, `https://webexapis.com/v1/convergedRecordings/${encodeURIComponent(req.query.id)}`);
+        const id = encodeURIComponent(req.query.id);
+        const variant = { admin: `admin/convergedRecordings/${id}`, meta: `convergedRecordings/${id}/metadata` }[req.query.v] || `convergedRecordings/${id}`;
+        const { json } = await webexGet(pool, `https://webexapis.com/v1/${variant}`);
+        if (req.query.v === "meta") return res.json({ keys: Object.keys(json || {}), sample: JSON.stringify(json).slice(0, 1500) });
         const links = (json && json.temporaryDirectDownloadLinks) || {};
         return res.json({ keys: Object.keys(json || {}), files: Object.fromEntries(Object.entries(links).map(([k, v]) => [k, !!v])), format: json && json.format, serviceData: json && json.serviceData });
       } catch (e) { return res.json({ error: e.message }); }
