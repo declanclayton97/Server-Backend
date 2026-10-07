@@ -652,6 +652,14 @@ export function registerCallReport(app, { getPool, bpLive }) {
     if (req.query.fresh) webexCache = { token: null, until: 0 };   // pick up newly granted scopes
     let scope = null;
     try { const { json } = await webexGet(pool, "https://webexapis.com/v1/people/me"); scope = json && json.displayName; } catch (e) { scope = "me: " + e.message; }
+    // ?id= one recording's details: which files Webex offers (audio, transcript...), links withheld.
+    if (req.query.id) {
+      try {
+        const { json } = await webexGet(pool, `https://webexapis.com/v1/convergedRecordings/${encodeURIComponent(req.query.id)}`);
+        const links = (json && json.temporaryDirectDownloadLinks) || {};
+        return res.json({ keys: Object.keys(json || {}), files: Object.fromEntries(Object.entries(links).map(([k, v]) => [k, !!v])), format: json && json.format, serviceData: json && json.serviceData });
+      } catch (e) { return res.json({ error: e.message }); }
+    }
     const from = new Date(Date.now() - 2 * 86400e3).toISOString(), to = new Date().toISOString();
     const tries = [
       `https://webexapis.com/v1/admin/convergedRecordings?from=${from}&to=${to}&max=50`,
