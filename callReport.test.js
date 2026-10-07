@@ -44,8 +44,8 @@ const rows = [
   { day: "2026-09-29", user_name: "Abigail Sales", direction: "TERMINATING", answered: true, duration: 30, call_type: "SIP_ENTERPRISE", correlation_id: "c1" },
 ];
 eq("tally", tallyCalls(rows, { u1: "jack" }, { "jack sales": "jack", "helen sales": "helen" }), {
-  jack: { "2026-09-28": { callsIn: 2, callsOut: 2, talk: 190, orders: 0 } },
-  helen: { "2026-09-28": { callsIn: 0, callsOut: 0, talk: 0, orders: 0 } },
+  jack: { "2026-09-28": { callsIn: 2, callsOut: 2, talk: 190, orders: 0, returns: 0 } },
+  helen: { "2026-09-28": { callsIn: 0, callsOut: 0, talk: 0, orders: 0, returns: 0 } },
 });
 
 const day = (d, x = {}) => ({ day: d, callsIn: 0, callsOut: 0, talk: 0, orders: 0, noCallData: false, ...x });

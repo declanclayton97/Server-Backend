@@ -216,32 +216,50 @@ export async function collectMissing(pool, first, last) {
 }
 
 // ---- orders ---------------------------------------------------------------------------
+// Orders and RETURNS each person created by hand (Dec, 7 Oct). A return is either:
+//   - an exchange order: a SALES order whose reference starts "EXCHANGE ORDER" (it replaces goods,
+//     so it is NOT a new sale and is no longer counted as an order), or
+//   - a sales credit (orderTypeId 3) - the return itself.
+// One person booking both halves of the same return ("EXCHANGE ORDER CREDITED VIA SC#n" where
+// they also created SC n) counts once. Integration-made orders are nobody's work and are skipped.
 async function ordersCreated(bpLive, people, first, last) {
   const ids = new Map(people.map((p) => [Number(p.bpId), p.key]));
-  const counts = {}, times = {};
-  let firstResult = 1;
-  for (;;) {
-    const r = await bpLive("GET", `/order-service/order-search?orderTypeId=1&createdOn=${first}T00:00:00/${last}T23:59:59&pageSize=500&firstResult=${firstResult}`);
-    const cols = r.metaData.columns.map((c) => c.name);
-    const ix = (n) => cols.indexOf(n);
-    for (const row of r.results) {
-      const key = ids.get(Number(row[ix("createdById")]));
-      if (!key || row[ix("installedIntegrationInstanceId")] != null) continue;
-      const day = String(row[ix("createdOn")]).slice(0, 10);   // Brightpearl gives UK local time
-      counts[key] = counts[key] || {};
-      counts[key][day] = (counts[key][day] || 0) + 1;
-      // "2026-10-01T09:23:41.000+01:00" - already UK local, so the clock part is the time.
-      const hm = /T(\d{2}):(\d{2})/.exec(String(row[ix("createdOn")]));
-      if (hm) (times[key] = times[key] || []).push({ day, min: Number(hm[1]) * 60 + Number(hm[2]), id: row[ix("orderId")] });
+  const counts = {}, times = {}, returnCounts = {}, returnTimes = {};
+  const add = (cnt, tms, key, created, id) => {
+    const day = String(created).slice(0, 10);                  // Brightpearl gives UK local time
+    (cnt[key] = cnt[key] || {})[day] = (cnt[key][day] || 0) + 1;
+    const hm = /T(\d{2}):(\d{2})/.exec(String(created));     // so the clock part is the time
+    if (hm) (tms[key] = tms[key] || []).push({ day, min: Number(hm[1]) * 60 + Number(hm[2]), id });
+  };
+  async function each(typeId, fn) {
+    let firstResult = 1;
+    for (;;) {
+      const r = await bpLive("GET", `/order-service/order-search?orderTypeId=${typeId}&createdOn=${first}T00:00:00/${last}T23:59:59&pageSize=500&firstResult=${firstResult}`);
+      const cols = r.metaData.columns.map((c) => c.name);
+      const ix = (n) => cols.indexOf(n);
+      for (const row of r.results) {
+        const key = ids.get(Number(row[ix("createdById")]));
+        if (!key || row[ix("installedIntegrationInstanceId")] != null) continue;
+        fn(key, row[ix("createdOn")], row[ix("orderId")], String(row[ix("customerRef")] || ""));
+      }
+      if (!r.metaData.morePagesAvailable) break;
+      firstResult = r.metaData.lastResult + 1;
     }
-    if (!r.metaData.morePagesAvailable) break;
-    firstResult = r.metaData.lastResult + 1;
   }
-  return { counts, times };
+  const creditsBy = {};                                         // person -> Set of SC ids they made
+  await each(3, (key, created, id) => { add(returnCounts, returnTimes, key, created, id); (creditsBy[key] = creditsBy[key] || new Set()).add(Number(id)); });
+  await each(1, (key, created, id, ref) => {
+    if (!/^\s*EXCHANGE\b/i.test(ref)) return add(counts, times, key, created, id);
+    const sc = Number((/SC#\s*(\d+)/i.exec(ref) || [])[1]);
+    if (sc && creditsBy[key] && creditsBy[key].has(sc)) return;  // same return, already counted
+    add(returnCounts, returnTimes, key, created, id);
+  });
+  return { counts, times, returnCounts, returnTimes };
 }
 
+
 // ---- the report -----------------------------------------------------------------------
-const blank = () => ({ callsIn: 0, callsOut: 0, talk: 0, orders: 0 });
+const blank = () => ({ callsIn: 0, callsOut: 0, talk: 0, orders: 0, returns: 0 });
 
 // Calls that touched the outside world on any leg (see the header).
 function customerCallTest(rows) {
@@ -302,16 +320,16 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
   const calls = tallyCalls(rows, uuidToKey, nameToKey);
   const events = callEvents(rows, uuidToKey, nameToKey);
   const seenNames = new Set(rows.map((r) => String(r.user_name || "").trim().toLowerCase()));
-  const { counts: orders, times: orderTimes } = await ordersCreated(bpLive, people, first, last);
+  const { counts: orders, times: orderTimes, returnCounts, returnTimes } = await ordersCreated(bpLive, people, first, last);
   const daysWithData = new Set((await pool.query(`SELECT to_char(day,'YYYY-MM-DD') d FROM webex_cdr_days WHERE day BETWEEN $1 AND $2`, [first, last])).rows.map((r) => r.d));
 
   const days = Array.from({ length: 7 }, (_, i) => addDays(first, i));
   const report = people.map((p) => {
-    const perDay = days.map((day) => ({ day, ...blank(), ...((calls[p.key] || {})[day] || {}), orders: (orders[p.key] || {})[day] || 0, noCallData: !daysWithData.has(day) }));
-    const total = perDay.reduce((a, d) => ({ callsIn: a.callsIn + d.callsIn, callsOut: a.callsOut + d.callsOut, talk: a.talk + d.talk, orders: a.orders + d.orders }), blank());
+    const perDay = days.map((day) => ({ day, ...blank(), ...((calls[p.key] || {})[day] || {}), orders: (orders[p.key] || {})[day] || 0, returns: (returnCounts[p.key] || {})[day] || 0, noCallData: !daysWithData.has(day) }));
+    const total = perDay.reduce((a, d) => ({ callsIn: a.callsIn + d.callsIn, callsOut: a.callsOut + d.callsOut, talk: a.talk + d.talk, orders: a.orders + d.orders, returns: a.returns + d.returns }), blank());
     const inWeek = (e) => e.day >= first && e.day <= last;
     return { ...p, webexMatched: !!uuids[p.key] || seenNames.has(String(p.webexName || p.name).toLowerCase()), days: perDay, total,
-      timeline: { calls: (events[p.key] || []).filter(inWeek), orders: (orderTimes[p.key] || []).filter(inWeek) } };
+      timeline: { calls: (events[p.key] || []).filter(inWeek), orders: (orderTimes[p.key] || []).filter(inWeek), returns: (returnTimes[p.key] || []).filter(inWeek) } };
   });
   return { week: first, weekEnd: last, people: report, collected, missingCallDays: days.filter((d) => !daysWithData.has(d)) };
 }
@@ -325,12 +343,12 @@ const TD = 'style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:13
 const TDN = 'style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-size:13px;text-align:right"';
 const TOT = 'style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37;text-align:right"';
 const weekTitle = (r) => `${dayLabel(r.week)} - ${dayLabel(r.weekEnd)}`;
-const shown = (p) => p.days.filter((d, i) => i < 5 || d.callsIn || d.callsOut || d.orders);   // weekends only if used
+const shown = (p) => p.days.filter((d, i) => i < 5 || d.callsIn || d.callsOut || d.orders || d.returns);   // weekends only if used
 
 // ---- timeline -------------------------------------------------------------------------
 // One chart per person: a row per day (Mon-Fri, plus a weekend day only if used), 07:00 to
 // 18:00. Each call is a bar as long as the call (green in, blue out; a call out nobody answered
-// is a thin grey tick); each order created is an orange line at the time it was made.
+// is a thin grey tick); each order created is an orange line, each return/exchange a purple one.
 // Sent as an image because no email client draws charts from HTML reliably.
 const TL_FROM = 7 * 60, TL_TO = 18 * 60;
 const TL = { left: 92, right: 16, top: 52, rowH: 34, width: 900 };
@@ -356,6 +374,10 @@ export function timelineSvg(r, p) {
       if (!c.answered) { out += `<rect x="${x1}" y="${y + 10}" width="1.5" height="${TL.rowH - 20}" fill="#9ca3af"/>`; continue; }
       out += `<rect x="${x1}" y="${y + 8}" width="${Math.max(2, x2 - x1)}" height="${TL.rowH - 16}" rx="1" fill="${c.kind === "in" ? "#16a34a" : "#2563eb"}" fill-opacity="0.85"/>`;
     }
+    for (const o of (p.timeline.returns || []).filter((o) => o.day === day)) {
+      const ox = x(o.min);
+      out += `<rect x="${ox - 1.25}" y="${y + 3}" width="2.5" height="${TL.rowH - 6}" fill="#7c3aed"/>`;
+    }
     for (const o of p.timeline.orders.filter((o) => o.day === day)) {
       const ox = x(o.min);
       out += `<rect x="${ox - 1.25}" y="${y + 3}" width="2.5" height="${TL.rowH - 6}" fill="#ea580c"/>`;
@@ -366,6 +388,8 @@ export function timelineSvg(r, p) {
   let lx = TL.left;
   for (const [col, label] of key) { out += `<rect x="${lx}" y="${ly - 9}" width="14" height="10" fill="${col}"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">${label}</text>`; lx += 160; }
   out += `<rect x="${lx + 5}" y="${ly - 12}" width="2.5" height="15" fill="#ea580c"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">Order created</text>`;
+  lx += 130;
+  out += `<rect x="${lx + 5}" y="${ly - 12}" width="2.5" height="15" fill="#7c3aed"/><text x="${lx + 20}" y="${ly}" font-size="11" fill="#374151">Return / exchange</text>`;
   return out + "</svg>";
 }
 let tlFont = null;
@@ -380,7 +404,7 @@ const cidFor = (p) => `timeline-${p.key}@callreport`;
 
 const dayRows = (p) => shown(p).map((d) => `<tr><td ${TD}>${esc(dayLabel(d.day))}</td>
     <td ${TDN}>${d.noCallData ? "-" : d.callsIn}</td><td ${TDN}>${d.noCallData ? "-" : d.callsOut}</td>
-    <td ${TDN}>${d.noCallData ? "-" : fmtDuration(d.talk)}</td><td ${TDN}>${d.orders}</td></tr>`).join("");
+    <td ${TDN}>${d.noCallData ? "-" : fmtDuration(d.talk)}</td><td ${TDN}>${d.orders}</td><td ${TDN}>${d.returns}</td></tr>`).join("");
 const timelineImg = (p, src) => `<img src="${src(p)}" width="${TL.width}" alt="Timeline of calls and orders, 7am to 6pm" style="display:block;width:100%;max-width:${TL.width}px;height:auto;border:1px solid #e5e7eb;margin-top:10px">`;
 
 export function personEmailHtml(r, p, { imgSrc = (q) => "cid:" + cidFor(q) } = {}) {
@@ -388,15 +412,15 @@ export function personEmailHtml(r, p, { imgSrc = (q) => "cid:" + cidFor(q) } = {
   <p>Hi ${esc(p.first)},</p>
   <p>Here's your week on the phones and in Brightpearl, ${esc(weekTitle(r))}.</p>
   <table style="border-collapse:collapse;width:100%">
-    <tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th></tr>
+    <tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th><th ${THN}>Returns</th></tr>
     ${dayRows(p)}
     <tr><td style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37">Week</td>
-      <td ${TOT}>${p.total.callsIn}</td><td ${TOT}>${p.total.callsOut}</td><td ${TOT}>${fmtDuration(p.total.talk)}</td><td ${TOT}>${p.total.orders}</td></tr>
+      <td ${TOT}>${p.total.callsIn}</td><td ${TOT}>${p.total.callsOut}</td><td ${TOT}>${fmtDuration(p.total.talk)}</td><td ${TOT}>${p.total.orders}</td><td ${TOT}>${p.total.returns}</td></tr>
   </table>
   <p style="font-size:13px;margin:18px 0 0"><b>Your days, 7am to 6pm</b></p>
   ${timelineImg(p, imgSrc)}
   <p style="color:#6b7280;font-size:12px;margin-top:14px">Calls in are calls you answered; calls out are calls you made. Calls between colleagues aren't counted.
-  Orders are sales orders you created in Brightpearl (web, Amazon and eBay orders aren't included).${r.missingCallDays.length ? " A dash means there's no call data for that day." : ""}</p>
+  Orders are sales orders you created in Brightpearl (web, Amazon and eBay orders aren't included); returns are the exchange orders and credit notes you booked.${r.missingCallDays.length ? " A dash means there's no call data for that day." : ""}</p>
 </div>`;
 }
 
@@ -423,13 +447,13 @@ export async function viewLink(pool, week) {
 
 export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUrl = null, web = false } = {}) {
   const people = r.people.map((p) => `<tr><td ${TD}>${esc(p.name)}${p.webexMatched ? "" : ' <span style="color:#b91c1c">(not found in Webex)</span>'}</td>
-    <td ${TDN}>${p.total.callsIn}</td><td ${TDN}>${p.total.callsOut}</td><td ${TDN}>${fmtDuration(p.total.talk)}</td><td ${TDN}>${p.total.orders}</td></tr>`).join("");
-  const sum = r.people.reduce((a, p) => ({ callsIn: a.callsIn + p.total.callsIn, callsOut: a.callsOut + p.total.callsOut, talk: a.talk + p.total.talk, orders: a.orders + p.total.orders }), blank());
+    <td ${TDN}>${p.total.callsIn}</td><td ${TDN}>${p.total.callsOut}</td><td ${TDN}>${fmtDuration(p.total.talk)}</td><td ${TDN}>${p.total.orders}</td><td ${TDN}>${p.total.returns}</td></tr>`).join("");
+  const sum = r.people.reduce((a, p) => ({ callsIn: a.callsIn + p.total.callsIn, callsOut: a.callsOut + p.total.callsOut, talk: a.talk + p.total.talk, orders: a.orders + p.total.orders, returns: a.returns + p.total.returns }), blank());
   const sections = r.people.map((p) => `<details style="margin:10px 0;border:1px solid #d1d5db;border-radius:6px">
   <summary style="cursor:pointer;padding:9px 12px;background:#f3f4f6;font-size:14px;font-weight:600">${esc(p.name)}
-    <span style="font-weight:400;color:#4b5563">&nbsp;-&nbsp;${p.total.callsIn} in, ${p.total.callsOut} out, ${fmtDuration(p.total.talk)} on the phone, ${p.total.orders} order${p.total.orders === 1 ? "" : "s"}</span></summary>
+    <span style="font-weight:400;color:#4b5563">&nbsp;-&nbsp;${p.total.callsIn} in, ${p.total.callsOut} out, ${fmtDuration(p.total.talk)} on the phone, ${p.total.orders} order${p.total.orders === 1 ? "" : "s"}, ${p.total.returns} return${p.total.returns === 1 ? "" : "s"}</span></summary>
   <div style="padding:10px 12px">
-  <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>On phone</th><th ${THN}>Orders</th></tr>
+  <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>On phone</th><th ${THN}>Orders</th><th ${THN}>Returns</th></tr>
   ${dayRows(p)}</table>
   ${timelineImg(p, imgSrc)}
   </div></details>`).join("");
@@ -438,15 +462,15 @@ export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUr
   ${viewUrl ? `<p style="margin:0 0 14px"><a href="${esc(viewUrl)}" style="display:inline-block;background:#0f6cbd;color:#ffffff;text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px;border-radius:4px">Open the full report</a>
     <span style="color:#6b7280;font-size:12px">&nbsp;each person's days and 7am-6pm timeline</span></p>` : ""}
   <table style="border-collapse:collapse;width:100%">
-    <tr><th ${TH}>Person</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th></tr>
+    <tr><th ${TH}>Person</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>Time on phone</th><th ${THN}>Orders created</th><th ${THN}>Returns</th></tr>
     ${people}
     <tr><td style="padding:7px 10px;font-weight:700;font-size:13px;border-top:2px solid #1f2a37">Team</td>
-      <td ${TOT}>${sum.callsIn}</td><td ${TOT}>${sum.callsOut}</td><td ${TOT}>${fmtDuration(sum.talk)}</td><td ${TOT}>${sum.orders}</td></tr>
+      <td ${TOT}>${sum.callsIn}</td><td ${TOT}>${sum.callsOut}</td><td ${TOT}>${fmtDuration(sum.talk)}</td><td ${TOT}>${sum.orders}</td><td ${TOT}>${sum.returns}</td></tr>
   </table>
   ${r.missingCallDays.length ? `<p style="color:#b45309;font-size:12px">No Webex call data for: ${r.missingCallDays.map(dayLabel).join(", ")}.</p>` : ""}
   ${web ? `<p style="font-size:13px;margin:18px 0 4px"><b>Each person</b> <span style="color:#6b7280">- click a name to open their days and timeline (7am to 6pm)</span></p>
   ${sections}` : ""}
-  <p style="color:#6b7280;font-size:12px;margin-top:14px">Internal calls excluded; hunt-group calls count only for whoever answered. Orders = sales orders created by that person in Brightpearl, excluding web/Amazon/eBay.</p>
+  <p style="color:#6b7280;font-size:12px;margin-top:14px">Internal calls excluded; hunt-group calls count only for whoever answered. Orders = sales orders created by that person in Brightpearl, excluding web/Amazon/eBay and exchange orders. Returns = exchange orders + credit notes they booked (both halves of one return count once).</p>
 </div>`;
 }
 
