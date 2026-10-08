@@ -2685,6 +2685,10 @@ async function existingAutoPo(existingPoId, { contactIds, autoKey }) {
   const soLines = [], soQty = new Map();
   for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
     for (const it of items) {
+      // A contributor whose row was taken OFF the PO is not wanted. The note is written once at
+      // creation and never updated, so on 2026-10-08 (PO 494958) three rows removed by hand — two
+      // already ordered on PO 494063, one FOC promo pack — still went to the Hultafors basket.
+      if (!rowBySku.has(String(it.sku).toUpperCase())) continue;
       const r = rowBySku.get(String(it.sku).toUpperCase()) || {};
       soLines.push({ order: Number(order), sku: it.sku, qty: it.qty, name: r.name || null, productId: r.productId || null, colour: r.colour, size: r.size, cost: costOf.get(String(it.sku).toUpperCase()) || 0 });
       soQty.set(String(it.sku).toUpperCase(), (soQty.get(String(it.sku).toUpperCase()) || 0) + it.qty);
