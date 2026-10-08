@@ -565,7 +565,105 @@ export async function syncRecordings(pool, days = 3) {
     }
     url = next;
   }
+  await transcribePending(pool).catch((e) => console.error("[call-report] transcripts:", e.message));
   return n;
+}
+
+// Webex writes the transcript some minutes after the call (Dec switched transcription on, 8
+// Oct). Each recording from the last 3 days without one is re-asked at most every 10 minutes;
+// once a transcript arrives, Claude turns it into a summary + an order note.
+async function transcribePending(pool, limit = 10) {
+  await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS transcript_checked_at timestamptz`);
+  await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS summary_json jsonb`);
+  await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS webex_notes text`);
+  const todo = (await pool.query(
+    `SELECT id FROM call_recordings
+      WHERE transcript IS NULL AND created > now() - interval '3 days' AND duration >= 15
+        AND (transcript_checked_at IS NULL OR transcript_checked_at < now() - interval '10 minutes')
+      ORDER BY created DESC LIMIT $1`, [limit])).rows;
+  for (const { id } of todo) {
+    await pool.query(`UPDATE call_recordings SET transcript_checked_at = now() WHERE id = $1`, [id]);
+    const { json } = await webexGet(pool, `https://webexapis.com/v1/convergedRecordings/${encodeURIComponent(id)}`);
+    const links = (json && json.temporaryDirectDownloadLinks) || {};
+    const grab = async (u) => { if (!u) return ""; try { const r = await fetch(u); return r.ok ? (await r.text()).trim() : ""; } catch { return ""; } };
+    // Webex's own AI summary ("suggested notes") and action items, kept alongside ours.
+    const notes = await grab(links.suggestedNotesDownloadLink), actions = await grab(links.actionItemsDownloadLink);
+    if (notes || actions) await pool.query(`UPDATE call_recordings SET webex_notes = $2 WHERE id = $1`, [id, [notes, actions && "Action items:\n" + actions].filter(Boolean).join("\n\n")]);
+    const text = vttToText(await grab(links.transcriptDownloadLink));
+    if (!text) continue;
+    await pool.query(`UPDATE call_recordings SET transcript = $2 WHERE id = $1`, [id, text]);
+    await summariseRecording(pool, id).catch((e) => console.error("[call-report] summary", id, e.message));
+  }
+  // Transcripts that arrived but were never summarised (Claude down, key missing at the time).
+  for (const { id } of (await pool.query(`SELECT id FROM call_recordings WHERE transcript IS NOT NULL AND summary IS NULL AND created > now() - interval '3 days' LIMIT 5`)).rows) {
+    await summariseRecording(pool, id).catch((e) => console.error("[call-report] summary", id, e.message));
+  }
+}
+// WebVTT ("00:00:01.000 --> 00:00:04.000" cues, "<v Speaker>" voices) -> "Speaker: words" lines.
+// Plain text passes through unchanged.
+export function vttToText(raw) {
+  const s = String(raw || "").replace(/\r/g, "");
+  if (!/^WEBVTT/.test(s.trim())) return s.trim();
+  const out = [];
+  for (const block of s.split(/\n\n+/)) {
+    const lines = block.split("\n").filter((l) => l && !/-->/.test(l) && !/^WEBVTT/.test(l) && !/^\d+$/.test(l.trim()) && !/^NOTE\b/.test(l));
+    for (const l of lines) {
+      const v = /^<v\s+([^>]+)>(.*?)(<\/v>)?$/.exec(l.trim());
+      const line = v ? `${v[1].trim()}: ${v[2].trim()}` : l.trim().replace(/<[^>]+>/g, "");
+      // Webex splits one person's sentence across cues; join consecutive lines from the same speaker.
+      const sp = /^([^:]{1,40}):\s/.exec(line), prev = out[out.length - 1];
+      if (sp && prev && prev.startsWith(sp[1] + ": ")) out[out.length - 1] = prev + " " + line.slice(sp[0].length);
+      else out.push(line);
+    }
+  }
+  return out.join("\n").trim();
+}
+
+// Claude reads the transcript and writes what a colleague would put on the order. Plain ASCII
+// in the note (Brightpearl mangles anything else - see bpSafeText).
+const SUMMARY_SCHEMA = {
+  type: "object", additionalProperties: false,
+  properties: {
+    is_customer_call: { type: "boolean" },
+    customer: { type: "string" },
+    summary: { type: "string" },
+    items: { type: "array", items: { type: "object", additionalProperties: false,
+      properties: { product: { type: "string" }, colour: { type: "string" }, sizes_and_quantities: { type: "string" }, decoration: { type: "string" } },
+      required: ["product", "colour", "sizes_and_quantities", "decoration"] } },
+    agreed: { type: "string" },
+    actions: { type: "array", items: { type: "string" } },
+    order_refs: { type: "array", items: { type: "string" } },
+    order_note: { type: "string" },
+  },
+  required: ["is_customer_call", "customer", "summary", "items", "agreed", "actions", "order_refs", "order_note"],
+};
+export async function summariseRecording(pool, id) {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
+  const c = (await pool.query(`SELECT owner_email, created, duration, other_party, transcript FROM call_recordings WHERE id = $1`, [id])).rows[0];
+  if (!c || !c.transcript) return null;
+  const staff = (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email;
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+  const msg = await new Anthropic().messages.create({
+    model: process.env.CALL_SUMMARY_MODEL || "claude-sonnet-5",
+    max_tokens: 1500,
+    messages: [{ role: "user", content:
+      `This is the transcript of a phone call at Tuff Shop, a UK workwear and embroidery/print company. ` +
+      `Our side is ${staff}; the other party shows as "${c.other_party}". Call on ${ukDay(c.created)}, ${Math.round(c.duration / 60)} min.\n\n` +
+      `Write what a colleague needs on the customer's sales order. Only state what was actually said - never guess sizes, ` +
+      `quantities, prices or dates. Empty string / empty list where nothing was said.\n` +
+      `- is_customer_call: false for a call between colleagues or with a supplier.\n` +
+      `- summary: 1-3 plain sentences.\n- items: each product discussed with colour, sizes+quantities, logo/decoration.\n` +
+      `- agreed: prices, delivery dates, deadlines or promises made.\n- actions: what our side must do next.\n` +
+      `- order_refs: any order / quote / PO numbers mentioned.\n` +
+      `- order_note: the note to paste on the order, plain ASCII only (no pound sign - write GBP; no dashes other than -), ` +
+      `starting "Phone call ${ukDay(c.created)} (${staff}):".\n\nTranscript:\n${c.transcript.slice(0, 60000)}` }],
+    output_config: { format: { type: "json_schema", schema: SUMMARY_SCHEMA } },
+  });
+  const text = (msg.content || []).find((b) => b.type === "text");
+  const parsed = JSON.parse((text && text.text) || "{}");
+  await pool.query(`UPDATE call_recordings SET summary = $2, summary_json = $3, summarized_at = now() WHERE id = $1`,
+    [id, parsed.order_note || parsed.summary || "", JSON.stringify(parsed)]);
+  return parsed;
 }
 const signRec = (secret, id) => crypto.createHmac("sha256", secret).update("rec:" + id).digest("hex").slice(0, 40);
 export async function recordingLink(pool, id) {
@@ -711,7 +809,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
     // Otherwise: pull the last ?days (default 3) from Webex, then list what is stored, with replay links.
     try {
       const synced = await syncRecordings(pool, Math.min(Number(req.query.days) || 3, 30));
-      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary FROM call_recordings ORDER BY created DESC LIMIT 50`)).rows;
+      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, webex_notes, length(transcript) AS transcript_chars, transcript_checked_at FROM call_recordings ORDER BY created DESC LIMIT 50`)).rows;
       for (const c of rows) c.url = await recordingLink(pool, c.id);
       res.json({ app: scope, synced, recordings: rows });
     } catch (e) { res.status(500).json({ app: scope, error: e.message }); }
@@ -731,7 +829,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
       if (!(await recordingOk(req))) return res.status(403).send("This link isn't valid.");
       const pool = getPool();
       await ensureRecordingTables(pool);
-      const c = (await pool.query(`SELECT owner_email, created, duration, other_party, summary, transcript FROM call_recordings WHERE id = $1`, [req.params.id])).rows[0];
+      const c = (await pool.query(`SELECT owner_email, created, duration, other_party, summary, transcript, webex_notes FROM call_recordings WHERE id = $1`, [req.params.id])).rows[0];
       const who = c ? (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email : "";
       const when = c ? `${dayLabel(ukDay(c.created))} ${hhmm(ukMinutes(c.created))}` : "";
       const audio = `/call-recording/${encodeURIComponent(req.params.id)}/audio?sig=${encodeURIComponent(String(req.query.sig))}`;
@@ -742,6 +840,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
 <p style="margin:0 0 16px;color:#4b5563;font-size:13px">${esc(who)}${who ? " - " : ""}${esc(when)}${c ? ` - ${fmtLen(c.duration)}` : ""}</p>
 <audio controls autoplay preload="auto" src="${esc(audio)}" style="width:100%"></audio>
 ${c && c.summary ? `<h3 style="font-size:14px;margin:20px 0 6px">Summary</h3><div style="font-size:13px;white-space:pre-wrap">${esc(c.summary)}</div>` : ""}
+${c && c.webex_notes ? `<h3 style="font-size:14px;margin:20px 0 6px">Webex AI summary</h3><div style="font-size:13px;white-space:pre-wrap">${esc(c.webex_notes)}</div>` : ""}
 ${c && c.transcript ? `<details style="margin-top:16px"><summary style="cursor:pointer;font-size:13px;font-weight:600">Transcript</summary><div style="font-size:13px;white-space:pre-wrap;margin-top:8px">${esc(c.transcript)}</div></details>` : ""}
 </div></body></html>`);
     } catch (e) { res.status(500).send("Could not open the recording: " + esc(e.message)); }
