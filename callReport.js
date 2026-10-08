@@ -768,7 +768,14 @@ ${c && c.transcript ? `<details style="margin-top:16px"><summary style="cursor:p
       const { json } = await webexGet(getPool(), `https://webexapis.com/v1/convergedRecordings/${encodeURIComponent(req.params.id)}`);
       const link = json && json.temporaryDirectDownloadLinks && json.temporaryDirectDownloadLinks.audioDownloadLink;
       if (!link) return res.status(404).send("Webex has no audio for this recording any more.");
-      res.set(noIndex).redirect(302, link);
+      // Streamed through rather than redirected: Webex serves it as an octet-stream download,
+      // which the browser's player will not start. Range is passed on so the player can seek.
+      const up = await fetch(link, { headers: req.headers.range ? { Range: req.headers.range } : {} });
+      if (!up.ok && up.status !== 206) return res.status(502).send(`Webex audio -> ${up.status}`);
+      res.status(up.status).set({ ...noIndex, "Content-Type": "audio/mpeg", "Accept-Ranges": "bytes", "Content-Disposition": "inline" });
+      for (const h of ["content-length", "content-range"]) if (up.headers.get(h)) res.set(h, up.headers.get(h));
+      const { Readable } = await import("stream");
+      Readable.fromWeb(up.body).on("error", () => res.end()).pipe(res);
     } catch (e) { res.status(502).send("Webex would not hand over the recording: " + esc(e.message)); }
   });
 
