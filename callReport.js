@@ -685,7 +685,20 @@ export async function summariseRecording(pool, id) {
   if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
   const c = (await pool.query(`SELECT owner_email, created, duration, other_party, transcript FROM call_recordings WHERE id = $1`, [id])).rows[0];
   if (!c || !c.transcript) return null;
-  const staff = (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email;
+  // A person's name, not their address ("dec@..." -> "Dec") when they are not a report person.
+  const staff = (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name
+    || String(c.owner_email || "").split("@")[0].replace(/^./, (x) => x.toUpperCase());
+  // Internal call? Webex's metadata names each end; when the other end is one of OUR
+  // Webex users (a handset like "Pelican Works 2"), it is colleague-to-colleague and must
+  // never become an order note. Claude alone took "Pelican Works 2" for a customer (8 Oct).
+  let internal = false;
+  try {
+    const { json } = await webexGet(pool, `https://webexapis.com/v1/convergedRecordings/${encodeURIComponent(id)}/metadata`);
+    const sd = (json && json.serviceData) || {};
+    const ours = sd.managedBy && sd.managedBy.actor && sd.managedBy.actor.id;
+    internal = [sd.callingParty, sd.calledParty, sd.connectedParty].some((p) => p && p.actor && p.actor.type === "USER"
+      && p.actor.id !== ours && /@tuffshop\.co\.uk$/i.test(String(p.actor.email || "")));
+  } catch { /* unknown - leave it to the transcript */ }
   const orders = await ordersMentioned(c.transcript);
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const msg = await new Anthropic().messages.create({
@@ -702,6 +715,9 @@ export async function summariseRecording(pool, id) {
       `and put what was heard in brackets when you correct a product code or number. Order numbers are often misheard: if a ` +
       `number heard is not found in Brightpearl, say so plainly ("order 595771 as heard - not found, check").\n` +
       (orders.length ? `Brightpearl orders matching numbers heard in the call - use them to identify the customer and products:\n${JSON.stringify(orders)}\n` : "") +
+      (internal ? `This was an INTERNAL call: both ends are Tuff Shop phones ("${c.other_party}" is a colleague's handset, not a customer). ` +
+        `is_customer_call must be false and order_note must be an empty string.\n` : "") +
+      `Phone names like "Mike Production" or "Pelican Works 2" are our handsets, not people or companies - never call one the customer.\n` +
       `- is_customer_call: false for a call between colleagues or with a supplier.\n` +
       `- call_type: chasing / new_order / change_to_order / query / complaint / other.\n` +
       `- summary: 1-2 plain sentences.\n` +
@@ -717,8 +733,12 @@ export async function summariseRecording(pool, id) {
   });
   const text = (msg.content || []).find((b) => b.type === "text");
   const parsed = JSON.parse((text && text.text) || "{}");
+  if (internal) Object.assign(parsed, { is_customer_call: false, order_note: "", internal: true });
+  // The list shows the order note; a call that is not with a customer shows its summary,
+  // labelled, and has no note to post.
+  const shown = parsed.is_customer_call === false ? `${internal ? "Internal call" : "Not a customer call"}: ${parsed.summary || ""}` : (parsed.order_note || parsed.summary || "");
   await pool.query(`UPDATE call_recordings SET summary = $2, summary_json = $3, summarized_at = now() WHERE id = $1`,
-    [id, parsed.order_note || parsed.summary || "", JSON.stringify(parsed)]);
+    [id, shown, JSON.stringify(parsed)]);
   return parsed;
 }
 const signRec = (secret, id) => crypto.createHmac("sha256", secret).update("rec:" + id).digest("hex").slice(0, 40);
