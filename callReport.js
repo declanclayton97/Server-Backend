@@ -384,6 +384,14 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
   const mail = graphConfigured() ? await emailActivity(people, first, last).catch((e) => ({ _error: e.message })) : {};
   const daysWithData = new Set((await pool.query(`SELECT to_char(day,'YYYY-MM-DD') d FROM webex_cdr_days WHERE day BETWEEN $1 AND $2`, [first, last])).rows.map((r) => r.d));
 
+  // Recorded calls in the week, each with its signed replay link.
+  let recs = [];
+  try {
+    await ensureRecordingTables(pool);
+    recs = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary FROM call_recordings WHERE day BETWEEN $1 AND $2 ORDER BY created`, [first, last])).rows;
+    for (const c of recs) c.url = await recordingLink(pool, c.id);
+  } catch (e) { console.error('[call-report] recordings:', e.message); }
+
   const days = Array.from({ length: 7 }, (_, i) => addDays(first, i));
   const report = people.map((p) => {
     const m = mail[p.key] || { error: mail._error || "mailbox not read" };
@@ -391,7 +399,9 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
       emailsIn: m.error ? 0 : m.in[day] || 0, emailsOut: m.error ? 0 : m.out[day] || 0, noCallData: !daysWithData.has(day), noEmailData: !!m.error }));
     const total = perDay.reduce((a, d) => ({ callsIn: a.callsIn + d.callsIn, callsOut: a.callsOut + d.callsOut, talk: a.talk + d.talk, orders: a.orders + d.orders, returns: a.returns + d.returns, emailsIn: a.emailsIn + d.emailsIn, emailsOut: a.emailsOut + d.emailsOut }), blank());
     const inWeek = (e) => e.day >= first && e.day <= last;
-    return { ...p, emailError: m.error || null, webexMatched: !!uuids[p.key] || seenNames.has(String(p.webexName || p.name).toLowerCase()), days: perDay, total,
+    const recordings = recs.filter((c) => c.owner_email === String(p.email || '').toLowerCase())
+      .map((c) => ({ day: ukDay(c.created), min: ukMinutes(c.created), duration: c.duration, with: c.other_party, summary: c.summary, url: c.url }));
+    return { ...p, recordings, emailError: m.error || null, webexMatched: !!uuids[p.key] || seenNames.has(String(p.webexName || p.name).toLowerCase()), days: perDay, total,
       timeline: { calls: (events[p.key] || []).filter(inWeek), orders: (orderTimes[p.key] || []).filter(inWeek), returns: (returnTimes[p.key] || []).filter(inWeek), emails: (m.sentTimes || []).filter(inWeek) } };
   });
   return { week: first, weekEnd: last, people: report, collected, missingCallDays: days.filter((d) => !daysWithData.has(d)) };
@@ -524,10 +534,60 @@ async function reportSecret(pool) {
   return linkSecret;
 }
 const signWeek = (secret, week) => crypto.createHmac("sha256", secret).update("manager:" + week).digest("hex").slice(0, 40);
+const publicBase = () => (process.env.PUBLIC_BASE_URL || "https://server-backend-1i47.onrender.com").replace(/\/$/, "");
 export async function viewLink(pool, week) {
-  const base = (process.env.PUBLIC_BASE_URL || "https://server-backend-1i47.onrender.com").replace(/\/$/, "");
-  return `${base}/call-report/view?week=${week}&sig=${signWeek(await reportSecret(pool), week)}`;
+  return `${publicBase()}/call-report/view?week=${week}&sig=${signWeek(await reportSecret(pool), week)}`;
 }
+
+// ---- call recordings (Dec, 8 Oct) -------------------------------------------------------
+// Webex Calling records into Webex's own storage. The Service App reads them as a Compliance
+// Officer: spark-admin:recordings_read lists them, but only spark-compliance:recordings_read
+// gets the audio download link (and only a full admin who is ALSO a compliance officer can
+// approve that scope - a full admin cannot give themselves the role; another admin must).
+// call_recordings keeps who / when / who with; the audio stays in Webex. A replay link points
+// at OUR server, signed per recording, which asks Webex for a fresh download link when it is
+// opened - Webex's own links expire within hours.
+async function ensureRecordingTables(pool) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS call_recordings (
+      id text PRIMARY KEY, owner_email text, created timestamptz NOT NULL, day date NOT NULL,
+      duration int, topic text, other_party text, session_id text,
+      transcript text, summary text, summarized_at timestamptz, seen_at timestamptz NOT NULL DEFAULT now())`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS call_recordings_day ON call_recordings (day)`);
+}
+// "Call with Pelican Works 2-20261007 1543" -> "Pelican Works 2"
+const otherParty = (topic) => String(topic || "").replace(/^Call with\s+/i, "").replace(/-\d{8}\s+\d{4}$/, "").trim();
+export async function syncRecordings(pool, days = 3) {
+  await ensureRecordingTables(pool);
+  const from = new Date(Date.now() - days * 86400e3).toISOString(), to = new Date().toISOString();
+  let url = `https://webexapis.com/v1/admin/convergedRecordings?from=${from}&to=${to}&max=100`;
+  let n = 0;
+  while (url) {
+    const { json, next } = await webexGet(pool, url);
+    for (const x of (json && json.items) || []) {
+      if ((x.serviceType && x.serviceType !== "calling") || (x.status && x.status !== "available")) continue;
+      await pool.query(
+        `INSERT INTO call_recordings (id, owner_email, created, day, duration, topic, other_party, session_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET duration = EXCLUDED.duration`,
+        [x.id, String(x.ownerEmail || "").toLowerCase(), x.createTime, ukDay(x.createTime), x.durationSeconds || 0,
+         x.topic || "", otherParty(x.topic), (x.serviceData && x.serviceData.callSessionId) || null]);
+      n++;
+    }
+    url = next;
+  }
+  return n;
+}
+const signRec = (secret, id) => crypto.createHmac("sha256", secret).update("rec:" + id).digest("hex").slice(0, 40);
+export async function recordingLink(pool, id) {
+  return `${publicBase()}/call-recording/${encodeURIComponent(id)}?sig=${signRec(await reportSecret(pool), id)}`;
+}
+const fmtLen = (s) => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, "0")}`;
+const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+// The recorded calls under a person in the web report.
+const recordingList = (p) => !(p.recordings || []).length ? "" : `<p style="font-size:13px;margin:16px 0 4px"><b>Recorded calls</b></p>
+  <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>When</th><th ${TH}>With</th><th ${THN}>Length</th><th ${TH}>Summary</th><th ${TH}></th></tr>
+  ${p.recordings.map((c) => `<tr><td ${TD}>${esc(dayLabel(c.day))} ${hhmm(c.min)}</td><td ${TD}>${esc(c.with)}</td><td ${TDN}>${fmtLen(c.duration)}</td>
+    <td ${TD}>${c.summary ? esc(c.summary) : '<span style="color:#9ca3af">summary to come</span>'}</td>
+    <td ${TD}><a href="${esc(c.url)}" target="_blank" rel="noopener" style="color:#0f6cbd;font-weight:600;text-decoration:none">&#9654; Listen</a></td></tr>`).join("")}</table>`;
 
 export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUrl = null, web = false } = {}) {
   const w = web ? WEB_TL_WIDTH : TL.width;
@@ -541,6 +601,7 @@ export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUr
   <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>On phone</th><th ${THN}>Orders</th><th ${THN}>Returns</th><th ${THN}>Emails in</th><th ${THN}>Emails out</th></tr>
   ${dayRows(p)}</table>
   ${timelineImg(p, imgSrc, w)}
+  ${recordingList(p)}
   </div></details>`).join("");
   return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#111;max-width:${w}px">
   <p>Sales activity for ${esc(weekTitle(r))}.</p>
@@ -663,20 +724,52 @@ export function registerCallReport(app, { getPool, bpLive }) {
         return res.json({ keys: Object.keys(json || {}), files: Object.fromEntries(Object.entries(links).map(([k, v]) => [k, !!v])), format: json && json.format, serviceData: json && json.serviceData });
       } catch (e) { return res.json({ error: e.message }); }
     }
-    const from = new Date(Date.now() - 2 * 86400e3).toISOString(), to = new Date().toISOString();
-    const tries = [
-      `https://webexapis.com/v1/admin/convergedRecordings?from=${from}&to=${to}&max=50`,
-      `https://webexapis.com/v1/admin/convergedRecordings?serviceType=calling&from=${from}&to=${to}&max=50`,
-    ];
-    const out = [];
-    for (const url of tries) {
-      try {
-        const { json } = await webexGet(pool, url);
-        out.push({ url: url.split("?")[0], items: ((json && json.items) || []).map((x) => ({ id: x.id, topic: x.topic, created: x.createTime, duration: x.durationSeconds, owner: x.ownerEmail || x.ownerId, service: x.serviceType, status: x.status, storage: x.storageRegion })) });
-        break;
-      } catch (e) { out.push({ url: url.split("?")[0], error: e.message }); }
-    }
-    res.json({ app: scope, results: out });
+    // Otherwise: pull the last ?days (default 3) from Webex, then list what is stored, with replay links.
+    try {
+      const synced = await syncRecordings(pool, Math.min(Number(req.query.days) || 3, 30));
+      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary FROM call_recordings ORDER BY created DESC LIMIT 50`)).rows;
+      for (const c of rows) c.url = await recordingLink(pool, c.id);
+      res.json({ app: scope, synced, recordings: rows });
+    } catch (e) { res.status(500).json({ app: scope, error: e.message }); }
+  });
+
+  // GET /call-recording/:id?sig= - a small player page for one recorded call. The signature
+  // is per recording, so a link opens that call and nothing else. The audio itself comes from
+  // /call-recording/:id/audio, which fetches a fresh Webex link at play time.
+  const recordingOk = async (req) => {
+    const id = String(req.params.id || ""), got = String(req.query.sig || "");
+    const want = signRec(await reportSecret(getPool()), id);
+    return got.length === want.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
+  };
+  const noIndex = { "Cache-Control": "private, no-store", "X-Robots-Tag": "noindex", "Referrer-Policy": "no-referrer" };
+  app.get("/call-recording/:id", async (req, res) => {
+    try {
+      if (!(await recordingOk(req))) return res.status(403).send("This link isn't valid.");
+      const pool = getPool();
+      await ensureRecordingTables(pool);
+      const c = (await pool.query(`SELECT owner_email, created, duration, other_party, summary, transcript FROM call_recordings WHERE id = $1`, [req.params.id])).rows[0];
+      const who = c ? (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email : "";
+      const when = c ? `${dayLabel(ukDay(c.created))} ${hhmm(ukMinutes(c.created))}` : "";
+      const audio = `/call-recording/${encodeURIComponent(req.params.id)}/audio?sig=${encodeURIComponent(String(req.query.sig))}`;
+      res.set(noIndex).type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Call recording</title></head>
+<body style="margin:0;padding:24px;background:#f6f7f9;font-family:Segoe UI,Arial,sans-serif;color:#111">
+<div style="background:#fff;padding:20px 24px;border-radius:8px;max-width:760px;margin:0 auto">
+<h2 style="margin:0 0 4px;font-size:18px">${c ? `Call with ${esc(c.other_party || "unknown")}` : "Call recording"}</h2>
+<p style="margin:0 0 16px;color:#4b5563;font-size:13px">${esc(who)}${who ? " - " : ""}${esc(when)}${c ? ` - ${fmtLen(c.duration)}` : ""}</p>
+<audio controls autoplay preload="auto" src="${esc(audio)}" style="width:100%"></audio>
+${c && c.summary ? `<h3 style="font-size:14px;margin:20px 0 6px">Summary</h3><div style="font-size:13px;white-space:pre-wrap">${esc(c.summary)}</div>` : ""}
+${c && c.transcript ? `<details style="margin-top:16px"><summary style="cursor:pointer;font-size:13px;font-weight:600">Transcript</summary><div style="font-size:13px;white-space:pre-wrap;margin-top:8px">${esc(c.transcript)}</div></details>` : ""}
+</div></body></html>`);
+    } catch (e) { res.status(500).send("Could not open the recording: " + esc(e.message)); }
+  });
+  app.get("/call-recording/:id/audio", async (req, res) => {
+    try {
+      if (!(await recordingOk(req))) return res.status(403).send("This link isn't valid.");
+      const { json } = await webexGet(getPool(), `https://webexapis.com/v1/convergedRecordings/${encodeURIComponent(req.params.id)}`);
+      const link = json && json.temporaryDirectDownloadLinks && json.temporaryDirectDownloadLinks.audioDownloadLink;
+      if (!link) return res.status(404).send("Webex has no audio for this recording any more.");
+      res.set(noIndex).redirect(302, link);
+    } catch (e) { res.status(502).send("Webex would not hand over the recording: " + esc(e.message)); }
   });
 
   // Customer emails in / out per person per day for a week, from their own mailboxes (?week=).
@@ -713,7 +806,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
 
   // Overnight (01:00-06:00 UK) pull of any finished day not yet stored; Monday 07:30-10:00
   // the previous week's emails, once (the week is claimed first, released on failure).
-  let busy = false;
+  let busy = false, lastRecordingSync = 0;
   setInterval(async () => {
     if (busy || String(process.env.CALL_REPORT_ENABLED || "").toLowerCase() !== "on" || !getPool()) return;
     const now = new Date();
@@ -723,6 +816,11 @@ export function registerCallReport(app, { getPool, bpLive }) {
     try {
       const pool = getPool();
       await ensureTables(pool);
+      // New call recordings every 15 minutes through the working day.
+      if (hm >= "07:00" && hm < "20:30" && Date.now() - lastRecordingSync > 14 * 60e3) {
+        lastRecordingSync = Date.now();
+        await syncRecordings(pool).catch((e) => console.error("[call-report] recordings sync:", e.message));
+      }
       if (hm >= "01:00" && hm < "06:00") {
         const today = ukDay(now);
         await collectMissing(pool, addDays(today, -8), addDays(today, -1));
