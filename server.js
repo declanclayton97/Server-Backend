@@ -14457,6 +14457,41 @@ const quoteRowToView = (r) => ({
   enteredStatusAt: r.entered_status_at,
 });
 
+// Bring quote_chase rows up to date with Brightpearl (total, reference, customer). Updates
+// the passed rows in place and returns what changed. The id list MUST be ascending:
+// Brightpearl 400s an unordered id-set (CMNC-006), and the first version of this sent
+// them in table order - every poll then failed the refresh and skipped (8 Oct).
+async function refreshQuoteChaseRows(rows) {
+  const ids = [...new Set(rows.map((r) => Number(r.order_id)).filter(Boolean))].sort((a, b) => a - b);
+  const updated = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const orders = await bpLive('GET', `/order-service/order/${ids.slice(i, i + 200).join(',')}`) || [];
+    for (const o of orders) {
+      const cust = (o.parties && o.parties.customer) || {};
+      const fresh = {
+        net_value: parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
+        reference: o.reference || '',
+        customer_name: cust.contactName || cust.addressFullName || '',
+        company_name: cust.companyName || '',
+        customer_email: quoteChaseEmail(o),
+      };
+      const row = rows.find((r) => Number(r.order_id) === Number(o.id));
+      if (!row) continue;
+      if (!fresh.customer_email) delete fresh.customer_email;   // never blank an email we had
+      const differs = (k) => (k === 'net_value' ? Math.abs(Number(row[k]) - fresh[k]) > 0.004 : String(row[k] ?? '') !== String(fresh[k] ?? ''));
+      if (!Object.keys(fresh).some(differs)) continue;
+      await pool.query(
+        `UPDATE quote_chase SET net_value = $2, reference = $3, customer_name = $4, company_name = $5,
+                customer_email = COALESCE($6, customer_email)
+          WHERE order_id = $1`,
+        [o.id, fresh.net_value, fresh.reference, fresh.customer_name, fresh.company_name, fresh.customer_email || null]);
+      updated.push({ orderId: o.id, from: Number(row.net_value), to: fresh.net_value });
+      Object.assign(row, fresh);
+    }
+  }
+  return { checked: ids.length, updated };
+}
+
 async function pollQuoteChase() {
   if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
   if (process.env.QUOTE_CHASE_ENABLED !== 'true') return;
@@ -14559,31 +14594,8 @@ async function pollQuoteChase() {
   // cancelled with "The quote has changed" (Dec, 8 Oct). A failed refresh skips this
   // poll: sending on stored figures is exactly the fault being fixed.
   try {
-    const ids = open.rows.map((r) => Number(r.order_id));
-    for (let i = 0; i < ids.length; i += 200) {
-      const orders = await bpLive('GET', `/order-service/order/${ids.slice(i, i + 200).join(',')}`) || [];
-      for (const o of orders) {
-        const cust = (o.parties && o.parties.customer) || {};
-        const fresh = {
-          net_value: parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
-          reference: o.reference || '',
-          customer_name: cust.contactName || cust.addressFullName || '',
-          company_name: cust.companyName || '',
-          customer_email: quoteChaseEmail(o),
-        };
-        const row = open.rows.find((r) => Number(r.order_id) === Number(o.id));
-        if (!row) continue;
-        if (!fresh.customer_email) delete fresh.customer_email;   // never blank an email we had
-        const changed = Object.keys(fresh).some((k) => String(row[k] ?? '') !== String(fresh[k] ?? ''));
-        if (!changed) continue;
-        await pool.query(
-          `UPDATE quote_chase SET net_value = $2, reference = $3, customer_name = $4, company_name = $5,
-                  customer_email = COALESCE($6, customer_email)
-            WHERE order_id = $1`,
-          [o.id, fresh.net_value, fresh.reference, fresh.customer_name, fresh.company_name, fresh.customer_email || null]);
-        Object.assign(row, fresh);
-      }
-    }
+    const r = await refreshQuoteChaseRows(open.rows);
+    if (r.updated.length) console.log(`[quote-chase] refreshed from Brightpearl: ${r.updated.map((u) => `SO${u.orderId} ${u.from}->${u.to}`).join(', ')}`);
   } catch (e) {
     console.error('[quote-chase] refreshing quote totals from Brightpearl failed, skipping this poll:', e.message);
     return;
@@ -15349,6 +15361,16 @@ app.get('/api/quote-chase/:orderId/chase-preview', (req, res, next) => app.local
   } catch (e) { res.status(500).send('Preview failed: ' + e.message); }
 });
 const gbpText = (n) => '£' + (Number(n) || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// POST /api/quote-chase/refresh - bring every tracked, still-open quote's total / reference /
+// customer up to date from Brightpearl now. Sends nothing.
+app.post('/api/quote-chase/refresh', (req, res, next) => app.locals.requireHubUser(req, res, next), async (req, res) => {
+  if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
+  try {
+    const q = await pool.query(`SELECT * FROM quote_chase WHERE still_quote_sent = TRUE AND is_test = FALSE`);
+    res.json(await refreshQuoteChaseRows(q.rows));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 app.get('/api/quote-chase/list', (req, res, next) => app.locals.requireHubUser(req, res, next), async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
