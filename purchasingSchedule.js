@@ -4821,9 +4821,26 @@ export async function blakladerErpReconcile(pool, altItemsUrl, { days = 21, dryR
     // A one-size part number is sent bare and resolved to "<partNo>onesize" — count that as the
     // same line. Anything else must match exactly: a near match is how the 2XL looked fine.
     const heldFor = (k) => held.get(k) ?? held.get(`${k}ONESIZE`) ?? [...held.entries()].filter(([h]) => h.startsWith(k) && /ONESIZE$/.test(h)).reduce((a, [, q]) => a + q, 0);
+    // Barcode fallback for a code that does not match. Order rows freeze the SKU they were raised
+    // with, so a product fixed since (PO 491057: row "14964599", product now 149613304599C56) reads
+    // as missing although Blaklader shipped it. The EAN is the same either side of a rename, so a
+    // line whose product barcode is on the ERP order is held, whatever its row SKU says.
+    const heldByEan = new Map();
+    for (const p of o.products) if (p.ean) heldByEan.set(String(p.ean).replace(/\D/g, ''), (heldByEan.get(String(p.ean).replace(/\D/g, '')) || 0) + p.qty);
+    const eanOf = new Map();
+    const unmatchedPids = [...want.values()].filter((w) => !(heldFor(norm(w.sku)) > 0) && Number(w.productId) > 1001).map((w) => Number(w.productId));
+    if (unmatchedPids.length && heldByEan.size) {
+      try {
+        for (const p of (await bp.bpLiveGet(`/product-service/product/${[...new Set(unmatchedPids)].sort((a, b) => a - b).join(',')}`)) || []) {
+          const e = String((p.identity && (p.identity.barcode || p.identity.ean)) || '').replace(/\D/g, '');
+          if (e) eanOf.set(Number(p.id), e);
+        }
+      } catch { /* barcode lookup failed — fall back to SKU-only, which over-reports rather than hides */ }
+    }
     const missing = [];
     for (const [k, w] of want) {
-      const got = heldFor(k) || 0;
+      let got = heldFor(k) || 0;
+      if (got < w.qty && eanOf.has(Number(w.productId))) got = Math.max(got, heldByEan.get(eanOf.get(Number(w.productId))) || 0);
       // Multipacks are ordered in pieces, so Blaklader may hold MORE than our units; only fewer is a fault.
       if (got < w.qty) missing.push({ sku: w.sku, want: w.qty, qty: w.qty - got, held: got, productId: w.productId, name: w.name });
     }
