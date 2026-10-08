@@ -909,7 +909,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
         out.phones.push(row);
       }
       try {
-        const s = new Date(Date.now() - 2 * 3600e3).toISOString(), e = new Date(Date.now() - 5 * 60e3).toISOString();
+        const s = new Date(Date.now() - (Number(req.query.mins) || 120) * 60e3).toISOString(), e = new Date(Date.now() - 5 * 60e3).toISOString();
         const { json } = await webexGet(pool, `${cdrBase()}/v1/cdr_feed?startTime=${s}&endTime=${e}&max=500`);
         const by = {};
         for (const r of (json && json.items) || []) {
