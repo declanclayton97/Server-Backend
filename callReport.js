@@ -384,14 +384,6 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
   const mail = graphConfigured() ? await emailActivity(people, first, last).catch((e) => ({ _error: e.message })) : {};
   const daysWithData = new Set((await pool.query(`SELECT to_char(day,'YYYY-MM-DD') d FROM webex_cdr_days WHERE day BETWEEN $1 AND $2`, [first, last])).rows.map((r) => r.d));
 
-  // Recorded calls in the week, each with its signed replay link.
-  let recs = [];
-  try {
-    await ensureRecordingTables(pool);
-    recs = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary FROM call_recordings WHERE day BETWEEN $1 AND $2 ORDER BY created`, [first, last])).rows;
-    for (const c of recs) c.url = await recordingLink(pool, c.id);
-  } catch (e) { console.error('[call-report] recordings:', e.message); }
-
   const days = Array.from({ length: 7 }, (_, i) => addDays(first, i));
   const report = people.map((p) => {
     const m = mail[p.key] || { error: mail._error || "mailbox not read" };
@@ -399,9 +391,7 @@ export async function buildReport({ pool, bpLive, week, collect = true }) {
       emailsIn: m.error ? 0 : m.in[day] || 0, emailsOut: m.error ? 0 : m.out[day] || 0, noCallData: !daysWithData.has(day), noEmailData: !!m.error }));
     const total = perDay.reduce((a, d) => ({ callsIn: a.callsIn + d.callsIn, callsOut: a.callsOut + d.callsOut, talk: a.talk + d.talk, orders: a.orders + d.orders, returns: a.returns + d.returns, emailsIn: a.emailsIn + d.emailsIn, emailsOut: a.emailsOut + d.emailsOut }), blank());
     const inWeek = (e) => e.day >= first && e.day <= last;
-    const recordings = recs.filter((c) => c.owner_email === String(p.email || '').toLowerCase())
-      .map((c) => ({ day: ukDay(c.created), min: ukMinutes(c.created), duration: c.duration, with: c.other_party, summary: c.summary, url: c.url }));
-    return { ...p, recordings, emailError: m.error || null, webexMatched: !!uuids[p.key] || seenNames.has(String(p.webexName || p.name).toLowerCase()), days: perDay, total,
+    return { ...p, emailError: m.error || null, webexMatched: !!uuids[p.key] || seenNames.has(String(p.webexName || p.name).toLowerCase()), days: perDay, total,
       timeline: { calls: (events[p.key] || []).filter(inWeek), orders: (orderTimes[p.key] || []).filter(inWeek), returns: (returnTimes[p.key] || []).filter(inWeek), emails: (m.sentTimes || []).filter(inWeek) } };
   });
   return { week: first, weekEnd: last, people: report, collected, missingCallDays: days.filter((d) => !daysWithData.has(d)) };
@@ -544,7 +534,8 @@ export async function viewLink(pool, week) {
 // Officer: spark-admin:recordings_read lists them, but only spark-compliance:recordings_read
 // gets the audio download link (and only a full admin who is ALSO a compliance officer can
 // approve that scope - a full admin cannot give themselves the role; another admin must).
-// call_recordings keeps who / when / who with; the audio stays in Webex. A replay link points
+// Recordings are NOT part of the weekly report (Dec, 8 Oct): they exist to turn a call into
+// order notes. call_recordings keeps who / when / who with; the audio stays in Webex. A replay link points
 // at OUR server, signed per recording, which asks Webex for a fresh download link when it is
 // opened - Webex's own links expire within hours.
 async function ensureRecordingTables(pool) {
@@ -582,12 +573,6 @@ export async function recordingLink(pool, id) {
 }
 const fmtLen = (s) => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, "0")}`;
 const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
-// The recorded calls under a person in the web report.
-const recordingList = (p) => !(p.recordings || []).length ? "" : `<p style="font-size:13px;margin:16px 0 4px"><b>Recorded calls</b></p>
-  <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>When</th><th ${TH}>With</th><th ${THN}>Length</th><th ${TH}>Summary</th><th ${TH}></th></tr>
-  ${p.recordings.map((c) => `<tr><td ${TD}>${esc(dayLabel(c.day))} ${hhmm(c.min)}</td><td ${TD}>${esc(c.with)}</td><td ${TDN}>${fmtLen(c.duration)}</td>
-    <td ${TD}>${c.summary ? esc(c.summary) : '<span style="color:#9ca3af">summary to come</span>'}</td>
-    <td ${TD}><a href="${esc(c.url)}" target="_blank" rel="noopener" style="color:#0f6cbd;font-weight:600;text-decoration:none">&#9654; Listen</a></td></tr>`).join("")}</table>`;
 
 export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUrl = null, web = false } = {}) {
   const w = web ? WEB_TL_WIDTH : TL.width;
@@ -601,7 +586,6 @@ export function managerEmailHtml(r, { imgSrc = (q) => "cid:" + cidFor(q), viewUr
   <table style="border-collapse:collapse;width:100%"><tr><th ${TH}>Day</th><th ${THN}>Calls in</th><th ${THN}>Calls out</th><th ${THN}>On phone</th><th ${THN}>Orders</th><th ${THN}>Returns</th><th ${THN}>Emails in</th><th ${THN}>Emails out</th></tr>
   ${dayRows(p)}</table>
   ${timelineImg(p, imgSrc, w)}
-  ${recordingList(p)}
   </div></details>`).join("");
   return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#111;max-width:${w}px">
   <p>Sales activity for ${esc(weekTitle(r))}.</p>
