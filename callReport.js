@@ -647,8 +647,12 @@ const SUMMARY_SCHEMA = {
   type: "object", additionalProperties: false,
   properties: {
     is_customer_call: { type: "boolean" },
+    // Most calls are a customer chasing an order (Dec, 8 Oct); new orders are the exception.
+    call_type: { type: "string", enum: ["chasing", "new_order", "change_to_order", "query", "complaint", "other"] },
     customer: { type: "string" },
     summary: { type: "string" },
+    customer_asked: { type: "string" },
+    told_customer: { type: "string" },
     items: { type: "array", items: { type: "object", additionalProperties: false,
       properties: { product: { type: "string" }, colour: { type: "string" }, sizes_and_quantities: { type: "string" }, decoration: { type: "string" } },
       required: ["product", "colour", "sizes_and_quantities", "decoration"] } },
@@ -657,7 +661,7 @@ const SUMMARY_SCHEMA = {
     order_refs: { type: "array", items: { type: "string" } },
     order_note: { type: "string" },
   },
-  required: ["is_customer_call", "customer", "summary", "items", "agreed", "actions", "order_refs", "order_note"],
+  required: ["is_customer_call", "call_type", "customer", "summary", "customer_asked", "told_customer", "items", "agreed", "actions", "order_refs", "order_note"],
 };
 // Brightpearl orders named in the call (any 6-digit number), so Claude can match what the
 // speech-to-text garbled ("JDL five in nervy") against what is really on the order.
@@ -671,7 +675,7 @@ async function ordersMentioned(transcript) {
       const o = Array.isArray(r) ? r[0] : r;
       if (!o || !o.id) { out.push({ number: n, found: false }); continue; }
       const cust = (o.parties && o.parties.customer) || {};
-      out.push({ number: n, found: true, type: o.orderTypeCode, reference: o.reference || "", customer: cust.companyName || cust.addressFullName || "",
+      out.push({ number: n, found: true, type: o.orderTypeCode, reference: o.reference || "", deliveryDate: ((o.delivery || {}).deliveryDate || "").slice(0, 10), customer: cust.companyName || cust.addressFullName || "",
         rows: Object.values(o.orderRows || {}).map((row) => ({ name: row.productName, sku: row.productSku, qty: Number((row.quantity || {}).magnitude || 0) })) });
     } catch (e) { out.push({ number: n, found: false, error: e.message }); }
   }
@@ -690,18 +694,25 @@ export async function summariseRecording(pool, id) {
     messages: [{ role: "user", content:
       `This is the transcript of a phone call at Tuff Shop, a UK workwear and embroidery/print company. ` +
       `Our side is ${staff}; the other party shows as "${c.other_party}". Call on ${ukDay(c.created)}, ${Math.round(c.duration / 60)} min.\n\n` +
-      `Write what a colleague needs on the customer's sales order. Only state what was actually said - never guess sizes, ` +
-      `quantities, prices or dates. Empty string / empty list where nothing was said.\n` +
+      `Write what a colleague needs on the customer's sales order. Most calls are a customer CHASING an existing order ` +
+      `(where is it, when will it arrive, has the proof been done); some are new orders, changes, queries or complaints. ` +
+      `Only state what was actually said - never guess sizes, quantities, prices or dates. Empty string / empty list where nothing was said.\n` +
       `The transcript is machine speech-to-text and garbles workwear words ("left press" = left breast, "nervy" = navy, ` +
-      `product codes). Correct a garbled word only where the meaning is clear, and put what was heard in brackets when you ` +
-      `correct a product code or number.\n` +
+      `"JDL five" = GD05, i.e. product codes come out as words). Correct a garbled word only where the meaning is clear, ` +
+      `and put what was heard in brackets when you correct a product code or number. Order numbers are often misheard: if a ` +
+      `number heard is not found in Brightpearl, say so plainly ("order 595771 as heard - not found, check").\n` +
       (orders.length ? `Brightpearl orders matching numbers heard in the call - use them to identify the customer and products:\n${JSON.stringify(orders)}\n` : "") +
       `- is_customer_call: false for a call between colleagues or with a supplier.\n` +
-      `- summary: 1-3 plain sentences.\n- items: each product discussed with colour, sizes+quantities, logo/decoration.\n` +
-      `- agreed: prices, delivery dates, deadlines or promises made.\n- actions: what our side must do next.\n` +
-      `- order_refs: any order / quote / PO numbers mentioned.\n` +
-      `- order_note: the note to paste on the order, plain ASCII only (no pound sign - write GBP; no dashes other than -), ` +
-      `starting "Phone call ${ukDay(c.created)} (${staff}):".\n\nTranscript:\n${c.transcript.slice(0, 60000)}` }],
+      `- call_type: chasing / new_order / change_to_order / query / complaint / other.\n` +
+      `- summary: 1-2 plain sentences.\n` +
+      `- customer_asked: what the caller wanted to know or have done.\n` +
+      `- told_customer: what we told them - status, dates, promises (e.g. "will call back tomorrow", "tracking to follow").\n` +
+      `- items: only when products were ordered or changed: product, colour, sizes+quantities, logo/decoration.\n` +
+      `- agreed: prices, delivery dates, deadlines agreed.\n- actions: what our side must do next.\n` +
+      `- order_refs: order / quote / PO numbers mentioned (as corrected, if Brightpearl confirmed one).\n` +
+      `- order_note: the note to paste on the order - short, plain ASCII only (no pound sign - write GBP; no dashes ` +
+      `other than -), starting "Phone call ${ukDay(c.created)} (${staff}):". For a chase, e.g. "Customer chased delivery; ` +
+      `told due Friday, tracking to be emailed."\n\nTranscript:\n${c.transcript.slice(0, 60000)}` }],
     output_config: { format: { type: "json_schema", schema: SUMMARY_SCHEMA } },
   });
   const text = (msg.content || []).find((b) => b.type === "text");
