@@ -734,6 +734,8 @@ export async function summariseRecording(pool, id) {
   const text = (msg.content || []).find((b) => b.type === "text");
   const parsed = JSON.parse((text && text.text) || "{}");
   if (internal) Object.assign(parsed, { is_customer_call: false, order_note: "", internal: true });
+  // What this call cost, so the spend is measured rather than estimated (Dec, 8 Oct).
+  parsed.usage = { model: msg.model, input_tokens: (msg.usage || {}).input_tokens || 0, output_tokens: (msg.usage || {}).output_tokens || 0 };
   // The list shows the order note; a call that is not with a customer shows its summary,
   // labelled, and has no note to post.
   const shown = parsed.is_customer_call === false ? `${internal ? "Internal call" : "Not a customer call"}: ${parsed.summary || ""}` : (parsed.order_note || parsed.summary || "");
