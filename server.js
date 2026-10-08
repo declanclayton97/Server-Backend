@@ -14552,6 +14552,43 @@ async function pollQuoteChase() {
     [QUOTE_CHASE_CONFIG.stageWorkingDays.length, quoteExcludedChannelsParam()]
   );
 
+  // Re-read every open quote's total / reference / customer from Brightpearl before
+  // anything is sent. These used to be captured once, when the quote first reached
+  // Quote sent, and never again: SO494616 was edited down to "overalls only" two
+  // hours after that, and chase 1 next day showed the ORIGINAL total - the customer
+  // cancelled with "The quote has changed" (Dec, 8 Oct). A failed refresh skips this
+  // poll: sending on stored figures is exactly the fault being fixed.
+  try {
+    const ids = open.rows.map((r) => Number(r.order_id));
+    for (let i = 0; i < ids.length; i += 200) {
+      const orders = await bpLive('GET', `/order-service/order/${ids.slice(i, i + 200).join(',')}`) || [];
+      for (const o of orders) {
+        const cust = (o.parties && o.parties.customer) || {};
+        const fresh = {
+          net_value: parseFloat((o.totalValue && o.totalValue.baseNet) || 0),
+          reference: o.reference || '',
+          customer_name: cust.contactName || cust.addressFullName || '',
+          company_name: cust.companyName || '',
+          customer_email: quoteChaseEmail(o),
+        };
+        const row = open.rows.find((r) => Number(r.order_id) === Number(o.id));
+        if (!row) continue;
+        if (!fresh.customer_email) delete fresh.customer_email;   // never blank an email we had
+        const changed = Object.keys(fresh).some((k) => String(row[k] ?? '') !== String(fresh[k] ?? ''));
+        if (!changed) continue;
+        await pool.query(
+          `UPDATE quote_chase SET net_value = $2, reference = $3, customer_name = $4, company_name = $5,
+                  customer_email = COALESCE($6, customer_email)
+            WHERE order_id = $1`,
+          [o.id, fresh.net_value, fresh.reference, fresh.customer_name, fresh.company_name, fresh.customer_email || null]);
+        Object.assign(row, fresh);
+      }
+    }
+  } catch (e) {
+    console.error('[quote-chase] refreshing quote totals from Brightpearl failed, skipping this poll:', e.message);
+    return;
+  }
+
   // Has the customer already answered on WhatsApp? The chase emails carry the
   // sales number, so people reply there instead of clicking — and a chase sent
   // to somebody who has already written back is the worst thing this can do.
@@ -15288,6 +15325,31 @@ app.post('/api/quote-chase/stop', async (req, res) => {
 // quotes deliberately not being chased are still visible to work manually.
 // Only the Sales Hub page reads this, and it is the whole quote pipeline with
 // customer names and values in it — so it needs a signed-in person.
+// GET /api/quote-chase/:orderId/chase-preview?stage=1 - the chase email for one quote, built
+// from what quote_chase holds for it (i.e. what the customer was sent), beside the order's
+// current total. Buttons are disabled so the preview cannot answer for the customer.
+app.get('/api/quote-chase/:orderId/chase-preview', (req, res, next) => app.locals.requireHubUser(req, res, next), async (req, res) => {
+  if (!useDatabase) return res.status(503).send('Not configured');
+  try {
+    const q = await pool.query(`SELECT * FROM quote_chase WHERE order_id = $1`, [Number(req.params.orderId)]);
+    if (!q.rowCount) return res.status(404).send('That order was never tracked by the quote chase.');
+    const r = q.rows[0];
+    const stage = Math.min(Math.max(Number(req.query.stage) || Number(r.stage) || 1, 1), 3);
+    const mail = buildChaseEmail([{ ...quoteRowToView(r), stage: r.stage }], stage, () => quoteResponseUrl(r.token));
+    let now = '';
+    try {
+      const o = ((await bpLive('GET', `/order-service/order/${r.order_id}`)) || [])[0];
+      if (o) now = `Brightpearl now: ${gbpText(o.totalValue && o.totalValue.baseNet)} + VAT, reference "${o.reference || ''}"`;
+    } catch { /* preview still useful without it */ }
+    const html = String(mail.html).replace(/href="[^"]*"/g, 'href="#" onclick="return false"');
+    res.type('html').send(`<div style="font-family:Arial,sans-serif;background:#fff4e5;border:1px solid #f5c26b;padding:10px 14px;margin:0 0 14px;font-size:13px">
+      <b>Preview of chase ${stage} for SO${r.order_id}</b> - as stored: ${gbpText(r.net_value)} + VAT, reference "${String(r.reference || '').replace(/</g, '&lt;')}",
+      to ${String(r.customer_email || '').replace(/</g, '&lt;')}. ${now}<br>Subject: ${String(mail.subject).replace(/</g, '&lt;')}<br>
+      Last chase sent: ${r.last_chase_at ? new Date(r.last_chase_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }) : 'never'} (buttons disabled in this preview)</div>${html}`);
+  } catch (e) { res.status(500).send('Preview failed: ' + e.message); }
+});
+const gbpText = (n) => '£' + (Number(n) || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 app.get('/api/quote-chase/list', (req, res, next) => app.locals.requireHubUser(req, res, next), async (req, res) => {
   if (!useDatabase) return res.status(503).json({ error: 'Not configured' });
   try {
