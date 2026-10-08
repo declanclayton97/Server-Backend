@@ -878,6 +878,41 @@ export function registerCallReport(app, { getPool, bpLive }) {
     if (req.query.fresh) webexCache = { token: null, until: 0 };   // pick up newly granted scopes
     let scope = null;
     try { const { json } = await webexGet(pool, "https://webexapis.com/v1/people/me"); scope = json && json.displayName; } catch (e) { scope = "me: " + e.message; }
+    // ?diag=1 - why sales-phone recordings might be missing: each phone's Webex login, the
+    // recordings listed for that owner, and the phone's calls in the last 2 hours of call history.
+    if (req.query.diag) {
+      const out = { phones: [], cdr: null };
+      for (const p of reportPeople()) {
+        const row = { person: p.first };
+        try {
+          const { json } = await webexGet(pool, `https://webexapis.com/v1/people?displayName=${encodeURIComponent(p.webexName || p.name)}`);
+          const hit = ((json && json.items) || []).find((x) => String(x.displayName).toLowerCase() === String(p.webexName || p.name).toLowerCase());
+          row.emails = hit && hit.emails;
+          const from = new Date(Date.now() - 86400e3).toISOString(), to = new Date().toISOString();
+          for (const e of (hit && hit.emails) || []) {
+            try {
+              const r = await webexGet(pool, `https://webexapis.com/v1/admin/convergedRecordings?ownerEmail=${encodeURIComponent(e)}&from=${from}&to=${to}&max=20`);
+              row.recordingsFor = (row.recordingsFor || 0) + (((r.json && r.json.items) || []).length);
+            } catch (er) { row.recordingsError = er.message; }
+          }
+        } catch (e) { row.error = e.message; }
+        out.phones.push(row);
+      }
+      try {
+        const s = new Date(Date.now() - 2 * 3600e3).toISOString(), e = new Date(Date.now() - 5 * 60e3).toISOString();
+        const { json } = await webexGet(pool, `${cdrBase()}/v1/cdr_feed?startTime=${s}&endTime=${e}&max=500`);
+        const by = {};
+        for (const r of (json && json.items) || []) {
+          const k = r["User"] || r.user || "?";
+          const t = (by[k] = by[k] || { legs: 0, answered: 0, recorded: 0 });
+          t.legs++; if (String(r["Answered"]).toLowerCase() === "true") t.answered++;
+          if (Object.keys(r).some((f) => /record/i.test(f) && r[f] && String(r[f]).toLowerCase() !== "false")) t.recorded++;
+        }
+        out.cdr = by;
+        out.cdrRecordFields = [...new Set(((json && json.items) || []).flatMap((r) => Object.keys(r).filter((f) => /record/i.test(f))))];
+      } catch (e) { out.cdr = { error: e.message }; }
+      return res.json(out);
+    }
     // ?settings=1 - each sales phone's call-recording setting as Webex holds it.
     if (req.query.settings) {
       const out = [];
