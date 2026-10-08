@@ -10,6 +10,7 @@
 
 import nodemailer from 'nodemailer';
 import * as bp from './purchasingAuto.js';
+import { bpSafeText } from './bpText.js';
 import * as sterlingPortal from './sterlingPortal.js';
 import { updateOrderReference, emailOrderDocument } from './bpWebSession.js';
 
@@ -4140,6 +4141,14 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       return { skipped: `already ran today (${uk.date})`, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}` };
     }
 
+    // Blaklader's final check runs with the morning run, before today's demand is read, so a line
+    // their back office dropped yesterday is reported the next morning rather than at delivery.
+    // Never blocks the run: a failure here is logged and today's order still goes ahead.
+    if (cfg.supplierKey === 'BLAKLADER' && lineMode !== 'low' && !dryRun) {
+      try { await blakladerErpReconcile(pool, altItemsUrl); }
+      catch (e) { await logPurchasingError(pool, { supplier: 'BLAKLADER', step: 'erp-check', severity: 'review', message: `Blaklader final check could not run: ${e.message}`, notify: false }).catch(() => {}); }
+    }
+
     // dry-run the combined PO to value the demand (net, ex-VAT)
     // The value-check MUST see the same half the placement will order. Valuing the combined demand
     // for a reorder-only run would threshold-test it against money that run is never going to
@@ -4760,6 +4769,77 @@ export async function beeswiftRehearse({ pool, altItemsUrl }) { return beeswiftR
 export async function pencarrieReleaseBackorders({ pool, poId, execute = false, released = null }) { return releasePencarrieBackorders(pool, poId, { execute: execute === true, released }); }
 // Blaklader against an existing unsent auto-PO (the basket step clears and verifies first).
 export async function blakladerPlaceExisting({ pool, altItemsUrl, poId }) { return placeBlakladerOrder(pool, altItemsUrl, { poId, live: true }); }
+
+// ── BLAKLADER FINAL CHECK: did their back office keep every line? ───────────────────────────
+// The basket check proves only what the BASKET held. Blaklader re-key each order into their ERP a
+// day later, and a code it cannot resolve is silently left off — PO 489301 (2026-09-15): the basket
+// took 4400251353892XL (their size is XXL), the run placed cleanly, the ERP order had no 2XL, and it
+// surfaced eight days later as a short delivery that Brightpearl split onto back-order PO 491423 —
+// which then looked like a live back order for three more weeks. Same failure class as before
+// with Blaklader, so this compares every recent ERP order against its PO (and that PO's back-order
+// children, since receiving moves undelivered rows there) and reports any line Blaklader does not
+// hold. A PO is checked once: the marker note records the verdict either way.
+const BLK_ERP_MARKER = '[BLK ERP CHECKED]';
+export async function blakladerErpReconcile(pool, altItemsUrl, { days = 21, dryRun = false, poIds = null } = {}) {
+  const out = { checked: [], short: [], skipped: [] };
+  const r = await fetch(`${altItemsUrl}/api/blaklader-erp-orders?days=${days}`, { signal: AbortSignal.timeout(120000) }).then((x) => x.json());
+  if (!r || !r.ok) throw new Error(`Blaklader ERP orders unreadable: ${(r && r.error) || 'no response'}`);
+  const only = poIds ? new Set(poIds.map(String)) : null;
+  const norm = (s) => String(s || '').toUpperCase().replace(/\s+/g, '');
+  for (const o of r.orders || []) {
+    if (only && !only.has(String(o.po))) continue;
+    const poId = Number(o.po);
+    if (!o.linesRead || !o.products.length) { out.skipped.push({ poId, why: 'ERP lines not readable' }); continue; }
+    let hdr;
+    try { hdr = (await bp.bpLiveGet(`/order-service/order/${poId}`))[0]; } catch { hdr = null; }
+    const sup = hdr && hdr.parties && hdr.parties.supplier && hdr.parties.supplier.contactId;
+    if (!hdr || hdr.orderTypeCode !== 'PO' || Number(sup) !== BLAKLADER_SUPPLIER_CONTACT) { out.skipped.push({ poId, why: 'not a Blaklader PO' }); continue; }
+    const notes = await bp.bpLiveGet(`/order-service/order/${poId}/note`).catch(() => []);
+    if (!poIds && (Array.isArray(notes) ? notes : []).some((n) => String(n.text || '').includes(BLK_ERP_MARKER))) { out.skipped.push({ poId, why: 'already checked' }); continue; }
+    // The PO's rows plus any back-order child's: receiving moves an undelivered row to a child PO,
+    // so the parent alone would hide exactly the line this check exists to find.
+    const ids = [poId];
+    try {
+      const s = await bp.bpLiveGet(`/order-service/order-search?parentOrderId=${poId}`);
+      for (const row of (s && s.results) || []) if (Number(row[0]) && Number(row[0]) !== poId) ids.push(Number(row[0]));
+    } catch { /* no children readable — parent only */ }
+    const want = new Map();
+    for (const id of ids) for (const l of await bp.getOrderCartLines(id)) {
+      const k = norm(l.sku); if (!k) continue;
+      const w = want.get(k) || { sku: l.sku, qty: 0, productId: l.productId, name: l.name };
+      w.qty += Math.round(l.qty); want.set(k, w);
+    }
+    const held = new Map();
+    for (const p of o.products) held.set(norm(p.sku), (held.get(norm(p.sku)) || 0) + p.qty);
+    // A one-size part number is sent bare and resolved to "<partNo>onesize" — count that as the
+    // same line. Anything else must match exactly: a near match is how the 2XL looked fine.
+    const heldFor = (k) => held.get(k) ?? held.get(`${k}ONESIZE`) ?? [...held.entries()].filter(([h]) => h.startsWith(k) && /ONESIZE$/.test(h)).reduce((a, [, q]) => a + q, 0);
+    const missing = [];
+    for (const [k, w] of want) {
+      const got = heldFor(k) || 0;
+      // Multipacks are ordered in pieces, so Blaklader may hold MORE than our units; only fewer is a fault.
+      if (got < w.qty) missing.push({ sku: w.sku, want: w.qty, qty: w.qty - got, held: got, productId: w.productId, name: w.name });
+    }
+    const verdict = missing.length
+      ? `${BLK_ERP_MARKER} SHORT: Blaklader order ${o.erpId}${o.internalId ? ` (${o.internalId})` : ''} does not hold ${missing.map((m) => `${m.sku} (we ordered ${m.want}, they hold ${m.held})`).join('; ')}. These lines are NOT coming - reorder under the correct code.`
+      : `${BLK_ERP_MARKER} OK: every line is on Blaklader order ${o.erpId}${o.internalId ? ` (${o.internalId})` : ''}.`;
+    const rec = { poId, erpId: o.erpId, internalId: o.internalId, poIds: ids, missing };
+    out.checked.push(rec);
+    if (missing.length) out.short.push(rec);
+    if (dryRun) continue;
+    await bp.addOrderNoteLive(poId, bpSafeText(verdict)).catch(() => {});
+    if (missing.length) {
+      await logPurchasingError(pool, {
+        supplier: 'BLAKLADER', step: 'erp-check', severity: 'review',
+        message: `PO ${poId}: Blaklader's order ${o.erpId}${o.internalId ? ` (${o.internalId})` : ''} is missing ${missing.length} line(s) we ordered — ${missing.map((m) => `${m.sku} x${m.qty}`).join(', ')}. The basket accepted them, their back office did not; usually a wrong code (e.g. 2XL where Blaklader use XXL). Fix the SKU and reorder.`,
+        context: rec,
+      }).catch(() => {});
+      const contrib = await bp.getPoContributors(poId).catch(() => ({ linesByOrder: {} }));
+      await notifyDroppedLines(pool, { supplier: 'BLAKLADER', poId, dropped: missing.map((m) => ({ sku: m.sku, qty: m.qty, productId: m.productId, name: m.name })), linesByOrder: contrib.linesByOrder, placed: true }).catch(() => {});
+    }
+  }
+  return out;
+}
 // Snickers against an existing unsent auto-PO; `discontinued` runs the discontinued route for those SKUs.
 export async function snickersPlaceExisting({ pool, altItemsUrl, poId, discontinued = [], rehearse = true }) { return placeSnickersOrder(pool, altItemsUrl, { poId, discontinued, rehearse, live: true }); }
 // Sterling against an existing unsent PO. rehearse:true stops after the basket read-back and empties it.
