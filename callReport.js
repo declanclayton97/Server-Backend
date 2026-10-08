@@ -780,7 +780,7 @@ export async function summariseRecording(pool, id) {
     output_config: { format: { type: "json_schema", schema: SUMMARY_SCHEMA } },
   });
   const text = (msg.content || []).find((b) => b.type === "text");
-  if (msg.stop_reason === "max_tokens") throw new Error("summary was cut off (call too long for max_tokens)");
+  if (msg.stop_reason === "max_tokens") throw new Error(`summary was cut off at ${(msg.usage || {}).output_tokens} tokens; blocks: ${(msg.content || []).map((b) => b.type).join(",")}; text starts: ${String((text && text.text) || "").slice(0, 400)} ... ends: ${String((text && text.text) || "").slice(-300)}`);
   const parsed = JSON.parse((text && text.text) || "{}");
   if (internal) Object.assign(parsed, { is_customer_call: false, order_note: "", internal: true });
   // What this call cost, so the spend is measured rather than estimated (Dec, 8 Oct).
