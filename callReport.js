@@ -602,7 +602,12 @@ async function transcribePending(pool, limit = 10) {
 // WebVTT ("00:00:01.000 --> 00:00:04.000" cues, "<v Speaker>" voices) -> "Speaker: words" lines.
 // Plain text passes through unchanged.
 export function vttToText(raw) {
-  const s = String(raw || "").replace(/\r/g, "");
+  let s = String(raw || "").replace(/\r/g, "").replace(/^﻿/, "");
+  // Webex wraps its own cue headers in a WebVTT file: drop the WEBVTT line and the timings,
+  // leaving the "1 "Name" (...)" headers for the parser below.
+  if (/^WEBVTT/.test(s.trim()) && /^\d+\s+"[^"]+"/m.test(s)) {
+    s = s.split("\n").filter((l) => !/^WEBVTT/.test(l) && !/-->/.test(l) && !/^NOTE\b/.test(l)).join("\n");
+  }
   // Webex Calling's own format (seen 8 Oct): a header line per utterance -
   //   3 "Matt Lund" (2022698496) (f938d292-...)
   // - followed by the words. Turned into "Matt Lund: words", joining a speaker's runs.
