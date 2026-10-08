@@ -878,6 +878,20 @@ export function registerCallReport(app, { getPool, bpLive }) {
     if (req.query.fresh) webexCache = { token: null, until: 0 };   // pick up newly granted scopes
     let scope = null;
     try { const { json } = await webexGet(pool, "https://webexapis.com/v1/people/me"); scope = json && json.displayName; } catch (e) { scope = "me: " + e.message; }
+    // ?settings=1 - each sales phone's call-recording setting as Webex holds it.
+    if (req.query.settings) {
+      const out = [];
+      for (const p of reportPeople()) {
+        try {
+          const { json } = await webexGet(pool, `https://webexapis.com/v1/people?displayName=${encodeURIComponent(p.webexName || p.name)}`);
+          const hit = ((json && json.items) || []).find((x) => String(x.displayName).toLowerCase() === String(p.webexName || p.name).toLowerCase());
+          if (!hit) { out.push({ person: p.first, error: "phone user not found" }); continue; }
+          const s = (await webexGet(pool, `https://webexapis.com/v1/people/${hit.id}/features/callRecording`)).json || {};
+          out.push({ person: p.first, phone: hit.displayName, enabled: s.enabled, record: s.record, announce: s.notification || s.startStopAnnouncement || null, vendor: s.serviceProvider || s.vendor || null });
+        } catch (e) { out.push({ person: p.first, error: e.message }); }
+      }
+      return res.json(out);
+    }
     // ?redo=<id> fetches the transcript again and re-writes the summary, returning it (or the error).
     if (req.query.redo) {
       try {
