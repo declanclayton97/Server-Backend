@@ -572,6 +572,7 @@ export async function syncRecordings(pool, days = 3) {
 // Webex writes the transcript some minutes after the call (Dec switched transcription on, 8
 // Oct). Each recording from the last 3 days without one is re-asked at most every 10 minutes;
 // once a transcript arrives, Claude turns it into a summary + an order note.
+const summariesOn = () => String(process.env.CALL_SUMMARIES || "").toLowerCase() === "on";
 async function transcribePending(pool, limit = 10) {
   await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS transcript_checked_at timestamptz`);
   await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS summary_json jsonb`);
@@ -592,8 +593,11 @@ async function transcribePending(pool, limit = 10) {
     const text = vttToText(await grab(links.transcriptDownloadLink));
     if (!text) continue;
     await pool.query(`UPDATE call_recordings SET transcript = $2 WHERE id = $1`, [id, text]);
-    await summariseRecording(pool, id).catch((e) => console.error("[call-report] summary", id, e.message));
+    if (summariesOn()) await summariseRecording(pool, id).catch((e) => console.error("[call-report] summary", id, e.message));
   }
+  // Summaries cost per call, so they are switched on separately from recording (Dec, 8 Oct:
+  // record now, summarise later). Off, transcripts are still collected (free) and wait here.
+  if (!summariesOn()) return;
   // Transcripts that arrived but were never summarised (Claude down, key missing at the time).
   for (const { id } of (await pool.query(`SELECT id FROM call_recordings WHERE transcript IS NOT NULL AND summary IS NULL AND created > now() - interval '3 days' LIMIT 5`)).rows) {
     await summariseRecording(pool, id).catch((e) => console.error("[call-report] summary", id, e.message));
