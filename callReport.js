@@ -915,6 +915,37 @@ ${c && c.transcript ? `<details style="margin-top:16px"><summary style="cursor:p
 </div></body></html>`);
     } catch (e) { res.status(500).send("Could not open the recording: " + esc(e.message)); }
   });
+  // GET /call-recordings?sig= - every recorded call of the last 7 days with its order note, for
+  // checking the transcription (Dec, 8 Oct). One fixed signed link; /api/call-report/recordings-link gives it.
+  app.get("/call-recordings", async (req, res) => {
+    try {
+      const want = signRec(await reportSecret(getPool()), "list"), got = String(req.query.sig || "");
+      if (got.length !== want.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want))) return res.status(403).send("This link isn't valid.");
+      const pool = getPool();
+      await ensureRecordingTables(pool);
+      await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS summary_json jsonb`);
+      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, summary_json, transcript IS NOT NULL AS has_transcript
+                                        FROM call_recordings WHERE created > now() - interval '7 days' ORDER BY created DESC`)).rows;
+      const body = [];
+      for (const c of rows) {
+        const who = (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email;
+        const j = c.summary_json || {};
+        body.push(`<tr><td ${TD}>${esc(dayLabel(ukDay(c.created)))} ${hhmm(ukMinutes(c.created))}</td><td ${TD}>${esc(who)}</td><td ${TD}>${esc(c.other_party)}</td>
+          <td ${TDN}>${fmtLen(c.duration)}</td><td ${TD}>${esc(j.call_type || "")}</td>
+          <td ${TD}>${c.summary ? esc(c.summary) : `<span style="color:#9ca3af">${c.has_transcript ? "transcript in, note pending" : "waiting for transcript"}</span>`}</td>
+          <td ${TD}><a href="${esc(await recordingLink(pool, c.id))}" target="_blank" rel="noopener" style="color:#0f6cbd;font-weight:600;text-decoration:none">&#9654; Open</a></td></tr>`);
+      }
+      res.set(noIndex).type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Call notes</title></head>
+<body style="margin:0;padding:24px;background:#f6f7f9;font-family:Segoe UI,Arial,sans-serif;color:#111"><div style="background:#fff;padding:20px 24px;border-radius:8px;max-width:1300px;margin:0 auto">
+<h2 style="margin:0 0 12px;font-size:18px">Recorded calls - last 7 days</h2>
+<table style="border-collapse:collapse;width:100%"><tr><th ${TH}>When</th><th ${TH}>Taken by</th><th ${TH}>With</th><th ${THN}>Length</th><th ${TH}>Type</th><th ${TH}>Order note</th><th ${TH}></th></tr>
+${body.join("") || `<tr><td ${TD} colspan="7">No recorded calls yet.</td></tr>`}</table>
+<p style="color:#6b7280;font-size:12px;margin-top:12px">Open a call for the recording, the full transcript and the note. Notes come from Webex's speech-to-text, checked against Brightpearl where an order number was heard.</p></div></body></html>`);
+    } catch (e) { res.status(500).send("Could not list the calls: " + esc(e.message)); }
+  });
+  app.get("/api/call-report/recordings-link", requireUser, guard, async (req, res) => {
+    res.json({ url: `${publicBase()}/call-recordings?sig=${signRec(await reportSecret(getPool()), "list")}` });
+  });
   app.get("/call-recording/:id/audio", async (req, res) => {
     try {
       if (!(await recordingOk(req))) return res.status(403).send("This link isn't valid.");
