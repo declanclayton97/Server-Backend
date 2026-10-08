@@ -544,6 +544,9 @@ async function ensureRecordingTables(pool) {
       duration int, topic text, other_party text, session_id text,
       transcript text, summary text, summarized_at timestamptz, seen_at timestamptz NOT NULL DEFAULT now())`);
   await pool.query(`CREATE INDEX IF NOT EXISTS call_recordings_day ON call_recordings (day)`);
+  // A recording wiped on request (e.g. card details read out, 8 Oct): kept as a row so the sync
+  // never re-imports it, but with no transcript/summary and no playback.
+  await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS purged_at timestamptz`);
 }
 // "Call with Pelican Works 2-20261007 1543" -> "Pelican Works 2"
 const otherParty = (topic) => String(topic || "").replace(/^Call with\s+/i, "").replace(/-\d{8}\s+\d{4}$/, "").trim();
@@ -589,7 +592,7 @@ async function transcribePending(pool, limit = 10) {
   await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS webex_notes text`);
   const todo = (await pool.query(
     `SELECT id FROM call_recordings
-      WHERE transcript IS NULL AND created > now() - interval '3 days' AND duration >= 15
+      WHERE transcript IS NULL AND purged_at IS NULL AND created > now() - interval '3 days' AND duration >= 15
         AND (transcript_checked_at IS NULL OR transcript_checked_at < now() - interval '10 minutes')
       ORDER BY created DESC LIMIT $1`, [limit])).rows;
   for (const { id } of todo) {
@@ -974,6 +977,13 @@ export function registerCallReport(app, { getPool, bpLive }) {
       }
       return res.json(out);
     }
+    // ?purge=<id> wipes our copy of a recording (transcript, summary, notes) and stops it being
+    // re-fetched or played. The audio itself must still be deleted in Webex (Control Hub).
+    if (req.query.purge) {
+      await ensureRecordingTables(pool);
+      const r = await pool.query(`UPDATE call_recordings SET transcript = NULL, summary = NULL, summary_json = NULL, webex_notes = NULL, purged_at = now() WHERE id = $1 RETURNING id, owner_email, created, duration`, [req.query.purge]);
+      return res.json({ purged: r.rows[0] || null });
+    }
     // ?redo=<id> fetches the transcript again and re-writes the summary, returning it (or the error).
     if (req.query.redo) {
       try {
@@ -1001,7 +1011,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
     // Otherwise: pull the last ?days (default 3) from Webex, then list what is stored, with replay links.
     try {
       const synced = await syncRecordings(pool, Math.min(Number(req.query.days) || 3, 30));
-      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, webex_notes, length(transcript) AS transcript_chars, transcript_checked_at FROM call_recordings ORDER BY created DESC LIMIT 50`)).rows;
+      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, webex_notes, length(transcript) AS transcript_chars, transcript_checked_at FROM call_recordings WHERE purged_at IS NULL ORDER BY created DESC LIMIT 50`)).rows;
       for (const c of rows) c.url = await recordingLink(pool, c.id);
       res.json({ app: scope, synced, recordings: rows });
     } catch (e) { res.status(500).json({ app: scope, error: e.message }); }
@@ -1021,7 +1031,8 @@ export function registerCallReport(app, { getPool, bpLive }) {
       if (!(await recordingOk(req))) return res.status(403).send("This link isn't valid.");
       const pool = getPool();
       await ensureRecordingTables(pool);
-      const c = (await pool.query(`SELECT owner_email, created, duration, other_party, summary, transcript, webex_notes FROM call_recordings WHERE id = $1`, [req.params.id])).rows[0];
+      const c = (await pool.query(`SELECT owner_email, created, duration, other_party, summary, transcript, webex_notes, purged_at FROM call_recordings WHERE id = $1`, [req.params.id])).rows[0];
+      if (c && c.purged_at) return res.status(410).send("This recording was deleted.");
       const who = c ? (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email : "";
       const when = c ? `${dayLabel(ukDay(c.created))} ${hhmm(ukMinutes(c.created))}` : "";
       const audio = `/call-recording/${encodeURIComponent(req.params.id)}/audio?sig=${encodeURIComponent(String(req.query.sig))}`;
@@ -1047,7 +1058,7 @@ ${c && c.transcript ? `<details style="margin-top:16px"><summary style="cursor:p
       await ensureRecordingTables(pool);
       await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS summary_json jsonb`);
       const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, summary_json, transcript IS NOT NULL AS has_transcript
-                                        FROM call_recordings WHERE created > now() - interval '7 days' ORDER BY created DESC`)).rows;
+                                        FROM call_recordings WHERE created > now() - interval '7 days' AND purged_at IS NULL ORDER BY created DESC`)).rows;
       const body = [];
       for (const c of rows) {
         const who = (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email;
@@ -1071,6 +1082,7 @@ ${body.join("") || `<tr><td ${TD} colspan="7">No recorded calls yet.</td></tr>`}
   app.get("/call-recording/:id/audio", async (req, res) => {
     try {
       if (!(await recordingOk(req))) return res.status(403).send("This link isn't valid.");
+      if ((await getPool().query(`SELECT 1 FROM call_recordings WHERE id = $1 AND purged_at IS NOT NULL`, [req.params.id])).rowCount) return res.status(410).send("This recording was deleted.");
       const { json } = await webexGet(getPool(), `https://webexapis.com/v1/convergedRecordings/${encodeURIComponent(req.params.id)}`);
       const link = json && json.temporaryDirectDownloadLinks && json.temporaryDirectDownloadLinks.audioDownloadLink;
       if (!link) return res.status(404).send("Webex has no audio for this recording any more.");
