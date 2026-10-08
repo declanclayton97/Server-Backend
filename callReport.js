@@ -919,6 +919,8 @@ export function registerCallReport(app, { getPool, bpLive }) {
           if (Object.keys(r).some((f) => /record/i.test(f) && r[f] && String(r[f]).toLowerCase() !== "false")) t.recorded++;
         }
         out.cdr = by;
+        out.answeredSales = ((json && json.items) || []).filter((r) => /Sales/.test(r["User"] || "") && String(r["Answered"]).toLowerCase() === "true")
+          .map((r) => ({ user: r["User"], start: r["Start time"], dir: r["Direction"], result: r["Call Recording Result"] || null, trigger: r["Call Recording Trigger"] || null, platform: r["Call Recording Platform Name"] || null }));
         out.cdrRecordFields = [...new Set(((json && json.items) || []).flatMap((r) => Object.keys(r).filter((f) => /record/i.test(f))))];
       } catch (e) { out.cdr = { error: e.message }; }
       return res.json(out);
