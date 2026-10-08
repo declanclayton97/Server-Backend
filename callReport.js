@@ -603,6 +603,23 @@ async function transcribePending(pool, limit = 10) {
 // Plain text passes through unchanged.
 export function vttToText(raw) {
   const s = String(raw || "").replace(/\r/g, "");
+  // Webex Calling's own format (seen 8 Oct): a header line per utterance -
+  //   3 "Matt Lund" (2022698496) (f938d292-...)
+  // - followed by the words. Turned into "Matt Lund: words", joining a speaker's runs.
+  if (/^\d+\s+"[^"]+"/m.test(s) && !/^WEBVTT/.test(s.trim())) {
+    const out = [];
+    let who = null;
+    for (const line of s.split("\n")) {
+      const h = /^\d+\s+"([^"]+)"/.exec(line.trim());
+      if (h) { who = h[1].trim(); continue; }
+      const words = line.trim();
+      if (!words) continue;
+      const prev = out[out.length - 1];
+      if (who && prev && prev.startsWith(who + ": ")) out[out.length - 1] = prev + " " + words;
+      else out.push(who ? `${who}: ${words}` : words);
+    }
+    return out.join("\n").trim();
+  }
   if (!/^WEBVTT/.test(s.trim())) return s.trim();
   const out = [];
   for (const block of s.split(/\n\n+/)) {
@@ -637,11 +654,30 @@ const SUMMARY_SCHEMA = {
   },
   required: ["is_customer_call", "customer", "summary", "items", "agreed", "actions", "order_refs", "order_note"],
 };
+// Brightpearl orders named in the call (any 6-digit number), so Claude can match what the
+// speech-to-text garbled ("JDL five in nervy") against what is really on the order.
+let bpForSummaries = null;
+async function ordersMentioned(transcript) {
+  if (!bpForSummaries) return [];
+  const out = [];
+  for (const n of [...new Set(String(transcript).match(/\b\d{6}\b/g) || [])].slice(0, 4)) {
+    try {
+      const r = await bpForSummaries("GET", `/order-service/order/${n}`);
+      const o = Array.isArray(r) ? r[0] : r;
+      if (!o || !o.id) { out.push({ number: n, found: false }); continue; }
+      const cust = (o.parties && o.parties.customer) || {};
+      out.push({ number: n, found: true, type: o.orderTypeCode, reference: o.reference || "", customer: cust.companyName || cust.addressFullName || "",
+        rows: Object.values(o.orderRows || {}).map((row) => ({ name: row.productName, sku: row.productSku, qty: Number((row.quantity || {}).magnitude || 0) })) });
+    } catch (e) { out.push({ number: n, found: false, error: e.message }); }
+  }
+  return out;
+}
 export async function summariseRecording(pool, id) {
   if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
   const c = (await pool.query(`SELECT owner_email, created, duration, other_party, transcript FROM call_recordings WHERE id = $1`, [id])).rows[0];
   if (!c || !c.transcript) return null;
   const staff = (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email;
+  const orders = await ordersMentioned(c.transcript);
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const msg = await new Anthropic().messages.create({
     model: process.env.CALL_SUMMARY_MODEL || "claude-sonnet-5",
@@ -651,6 +687,10 @@ export async function summariseRecording(pool, id) {
       `Our side is ${staff}; the other party shows as "${c.other_party}". Call on ${ukDay(c.created)}, ${Math.round(c.duration / 60)} min.\n\n` +
       `Write what a colleague needs on the customer's sales order. Only state what was actually said - never guess sizes, ` +
       `quantities, prices or dates. Empty string / empty list where nothing was said.\n` +
+      `The transcript is machine speech-to-text and garbles workwear words ("left press" = left breast, "nervy" = navy, ` +
+      `product codes). Correct a garbled word only where the meaning is clear, and put what was heard in brackets when you ` +
+      `correct a product code or number.\n` +
+      (orders.length ? `Brightpearl orders matching numbers heard in the call - use them to identify the customer and products:\n${JSON.stringify(orders)}\n` : "") +
       `- is_customer_call: false for a call between colleagues or with a supplier.\n` +
       `- summary: 1-3 plain sentences.\n- items: each product discussed with colour, sizes+quantities, logo/decoration.\n` +
       `- agreed: prices, delivery dates, deadlines or promises made.\n- actions: what our side must do next.\n` +
@@ -731,6 +771,7 @@ export async function sendReport(r, { onlyTo, viewUrl = null, managerOnly = fals
 
 // ---- routes + schedule ----------------------------------------------------------------
 export function registerCallReport(app, { getPool, bpLive }) {
+  bpForSummaries = bpLive;
   const requireUser = (req, res, next) => app.locals.requireHubUser(req, res, next);
   const users = () => String(process.env.CALL_REPORT_USERS || "dec,dec clayton,declan,declan clayton").split(",").map((s) => s.trim().toLowerCase());
   const allowed = (u) => !!u && [u.key, u.name].some((v) => users().includes(String(v || "").trim().toLowerCase()));
@@ -795,6 +836,19 @@ export function registerCallReport(app, { getPool, bpLive }) {
     if (req.query.fresh) webexCache = { token: null, until: 0 };   // pick up newly granted scopes
     let scope = null;
     try { const { json } = await webexGet(pool, "https://webexapis.com/v1/people/me"); scope = json && json.displayName; } catch (e) { scope = "me: " + e.message; }
+    // ?redo=<id> fetches the transcript again and re-writes the summary, returning it (or the error).
+    if (req.query.redo) {
+      try {
+        await ensureRecordingTables(pool);
+        await pool.query(`UPDATE call_recordings SET transcript = NULL, summary = NULL, summary_json = NULL, transcript_checked_at = NULL WHERE id = $1`, [req.query.redo]);
+        await transcribePending(pool);
+        const row = (await pool.query(`SELECT transcript, summary, summary_json FROM call_recordings WHERE id = $1`, [req.query.redo])).rows[0] || {};
+        if (row.transcript && !row.summary) {
+          try { await summariseRecording(pool, req.query.redo); } catch (e) { return res.json({ transcript: row.transcript, error: e.message }); }
+        }
+        return res.json((await pool.query(`SELECT transcript, summary, summary_json FROM call_recordings WHERE id = $1`, [req.query.redo])).rows[0] || {});
+      } catch (e) { return res.status(500).json({ error: e.message }); }
+    }
     // ?id= one recording's details: which files Webex offers (audio, transcript...), links withheld.
     if (req.query.id) {
       try {
