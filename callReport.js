@@ -550,20 +550,30 @@ const otherParty = (topic) => String(topic || "").replace(/^Call with\s+/i, "").
 export async function syncRecordings(pool, days = 3) {
   await ensureRecordingTables(pool);
   const from = new Date(Date.now() - days * 86400e3).toISOString(), to = new Date().toISOString();
-  let url = `https://webexapis.com/v1/admin/convergedRecordings?from=${from}&to=${to}&max=100`;
+  // The org-wide list only returned the AUTHORISING admin's own recordings (8 Oct: 12 of
+  // Dec's, none of the sales phones', while asking per owner found Helen's). So the list is
+  // asked once per owner - every report person plus CALL_RECORDING_OWNERS - and once unfiltered.
+  const owners = [...new Set([...reportPeople().map((p) => p.email),
+    ...String(process.env.CALL_RECORDING_OWNERS || "").split(",")].map((e) => String(e || "").trim().toLowerCase()).filter(Boolean))];
+  const seen = new Set();
   let n = 0;
-  while (url) {
-    const { json, next } = await webexGet(pool, url);
-    for (const x of (json && json.items) || []) {
-      if ((x.serviceType && x.serviceType !== "calling") || (x.status && x.status !== "available")) continue;
-      await pool.query(
-        `INSERT INTO call_recordings (id, owner_email, created, day, duration, topic, other_party, session_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET duration = EXCLUDED.duration`,
-        [x.id, String(x.ownerEmail || "").toLowerCase(), x.createTime, ukDay(x.createTime), x.durationSeconds || 0,
-         x.topic || "", otherParty(x.topic), (x.serviceData && x.serviceData.callSessionId) || null]);
-      n++;
+  for (const owner of [null, ...owners]) {
+    let url = `https://webexapis.com/v1/admin/convergedRecordings?from=${from}&to=${to}&max=100${owner ? `&ownerEmail=${encodeURIComponent(owner)}` : ""}`;
+    while (url) {
+      const { json, next } = await webexGet(pool, url);
+      for (const x of (json && json.items) || []) {
+        if (seen.has(x.id)) continue;
+        seen.add(x.id);
+        if ((x.serviceType && x.serviceType !== "calling") || (x.status && x.status !== "available")) continue;
+        await pool.query(
+          `INSERT INTO call_recordings (id, owner_email, created, day, duration, topic, other_party, session_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET duration = EXCLUDED.duration`,
+          [x.id, String(x.ownerEmail || owner || "").toLowerCase(), x.createTime, ukDay(x.createTime), x.durationSeconds || 0,
+           x.topic || "", otherParty(x.topic), (x.serviceData && x.serviceData.callSessionId) || null]);
+        n++;
+      }
+      url = next;
     }
-    url = next;
   }
   await transcribePending(pool).catch((e) => console.error("[call-report] transcripts:", e.message));
   return n;
