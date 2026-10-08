@@ -887,7 +887,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
           const hit = ((json && json.items) || []).find((x) => String(x.displayName).toLowerCase() === String(p.webexName || p.name).toLowerCase());
           if (!hit) { out.push({ person: p.first, error: "phone user not found" }); continue; }
           const s = (await webexGet(pool, `https://webexapis.com/v1/people/${hit.id}/features/callRecording`)).json || {};
-          out.push({ person: p.first, phone: hit.displayName, enabled: s.enabled, record: s.record, announce: s.notification || s.startStopAnnouncement || null, vendor: s.serviceProvider || s.vendor || null });
+          out.push({ person: p.first, phone: hit.displayName, ...s });
         } catch (e) { out.push({ person: p.first, error: e.message }); }
       }
       return res.json(out);
