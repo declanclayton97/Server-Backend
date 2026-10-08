@@ -4660,7 +4660,7 @@ async function beeswiftRehearsal(pool, altItemsUrl) {
     deliverTo: pv.deliverTo || null, orderPage: pv.lines || [], packs: co.packs || [], added: co.added || [], problems: co.problems || [], cleared: co.cleared || null, basketBefore: co.basketBefore || [] };
 }
 
-async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [] } = {}) {
+async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, excludeSkus = [], poId: existingPoId = null } = {}) {
   const steps = {};
   // excludeSkus: same as Castle — explicit instruction only. Kept off the basket, taken off the PO,
   // and left UNFINALISED on its sales order so a person still deals with it (SW2011 brogue, 6 Oct:
@@ -4670,8 +4670,14 @@ async function placeBeeswiftOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   const token = await beeswiftFreshToken();
   steps.login = { tokenTail: token.slice(-6) };
   let po;
-  try { po = await createPo({ supplierKey: 'BEESWIFT', execute: live, padToThreshold, logPool: pool }); }
-  catch (e) { throw createPoErr(e); }
+  // Reuse an unsent auto-PO a failed run left (PO 495054, 2026-10-08: 10 waistcoat lines BeeSwift
+  // could not resolve). A fresh run would build a NEW PO, and the old one's rows count as on order,
+  // so the very lines that failed would be the ones missing from it.
+  if (existingPoId) po = await existingAutoPo(existingPoId, { contactIds: [BEESWIFT_SUPPLIER_CONTACT], autoKey: 'BEESWIFT' });
+  else {
+    try { po = await createPo({ supplierKey: 'BEESWIFT', execute: live, padToThreshold, logPool: pool }); }
+    catch (e) { throw createPoErr(e); }
+  }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -4768,6 +4774,7 @@ export async function beeswiftRehearse({ pool, altItemsUrl }) { return beeswiftR
 
 export async function pencarrieReleaseBackorders({ pool, poId, execute = false, released = null }) { return releasePencarrieBackorders(pool, poId, { execute: execute === true, released }); }
 // Blaklader against an existing unsent auto-PO (the basket step clears and verifies first).
+export async function beeswiftPlaceExisting({ pool, altItemsUrl, poId }) { return placeBeeswiftOrder(pool, altItemsUrl, { poId: Number(poId), live: true }); }
 export async function blakladerPlaceExisting({ pool, altItemsUrl, poId }) { return placeBlakladerOrder(pool, altItemsUrl, { poId, live: true }); }
 
 // ── BLAKLADER FINAL CHECK: did their back office keep every line? ───────────────────────────
