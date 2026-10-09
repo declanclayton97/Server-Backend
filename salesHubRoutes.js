@@ -1008,11 +1008,16 @@ export function registerSalesHubRoutes(app, deps) {
       const fromName = who || String(b.sentBy || "").trim() || salesperson.name || "Tuffshop Sales";
       const fromAddress = process.env.SALES_SENDER_EMAIL || process.env.SENDER_EMAIL || "sales@tuffshop.co.uk";
 
-      // The customer replies to the person who owns the order, not a shared
-      // address nobody watches.
+      // Where the customer's answer goes. It used to be the person who CREATED the order -
+      // but web orders are created by the website integration under the API account, so
+      // customers replied to tim@ (Dec, 9 Oct, Jack's replies). Now it is the person who
+      // SENT this email (their own mailbox) AND the shared sales@ box the hub watches, so
+      // the answer reaches the sender and nobody else's absence can lose it.
       // From a person's OWN mailbox, replies come back to them anyway - no Reply-To.
       const ownBox = currentMailbox().toLowerCase() !== salesMailbox().toLowerCase();
-      const replyTo = ownBox ? undefined : (salesperson.email || fromAddress);
+      const senderBox = ownBox ? null : await myMailbox(req.hubUser).catch(() => null);
+      const replyTo = ownBox ? undefined
+        : [...new Set([senderBox, salesMailbox()].filter(Boolean).map((s) => String(s).toLowerCase()))];
 
       // Through Outlook when connected: sent as the real sales mailbox (passes DMARC, which
       // smtp2go does not), kept in Sent Items, and — when the email came from the inbox —
