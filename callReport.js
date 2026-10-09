@@ -809,13 +809,17 @@ export async function matchRecording(pool, id) {
   for (const n of numbersSpoken(c.transcript).slice(0, 6)) {
     const tries = [];
     if (/^4\d{5}$/.test(n)) tries.push(["so", n]);
-    if (n.length >= 5 && n.length <= 9) tries.push(["ref", n.padStart(9, "0")]);
+    // Web refs have 6 significant digits (000125971); padding a 5-digit fragment ("98016")
+    // matched a 2025 order on 8 Oct, so shorter numbers are not tried as refs.
+    if (/^0*[1-9]\d{5}$/.test(n)) tries.push(["ref", n.padStart(9, "0")]);
     for (const [kind, v] of tries) {
       try {
         const hit = kind === "so"
           ? (await bpSearch(`/order-service/order-search?orderId=${v}`))[0]
           : (await bpSearch(`/order-service/order-search?customerRef=${v}`))[0];
         if (!hit) continue;
+        // An order matched only on a heard number must be recent (a stray number hits old orders).
+        if (Date.now() - new Date(hit.createdOn).getTime() > 365 * 86400e3) continue;
         // A number heard on someone else's order is only trusted when we have no caller match.
         if (contacts.length && !contacts.some((x) => Number(x.contactId) === Number(hit.contactId))) continue;
         order = hit; how = kind === "so" ? `order number said on the call (${n})` : `web order number said on the call (${n})`;
@@ -1114,6 +1118,14 @@ export function registerCallReport(app, { getPool, bpLive }) {
       await ensureRecordingTables(pool);
       const r = await pool.query(`UPDATE call_recordings SET transcript = NULL, summary = NULL, summary_json = NULL, webex_notes = NULL, purged_at = now() WHERE id = $1 RETURNING id, owner_email, created, duration`, [req.query.purge]);
       return res.json({ purged: r.rows[0] || null });
+    }
+    // ?rematch=1 runs the customer/order matching again on the last 3 days' calls.
+    if (req.query.rematch) {
+      await ensureRecordingTables(pool);
+      const ids = (await pool.query(`SELECT id FROM call_recordings WHERE purged_at IS NULL AND created > now() - interval '3 days' ORDER BY created DESC`)).rows.map((r) => r.id);
+      const out = [];
+      for (const id of ids) { try { out.push({ id, ...(await matchRecording(pool, id)) }); } catch (e) { out.push({ id, error: e.message }); } }
+      return res.json({ matched: out.length, results: out.map((r) => ({ id: r.id, number: r.number, orderId: r.orderId, how: r.how, certain: r.certain, error: r.error })) });
     }
     // ?redo=<id> fetches the transcript again and re-writes the summary, returning it (or the error).
     if (req.query.redo) {
