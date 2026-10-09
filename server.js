@@ -14461,6 +14461,15 @@ const quoteRowToView = (r) => ({
 // the passed rows in place and returns what changed. The id list MUST be ascending:
 // Brightpearl 400s an unordered id-set (CMNC-006), and the first version of this sent
 // them in table order - every poll then failed the refresh and skipped (8 Oct).
+// A quote's "salesperson" is whoever created it in Brightpearl; web quotes are created by the
+// website integration under the API account (Tim Banks), whose mailbox nobody reads. Such an
+// address is never used for Reply-To or handover - callers fall back to sales@ (Dec, 9 Oct).
+const SYSTEM_STAFF_EMAILS = String(process.env.BP_SYSTEM_EMAILS || 'tim@tuffshop.co.uk').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean);
+function staffEmail(email) {
+  const e = String(email || '').trim();
+  return e && !SYSTEM_STAFF_EMAILS.includes(e.toLowerCase()) ? e : null;
+}
+
 async function refreshQuoteChaseRows(rows) {
   const ids = [...new Set(rows.map((r) => Number(r.order_id)).filter(Boolean))].sort((a, b) => a - b);
   const updated = [];
@@ -14678,7 +14687,7 @@ async function pollQuoteChase() {
         const mail = buildChaseEmail(group.quotes, decision.stage,
           (q) => quoteResponseUrl(q.row.token));
         await sendQuoteMail({
-          to: driver.customerEmail, replyTo: driver.salespersonEmail || undefined,
+          to: driver.customerEmail, replyTo: staffEmail(driver.salespersonEmail) || undefined,
           subject: mail.subject, html: mail.html, text: mail.text,
         });
         await pool.query(
@@ -14694,7 +14703,7 @@ async function pollQuoteChase() {
         console.log(`[quote-chase] chase ${decision.stage} to ${driver.customerEmail} covering SO${ids.join(', SO')}`);
       } else if (decision.action === 'handover') {
         const mail = buildHandoverEmail(group.quotes);
-        const to = driver.salespersonEmail || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
+        const to = staffEmail(driver.salespersonEmail) || process.env.QUOTE_CHASE_FALLBACK_TO || 'sales@tuffshop.co.uk';
         await sendQuoteMail({ to, subject: mail.subject, html: mail.html });
         await pool.query(
           `UPDATE quote_chase SET stage = $2, handover_at = NOW(), last_checked_at = NOW()
@@ -15226,13 +15235,13 @@ app.post('/api/quote-chase/one-off', async (req, res) => {
         quotes: ids,
         value: group.quotes.reduce((a, b) => a + Number(b.netValue || 0), 0),
         subject: mail.subject,
-        replyTo: driver.salespersonEmail || null,
+        replyTo: staffEmail(driver.salespersonEmail) || null,
       };
       if (!send) { results.push({ ...entry, wouldSend: true }); continue; }
       try {
         await sendQuoteMail({
           to: driver.customerEmail,
-          replyTo: driver.salespersonEmail || undefined,
+          replyTo: staffEmail(driver.salespersonEmail) || undefined,
           subject: mail.subject, html: mail.html, text: mail.text,
           force: true,           // the chase may still be in dry run; this is a deliberate one-off
         });
@@ -15300,7 +15309,7 @@ app.get('/api/quote-chase/one-off-preview', async (req, res) => {
     const mail = buildRefreshEmail(groups[0].quotes, (x) => quoteResponseUrl(x.row.token));
     res.set('Content-Type', 'text/html; charset=utf-8').send(
       `<p style="font:12px monospace;background:#f4f4f4;padding:10px;margin:0 0 16px;">` +
-      `To: ${groups[0].driver.customerEmail} &nbsp;·&nbsp; Reply-To: ${groups[0].driver.salespersonEmail || '-'}<br>` +
+      `To: ${groups[0].driver.customerEmail} &nbsp;·&nbsp; Reply-To: ${groups[0].staffEmail(driver.salespersonEmail) || '-'}<br>` +
       `Subject: <strong>${mail.subject}</strong> &nbsp;·&nbsp; ${groups[0].quotes.length} quote(s)</p>` + mail.html
     );
   } catch (e) {
