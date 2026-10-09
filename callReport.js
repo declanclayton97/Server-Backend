@@ -749,7 +749,11 @@ const WORD_DIGITS = { zero: "0", oh: "0", o: "0", nought: "0", one: "1", two: "2
 // "four nine four seven two nine" / "4 9 4 7 2 9" / "494,729" -> "494729"
 export function numbersSpoken(text) {
   // ", " or ". " ends a number (Webex punctuates between phrases); "494,729" / "49-47-29" join up.
-  const tokens = String(text || "").toLowerCase().replace(/[,.]\s+/g, " ; ").replace(/[,.-]/g, "").split(/\s+/);
+  // Each transcript line starts "Speaker: " - and an unsaved caller's "speaker" is their phone
+  // number ("+441277658517: 000-12-5510"), which ran into the order number on 9 Oct. So the
+  // speaker label is dropped and every line ends a number.
+  const body = String(text || "").split("\n").map((l) => l.replace(/^[^:\n]{1,40}:\s/, "")).join(" ; ");
+  const tokens = body.toLowerCase().replace(/[,.]\s+/g, " ; ").replace(/[,.-]/g, "").split(/\s+/);
   const out = new Set();
   let run = "";
   const flush = () => { if (run.length >= 5) out.add(run); run = ""; };
@@ -1122,7 +1126,8 @@ export function registerCallReport(app, { getPool, bpLive }) {
     // ?rematch=1 runs the customer/order matching again on the last 3 days' calls.
     if (req.query.rematch) {
       await ensureRecordingTables(pool);
-      const ids = (await pool.query(`SELECT id FROM call_recordings WHERE purged_at IS NULL AND created > now() - interval '3 days' ORDER BY created DESC`)).rows.map((r) => r.id);
+      const ids = req.query.rematch !== "1" ? [String(req.query.rematch)]   // ?rematch=<id> for one call
+        : (await pool.query(`SELECT id FROM call_recordings WHERE purged_at IS NULL AND created > now() - interval '3 days' ORDER BY created DESC`)).rows.map((r) => r.id);
       const out = [];
       for (const id of ids) { try { out.push({ id, ...(await matchRecording(pool, id)) }); } catch (e) { out.push({ id, error: e.message }); } }
       return res.json({ matched: out.length, results: out.map((r) => ({ id: r.id, number: r.number, orderId: r.orderId, how: r.how, certain: r.certain, error: r.error })) });
