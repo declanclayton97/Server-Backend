@@ -853,6 +853,37 @@ export async function matchRecording(pool, id) {
   return result;
 }
 
+// Everything that is the same on every call - cached by Claude (see summariseRecording). Kept
+// free of anything per-call (names, dates, transcript) or the cache would never be reused;
+// the vocabulary is sorted so its daily refresh only changes the block when a brand changes.
+async function summaryInstructions() {
+  const vocab = [...(await tradeVocabulary())].sort((a, b) => a.localeCompare(b));
+  return `You turn transcripts of phone calls at Tuff Shop, a UK workwear and embroidery/print company, into notes for ` +
+    `the customer's sales order. The call details (who took it, who rang, when) and the transcript follow in the message.\n\n` +
+    `Write what a colleague needs on the customer's sales order. Most calls are a customer CHASING an existing order ` +
+    `(where is it, when will it arrive, has the proof been done); some are new orders, changes, queries or complaints. ` +
+    `Only state what was actually said - never guess sizes, quantities, prices or dates. Empty string / empty list where nothing was said.\n` +
+    `The transcript is machine speech-to-text and garbles workwear words ("left press" = left breast, "nervy" = navy, ` +
+    `"JDL five" = GD05, i.e. product codes come out as words). Correct a garbled word only where the meaning is clear, ` +
+    `and put what was heard in brackets when you correct a product code or number. Order numbers are often misheard: if a ` +
+    `number heard is not found in Brightpearl, say so plainly ("order 595771 as heard - not found, check").\n` +
+    `Phone names like "Mike Production" or "Pelican Works 2" are our handsets, not people or companies - never call one the customer.\n` +
+    `Names and trade words we use - spell them exactly like this wherever the transcript clearly means one (e.g. "unique" ` +
+    `meaning the brand = Uneek, "tough shop" = Tuffshop, "snicker" = Snickers): ${vocab.join(", ")}.\n` +
+    `Our order numbers are 6 digits (sales orders "SO", currently around 49xxxx); web order numbers are 9 digits starting 000 ` +
+    `(000125971); product codes are letters+digits like GD05, UC902, 2821 and are often heard as words.\n` +
+    `- is_customer_call: false for a call between colleagues or with a supplier.\n` +
+    `- call_type: chasing / new_order / change_to_order / query / complaint / other.\n` +
+    `- summary: 1-2 plain sentences.\n` +
+    `- customer_asked: what the caller wanted to know or have done.\n` +
+    `- told_customer: what we told them - status, dates, promises (e.g. "will call back tomorrow", "tracking to follow").\n` +
+    `- items: only when products were ordered or changed: product, colour, sizes+quantities, logo/decoration.\n` +
+    `- agreed: prices, delivery dates, deadlines agreed.\n- actions: what our side must do next.\n` +
+    `- order_refs: order / quote / PO numbers mentioned (as corrected, if Brightpearl confirmed one).\n` +
+    `- order_note: the note to paste on the order - short, plain ASCII only (no pound sign - write GBP; no dashes ` +
+    `other than -), starting with the "Phone call ..." prefix given in the call details. For a chase, e.g. "Customer chased ` +
+    `delivery; told due Friday, tracking to be emailed."`;
+}
 export async function summariseRecording(pool, id) {
   if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
   const c = (await pool.query(`SELECT owner_email, created, duration, other_party, transcript FROM call_recordings WHERE id = $1`, [id])).rows[0];
@@ -871,42 +902,28 @@ export async function summariseRecording(pool, id) {
     internal = [sd.callingParty, sd.calledParty, sd.connectedParty].some((p) => p && p.actor && p.actor.type === "USER"
       && p.actor.id !== ours && /@tuffshop\.co\.uk$/i.test(String(p.actor.email || "")));
   } catch { /* unknown - leave it to the transcript */ }
+  // Internal calls are not sent to Claude at all (Dec, 9 Oct: 17 of 64 calls were internal -
+  // a quarter of the spend for notes nobody posts). Recorded as such so they are not retried.
+  if (internal) {
+    const parsed = { is_customer_call: false, internal: true, skipped: true, call_type: "other", order_note: "", summary: "" };
+    await pool.query(`UPDATE call_recordings SET summary = $2, summary_json = $3, summarized_at = now() WHERE id = $1`,
+      [id, `Internal call with ${c.other_party} - not summarised`, JSON.stringify(parsed)]);
+    return parsed;
+  }
   const m = (await pool.query(`SELECT order_id FROM call_recordings WHERE id = $1`, [id])).rows[0];
   const orders = await ordersMentioned(c.transcript + (m && m.order_id ? ` ${m.order_id}` : ""));
-  const vocab = await tradeVocabulary();
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const msg = await new Anthropic().messages.create({
     model: process.env.CALL_SUMMARY_MODEL || "claude-sonnet-5",
     max_tokens: 4000,   // a 13-minute call needed more than 1500 (8 Oct)
+    // The instructions, brands and trade words are identical on every call, so they go in a
+    // cached system block: written once an hour, then read at a fraction of the price.
+    system: [{ type: "text", text: await summaryInstructions(), cache_control: { type: "ephemeral", ttl: "1h" } }],
     messages: [{ role: "user", content:
-      `This is the transcript of a phone call at Tuff Shop, a UK workwear and embroidery/print company. ` +
-      `Our side is ${staff}; the other party shows as "${c.other_party}". Call on ${ukDay(c.created)}, ${Math.round(c.duration / 60)} min.\n\n` +
-      `Write what a colleague needs on the customer's sales order. Most calls are a customer CHASING an existing order ` +
-      `(where is it, when will it arrive, has the proof been done); some are new orders, changes, queries or complaints. ` +
-      `Only state what was actually said - never guess sizes, quantities, prices or dates. Empty string / empty list where nothing was said.\n` +
-      `The transcript is machine speech-to-text and garbles workwear words ("left press" = left breast, "nervy" = navy, ` +
-      `"JDL five" = GD05, i.e. product codes come out as words). Correct a garbled word only where the meaning is clear, ` +
-      `and put what was heard in brackets when you correct a product code or number. Order numbers are often misheard: if a ` +
-      `number heard is not found in Brightpearl, say so plainly ("order 595771 as heard - not found, check").\n` +
+      `Call details: our side is ${staff}; the other party shows as "${c.other_party}". Call on ${ukDay(c.created)}, ` +
+      `${Math.round(c.duration / 60)} min. Start order_note with "Phone call ${ukDay(c.created)} (${staff}):".\n` +
       (orders.length ? `Brightpearl orders matching numbers heard in the call - use them to identify the customer and products:\n${JSON.stringify(orders)}\n` : "") +
-      (internal ? `This was an INTERNAL call: both ends are Tuff Shop phones ("${c.other_party}" is a colleague's handset, not a customer). ` +
-        `is_customer_call must be false and order_note must be an empty string.\n` : "") +
-      `Phone names like "Mike Production" or "Pelican Works 2" are our handsets, not people or companies - never call one the customer.\n` +
-      `Names and trade words we use - spell them exactly like this wherever the transcript clearly means one (e.g. "unique" ` +
-      `meaning the brand = Uneek, "tough shop" = Tuffshop, "snicker" = Snickers): ${vocab.join(", ")}.\n` +
-      `Our order numbers are 6 digits (sales orders "SO", currently around 49xxxx); product codes are letters+digits like GD05, ` +
-      `UC902, 2821 and are often heard as words.\n` +
-      `- is_customer_call: false for a call between colleagues or with a supplier.\n` +
-      `- call_type: chasing / new_order / change_to_order / query / complaint / other.\n` +
-      `- summary: 1-2 plain sentences.\n` +
-      `- customer_asked: what the caller wanted to know or have done.\n` +
-      `- told_customer: what we told them - status, dates, promises (e.g. "will call back tomorrow", "tracking to follow").\n` +
-      `- items: only when products were ordered or changed: product, colour, sizes+quantities, logo/decoration.\n` +
-      `- agreed: prices, delivery dates, deadlines agreed.\n- actions: what our side must do next.\n` +
-      `- order_refs: order / quote / PO numbers mentioned (as corrected, if Brightpearl confirmed one).\n` +
-      `- order_note: the note to paste on the order - short, plain ASCII only (no pound sign - write GBP; no dashes ` +
-      `other than -), starting "Phone call ${ukDay(c.created)} (${staff}):". For a chase, e.g. "Customer chased delivery; ` +
-      `told due Friday, tracking to be emailed."\n\nTranscript:\n${c.transcript.slice(0, 60000)}` }],
+      `\nTranscript:\n${c.transcript.slice(0, 60000)}` }],
     output_config: { format: { type: "json_schema", schema: SUMMARY_SCHEMA } },
   });
   const text = (msg.content || []).find((b) => b.type === "text");
@@ -914,7 +931,10 @@ export async function summariseRecording(pool, id) {
   const parsed = JSON.parse((text && text.text) || "{}");
   if (internal) Object.assign(parsed, { is_customer_call: false, order_note: "", internal: true });
   // What this call cost, so the spend is measured rather than estimated (Dec, 8 Oct).
-  parsed.usage = { model: msg.model, input_tokens: (msg.usage || {}).input_tokens || 0, output_tokens: (msg.usage || {}).output_tokens || 0 };
+  // Cached tokens are billed differently (written ~2x, read ~0.1x), so they are kept apart.
+  const u = msg.usage || {};
+  parsed.usage = { model: msg.model, input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0,
+    cache_write_tokens: u.cache_creation_input_tokens || 0, cache_read_tokens: u.cache_read_input_tokens || 0 };
   // The list shows the order note; a call that is not with a customer shows its summary,
   // labelled, and has no note to post.
   const shown = parsed.is_customer_call === false ? `${internal ? "Internal call" : "Not a customer call"}: ${parsed.summary || ""}` : (parsed.order_note || parsed.summary || "");
