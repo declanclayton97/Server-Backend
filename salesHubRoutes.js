@@ -226,12 +226,21 @@ export function registerSalesHubRoutes(app, deps) {
       try { authors[id] = (await resolveSalesperson(id)).name || `Staff ${id}`; }
       catch { authors[id] = `Staff ${id}`; }
     }
+    // Everything our systems post (hub replies, quote chase, purchasing) goes through the API
+    // account, contact 4 "Tim Banks" - so it must not be shown as a person. A hub reply names
+    // its sender ("Sent by: Helen"), which is the truth; anything else is "System".
+    const systemIds = new Set(String(process.env.BP_SYSTEM_CONTACT_IDS || "4").split(",").map((s) => Number(s.trim())).filter(Boolean));
+    const authorOf = (n) => {
+      if (!systemIds.has(Number(n.addedBy))) return authors[n.addedBy] || "";
+      const sent = /Sent by:\s*([^\n<]+)/i.exec(String(n.text || ""));
+      return sent ? `${sent[1].trim()} (Sales Hub)` : "System";
+    };
 
     const timeline = notes
       .map((n) => ({
         addedOn: n.addedOn,
         text: n.text,
-        addedBy: authors[n.addedBy] || "",
+        addedBy: authorOf(n),
         orderStatusId: n.orderStatusId,
         kind: classifyNote(n),
       }))
@@ -584,12 +593,14 @@ export function registerSalesHubRoutes(app, deps) {
       const msgs = page.messages;
       const locks = await othersLocks(req.hubUser.key).catch(() => ({}));
       const drafting = await draftsBySource(msgs.map((m) => m.id)).catch(() => ({}));
+      const replied = await repliesFor(msgs.map((m) => m.id)).catch(() => ({}));
       res.json({
         mailbox: currentMailbox(),
         folder,
         next: page.next,
         messages: msgs.map((m) => ({
           draft: drafting[m.id] || null,
+          replied: replied[m.id] || null,
           ...m,
           orderNumber: extractOrderNumber(`${m.subject}\n${m.preview}`) || null,
           viewing: locks[m.id] || null,
@@ -607,7 +618,18 @@ export function registerSalesHubRoutes(app, deps) {
     if (!graphConfigured()) return res.status(503).json({ error: "Outlook is not connected" });
     try {
       const m = await getMessage(req.params.id);
-      res.json({ ...m, orderNumber: extractOrderNumber(`${m.subject}\n${m.text}`) || null });
+      // Answered? From the hub (recorded on send), or straight from Outlook - a later message
+      // in the same conversation sent FROM this mailbox.
+      let replied = (await repliesFor([m.id]).catch(() => ({})))[m.id] || null;
+      if (!replied && m.conversationId && m.receivedAt) {
+        try {
+          const me = currentMailbox().toLowerCase();
+          const later = (await listThread(m.conversationId)).filter((x) => !x.isDraft
+            && String(x.fromAddress || "").toLowerCase() === me && new Date(x.receivedAt) > new Date(m.receivedAt));
+          if (later.length) replied = { by: "Outlook", at: later[later.length - 1].receivedAt, mode: "outlook" };
+        } catch { /* not knowing is fine */ }
+      }
+      res.json({ ...m, replied, orderNumber: extractOrderNumber(`${m.subject}\n${m.text}`) || null });
     } catch (err) {
       res.status(err.status === 404 ? 404 : 500).json({ error: err.message });
     }
@@ -652,6 +674,29 @@ export function registerSalesHubRoutes(app, deps) {
   const draftRow = (r) => r && ({ draftId: r.draft_id, sourceId: r.source_id, mode: r.mode, body: r.body, subject: r.subject,
     to: r.to_list, cc: r.cc_list, bcc: r.bcc_list, orderId: r.order_id ? Number(r.order_id) : null, intent: r.intent,
     by: r.user_name, byKey: r.user_key, at: r.updated_at });
+  // ---- "Sorted": which emails have been answered (Dec, 9 Oct) ---------------------------
+  // Every reply/forward sent from the hub is recorded against the email it answered, so the
+  // inbox can show "Sorted - replied by Helen" instead of leaving people to read the order
+  // notes, where our own reply note shows up as "Tim Banks" (the API account) and reads like
+  // a colleague acting since the email.
+  let repliesReady = null;
+  function ensureReplies() {
+    if (!repliesReady) repliesReady = getPool().query(`CREATE TABLE IF NOT EXISTS sales_hub_replies (
+        message_id text NOT NULL, mailbox text, order_id bigint, mode text, sent_by text,
+        sent_at timestamptz NOT NULL DEFAULT now())`)
+      .then(() => getPool().query(`CREATE INDEX IF NOT EXISTS sales_hub_replies_msg ON sales_hub_replies (message_id)`))
+      .catch((e) => { repliesReady = null; throw e; });
+    return repliesReady;
+  }
+  async function repliesFor(ids) {
+    if (!ids.length || !useDatabase || !getPool()) return {};
+    await ensureReplies();
+    const r = await getPool().query(
+      `SELECT DISTINCT ON (message_id) message_id, sent_by, sent_at, mode FROM sales_hub_replies
+        WHERE message_id = ANY($1::text[]) ORDER BY message_id, sent_at DESC`, [ids]);
+    return Object.fromEntries(r.rows.map((x) => [x.message_id, { by: x.sent_by, at: x.sent_at, mode: x.mode }]));
+  }
+
   async function draftsBySource(ids) {
     if (!(useDatabase && getPool()) || !ids.length) return {};
     await ensureDrafts();
@@ -1011,6 +1056,13 @@ export function registerSalesHubRoutes(app, deps) {
       if (orderId) {
         try { noted = (await postBpOrderNote(orderId, note)) !== false; }
         catch (e) { console.error("[sales-hub] note failed:", e.message); }
+      }
+      // Mark the email it answered as sorted.
+      if (b.messageId && mode !== "new" && useDatabase && getPool()) {
+        ensureReplies().then(() => getPool().query(
+          `INSERT INTO sales_hub_replies (message_id, mailbox, order_id, mode, sent_by) VALUES ($1,$2,$3,$4,$5)`,
+          [String(b.messageId), currentMailbox(), orderId || null, mode, who || b.sentBy || ""]))
+          .catch((e) => console.error("[sales-hub] reply record failed:", e.message));
       }
 
       // The email has gone. A failed note must not read as a failed send, or
