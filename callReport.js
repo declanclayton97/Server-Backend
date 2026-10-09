@@ -547,6 +547,9 @@ async function ensureRecordingTables(pool) {
   // A recording wiped on request (e.g. card details read out, 8 Oct): kept as a row so the sync
   // never re-imports it, but with no transcript/summary and no playback.
   await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS purged_at timestamptz`);
+  // Which customer / order the call was about (matchRecording).
+  for (const col of ["caller_number text", "contact_id bigint", "contact_name text", "order_id bigint", "match_json jsonb", "matched_at timestamptz"])
+    await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS ${col}`);
 }
 // "Call with Pelican Works 2-20261007 1543" -> "Pelican Works 2"
 const otherParty = (topic) => String(topic || "").replace(/^Call with\s+/i, "").replace(/-\d{8}\s+\d{4}$/, "").trim();
@@ -607,6 +610,13 @@ async function transcribePending(pool, limit = 10) {
     if (!text) continue;
     await pool.query(`UPDATE call_recordings SET transcript = $2 WHERE id = $1`, [id, fixKnownMishearings(text)]);
     if (summariesOn()) await summariseRecording(pool, id).catch((e) => console.error("[call-report] summary", id, e.message));
+  }
+  // Match calls to customers/orders: new calls, and once more when the transcript arrives.
+  for (const { id } of (await pool.query(`SELECT id FROM call_recordings
+      WHERE purged_at IS NULL AND created > now() - interval '3 days'
+        AND (matched_at IS NULL OR (transcript IS NOT NULL AND COALESCE(match_json->>'hadTranscript', 'false') <> 'true'))
+      ORDER BY created DESC LIMIT 10`)).rows) {
+    await matchRecording(pool, id).catch((e) => console.error("[call-report] match", id, e.message));
   }
   // Summaries cost per call, so they are switched on separately from recording (Dec, 8 Oct:
   // record now, summarise later). Off, transcripts are still collected (free) and wait here.
@@ -727,6 +737,114 @@ export function fixKnownMishearings(text) {
     .replace(/\b(tough|tuff)\s+work\s*wear\b/gi, "Tuff Workwear")
     .replace(/\btough\s+sportswear\b/gi, "Tuff Sportswear");
 }
+// ---- matching a call to its customer and order (Dec, 9 Oct) --------------------------------
+// Tested on 8 Oct's 10 sales calls: the CALLER'S NUMBER found the right customer and order
+// on 6, where speech-to-text alone got order numbers wrong (459052 for SO459194). So, in order:
+//   1. an SO number or web order number said on the call that Brightpearl confirms
+//      (web refs are stored 9 digits, "000125971"; the call says "0125971" or "125971");
+//   2. otherwise the caller's number -> Brightpearl contact (pri / mob / sec, spacing ignored,
+//      whole number only) -> that customer's latest orders.
+// Read-only and free, so it runs whether or not summaries are on.
+const WORD_DIGITS = { zero: "0", oh: "0", o: "0", nought: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9" };
+// "four nine four seven two nine" / "4 9 4 7 2 9" / "494,729" -> "494729"
+export function numbersSpoken(text) {
+  // ", " or ". " ends a number (Webex punctuates between phrases); "494,729" / "49-47-29" join up.
+  const tokens = String(text || "").toLowerCase().replace(/[,.]\s+/g, " ; ").replace(/[,.-]/g, "").split(/\s+/);
+  const out = new Set();
+  let run = "";
+  const flush = () => { if (run.length >= 5) out.add(run); run = ""; };
+  for (const t of tokens) {
+    const w = t.replace(/[^a-z0-9]/g, "");
+    if (/^\d+$/.test(w)) { run += w; continue; }
+    if (WORD_DIGITS[w] !== undefined && (run || w !== "o")) { run += WORD_DIGITS[w]; continue; }
+    if (w === "double" || w === "triple") continue;
+    flush();
+  }
+  flush();
+  return [...out];
+}
+const nationalNumber = (n) => {
+  const d = String(n || "").replace(/[^\d+]/g, "");
+  if (/^\+44\d{9,10}$/.test(d)) return "0" + d.slice(3);
+  if (/^44\d{9,10}$/.test(d)) return "0" + d.slice(2);
+  return /^0\d{9,10}$/.test(d) ? d : null;
+};
+async function callerNumber(pool, c) {
+  const direct = nationalNumber(c.other_party);
+  if (direct) return direct;
+  try {   // a caller saved in Webex shows as a name; the metadata still has the number
+    const { json } = await webexGet(pool, `https://webexapis.com/v1/convergedRecordings/${encodeURIComponent(c.id)}/metadata`);
+    const sd = (json && json.serviceData) || {};
+    for (const p of [sd.callingParty, sd.calledParty, sd.connectedParty]) {
+      if (!p || (p.actor && p.actor.type === "USER" && /@tuffshop\.co\.uk$/i.test(String(p.actor.email || "")))) continue;
+      const n = nationalNumber(p.number);
+      if (n) return n;
+    }
+  } catch { /* no number */ }
+  return null;
+}
+async function bpSearch(path) {
+  const r = await bpForSummaries("GET", path);
+  const cols = ((r && r.metaData && r.metaData.columns) || []).map((x) => x.name);
+  return ((r && r.results) || []).map((row) => Object.fromEntries(cols.map((k, i) => [k, row[i]])));
+}
+export async function matchRecording(pool, id) {
+  if (!bpForSummaries) return null;
+  const c = (await pool.query(`SELECT id, other_party, transcript, summary_json FROM call_recordings WHERE id = $1`, [id])).rows[0];
+  if (!c) return null;
+  const number = await callerNumber(pool, c);
+  const internal = c.summary_json && c.summary_json.internal;
+  let contacts = [];
+  if (number && !internal) {
+    const seen = new Map();
+    for (const f of ["pri", "mob", "sec"]) {
+      for (const x of await bpSearch(`/contact-service/contact-search?${f}=${number}`)) {
+        seen.set(x.contactId, { contactId: x.contactId, name: `${x.firstName || ""} ${x.lastName || ""}`.replace(/\s+/g, " ").trim(), company: x.companyName || "" });
+      }
+    }
+    contacts = [...seen.values()].slice(0, 3);
+  }
+  // 1. numbers said on the call
+  let order = null, how = null;
+  for (const n of numbersSpoken(c.transcript).slice(0, 6)) {
+    const tries = [];
+    if (/^4\d{5}$/.test(n)) tries.push(["so", n]);
+    if (n.length >= 5 && n.length <= 9) tries.push(["ref", n.padStart(9, "0")]);
+    for (const [kind, v] of tries) {
+      try {
+        const hit = kind === "so"
+          ? (await bpSearch(`/order-service/order-search?orderId=${v}`))[0]
+          : (await bpSearch(`/order-service/order-search?customerRef=${v}`))[0];
+        if (!hit) continue;
+        // A number heard on someone else's order is only trusted when we have no caller match.
+        if (contacts.length && !contacts.some((x) => Number(x.contactId) === Number(hit.contactId))) continue;
+        order = hit; how = kind === "so" ? `order number said on the call (${n})` : `web order number said on the call (${n})`;
+        break;
+      } catch { /* try the next */ }
+    }
+    if (order) break;
+  }
+  // 2. the caller's latest orders
+  let candidates = [];
+  for (const ct of contacts) {
+    const rows = await bpSearch(`/order-service/order-search?contactId=${ct.contactId}&orderTypeId=1&sort=orderId.DESC&pageSize=3`);
+    candidates.push(...rows.map((r) => ({ orderId: r.orderId, created: String(r.createdOn || "").slice(0, 10), ref: r.customerRef || "", statusId: r.orderStatusId, contact: ct.name })));
+  }
+  candidates = candidates.sort((a, b) => b.orderId - a.orderId).slice(0, 5);
+  if (!order && candidates.length) { order = { orderId: candidates[0].orderId }; how = "caller's number - their latest order"; }
+  const result = {
+    number, contacts, orderId: order ? Number(order.orderId) : null, how,
+    // Several recent orders = a guess; staff should confirm before a note goes on it.
+    certain: !!order && (/said on the call/.test(how || "") || candidates.length <= 1),
+    hadTranscript: !!c.transcript,
+    candidates,
+  };
+  await pool.query(`UPDATE call_recordings SET caller_number = $2, contact_id = $3, contact_name = $4, order_id = $5, match_json = $6, matched_at = now() WHERE id = $1`,
+    [id, number, contacts[0] ? contacts[0].contactId : null, contacts[0] ? [contacts[0].name, contacts[0].company].filter(Boolean).join(" / ") : null,
+     result.orderId, JSON.stringify(result)]);
+  return result;
+}
+
 export async function summariseRecording(pool, id) {
   if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
   const c = (await pool.query(`SELECT owner_email, created, duration, other_party, transcript FROM call_recordings WHERE id = $1`, [id])).rows[0];
@@ -745,7 +863,8 @@ export async function summariseRecording(pool, id) {
     internal = [sd.callingParty, sd.calledParty, sd.connectedParty].some((p) => p && p.actor && p.actor.type === "USER"
       && p.actor.id !== ours && /@tuffshop\.co\.uk$/i.test(String(p.actor.email || "")));
   } catch { /* unknown - leave it to the transcript */ }
-  const orders = await ordersMentioned(c.transcript);
+  const m = (await pool.query(`SELECT order_id FROM call_recordings WHERE id = $1`, [id])).rows[0];
+  const orders = await ordersMentioned(c.transcript + (m && m.order_id ? ` ${m.order_id}` : ""));
   const vocab = await tradeVocabulary();
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const msg = await new Anthropic().messages.create({
@@ -799,6 +918,18 @@ const signRec = (secret, id) => crypto.createHmac("sha256", secret).update("rec:
 export async function recordingLink(pool, id) {
   return `${publicBase()}/call-recording/${encodeURIComponent(id)}?sig=${signRec(await reportSecret(pool), id)}`;
 }
+// The matched customer and order, linked to Brightpearl; a guess (several recent orders) says so.
+const BP_ORDER = "https://euw1.brightpearlapp.com/patt-op.php?scode=invoice&oID=";
+const orderCell = (c) => {
+  const m = c.match_json || {};
+  if (!c.order_id && !c.contact_name) return '<span style="color:#9ca3af">' + (c.match_json ? "no match" : "matching...") + "</span>";
+  const others = (m.candidates || []).filter((x) => Number(x.orderId) !== Number(c.order_id)).slice(0, 2)
+    .map((x) => '<a href="' + BP_ORDER + x.orderId + '" target="_blank" rel="noopener" style="color:#6b7280">SO' + x.orderId + "</a>").join(", ");
+  return (c.contact_name ? esc(c.contact_name) + "<br>" : "") +
+    (c.order_id ? '<a href="' + BP_ORDER + c.order_id + '" target="_blank" rel="noopener" style="color:#0f6cbd;font-weight:600">SO' + c.order_id + "</a>" : "") +
+    (m.how ? '<br><span style="color:#6b7280;font-size:11px">' + esc(m.how) + (m.certain ? "" : " - check") + "</span>" : "") +
+    (others ? '<br><span style="color:#6b7280;font-size:11px">also: ' + others + "</span>" : "");
+};
 const fmtLen = (s) => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, "0")}`;
 const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 
@@ -1011,7 +1142,7 @@ export function registerCallReport(app, { getPool, bpLive }) {
     // Otherwise: pull the last ?days (default 3) from Webex, then list what is stored, with replay links.
     try {
       const synced = await syncRecordings(pool, Math.min(Number(req.query.days) || 3, 30));
-      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, webex_notes, length(transcript) AS transcript_chars, transcript_checked_at FROM call_recordings WHERE purged_at IS NULL ORDER BY created DESC LIMIT 50`)).rows;
+      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, webex_notes, length(transcript) AS transcript_chars, transcript_checked_at, caller_number, contact_name, order_id, match_json FROM call_recordings WHERE purged_at IS NULL ORDER BY created DESC LIMIT 50`)).rows;
       for (const c of rows) c.url = await recordingLink(pool, c.id);
       res.json({ app: scope, synced, recordings: rows });
     } catch (e) { res.status(500).json({ app: scope, error: e.message }); }
@@ -1057,21 +1188,21 @@ ${c && c.transcript ? `<details style="margin-top:16px"><summary style="cursor:p
       const pool = getPool();
       await ensureRecordingTables(pool);
       await pool.query(`ALTER TABLE call_recordings ADD COLUMN IF NOT EXISTS summary_json jsonb`);
-      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, summary_json, transcript IS NOT NULL AS has_transcript
+      const rows = (await pool.query(`SELECT id, owner_email, created, duration, other_party, summary, summary_json, transcript IS NOT NULL AS has_transcript, contact_name, order_id, match_json
                                         FROM call_recordings WHERE created > now() - interval '7 days' AND purged_at IS NULL ORDER BY created DESC`)).rows;
       const body = [];
       for (const c of rows) {
         const who = (reportPeople().find((p) => String(p.email).toLowerCase() === c.owner_email) || {}).name || c.owner_email;
         const j = c.summary_json || {};
         body.push(`<tr><td ${TD}>${esc(dayLabel(ukDay(c.created)))} ${hhmm(ukMinutes(c.created))}</td><td ${TD}>${esc(who)}</td><td ${TD}>${esc(c.other_party)}</td>
-          <td ${TDN}>${fmtLen(c.duration)}</td><td ${TD}>${esc(j.call_type || "")}</td>
+          <td ${TDN}>${fmtLen(c.duration)}</td><td ${TD}>${orderCell(c)}</td><td ${TD}>${esc(j.call_type || "")}</td>
           <td ${TD}>${c.summary ? esc(c.summary) : `<span style="color:#9ca3af">${c.has_transcript ? "transcript in, note pending" : "waiting for transcript"}</span>`}</td>
           <td ${TD}><a href="${esc(await recordingLink(pool, c.id))}" target="_blank" rel="noopener" style="color:#0f6cbd;font-weight:600;text-decoration:none">&#9654; Open</a></td></tr>`);
       }
       res.set(noIndex).type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Call notes</title></head>
 <body style="margin:0;padding:24px;background:#f6f7f9;font-family:Segoe UI,Arial,sans-serif;color:#111"><div style="background:#fff;padding:20px 24px;border-radius:8px;max-width:1300px;margin:0 auto">
 <h2 style="margin:0 0 12px;font-size:18px">Recorded calls - last 7 days</h2>
-<table style="border-collapse:collapse;width:100%"><tr><th ${TH}>When</th><th ${TH}>Taken by</th><th ${TH}>With</th><th ${THN}>Length</th><th ${TH}>Type</th><th ${TH}>Order note</th><th ${TH}></th></tr>
+<table style="border-collapse:collapse;width:100%"><tr><th ${TH}>When</th><th ${TH}>Taken by</th><th ${TH}>With</th><th ${THN}>Length</th><th ${TH}>Customer / order</th><th ${TH}>Type</th><th ${TH}>Order note</th><th ${TH}></th></tr>
 ${body.join("") || `<tr><td ${TD} colspan="7">No recorded calls yet.</td></tr>`}</table>
 <p style="color:#6b7280;font-size:12px;margin-top:12px">Open a call for the recording, the full transcript and the note. Notes come from Webex's speech-to-text, checked against Brightpearl where an order number was heard.</p></div></body></html>`);
     } catch (e) { res.status(500).send("Could not list the calls: " + esc(e.message)); }
