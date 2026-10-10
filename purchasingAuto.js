@@ -238,6 +238,11 @@ export const SUPPLIERS = {
   // is a Brightpearl data job, not a code one.
   PULSAR: { contactId: 11807, costList: 20, poField: 'PCF_PULSARPO', lowInvSupplierId: 11807, brandIds: [168], detect: (n) => /pulsar/i.test(n || '') }, // PCF_PULSARPO ("PULSAR PO") existed already; this pointed at the shared box instead
   V12: { contactId: 92811, costList: 20, poField: 'PCF_STOCKPO' /* ⚠ no PCF_V12PO exists in BP yet — create one and move this over */, lowInvSupplierId: 92811, brandIds: [279], detect: (n) => /\bv\s*12\b/i.test(n || '') },
+  // Leo Workwear (contact 7919, "Leo Textiles Ltd T/A Leo Workwear" — a name lookup would wrongly hit
+  // LEO GROUP 1382). Portal order via Alt-Items /api/leo-order; our SKU IS the Leo SKU, so no resolver.
+  // Every product name starts "Leo Workwear", which keeps the detect off Leonard/Leodis. No PCF_LEOPO
+  // exists in Brightpearl, so this shares PCF_STOCKPO like Scruffs and V12 (2026-10-10).
+  LEO: { contactId: 7919, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 7919, detect: (n) => /leo\s*workwear/i.test(n || '') },
   // portalNeverRaises: the portal is net EXCEPT markdown/outlet lines, which show the ORIGINAL
   // wholesale and take the markdown at invoice (104670 outlet: portal £85.50, our cost £42.75 = 50%
   // off — user, 2026-10-02). So a portal price ABOVE our cost is the markdown, never a correction.
@@ -341,6 +346,7 @@ const _SUPPLIER_NAME_HINTS = {
   BLAKLADER: /bl[aå]kl[aä]der/i, SNICKERS: /snickers/i, FRISTADS: /fristads/i,
   'HELLY HANSEN': /helly/i, STERLING: /sterling/i, 'PERFORMANCE BRANDS': /performance\s*brands/i,
   BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i, BEESWIFT: /bee\s*swift/i, 'AS APPAREL': /\bas\s*apparel\b/i, TRANEMO: /tranemo/i,
+  LEO: /leo\s*(?:workwear|textiles)/i,
 };
 export function tagFailsToMatch(rawTag) {
   const out = [];
@@ -621,6 +627,8 @@ const TAG_ALIASES = {
   // 17:30 tag audit.
   'PULSAR UK': 'PULSAR',
   'PULSAR®': 'PULSAR',
+  'LEO WORKWEAR': 'LEO',
+  'LEO TEXTILES': 'LEO',
 };
 // ── ALTERNATIVE SUPPLIERS INSIDE ONE TAG ─────────────────────────────────────
 // The two separators mean DIFFERENT things, and only "/" was ever handled:

@@ -2303,6 +2303,92 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   return { poId, orderNo, steps };
 }
 
+// ── Leo Workwear placement chain (leoworkwear.com trade portal) ──────────────
+// Alt-Items /api/leo-order drives the portal: empty-basket check → fast_lines bulk add → cart
+// read-back (every SKU at the right qty, nothing extra, or it clears and refuses) → Order Details
+// with our PO number in Leo's mandatory "Purchase Order #" → Review → Finalise. Our BP SKU IS the
+// Leo SKU (W11-Y/NV-LEO-XL), so there is no resolver. Leo add carriage (£7.50 under £200 ex-VAT)
+// at Review, so the charge we put on the PO is the one THEY showed, not a guess.
+// A real order needs LEO_ORDER_LIVE=true on Alt-Items as well; without it the route only rehearses
+// and this run stops at 'checkout' with the PO built and nothing sent.
+const LEO_SUPPLIER_CONTACT = 7919;
+async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await createPo({ supplierKey: 'LEO', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw createPoErr(e); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // One line per SKU — the cart read-back compares per-SKU quantities, and Leo merges repeats.
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name, productId: l.productId }));
+  if (!orderLines.length) throw stepErr('cart', 'no orderable Leo lines');
+  // Every Leo code ends -LEO-<size>. A product still on an internal code would just be missing
+  // from the cart; refuse up front and name it, which is cheaper than a basket round-trip.
+  const notLeo = orderLines.filter((l) => !/-LEO-[A-Z0-9]+$/i.test(l.sku));
+  if (notLeo.length) throw stepErr('resolve', `${notLeo.length} line(s) on PO#${poId} are not Leo codes (…-LEO-<size>) — NOT ordering: ${notLeo.map((l) => `${l.qty} × ${l.sku}`).join(', ')}`, { poId, notLeo });
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  let r;
+  try {
+    r = await jfetch('checkout', `${altItemsUrl}/api/leo-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lines: orderLines.map((l) => ({ sku: l.sku, qty: l.qty })), reference: String(poId), execute: live }),
+    });
+  } catch (e) {
+    // The finalise hop may have gone through even though we lost the answer. Ask Leo, never retry.
+    const found = await jfetch('checkout', `${altItemsUrl}/api/leo-order-lookup?ref=${encodeURIComponent(poId)}`, {}).catch(() => null);
+    throw stepErr('checkout', `Leo order call failed: ${e.message}${found && found.found ? ` — BUT Leo's order list shows PO ${poId}: ${found.context}. Do NOT re-run; link it by hand.` : ' — not found on Leo\'s order list.'}`, { poId, lookup: found });
+  }
+  steps.leo = { cart: r.steps && r.steps.cart, review: r.steps && r.steps.review && { totals: r.steps.review.totals, poShown: r.steps.review.poShown } };
+  if (r.rehearsed) throw stepErr('checkout', `Leo rehearsed only (LEO_ORDER_LIVE is not "true" on Alt-Items) — PO#${poId} built, nothing sent to Leo.`, { poId, leo: steps.leo });
+  if (!r.ok) {
+    const cart = (r.steps && r.steps.cart) || {};
+    const miss = (cart.missing && cart.missing.length) ? ` — not in Leo's cart as asked: ${cart.missing.map((m) => `${m.sku} want ${m.want} got ${m.got}`).join(', ')}` : '';
+    throw stepErr(cart.missing && cart.missing.length ? 'cart' : 'checkout', `Leo did not confirm the order: ${r.error || 'no order number on the confirmation page'}${miss}`, { poId, leo: r.steps });
+  }
+  const orderNo = String(r.orderNo).trim();
+  steps.checkout = { ok: true, orderNo };
+
+  // Carriage exactly as Leo charged it on the Review page (£8.50 "Carriage Charge (UK0)" under
+  // £200 ex-VAT, seen 2026-10-10).
+  const totals = (r.steps && r.steps.review && r.steps.review.totals) || {};
+  const carriage = totals.carriage;
+  // PRICE CHECK: Leo's goods total on the Review page (ex VAT, carriage taken out) against the PO.
+  // Diagnostic only — the order is already placed.
+  try {
+    const poNet = +[...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (Number(l.cost) || 0) * (Number(l.qty) || 0), 0).toFixed(2);
+    if (totals.goodsExVat != null) {
+      const gap = +(totals.goodsExVat - poNet).toFixed(2);
+      steps.priceCheck = { theirs: totals.goodsExVat, poNet, gap };
+      if (Math.abs(gap) >= 0.01) {
+        await logPriceCheck(pool, steps, {
+          supplierKey: 'LEO', poId, changes: [],
+          message: `Prices don't match: Leo goods total £${totals.goodsExVat.toFixed(2)} vs our PO net £${poNet.toFixed(2)} (diff £${gap}). A Brightpearl cost price (list 20) may need adjusting. Order ${orderNo} still placed.`,
+          context: { poId, orderNo, theirs: totals.goodsExVat, poNet, gap },
+        });
+      }
+    }
+  } catch (e) { steps.priceCheck = { skipped: e.message }; }
+  if (live && carriage > 0) {
+    try { steps.carriage = await bp.addPoMiscRowLive({ poId, name: 'Carriage (Leo, order under £200 ex-VAT)', net: carriage, qty: 1, execute: true }); }
+    catch (e) { steps.carriage = { error: e.message }; }
+  }
+
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, orderNo); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Leo Workwear — order ${orderNo}. Reference-set failed: ${e.message}`, LEO_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: orderNo, refWritten, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'LEO', poId, noteContactId: LEO_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -4015,6 +4101,7 @@ const SCHEDULED_SUPPLIERS = {
   'AS APPAREL': { supplierKey: 'AS APPAREL', stateId: 21, placeFn: placeAsApparelOrder, threshold: Number(process.env.ASAPPAREL_FREESHIP_THRESHOLD || 175) }, // emailed PO, 14:40; free carriage @ £175 ex-VAT, £9.90 below it onto the PO (user, 2026-10-02)
   BEESWIFT: { supplierKey: 'BEESWIFT', stateId: 20, placeFn: placeBeeswiftOrder, extraNet: (pool, lines) => beeswiftPackExtraNet(pool, lines), threshold: Number(process.env.BEESWIFT_FREESHIP_THRESHOLD || 150) },
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
+  LEO: { supplierKey: 'LEO', stateId: 23, placeFn: placeLeoOrder, threshold: Number(process.env.LEO_FREESHIP_THRESHOLD || 200) }, // leoworkwear.com trade portal via Alt-Items /api/leo-order; carriage paid @ £200 ex-VAT, else £7.50 (read off Leo's Review page). 09:00 UK, gated by LEO_SCHEDULE_ENABLED=true + LEO_ORDER_LIVE=true on Alt-Items
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
 
@@ -4049,10 +4136,11 @@ const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
   SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811, BUCKLER: 8981,
-  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780,
+  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
+  LEO: { at: '09:00' },
   BLAKLADER: { at: '09:30' },
   SNICKERS: { at: '10:00' },
   FRISTADS: { at: '10:30' },

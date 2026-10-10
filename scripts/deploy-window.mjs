@@ -50,6 +50,7 @@ if (atArg) {
 // Every poller window (start hour:minute, 30 minutes long). KEEP IN STEP WITH server.js — if you
 // add a poller there and not here, this will cheerfully clear a deploy into its window.
 const POLLERS = [
+  { name: 'Leo', h: 9, m: 0, days: 'Mon-Fri' },   // 2026-10-10, gated off until LEO_SCHEDULE_ENABLED=true
   { name: 'Blaklader', h: 9, m: 30, days: 'Mon-Fri' },
   { name: 'Snickers', h: 10, m: 0, days: 'Mon-Fri' },
   { name: 'Fristads', h: 10, m: 30, days: 'Mon-Fri' },
