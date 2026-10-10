@@ -280,7 +280,16 @@ export const SUPPLIERS = {
   STERLING:     { contactId: 341,   costList: 20, poField: 'PCF_STERLPO', lowInvSupplierId: 341, detect: (n) => /apache|city\s*knights|dewalt/i.test(n || '') },
   // Ralawise = distributor (Stanley Stella exclusive + Gildan/AWDis/etc). Detect by
   // Stanley Stella name OR a Ralawise-format SKU (2 letters + 3 digits + …).
-  RALAWISE:     { contactId: 205,   costList: null, poField: 'PCF_RALAPO', detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z0-9]/.test(String(sku || '').replace(/[\s_-]/g, '')) },
+  // Ralawise sells most of the same brands as PenCarrie (2026-10-10, going live as an automated lane).
+  // Rows it takes: its own detect (Stanley Stella, or a product already on a Ralawise code) plus
+  // products BP names Ralawise as primary supplier for — EXCEPT any row another supplier on the same
+  // order would also take (yieldToPeers, in gatherLiveDemand). A tag only ever lists the suppliers
+  // still to order, so "take every row on a lone RALAWISE tag" would re-order lines PenCarrie had
+  // already bought; the peer rule reads PenCarrie's stamped PCF_PENCPO to catch exactly that.
+  // Every row is then resolved to an exact Ralawise SKU in Alt-Items (ralawiseResolve.js) or the PO
+  // is refused with the line named. No lowInvSupplierId on purpose: reorder from Ralawise would
+  // compete with PenCarrie's for the same shared-brand stock. costList 20, like every supplier.
+  RALAWISE:     { contactId: 205,   costList: 20, poField: 'PCF_RALAPO', yieldToPeers: true, detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z]{4}/.test(String(sku || '').replace(/[\s_-]/g, '')) },
   // PenCarrie = leisurewear DISTRIBUTOR (Gildan/AWDis/FOTL/B&C/Kustom Kit/Result/…). Products
   // are NOT named "pencarrie", so TAG-ONLY (no brand detect): a single-supplier PENCARRIE order
   // takes all orderable rows; re-pickup prevented by clearing the tag on finalize. Ordering is
@@ -347,6 +356,7 @@ const _SUPPLIER_NAME_HINTS = {
   'HELLY HANSEN': /helly/i, STERLING: /sterling/i, 'PERFORMANCE BRANDS': /performance\s*brands/i,
   BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i, BEESWIFT: /bee\s*swift/i, 'AS APPAREL': /\bas\s*apparel\b/i, TRANEMO: /tranemo/i,
   LEO: /leo\s*(?:workwear|textiles)/i,
+  RALAWISE: /ralawise/i,
 };
 export function tagFailsToMatch(rawTag) {
   const out = [];
@@ -1491,6 +1501,9 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // the line is ours to buy: Chadwick matches on brandId 213, and Behrens Group products carry
     // that same brand. See belongsHere below.
     const foreignSupplier = new Map();
+    // productId → brandId for the rows looked up below, so a peer supplier's brand claim can be
+    // checked too (see yieldToPeers).
+    const brandOf = new Map();
     // BRAND is the authoritative signal, not the product name. A name detect is a guess about how
     // someone typed the product; the brand is a field on the record. Chadwick is the clean case —
     // every one of its products carries brandId 213 — and brand catches anything renamed, which a
@@ -1515,6 +1528,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
             if (contactId && String(p.primarySupplierId) === String(contactId)) supplierOwned.add(String(p.id));
             if (brandIds.size && p.brandId != null && brandIds.has(String(p.brandId))) brandOwned.add(String(p.id));
             if (contactId && p.primarySupplierId != null && String(p.primarySupplierId) !== String(contactId)) foreignSupplier.set(String(p.id), String(p.primarySupplierId));
+            if (p.brandId != null) brandOf.set(String(p.id), String(p.brandId));
           }
         } catch { /* additive only: if the lookup fails we fall back to name matching, never worse */ }
         await pause(150);
@@ -1544,6 +1558,29 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     let candidateRows = (singleSupplier && !hasBrandDetect)
       ? orderableRows
       : orderableRows.filter(([, r]) => belongsHere(r));
+    // YIELD TO PEERS (Ralawise). A distributor that shares its brands with another automated lane
+    // must never take a row that lane would also take, or both order it. The peers are every OTHER
+    // registered supplier this order involves: named in the tag now, OR already placed — finalise
+    // removes a supplier's tag but stamps its own PO field (PCF_PENCPO …), so a tag that has shrunk
+    // from "pencarrie / RALAWISE" to "RALAWISE" still has PenCarrie as a peer. The shared
+    // PCF_STOCKPO box names no single supplier, so it cannot identify one and is ignored.
+    // A row any peer claims — by its name/code detect or its brand list — is left to that peer.
+    if (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].yieldToPeers) {
+      const peers = Object.entries(SUPPLIERS).filter(([k, s2]) => k !== supplierKey && (
+        allTags.some((t) => groupHasSupplier(t, k)) || (s2.poField && s2.poField !== 'PCF_STOCKPO' && cf[s2.poField])));
+      const peerClaims = (r) => peers.find(([, s2]) => (s2.detect && s2.detect(r.productName, r.productSku))
+        || (s2.brandIds && brandOf.has(String(r.productId)) && s2.brandIds.map(String).includes(brandOf.get(String(r.productId)))));
+      if (peers.length) {
+        candidateRows = candidateRows.filter(([rowId, r]) => {
+          const p = peerClaims(r);
+          if (!p) return true;
+          demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName,
+            ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0,
+            note: `${p[0]} also claims this line on this order — left to ${p[0]}, not ordered from ${supplierKey}` });
+          return false;
+        });
+      }
+    }
     // Record what that rule dropped. A line removed here is one a human asked for and will not see
     // on the PO, which is exactly the shape of "asked for but never ordered" — it must be
     // answerable from the demand log rather than inferred later.

@@ -69,6 +69,7 @@ const POLLERS = [
   { name: 'AS Apparel', h: 14, m: 40, days: 'Mon-Fri' },
   { name: 'Portwest', h: 15, m: 0, days: 'Mon-Fri' },
   { name: 'Hellberg', h: 15, m: 20, days: 'Mon-Fri' },   // emailed PO, split from Snickers 2026-09-16 — runs on Purchasing-Automation
+  { name: 'Ralawise', h: 15, m: 30, days: 'Mon-Fri' },   // 2026-10-10, gated off until RALAWISE_SCHEDULE_ENABLED=true
   { name: 'PenCarrie', h: 15, m: 40, days: 'Mon-Fri' },
   { name: 'Uneek', h: 16, m: 0, days: 'Mon-Fri' },
   { name: 'Blaklader reorder', h: 16, m: 20, days: 'Mon-Fri' },

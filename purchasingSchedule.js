@@ -2303,6 +2303,96 @@ async function placeChadwickOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   return { poId, orderNo, steps };
 }
 
+// ── Ralawise placement chain (api.ralawise.com POST /v1/order) ───────────────
+// A DIRECT order: no basket, nothing to eyeball, the order is placed by the one call. So every
+// line is resolved to an exact Ralawise SKU in Alt-Items (ralawiseResolve.js — our SKU, barcode,
+// or a manufacturer/style code we hold plus colour + size) and ANY unresolvable line refuses the
+// whole PO at 'resolve' (retry-safe: nothing reached Ralawise). There is no test order — the owner
+// does not want APITEST orders in Ralawise's system — so the live gate is RALAWISE_ORDER_LIVE=true
+// on Alt-Items plus RALAWISE_SCHEDULE_ENABLED=true here. Ralawise add £8.70 carriage under £185 ex
+// VAT themselves; the charge on their response goes onto the PO.
+const RALAWISE_SUPPLIER_CONTACT = 205;
+async function placeRalawiseOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await createPo({ supplierKey: 'RALAWISE', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw createPoErr(e); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  // Lines from the PO itself, with everything the resolver can use: the row's own SKU (BP writes
+  // the product's per-supplier code there — often Ralawise's style, J180M / BG544.CSR), and the
+  // product's barcode, EAN and MPN.
+  let cart;
+  try { cart = (await bp.getOrderCartLines(poId)).filter((l) => l.sku); }
+  catch (e) { throw stepErr('cart', `couldn't read PO ${poId} rows: ${e.message}`); }
+  if (!cart.length) throw stepErr('cart', 'no orderable Ralawise lines');
+  const rowSkuByPid = {}, idByPid = {};
+  try {
+    const live0 = (await bp.bpLiveGet(`/order-service/order/${poId}`))[0];
+    for (const r of Object.values((live0 && live0.orderRows) || {})) if (r.productId != null) rowSkuByPid[String(r.productId)] = r.productSku;
+    const pids = [...new Set(cart.map((l) => l.productId).filter(Boolean))].sort((a, b) => a - b);
+    for (let i = 0; i < pids.length; i += 100) {
+      const ps = await bp.bpLiveGet(`/product-service/product/${pids.slice(i, i + 100).join(',')}`);
+      for (const p of ps || []) idByPid[String(p.id)] = p.identity || {};
+    }
+  } catch (e) { steps.identityWarn = `product identity read failed (resolver has less to go on): ${e.message}`; }
+  const orderLines = cart.map((l) => {
+    const id = idByPid[String(l.productId)] || {};
+    // cart lines carry the PO ROW's SKU (which BP may have swapped for the supplier code); the
+    // product's own SKU is identity.sku. The resolver wants both.
+    return { sku: String(id.sku || l.sku), rowSku: String(l.sku || rowSkuByPid[String(l.productId)] || '') || null, mpn: id.mpn || null, ean: id.ean || null, barcode: id.barcode || null, name: l.name, colour: l.colour, size: l.size, qty: Math.round(l.qty), productId: l.productId };
+  });
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  let r;
+  try {
+    r = await jfetch('checkout', `${altItemsUrl}/api/ralawise-place`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lines: orderLines, reference: String(poId), execute: live }),
+    });
+  } catch (e) {
+    // A direct API order may have gone through even though the answer was lost, and Ralawise
+    // offer no order-history endpoint to ask. Never retry — a person checks their account.
+    throw stepErr('checkout', `Ralawise order call failed: ${e.message} — it MAY have been placed. Check the Ralawise account for reference ${poId} before doing anything; do NOT re-run.`, { poId });
+  }
+  if (!r.ok && r.step === 'resolve') {
+    const u = (r.unresolved || []).slice(0, 8).map((x) => `${x.qty} × ${x.sku} ${x.name ? `(${x.name.slice(0, 40)})` : ''} — ${x.reason}`).join('; ');
+    const c = (r.collisions || []).map((x) => `${x.ralSku} ← ${x.ours.join(' + ')}`).join('; ');
+    throw stepErr('resolve', `${(r.unresolved || []).length || (r.collisions || []).length} Ralawise line(s) could not be pinned to one exact Ralawise SKU — NOT placing. PO#${poId} left for review. ${u}${c ? ` Collisions: ${c}` : ''}. Fix the product's SKU/MPN/barcode, or add it to Alt-Items data/ralawise-verified-codes.json.`, { poId, unresolved: r.unresolved, collisions: r.collisions });
+  }
+  if (r.rehearsed) throw stepErr('checkout', `Ralawise rehearsed only — PO#${poId} built, every line resolved, nothing sent.`, { poId, plan: r.plan });
+  if (!r.ok) throw stepErr(r.step === 'gate' ? 'checkout' : (r.step || 'checkout'), `Ralawise did not take the order: ${r.error || JSON.stringify(r).slice(0, 250)}`, { poId, plan: r.plan });
+  const orderNo = String(r.orderNumber).trim();
+  steps.checkout = { ok: true, orderNo, missing: r.missing, allocation: r.allocation, totals: r.totals };
+  if (r.missing && r.missing.length) {
+    await logPurchasingError(pool, {
+      supplier: 'RALAWISE', step: 'checkout', severity: 'error',
+      message: `Ralawise order ${orderNo} (PO#${poId}) was placed WITHOUT ${r.missing.length} line(s) — they are not on Ralawise's order: ${r.missing.join(', ')}. Order them by hand or fix the code and remove the row from the PO.`,
+      context: { poId, orderNo, missing: r.missing, plan: r.plan },
+    }).catch(() => {});
+  }
+
+  const carriage = r.totals && Number(r.totals.delivery);
+  if (live && carriage > 0) {
+    try { steps.carriage = await bp.addPoMiscRowLive({ poId, name: 'Carriage (Ralawise, order under £185 ex-VAT)', net: carriage, qty: 1, execute: true }); }
+    catch (e) { steps.carriage = { error: e.message }; }
+  }
+
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, orderNo); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Ralawise — order ${orderNo}. Reference-set failed: ${e.message}`, RALAWISE_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: orderNo, refWritten, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'RALAWISE', poId, noteContactId: RALAWISE_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 // ── Leo Workwear placement chain (leoworkwear.com trade portal) ──────────────
 // Alt-Items /api/leo-order drives the portal: empty-basket check → fast_lines bulk add → cart
 // read-back (every SKU at the right qty, nothing extra, or it clears and refuses) → Order Details
@@ -4101,6 +4191,7 @@ const SCHEDULED_SUPPLIERS = {
   'AS APPAREL': { supplierKey: 'AS APPAREL', stateId: 21, placeFn: placeAsApparelOrder, threshold: Number(process.env.ASAPPAREL_FREESHIP_THRESHOLD || 175) }, // emailed PO, 14:40; free carriage @ £175 ex-VAT, £9.90 below it onto the PO (user, 2026-10-02)
   BEESWIFT: { supplierKey: 'BEESWIFT', stateId: 20, placeFn: placeBeeswiftOrder, extraNet: (pool, lines) => beeswiftPackExtraNet(pool, lines), threshold: Number(process.env.BEESWIFT_FREESHIP_THRESHOLD || 150) },
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
+  RALAWISE: { supplierKey: 'RALAWISE', stateId: 24, placeFn: placeRalawiseOrder, threshold: Number(process.env.RALAWISE_FREESHIP_THRESHOLD || 185) }, // api.ralawise.com POST /v1/order via Alt-Items /api/ralawise-place (exact SKU resolver, no test orders); free delivery @ £185 ex-VAT else £8.70 (read off their response). 15:30 UK, gated by RALAWISE_SCHEDULE_ENABLED=true + RALAWISE_ORDER_LIVE=true on Alt-Items
   LEO: { supplierKey: 'LEO', stateId: 23, placeFn: placeLeoOrder, threshold: Number(process.env.LEO_FREESHIP_THRESHOLD || 200) }, // leoworkwear.com trade portal via Alt-Items /api/leo-order; carriage paid @ £200 ex-VAT, else £7.50 (read off Leo's Review page). 09:00 UK, gated by LEO_SCHEDULE_ENABLED=true + LEO_ORDER_LIVE=true on Alt-Items
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
@@ -4136,7 +4227,7 @@ const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
   SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811, BUCKLER: 8981,
-  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919,
+  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
@@ -4155,6 +4246,7 @@ const WINDOW_DISPLAY = {
   'PERFORMANCE BRANDS': { at: '14:20' },
   'AS APPAREL': { at: '14:40' },
   PORTWEST: { at: '15:00' },
+  RALAWISE: { at: '15:30' },
   PENCARRIE: { at: '15:40' },
   UNEEK: { at: '16:00' },
   V12: { at: '12:20' },
