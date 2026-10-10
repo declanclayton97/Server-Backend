@@ -289,7 +289,12 @@ export const SUPPLIERS = {
   // Every row is then resolved to an exact Ralawise SKU in Alt-Items (ralawiseResolve.js) or the PO
   // is refused with the line named. No lowInvSupplierId on purpose: reorder from Ralawise would
   // compete with PenCarrie's for the same shared-brand stock. costList 20, like every supplier.
-  RALAWISE:     { contactId: 205,   costList: 20, poField: 'PCF_RALAPO', yieldToPeers: true, detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z]{4}/.test(String(sku || '').replace(/[\s_-]/g, '')) },
+  RALAWISE:     { contactId: 205,   costList: 20, poField: 'PCF_RALAPO', yieldToPeers: true,
+    // DTF consumables (DuPont Artistri inks, Resolute adhesive powder) are bought from Ralawise but are
+    // NOT in their order-API catalogue, so they would refuse every garment on the PO. Held back here
+    // (recorded in the demand log) and ordered by a person.
+    excludeIf: (n) => /artistri|dtfs*ink|adhesives*powder|resolute/i.test(n || ''),
+    detect: (n, sku) => /stanley\s*stella/i.test(n || '') || /^[A-Z]{2}\d{3}[A-Z]{4}/.test(String(sku || '').replace(/[\s_-]/g, '')) },
   // PenCarrie = leisurewear DISTRIBUTOR (Gildan/AWDis/FOTL/B&C/Kustom Kit/Result/…). Products
   // are NOT named "pencarrie", so TAG-ONLY (no brand detect): a single-supplier PENCARRIE order
   // takes all orderable rows; re-pickup prevented by clearing the tag on finalize. Ordering is
