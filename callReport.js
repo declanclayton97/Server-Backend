@@ -1033,6 +1033,8 @@ export async function sendReport(r, { onlyTo, viewUrl = null, managerOnly = fals
 // ---- routes + schedule ----------------------------------------------------------------
 export function registerCallReport(app, { getPool, bpLive }) {
   bpForSummaries = bpLive;
+  // The Orders tab links an order's recorded calls.
+  app.locals.callRecordingLink = (id) => recordingLink(getPool(), id);
   const requireUser = (req, res, next) => app.locals.requireHubUser(req, res, next);
   const users = () => String(process.env.CALL_REPORT_USERS || "dec,dec clayton,declan,declan clayton").split(",").map((s) => s.trim().toLowerCase());
   const allowed = (u) => !!u && [u.key, u.name].some((v) => users().includes(String(v || "").trim().toLowerCase()));

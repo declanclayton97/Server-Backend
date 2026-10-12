@@ -788,6 +788,158 @@ export function registerSalesHubRoutes(app, deps) {
 
   // POST /api/sales-hub/lookup  { query, emailDate? }
   // `query` is either a bare order number or a whole email.
+  // ---- Orders tab: a customer rings, find their order and everything about it (Dec, 12 Oct) ----
+  let statusNames = { at: 0, map: {} };
+  async function orderStatusName(id) {
+    if (Date.now() - statusNames.at > 6 * 3600e3) {
+      try {
+        const list = (await bpLive("GET", "/order-service/order-status")) || [];
+        statusNames = { at: Date.now(), map: Object.fromEntries(list.map((s) => [s.statusId, s.name])) };
+      } catch { /* names are a nicety */ }
+    }
+    return statusNames.map[id] || "";
+  }
+  async function bpRows(path) {
+    const r = await bpLive("GET", path);
+    const cols = ((r && r.metaData && r.metaData.columns) || []).map((x) => x.name);
+    return ((r && r.results) || []).map((row) => Object.fromEntries(cols.map((k, i) => [k, row[i]])));
+  }
+  const ukPhone = (s) => {
+    const d = String(s || "").replace(/[^\d+]/g, "");
+    if (/^\+44\d{9,10}$/.test(d)) return "0" + d.slice(3);
+    if (/^44\d{9,10}$/.test(d)) return "0" + d.slice(2);
+    return /^0\d{9,10}$/.test(d) ? d : null;
+  };
+  // GET /api/sales-hub/order-search?q= - an SO number, a web order number (000125971), a phone
+  // number, an email address, or a name / company. Returns matching customers with their
+  // latest orders, or the one order when the number names it.
+  app.get("/api/sales-hub/order-search", requireUser, async (req, res) => {
+    const q = String(req.query.q || "").trim();
+    if (!q) return res.status(400).json({ error: "Type an order number, phone, email or name" });
+    try {
+      const orders = new Map();      // orderId -> summary
+      const contacts = new Map();    // contactId -> { name, company, email }
+      const addOrder = async (o, how) => {
+        if (!o || !o.orderId || orders.has(o.orderId)) return;
+        orders.set(o.orderId, { orderId: o.orderId, created: String(o.createdOn || "").slice(0, 10), ref: o.customerRef || "",
+          status: await orderStatusName(o.orderStatusId), contactId: o.contactId, how });
+      };
+      const digits = q.replace(/[\s-]/g, "");
+      const phone = ukPhone(q);
+      if (/^\d+$/.test(digits) && !phone) {
+        if (digits.length <= 7) for (const o of await bpRows(`/order-service/order-search?orderId=${Number(digits)}`)) await addOrder(o, "order number");
+        if (/^0*[1-9]\d{4,8}$/.test(digits)) for (const o of await bpRows(`/order-service/order-search?customerRef=${digits.padStart(9, "0")}`)) await addOrder(o, "web order number");
+      }
+      const found = [];
+      if (phone) for (const f of ["pri", "mob", "sec"]) found.push(...await bpRows(`/contact-service/contact-search?${f}=${phone}`));
+      else if (/@/.test(q)) found.push(...await bpRows(`/contact-service/contact-search?primaryEmail=${encodeURIComponent(q)}`));
+      else if (!/^\d+$/.test(digits)) {
+        found.push(...await bpRows(`/contact-service/contact-search?companyName=${encodeURIComponent(q)}&pageSize=10`));
+        const parts = q.split(/\s+/);
+        found.push(...await bpRows(`/contact-service/contact-search?lastName=${encodeURIComponent(parts[parts.length - 1])}${parts.length > 1 ? `&firstName=${encodeURIComponent(parts[0])}` : ""}&pageSize=10`));
+        for (const o of await bpRows(`/order-service/order-search?customerRef=${encodeURIComponent(q)}`)) await addOrder(o, "reference");
+      }
+      for (const c of found) if (!c.isStaff && !contacts.has(c.contactId)) contacts.set(c.contactId, { contactId: c.contactId,
+        name: `${c.firstName || ""} ${c.lastName || ""}`.replace(/\s+/g, " ").trim(), company: c.companyName || "", email: c.primaryEmail || "" });
+      for (const c of [...contacts.values()].slice(0, 8)) {
+        for (const o of await bpRows(`/order-service/order-search?contactId=${c.contactId}&orderTypeId=1&sort=orderId.DESC&pageSize=8`)) await addOrder(o, "customer");
+      }
+      // Customers for orders found by number, so every result row has a name.
+      for (const o of orders.values()) {
+        if (o.contactId && !contacts.has(o.contactId)) {
+          try {
+            const c = ((await bpLive("GET", `/contact-service/contact/${o.contactId}`)) || [])[0] || {};
+            contacts.set(o.contactId, { contactId: o.contactId, name: `${c.firstName || ""} ${c.lastName || ""}`.trim(),
+              company: (c.organisation && c.organisation.name) || "", email: (((c.communication || {}).emails || {}).PRI || {}).email || "" });
+          } catch { /* name unknown */ }
+        }
+      }
+      const list = [...orders.values()].sort((a, b) => b.orderId - a.orderId).slice(0, 40)
+        .map((o) => ({ ...o, customer: contacts.get(o.contactId) || null }));
+      res.json({ query: q, kind: phone ? "phone" : /@/.test(q) ? "email" : /^\d+$/.test(digits) ? "number" : "name", orders: list });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Courier tracking as the shipping integrations note it: "Royal Mail tracking reference received: VJ2105..."
+  const COURIER_URL = {
+    "royal mail": (r) => `https://www.royalmail.com/track-your-item#/tracking-results/${r}`,
+    "parcelforce": (r) => `https://www.parcelforce.com/track-trace?trackNumber=${r}`,
+    "dpd": (r) => `https://track.dpd.co.uk/parcels/${r}`,
+    "dhl": (r) => `https://www.dhl.com/gb-en/home/tracking/tracking-express.html?tracking-id=${r}`,
+    "ups": (r) => `https://www.ups.com/track?tracknum=${r}`,
+    "evri": (r) => `https://www.evri.com/track/parcel/${r}`,
+    "fedex": (r) => `https://www.fedex.com/fedextrack/?trknbr=${r}`,
+  };
+  function trackingFromNotes(timeline) {
+    const out = [];
+    for (const n of timeline || []) {
+      const t = String(n.text || "").replace(/<[^>]+>/g, " ");
+      const m = /([A-Za-z][A-Za-z ]{1,25}?)\s+tracking\s+(?:reference|number|ref)[^:]*:\s*([A-Z0-9]{6,30})/i.exec(t);
+      if (!m) continue;
+      const carrier = m[1].trim();
+      const key = Object.keys(COURIER_URL).find((k) => carrier.toLowerCase().includes(k));
+      out.push({ carrier, ref: m[2], url: key ? COURIER_URL[key](m[2]) : null, at: n.addedOn });
+    }
+    return out;
+  }
+
+  // GET /api/sales-hub/order-detail/:id - everything about one order for the Orders tab.
+  app.get("/api/sales-hub/order-detail/:id", requireUser, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const o = await gatherOrder(id);
+      if (!o) return res.status(404).json({ error: "Order not found" });
+      const raw = ((await bpLive("GET", `/order-service/order/${id}`)) || [])[0] || {};
+      const cust = (raw.parties && raw.parties.customer) || {};
+      const del = (raw.parties && raw.parties.delivery) || {};
+      const ALT = process.env.ALT_ITEMS_URL || "https://alternate-items.onrender.com";
+      const [goodsOut, poTracking, calls, lineToPo] = await Promise.all([
+        // What has left the building: Brightpearl goods-out notes.
+        bpLive("GET", `/warehouse-service/order/${id}/goods-note/goods-out`).then((g) => Object.entries(g || {}).map(([noteId, n]) => ({
+          noteId, shippedOn: (n.status && n.status.shipped && n.status.shippedOn) || null, packedOn: (n.status && n.status.packedOn) || null,
+          boxes: (n.shipping && n.shipping.boxes) || null,
+          items: Object.entries(n.orderRows || {}).map(([rowId, list]) => ({
+            name: ((raw.orderRows || {})[rowId] || {}).productName || "", quantity: (list || []).reduce((a, x) => a + Number(x.quantity || 0), 0) })),
+        }))).catch(() => []),
+        // The supplier's own tracking for each PO (Alternate-Items readers).
+        Promise.all((o.pos || []).map(async (p) => {
+          const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 8000);
+          try { return { poId: p.id, ...(await (await fetch(`${ALT}/api/po-tracking?poId=${p.id}`, { signal: ctl.signal })).json()) }; }
+          catch { return { poId: p.id, state: "unknown" }; } finally { clearTimeout(timer); }
+        })),
+        // Recorded calls matched to this order.
+        (useDatabase && getPool() ? getPool().query(`SELECT id, owner_email, created, duration, other_party, summary FROM call_recordings
+            WHERE order_id = $1 AND purged_at IS NULL ORDER BY created DESC LIMIT 10`, [id]).then((r) => r.rows).catch(() => []) : []),
+        // Which PO each line is on (demand_log ties our SKU to the PO it was ordered on).
+        (useDatabase && getPool() ? getPool().query(`SELECT DISTINCT ON (upper(sku)) upper(sku) AS sku, po_id, supplier FROM demand_log
+            WHERE so_id = $1 AND sku IS NOT NULL ORDER BY upper(sku), po_id DESC NULLS LAST`, [id]).then((r) => r.rows).catch(() => []) : []),
+      ]);
+      const poById = new Map((o.pos || []).map((p) => [Number(p.id), p]));
+      const trackByPo = new Map(poTracking.map((t) => [Number(t.poId), t]));
+      const lines = (o.allRows || []).map((l) => {
+        const d = lineToPo.find((x) => x.sku === String(l.sku || "").toUpperCase());
+        const po = d && d.po_id ? poById.get(Number(d.po_id)) : null;
+        return { ...l, poId: d && d.po_id ? Number(d.po_id) : null, supplier: (d && d.supplier) || (po && po.supplier) || "",
+          poStatus: po ? po.status : "", poDue: po ? po.expectedDate : null };
+      });
+      const recLink = app.locals.callRecordingLink;
+      res.json({
+        ...o,
+        lines,
+        customer: { name: cust.addressFullName || "", company: cust.companyName || "", email: cust.email || "",
+          phone: cust.telephone || cust.mobileTelephone || "", mobile: cust.mobileTelephone || "" },
+        delivery: { name: del.addressFullName || "", company: del.companyName || "",
+          address: [del.addressLine1, del.addressLine2, del.addressLine3, del.addressLine4, del.postalCode].filter(Boolean).join(", "),
+          date: (raw.delivery && raw.delivery.deliveryDate) || null, shippingMethodId: (raw.delivery && raw.delivery.shippingMethodId) || null },
+        paymentStatus: raw.orderPaymentStatus || "",
+        shipments: goodsOut.sort((a, b) => new Date(a.shippedOn || a.packedOn || 0) - new Date(b.shippedOn || b.packedOn || 0)),
+        tracking: trackingFromNotes(o.timeline),
+        pos: (o.pos || []).map((p) => ({ ...p, tracking: trackByPo.get(Number(p.id)) || null })),
+        calls: await Promise.all(calls.map(async (c) => ({ ...c, url: recLink ? await recLink(c.id).catch(() => null) : null }))),
+      });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.post("/api/sales-hub/lookup", requireUser, async (req, res) => {
     try {
       // Every answer carries the template list, so an email with no order can still pick one
