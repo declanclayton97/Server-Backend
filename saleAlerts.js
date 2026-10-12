@@ -290,6 +290,42 @@ async function sendReview(result) {
     `<div style="font-family:Arial,sans-serif;font-size:14px">${rows || "<p>Nothing to send today.</p>"}${sample ? `<hr><p><b>What customers would receive:</b></p>${sample.html}` : ""}</div>`);
 }
 
+// ---- WhatsApp ---------------------------------------------------------------------------------------
+// Approved Marketing template sale_item_alert (id 1081768568097569): IMAGE header (the item photo),
+// body "Hi {{1}}, your size is in our sale 👀 / The {{2}} you bought from us is now reduced. Stock is limited,
+// so it's first come, first served.", URL button https://tuffshop.co.uk/{{1}}, quick reply "Stop promotions".
+const WA_TEMPLATE = process.env.SALE_ALERTS_WA_TEMPLATE || "sale_item_alert";
+const waNumberId = () => (String(process.env.SALE_ALERTS_WA_CHANNEL || "sales").toLowerCase() === "sales"
+  ? process.env.WHATSAPP_SALES_PHONE_NUMBER_ID : process.env.WHATSAPP_PHONE_NUMBER_ID) || null;
+
+/** UK mobile in WhatsApp form (447...), or null. Landlines and junk return null. */
+export function ukMobile(raw) {
+  let d = String(raw || "").replace(/[^\d+]/g, "");
+  if (d.startsWith("+")) d = d.slice(1);
+  if (d.startsWith("00")) d = d.slice(2);
+  if (d.startsWith("0")) d = "44" + d.slice(1);
+  return /^447\d{9}$/.test(d) ? d : null;
+}
+
+export async function sendSaleWhatsApp({ to, firstName, item }) {
+  const id = waNumberId();
+  if (!process.env.WHATSAPP_TOKEN || !id) throw new Error("WhatsApp is not configured (WHATSAPP_TOKEN / phone number id)");
+  const path = String(item.url).replace(/^https?:\/\/(www\.)?tuffshop\.co\.uk\//i, "");
+  const components = [
+    ...(item.image ? [{ type: "header", parameters: [{ type: "image", image: { link: item.image } }] }] : []),
+    { type: "body", parameters: [{ type: "text", text: String(firstName || "there").slice(0, 60) }, { type: "text", text: String(item.name).slice(0, 200) }] },
+    { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: path }] },
+  ];
+  const v = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+  const r = await fetch(`https://graph.facebook.com/${v}/${id}/messages`, {
+    method: "POST", headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ messaging_product: "whatsapp", to, type: "template", template: { name: WA_TEMPLATE, language: { code: "en" }, components } }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`WhatsApp send failed: ${(j.error && (j.error.error_user_msg || j.error.message)) || r.status}`);
+  return { via: "whatsapp", messageId: (j.messages && j.messages[0] && j.messages[0].id) || null };
+}
+
 // ---- routes + schedule ---------------------------------------------------------------------------
 export function registerSaleAlerts(app, { getPool }) {
   const requireUser = (req, res, next) => app.locals.requireHubUser(req, res, next);
@@ -313,6 +349,21 @@ export function registerSaleAlerts(app, { getPool }) {
       if (!/@tuffshop\.co\.uk$/.test(to)) return res.status(400).json({ error: "Samples only go to @tuffshop.co.uk addresses" });
       const { subject, html } = renderEmail({ item: { name: "Carhartt 106674 Firm Duck Traditional Coat", url: "https://tuffshop.co.uk/sale.html" }, firstName: "Sam", email: to });
       res.json(await send(to, "[SAMPLE] " + subject, html));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  // Test the WhatsApp template with a real sale item. Locked twice: needs SALE_ALERTS_SECRET as ?key=, and only
+  // ever sends to SALE_ALERTS_TEST_TO (default Dec's mobile) - it cannot message a customer.
+  app.post("/api/sale-alerts/whatsapp-test", async (req, res) => {
+    try {
+      const secret = cfg().secret, key = String(req.query.key || "");
+      if (!secret || key.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(secret))) return res.status(403).json({ error: "forbidden" });
+      const to = ukMobile(process.env.SALE_ALERTS_TEST_TO || "447892872364");
+      const url = String(req.query.url || "https://tuffshop.co.uk/carhartt-106674-firm-duck-traditional-coat-black.html");
+      if (!/^https:\/\/tuffshop\.co\.uk\//.test(url)) return res.status(400).json({ error: "url must be a tuffshop.co.uk page" });
+      const page = await salePage(url);
+      if (!page.name) return res.status(400).json({ error: "could not read that page", page });
+      const r = await sendSaleWhatsApp({ to, firstName: String(req.query.name || "Dec"), item: page });
+      res.json({ ok: true, to, item: { name: page.name, url: page.url, image: page.image, sizes: page.variants.map((v) => v.size || v.sku) }, ...r });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   app.get("/api/sale-alerts/log", requireUser, async (req, res) => {
