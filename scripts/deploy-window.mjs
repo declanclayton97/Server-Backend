@@ -51,6 +51,7 @@ if (atArg) {
 // add a poller there and not here, this will cheerfully clear a deploy into its window.
 const POLLERS = [
   { name: 'Leo', h: 9, m: 0, days: 'Mon-Fri' },   // 2026-10-10, gated off until LEO_SCHEDULE_ENABLED=true
+  { name: 'Brook Taverner', h: 9, m: 20, days: 'Mon-Fri' },   // 2026-10-12, gated off until BROOKTAVERNER_SCHEDULE_ENABLED=true
   { name: 'Blaklader', h: 9, m: 30, days: 'Mon-Fri' },
   { name: 'Snickers', h: 10, m: 0, days: 'Mon-Fri' },
   { name: 'Fristads', h: 10, m: 30, days: 'Mon-Fri' },

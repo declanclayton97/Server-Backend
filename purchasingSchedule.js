@@ -2479,6 +2479,86 @@ async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = tru
   return { poId, orderNo, steps };
 }
 
+// ── Brook Taverner placement chain (brooktaverner.com, Magento 1 behind Sucuri) ─
+// Alt-Items /api/brooktaverner-order: empty-basket check → each of our SKUs resolved by THEIR own
+// per-line check (2256D-6-31 → 2256D size 06L; a wrong guess is refused, never ordered) → one bulk
+// add → basket read-back → one-step checkout with OUR address (LS26 8LG), Standard delivery,
+// invoice account and our PO number in their mandatory Customer Order Number. Mapped from the first
+// order, placed by hand in Chrome on 2026-10-12 (PO 495891 → #100298032).
+// NO PADDING (owner, 2026-10-12): a low-quantity supplier, so the day-3 top-up that tips Snickers
+// over its threshold never runs here — after 3 working days it simply places with Standard
+// delivery (£8.95 under £100 ex-VAT). Genuine low-inventory lines still go on as normal.
+// A real order needs BROOKTAVERNER_ORDER_LIVE=true on Alt-Items; without it the route only
+// rehearses and this run stops at 'checkout' with the PO built and nothing sent.
+const BROOK_TAVERNER_SUPPLIER_CONTACT = 5499;
+async function placeBrookTavernerOrder(pool, altItemsUrl, { live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await createPo({ supplierKey: 'BROOK TAVERNER', execute: live, padToThreshold: 0, logPool: pool }); }
+  catch (e) { throw createPoErr(e); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name, productId: l.productId }));
+  if (!orderLines.length) throw stepErr('cart', 'no orderable Brook Taverner lines');
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  let r;
+  try {
+    r = await jfetch('checkout', `${altItemsUrl}/api/brooktaverner-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lines: orderLines.map((l) => ({ sku: l.sku, qty: l.qty, name: l.name })), reference: String(poId), execute: live }),
+    });
+  } catch (e) {
+    // The place hop may have gone through even though we lost the answer. Never retry — say so.
+    throw stepErr('checkout', `Brook Taverner order call failed: ${e.message} — check brooktaverner.com My Orders for an order today before re-running PO#${poId}.`, { poId });
+  }
+  steps.bt = { resolve: r.steps && r.steps.resolve, cart: r.steps && r.steps.cart, checkout: r.steps && r.steps.checkout };
+  if (r.unresolved && r.unresolved.length) throw stepErr('resolve', `Brook Taverner did not accept ${r.unresolved.length} line(s) on PO#${poId} — NOT ordering: ${r.error}`, { poId, bt: steps.bt });
+  if (r.rehearsed) throw stepErr('checkout', `Brook Taverner rehearsed only (BROOKTAVERNER_ORDER_LIVE is not "true" on Alt-Items) — PO#${poId} built, nothing sent.`, { poId, bt: steps.bt });
+  if (!r.ok) {
+    const cart = (r.steps && r.steps.cart) || {};
+    const miss = (cart.missing && cart.missing.length) ? ` — not in the basket as asked: ${cart.missing.map((m) => `${m.item} want ${m.want} got ${m.got}`).join(', ')}` : '';
+    throw stepErr(cart.missing && cart.missing.length ? 'cart' : 'checkout', `Brook Taverner did not confirm the order: ${r.error || 'no new order in their history'}${miss}`, { poId, bt: r.steps });
+  }
+  const orderNo = String(r.orderNo).trim();
+  steps.checkout = { ok: true, orderNo, basketRef: r.steps.place && r.steps.place.basketRef };
+
+  const co = (r.steps && r.steps.checkout) || {};
+  // PRICE CHECK: their basket goods total (ex VAT) against the PO. Diagnostic only — already placed.
+  try {
+    const poNet = +[...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (Number(l.cost) || 0) * (Number(l.qty) || 0), 0).toFixed(2);
+    if (co.goodsExVat != null) {
+      const gap = +(co.goodsExVat - poNet).toFixed(2);
+      steps.priceCheck = { theirs: co.goodsExVat, poNet, gap };
+      if (Math.abs(gap) >= 0.01) {
+        await logPriceCheck(pool, steps, {
+          supplierKey: 'BROOK TAVERNER', poId, changes: [],
+          message: `Prices don't match: Brook Taverner goods total £${co.goodsExVat.toFixed(2)} vs our PO net £${poNet.toFixed(2)} (diff £${gap}). A Brightpearl cost price (list 20) may need adjusting. Order ${orderNo} still placed.`,
+          context: { poId, orderNo, theirs: co.goodsExVat, poNet, gap },
+        });
+      }
+    }
+  } catch (e) { steps.priceCheck = { skipped: e.message }; }
+  if (live && co.carriage > 0) {
+    try { steps.carriage = await bp.addPoMiscRowLive({ poId, name: 'Carriage - Standard Delivery (Brook Taverner, under £100 ex-VAT)', net: co.carriage, qty: 1, execute: true }); }
+    catch (e) { steps.carriage = { error: e.message }; }
+  }
+
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, orderNo); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Brook Taverner — order ${orderNo}. Reference-set failed: ${e.message}`, BROOK_TAVERNER_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: orderNo, refWritten, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'BROOK TAVERNER', poId, noteContactId: BROOK_TAVERNER_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -4193,6 +4273,10 @@ const SCHEDULED_SUPPLIERS = {
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
   RALAWISE: { supplierKey: 'RALAWISE', stateId: 24, placeFn: placeRalawiseOrder, threshold: Number(process.env.RALAWISE_FREESHIP_THRESHOLD || 185) }, // api.ralawise.com POST /v1/order via Alt-Items /api/ralawise-place (exact SKU resolver, no test orders); free delivery @ £185 ex-VAT else £8.70 (read off their response). 15:30 UK, gated by RALAWISE_SCHEDULE_ENABLED=true + RALAWISE_ORDER_LIVE=true on Alt-Items
   LEO: { supplierKey: 'LEO', stateId: 23, placeFn: placeLeoOrder, threshold: Number(process.env.LEO_FREESHIP_THRESHOLD || 200) }, // leoworkwear.com trade portal via Alt-Items /api/leo-order; carriage paid @ £200 ex-VAT, else £7.50 (read off Leo's Review page). 09:00 UK, gated by LEO_SCHEDULE_ENABLED=true + LEO_ORDER_LIVE=true on Alt-Items
+  // noPad: never top up with extra low-inv to reach the threshold (owner, 2026-10-12) — on day 3 it
+  // places as it stands with Standard delivery. 09:20 UK, gated by BROOKTAVERNER_SCHEDULE_ENABLED=true
+  // here + BROOKTAVERNER_ORDER_LIVE=true on Alt-Items.
+  'BROOK TAVERNER': { supplierKey: 'BROOK TAVERNER', stateId: 25, placeFn: placeBrookTavernerOrder, noPad: true, threshold: Number(process.env.BROOKTAVERNER_FREESHIP_THRESHOLD || 100) },
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
 
@@ -4227,11 +4311,12 @@ const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
   SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811, BUCKLER: 8981,
-  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205,
+  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205, 'BROOK TAVERNER': 5499,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
   LEO: { at: '09:00' },
+  'BROOK TAVERNER': { at: '09:20' },
   BLAKLADER: { at: '09:30' },
   SNICKERS: { at: '10:00' },
   FRISTADS: { at: '10:30' },
@@ -4376,6 +4461,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       // threshold (e.g. an URGENT back-order of a single OOS line). Never set by the pollers.
       if (over) { willPlace = true; reason = 'over-threshold'; }
       else if (forcePlace) { willPlace = true; padOnPlace = !!topUp; reason = topUp ? `forced place (manual — topped up with low-inv toward £${threshold})` : `forced place (manual — under £${threshold}, threshold ignored)`; }
+      else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS && cfg.noPad) { willPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — placed as it stands with carriage, never padded)`; }
       else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS) { willPlace = true; padOnPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — top up low-inv to reach free delivery, else carriage)`; }
       else { decision = `waiting — day ${wouldBeDay} of ${MAX_WAIT_WORKING_DAYS} (£${netValue} < £${threshold})`; newWaitDays = wouldBeDay; }
     }

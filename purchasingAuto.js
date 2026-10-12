@@ -243,6 +243,10 @@ export const SUPPLIERS = {
   // Every product name starts "Leo Workwear", which keeps the detect off Leonard/Leodis. No PCF_LEOPO
   // exists in Brightpearl, so this shares PCF_STOCKPO like Scruffs and V12 (2026-10-10).
   LEO: { contactId: 7919, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 7919, detect: (n) => /leo\s*workwear/i.test(n || '') },
+  // Brook Taverner (contact 5499). brooktaverner.com via Alt-Items /api/brooktaverner-order: their own
+  // per-line check turns our 2256D-6-31 into code 2256D size 06L before anything is basketed. Every
+  // product name starts "Brook Taverner". No PCF_BROOKPO exists, so this shares PCF_STOCKPO (2026-10-12).
+  'BROOK TAVERNER': { contactId: 5499, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 5499, detect: (n) => /brook\s*taverner/i.test(n || '') },
   // portalNeverRaises: the portal is net EXCEPT markdown/outlet lines, which show the ORIGINAL
   // wholesale and take the markdown at invoice (104670 outlet: portal £85.50, our cost £42.75 = 50%
   // off — user, 2026-10-02). So a portal price ABOVE our cost is the markdown, never a correction.
@@ -361,6 +365,7 @@ const _SUPPLIER_NAME_HINTS = {
   'HELLY HANSEN': /helly/i, STERLING: /sterling/i, 'PERFORMANCE BRANDS': /performance\s*brands/i,
   BUCKLER: /buckler|buckbootz/i, V12: /\bv\s*12\b/i, BEESWIFT: /bee\s*swift/i, 'AS APPAREL': /\bas\s*apparel\b/i, TRANEMO: /tranemo/i,
   LEO: /leo\s*(?:workwear|textiles)/i,
+  'BROOK TAVERNER': /brook\s*taverner/i,
   RALAWISE: /ralawise/i,
 };
 export function tagFailsToMatch(rawTag) {
@@ -644,6 +649,8 @@ const TAG_ALIASES = {
   'PULSAR®': 'PULSAR',
   'LEO WORKWEAR': 'LEO',
   'LEO TEXTILES': 'LEO',
+  'BROOK TAVERNER LTD': 'BROOK TAVERNER',
+  BROOKTAVERNER: 'BROOK TAVERNER',
 };
 // ── ALTERNATIVE SUPPLIERS INSIDE ONE TAG ─────────────────────────────────────
 // The two separators mean DIFFERENT things, and only "/" was ever handled:
