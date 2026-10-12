@@ -410,11 +410,27 @@ export function registerSalesHubRoutes(app, deps) {
       console.error("[sales-hub] product lookup failed:", e.message);
     }
 
+    // What has been SENT, per row. Brightpearl's order rows carry no shipped quantity (the
+    // old read of quantity.shipped was always 0, so SO495931 - sent in two parcels - showed
+    // "2 still to send", Dec 12 Oct). It lives on the goods-out notes: sum each row over the
+    // notes marked shipped. If those cannot be read, the order's own "all shipped" flag (ASS)
+    // still counts everything as sent.
+    const shippedByRow = {};
+    try {
+      const gon = (await bpLive("GET", `/warehouse-service/order/${order.id}/goods-note/goods-out`)) || {};
+      for (const n of Object.values(gon)) {
+        if (!(n.status && n.status.shipped)) continue;
+        for (const [rowId, list] of Object.entries(n.orderRows || {})) {
+          shippedByRow[rowId] = (shippedByRow[rowId] || 0) + (list || []).reduce((a, x) => a + Number(x.quantity || 0), 0);
+        }
+      }
+    } catch (e) { console.error("[sales-hub] goods-out read failed:", e.message); }
+    const allShipped = order.shippingStatusCode === "ASS";
+    const rowIdOf = new Map(Object.entries(order.orderRows || {}).map(([k, v]) => [v, k]));
+
     const allRows = rawRows.map((r) => {
       const qty = Number((r.quantity && r.quantity.magnitude) || 0);
-      // Brightpearl exposes what has shipped per row as a magnitude too; where
-      // it is absent treat it as nothing shipped rather than guessing.
-      const shipped = Number((r.quantity && r.quantity.shipped) || 0);
+      const shipped = allShipped ? qty : Math.min(qty, Number(shippedByRow[rowIdOf.get(r)] || 0));
       return {
         name: r.productName,
         sku: r.productSku,
