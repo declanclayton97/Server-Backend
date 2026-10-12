@@ -1,10 +1,10 @@
-// saleAlerts.js - "the item you bought is on sale" emails for stock in the STW sale warehouse.
+// saleAlerts.js - "something you bought is now in our sale, in your size" emails.
 //
-// Everything in a BP location whose first grouping is STW is sale stock (Dec, 7 Oct 2026).
-// Each weekday it features a few STW items it has not featured before, finds everyone who bought
-// that exact product (BP goods-out movements), and emails them from info@ through Graph:
-// "you bought X in size/colour - we have one that has just gone on sale, first come first served".
-// No price in the email (Dec). Never emailed:
+// Items come from the website's sale section (tuffshop.co.uk/sale.html, Dec 12 Oct 2026 - replaced the STW
+// warehouse source). Each weekday it features a few sale pages it has not featured before, maps every size still
+// salable on the page back to the original BP product, finds everyone who bought that exact product and size
+// (BP goods-out movements) and emails them from info@ through Graph with a direct link to the sale item.
+// No price in the message; first come, first served. Never emailed:
 //   - anyone with a sales credit for that product (returned it)
 //   - Amazon / eBay buyers (relay addresses), company webstores, decorated (embroidered/printed) purchases
 //   - trade/rep channels unless SALE_ALERTS_TRADE=on
@@ -17,8 +17,9 @@
 //       live:   customers are emailed.
 //   SALE_ALERTS_SECRET   signs unsubscribe links (required for review and live)
 //   SALE_ALERTS_FROM (info@tuffshop.co.uk), SALE_ALERTS_REVIEW_TO (dec@tuffshop.co.uk), SALE_ALERTS_PER_DAY (5),
-//   SALE_ALERTS_AT (10:00, weekdays, until +60 min), SALE_ALERTS_LINK (https://tuffshop.co.uk/sale.html),
+//   SALE_ALERTS_AT (10:00, weekdays, until +60 min),
 //   SALE_ALERTS_TRADE (off), SALE_ALERTS_LOOKBACK_DAYS (1095), SALE_ALERTS_PUBLIC_URL (this service's base URL)
+//   SALE_ALERTS_SITE_HEADER  "Name: secret" sent to tuffshop.co.uk so a Cloudflare skip rule lets the sale pages through
 
 import crypto from "crypto";
 import { bpLiveGet } from "./purchasingAuto.js";
@@ -37,7 +38,6 @@ const cfg = () => ({
   reviewTo: process.env.SALE_ALERTS_REVIEW_TO || "dec@tuffshop.co.uk",
   perDay: Math.max(1, Math.min(20, Number(process.env.SALE_ALERTS_PER_DAY) || 5)),
   at: process.env.SALE_ALERTS_AT || "10:00",
-  link: process.env.SALE_ALERTS_LINK || "https://tuffshop.co.uk/sale.html",
   trade: String(process.env.SALE_ALERTS_TRADE || "off").toLowerCase() === "on",
   lookbackDays: Number(process.env.SALE_ALERTS_LOOKBACK_DAYS) || 1095,
   publicUrl: (process.env.SALE_ALERTS_PUBLIC_URL || "https://server-backend-1i47.onrender.com").replace(/\/$/, ""),
@@ -57,36 +57,6 @@ export function unsubToken(email, secret = cfg().secret) {
 const unsubUrl = (email) => { const c = cfg(); return `${c.publicUrl}/sale-alerts/unsubscribe?e=${encodeURIComponent(normEmail(email))}&t=${unsubToken(email)}`; };
 
 // ---- BP reads ---------------------------------------------------------------------------------
-async function stwLocations() {
-  const locs = (await bpLiveGet(`/warehouse-service/warehouse/${WAREHOUSE}/location/`)) || [];
-  return new Set(locs.filter((l) => String(l.groupingA || "").toUpperCase() === "STW").map((l) => Number(l.id)));
-}
-
-/** Every product with free stock in an STW location: Map(pid -> units). Reads the whole catalogue in SMALL ranges:
- *  a 60k-id range is tens of MB of JSON and pushed this service over its memory limit on 12 Oct (crash + restart). */
-async function stwStock(stw) {
-  const lo = rowsOf(await bpLiveGet(`/product-service/product-search?sort=productId%7CASC&pageSize=1`))[0].productId;
-  const hi = rowsOf(await bpLiveGet(`/product-service/product-search?sort=productId%7CDESC&pageSize=1`))[0].productId;
-  const out = new Map();
-  const STEP = 4000;
-  for (let a = lo; a <= hi; a += STEP) {
-    const resp = (await bpLiveGet(`/warehouse-service/product-availability/${a}-${Math.min(hi, a + STEP - 1)}?includeOptional=breakDownByLocation`)) || {};
-    for (const [pid, v] of Object.entries(resp)) {
-      const byLoc = v.warehouses?.[WAREHOUSE]?.byLocation || {};
-      let q = 0; for (const [lid, x] of Object.entries(byLoc)) if (stw.has(Number(lid))) q += Math.max(0, Number(x.onHand ?? x.inStock) || 0);
-      if (q > 0) out.set(Number(pid), q);
-    }
-    await new Promise((r) => setTimeout(r, 300));   // gentle on BP and on memory
-  }
-  return out;
-}
-
-async function stwUnitsNow(pid, stw) {
-  const resp = (await bpLiveGet(`/warehouse-service/product-availability/${pid}?includeOptional=breakDownByLocation`)) || {};
-  let q = 0; for (const [lid, x] of Object.entries(resp[pid]?.warehouses?.[WAREHOUSE]?.byLocation || {})) if (stw.has(Number(lid))) q += Math.max(0, Number(x.onHand ?? x.inStock) || 0);
-  return q;
-}
-
 async function movements(pid, type) {
   const out = [];
   for (let first = 1; ; first += 500) {
@@ -100,13 +70,6 @@ async function orders(ids) {
   const out = [];
   for (const c of chunk([...new Set(ids)].sort((a, b) => a - b), 50)) out.push(...((await bpLiveGet(`/order-service/order/${c.join(",")}`)) || []));
   return out;
-}
-
-async function productInfo(pid) {
-  const p = ((await bpLiveGet(`/product-service/product/${pid}`)) || [])[0] || {};
-  const v = Object.fromEntries((p.variations || []).map((x) => [String(x.optionName).toLowerCase(), x.optionValue]));
-  const name = (p.salesChannels?.[0]?.productName || "").replace(/\s*\[[^\]]*\]\s*/g, " ").replace(/\s*\(.*?\)\s*$/, "").trim();
-  return { productId: pid, sku: p.identity?.sku || "", name, size: v.size || "", colour: v.colour || v.color || "" };
 }
 
 /**
@@ -160,18 +123,88 @@ export async function recipientsFor(pid, { pool, cutoffDays = 7 } = {}) {
   return { eligible, skipped };
 }
 
-// ---- the email --------------------------------------------------------------------------------
-export function renderEmail({ product, firstName, email }) {
-  const c = cfg();
-  const what = [product.colour, product.size ? `size ${product.size}` : ""].filter(Boolean).join(", ");
-  const subject = `The ${product.name} you bought is now on sale`;
+// ---- the sale section of the website --------------------------------------------------------
+// Items come from tuffshop.co.uk/sale.html (Dec, 12 Oct): what is actually on sale, with its own link.
+// A sale page is either a single-size "...-sale.html" product (SKU = original SKU + "-1") or a full
+// product whose page lists the sizes still salable. Each available size maps back to the original
+// BP product, whose past buyers are the audience - so "in your size" is exact.
+const SITE = "https://tuffshop.co.uk";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36 TuffshopSaleAlerts";
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// tuffshop.co.uk sits behind Cloudflare bot protection, which challenges server requests (403). A Cloudflare WAF
+// "skip" rule matching SALE_ALERTS_SITE_HEADER ("Name: secret") lets this service read the sale pages.
+function siteHeaders() {
+  const h = { "User-Agent": UA, Accept: "text/html,application/xhtml+xml", "Accept-Language": "en-GB,en;q=0.9" };
+  const raw = process.env.SALE_ALERTS_SITE_HEADER || "", i = raw.indexOf(":");
+  if (i > 0) h[raw.slice(0, i).trim()] = raw.slice(i + 1).trim();
+  return h;
+}
+async function getPage(url) {
+  const r = await fetch(url, { headers: siteHeaders(), redirect: "follow" });
+  if (r.status === 403 && r.headers.get("cf-mitigated")) throw new Error("tuffshop.co.uk blocked the request (Cloudflare challenge) - add the WAF skip rule for SALE_ALERTS_SITE_HEADER");
+  if (!r.ok) { const e = new Error(`${url} -> ${r.status}`); e.status = r.status; throw e; }
+  return r.text();
+}
+
+/** Every product page in the sale section, in the site's own order. */
+export async function saleCatalogue({ maxPages = 80 } = {}) {
+  const seen = new Set(), out = [];
+  for (let p = 1; p <= maxPages; p++) {
+    const h = await getPage(`${SITE}/sale.html?product_list_limit=36&p=${p}`);
+    const urls = [...h.matchAll(/class="product-item-link"[^>]*href="([^"]+)"/g)].map((m) => m[1].split(/[?#]/)[0]);
+    const fresh = urls.filter((u) => !seen.has(u));
+    if (!fresh.length) break;                 // Magento repeats the last page past the end
+    for (const u of fresh) { seen.add(u); out.push(u); }
+    await pause(400);
+  }
+  return out;
+}
+
+const decode = (s) => String(s || "").replace(/&amp;/g, "&").replace(/&#0?39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
+/** What is still buyable on one sale page: { url, name, variants: [{ sku, size }] } (variants empty = sold out). */
+export async function salePage(url) {
+  let h;
+  try { h = await getPage(url); } catch (e) { if (e.status === 404) return { url, name: "", variants: [], gone: true }; throw e; }
+  // "Carhartt K126 ... - Black - XL - SALE" reads oddly as "the ... you bought": drop the trailing "- SALE"
+  const name = decode((h.match(/<h1[^>]*>\s*<span[^>]*>([^<]+)/) || h.match(/<title>([^<]+)/) || [])[1]).replace(/\s*\|.*$/, "").replace(/\s*-\s*sale$/i, "");
+  const cfgM = h.match(/"attributes":(\{.*?\}),"template"/), skuM = h.match(/"sku":(\{[^}]*\})/), salM = h.match(/"salable":(\{.*?\}\})/);
+  if (cfgM && skuM) {                                          // full product: one variant per salable size
+    const attrs = JSON.parse(cfgM[1]), skus = JSON.parse(skuM[1]), salable = salM ? JSON.parse(salM[1]) : null;
+    const sizeAttr = Object.values(attrs).find((a) => /size/i.test(a.label)) || Object.values(attrs)[0];
+    const ok = new Set(salable ? Object.values(salable).flatMap((o) => Object.values(o).flat()) : Object.keys(skus));
+    const variants = [];
+    for (const opt of sizeAttr?.options || []) for (const pid of opt.products) if (ok.has(String(pid)) && skus[pid]) variants.push({ sku: skus[pid], size: decode(opt.label) });
+    return { url, name, variants };
+  }
+  const sku = decode((h.match(/itemprop="sku"[^>]*>([^<]*)/) || h.match(/"sku":"([^"]+)"/) || [])[1]);   // JSON-LD on single-size sale pages
+  // JSON-LD writes the flag with escaped slashes: "availability":"https:\/\/schema.org\/InStock"
+  const inStock = /"availability":"[^"]*InStock"|stock available|title="Availability"[\s\S]{0,200}In stock/i.test(h) && !/"availability":"[^"]*OutOfStock"|stock unavailable/i.test(h);
+  return { url, name, variants: sku && inStock ? [{ sku, size: "" }] : [] };
+}
+
+/** The BP product a sale SKU stands for: the original. Sale copies are the original SKU + "-N" (337910429899XL-1)
+ *  or + "#SALE" / "#Sale" (K126-BLKXLREG#SALE). */
+export const originalSkuOf = (saleSku) => String(saleSku).replace(/#sale$/i, "").replace(/-\d+$/, "");
+async function originalProductId(saleSku) {
+  const base = originalSkuOf(saleSku);
+  const tries = base !== saleSku ? [base, saleSku.replace(/#sale$/i, ""), saleSku] : [saleSku];
+  for (const sku of tries) {
+    const rows = rowsOf(await bpLiveGet(`/product-service/product-search?SKU=${encodeURIComponent(sku)}&pageSize=10`)).filter((r) => String(r.SKU).toUpperCase() === sku.toUpperCase());
+    if (rows.length) return { pid: rows[0].productId, sku: rows[0].SKU };
+  }
+  return null;
+}
+
+// ---- the message --------------------------------------------------------------------------------
+// Short on purpose (Dec): one line of news, the link, the first-come warning.
+export function renderEmail({ item, firstName, email }) {
+  const subject = "Did you know? Something you bought is now in our sale";
   const html = `<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.5;color:#222;max-width:560px">
 <p>Hi ${esc(firstName || "there")},</p>
-<p>We noticed you've bought the <b>${esc(product.name)}</b>${what ? ` in <b>${esc(what)}</b>` : ""} from us before.</p>
-<p>We have one available that has just gone <b>on sale</b>. It's first come, first served, so be quick if you'd like it.</p>
-<p><a href="${esc(c.link)}" style="display:inline-block;background:#1f5fbf;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">Shop the sale</a></p>
-<p>Or just reply to this email and we'll sort it for you.</p>
-<p>Thanks,<br>The Tuffshop team</p>
+<p><b>Did you know?</b> The ${esc(item.name)} you bought from us is now in our sale, in your size.</p>
+<p><a href="${esc(item.url)}" style="display:inline-block;background:#1f5fbf;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">See it in the sale</a></p>
+<p>It's first come, first served, so if the link doesn't work, somebody beat you to it!</p>
+<p>The Tuffshop team</p>
 <p style="font-size:12px;color:#888;margin-top:28px">You're getting this because you bought this item from Tuffshop. <a href="${esc(unsubUrl(email))}" style="color:#888">Unsubscribe from sale emails</a>.</p>
 </div>`;
   return { subject, html };
@@ -189,41 +222,51 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
   if (!dryRun && !c.secret) throw new Error("SALE_ALERTS_SECRET is not set (needed for unsubscribe links)");
   if (!dryRun && !graphConfigured()) throw new Error("Graph mail is not configured");
   const day = ukDay();
-  const stw = await stwLocations();
-  const stock = await stwStock(stw);
-  // Featured already? A product only REVIEWED is still owed its real send once live; in review mode it is not re-reviewed.
-  const done = new Set((await pool.query(`SELECT product_id, status FROM sale_alert_items`)).rows.filter((r) => r.status !== 'review' || mode === 'review').map((r) => Number(r.product_id)));
-  // most units in STW first, then oldest product id (longest-standing lines)
-  const queue = [...stock.entries()].filter(([pid]) => !done.has(pid)).sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  const pages = await saleCatalogue();
+  // Featured already? A page only REVIEWED is still owed its real send once live; in review mode it is not re-reviewed.
+  const done = new Set((await pool.query(`SELECT url, status FROM sale_alert_pages`)).rows.filter((r) => r.status !== "review" || mode === "review").map((r) => r.url));
+  const queue = pages.filter((u) => !done.has(u));
   const batch = [], evaluated = [];
-  for (const [pid, units] of queue) {
+  for (const url of queue) {
     if (batch.length >= c.perDay || evaluated.length >= maxEvaluate) break;
-    const product = await productInfo(pid);
-    const r = await recipientsFor(pid, { pool });
-    evaluated.push({ productId: pid, sku: product.sku, units, eligible: r.eligible.length });
-    if (!r.eligible.length) {
-      if (!dryRun) await pool.query(`INSERT INTO sale_alert_items (product_id, sku, featured_on, status, recipients) VALUES ($1,$2,$3,'no buyers',0) ON CONFLICT (product_id) DO NOTHING`, [pid, product.sku, day]);
+    const page = await salePage(url);
+    const eligible = new Map(), skipped = [], sizes = [];
+    for (const v of page.variants) {
+      const orig = await originalProductId(v.sku);
+      if (!orig) { skipped.push({ reason: `sale SKU ${v.sku} not matched to a product` }); continue; }
+      sizes.push({ ...v, pid: orig.pid, origSku: orig.sku });
+      const r = await recipientsFor(orig.pid, { pool });
+      for (const e of r.eligible) if (!eligible.has(e.email)) eligible.set(e.email, { ...e, size: v.size, pid: orig.pid });
+      skipped.push(...r.skipped);
+    }
+    evaluated.push({ url, name: page.name, sizes: sizes.length, eligible: eligible.size });
+    if (!eligible.size) {
+      if (!dryRun) await pool.query(`INSERT INTO sale_alert_pages (url, name, featured_on, status, recipients) VALUES ($1,$2,$3,$4,0) ON CONFLICT (url) DO NOTHING`, [url, page.name, day, page.variants.length ? "no buyers" : "sold out"]);
       continue;
     }
-    batch.push({ product, units, ...r });
+    batch.push({ page, sizes, eligible: [...eligible.values()], skipped });
+    await pause(300);
   }
-  const result = { day, mode: dryRun ? "preview" : mode, stwProducts: stock.size, notYetFeatured: queue.length, evaluated, products: [] };
+  const result = { day, mode: dryRun ? "preview" : mode, salePages: pages.length, notYetFeatured: queue.length, evaluated, products: [] };
   for (const b of batch) {
-    const p = { productId: b.product.productId, sku: b.product.sku, name: b.product.name, size: b.product.size, colour: b.product.colour, units: b.units,
-      recipients: b.eligible.map((e) => ({ email: e.email, firstName: e.firstName, orderId: e.orderId, date: e.date })),
+    const pid0 = b.sizes[0]?.pid || null;
+    const p = { url: b.page.url, name: b.page.name, sizes: b.sizes.map((s) => s.size || s.origSku), sku: b.sizes.map((s) => s.origSku).join(", "),
+      recipients: b.eligible.map((e) => ({ email: e.email, firstName: e.firstName, size: e.size, orderId: e.orderId, date: e.date })),
       skipped: b.skipped.map((s) => ({ email: s.email || null, orderId: s.orderId, reason: s.reason })), sent: 0, failed: 0 };
     result.products.push(p);
     if (dryRun) continue;
-    await pool.query(`INSERT INTO sale_alert_items (product_id, sku, featured_on, status, recipients) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (product_id) DO UPDATE SET status = EXCLUDED.status, featured_on = EXCLUDED.featured_on, recipients = EXCLUDED.recipients`,
-      [b.product.productId, b.product.sku, day, mode, b.eligible.length]);
-    for (const s of b.skipped) await logSend(pool, { day, pid: b.product.productId, contactId: s.contactId, email: s.email, status: "skipped", reason: s.reason });
-    if (mode !== "live") { for (const e of b.eligible) await logSend(pool, { day, pid: b.product.productId, contactId: e.contactId, email: e.email, status: "review", reason: "review mode - not sent" }); continue; }
+    await pool.query(`INSERT INTO sale_alert_pages (url, name, featured_on, status, recipients) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (url) DO UPDATE SET status = EXCLUDED.status, featured_on = EXCLUDED.featured_on, recipients = EXCLUDED.recipients`,
+      [b.page.url, b.page.name, day, mode, b.eligible.length]);
+    for (const s of b.skipped) await logSend(pool, { day, pid: pid0, contactId: s.contactId, email: s.email, status: "skipped", reason: s.reason });
+    if (mode !== "live") { for (const e of b.eligible) await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "review", reason: "review mode - not sent" }); continue; }
+    let live = b.page, checkedAt = Date.now();
     for (const e of b.eligible) {
-      // first come, first served: stop the moment the STW stock has gone
-      if ((await stwUnitsNow(b.product.productId, stw)) <= 0) { await logSend(pool, { day, pid: b.product.productId, contactId: e.contactId, email: e.email, status: "skipped", reason: "sold out before sending" }); continue; }
-      const { subject, html } = renderEmail({ product: b.product, firstName: e.firstName, email: e.email });
-      try { const r = await send(e.email, subject, html); p.sent++; await logSend(pool, { day, pid: b.product.productId, contactId: e.contactId, email: e.email, status: "sent", reason: r?.via || "graph" }); }
-      catch (err) { p.failed++; await logSend(pool, { day, pid: b.product.productId, contactId: e.contactId, email: e.email, status: "failed", reason: err.message.slice(0, 300) }); }
+      // first come, first served: re-read the page every 2 minutes and stop for a size the moment it has gone
+      if (Date.now() - checkedAt > 120000) { live = await salePage(b.page.url); checkedAt = Date.now(); }
+      if (!live.variants.some((v) => (v.size || "") === (e.size || ""))) { await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "skipped", reason: "sold out before sending" }); continue; }
+      const { subject, html } = renderEmail({ item: { name: b.page.name, url: b.page.url }, firstName: e.firstName, email: e.email });
+      try { const r = await send(e.email, subject, html); p.sent++; await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "sent", reason: r?.via || "graph" }); }
+      catch (err) { p.failed++; await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "failed", reason: err.message.slice(0, 300) }); }
     }
   }
   if (!dryRun && mode === "review") await sendReview(result).catch((e) => { result.reviewError = e.message; });
@@ -237,10 +280,10 @@ async function logSend(pool, { day, pid, contactId, email, status, reason }) {
 
 async function sendReview(result) {
   const c = cfg();
-  const rows = result.products.map((p) => `<h3 style="margin:18px 0 4px">${esc(p.name)} - ${esc([p.colour, p.size].filter(Boolean).join(", "))} <span style="color:#888">(${esc(p.sku)}, ${p.units} in STW)</span></h3>
-<p style="margin:0">Would email <b>${p.recipients.length}</b>: ${p.recipients.map((r) => esc(r.email)).join(", ")}</p>
+  const rows = result.products.map((p) => `<h3 style="margin:18px 0 4px"><a href="${esc(p.url)}">${esc(p.name)}</a> <span style="color:#888">(${esc(p.sku)}${p.sizes.some(Boolean) ? `; sizes ${esc(p.sizes.join(", "))}` : ""})</span></h3>
+<p style="margin:0">Would email <b>${p.recipients.length}</b>: ${p.recipients.map((r) => esc(r.email) + (r.size ? ` (${esc(r.size)})` : "")).join(", ")}</p>
 <p style="margin:0;color:#888;font-size:13px">Skipped ${p.skipped.length}: ${Object.entries(p.skipped.reduce((a, s) => ((a[s.reason] = (a[s.reason] || 0) + 1), a), {})).map(([k, v]) => `${esc(k)} ${v}`).join(", ") || "none"}</p>`).join("");
-  const sample = result.products[0] ? renderEmail({ product: { name: result.products[0].name, size: result.products[0].size, colour: result.products[0].colour }, firstName: "Sam", email: c.reviewTo }) : null;
+  const sample = result.products[0] ? renderEmail({ item: { name: result.products[0].name, url: result.products[0].url }, firstName: "Sam", email: c.reviewTo }) : null;
   await send(c.reviewTo, `Sale alerts ${result.day}: ${result.products.length} items, ${result.products.reduce((a, p) => a + p.recipients.length, 0)} customers (review - nothing sent)`,
     `<div style="font-family:Arial,sans-serif;font-size:14px">${rows || "<p>Nothing to send today.</p>"}${sample ? `<hr><p><b>What customers would receive:</b></p>${sample.html}` : ""}</div>`);
 }
@@ -250,6 +293,7 @@ export function registerSaleAlerts(app, { getPool }) {
   const requireUser = (req, res, next) => app.locals.requireHubUser(req, res, next);
   const ensure = async () => getPool().query(`
     CREATE TABLE IF NOT EXISTS sale_alert_items (product_id bigint PRIMARY KEY, sku text, featured_on date NOT NULL, status text, recipients int);
+    CREATE TABLE IF NOT EXISTS sale_alert_pages (url text PRIMARY KEY, name text, featured_on date NOT NULL, status text, recipients int);
     CREATE TABLE IF NOT EXISTS sale_alert_sends (id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), day date, product_id bigint, contact_id bigint, email text, status text NOT NULL, reason text);
     CREATE INDEX IF NOT EXISTS idx_sale_alert_sends_email ON sale_alert_sends(email, at);
     CREATE TABLE IF NOT EXISTS sale_alert_unsubs (email text PRIMARY KEY, at timestamptz NOT NULL DEFAULT now());
@@ -265,7 +309,7 @@ export function registerSaleAlerts(app, { getPool }) {
     try {
       const to = normEmail(req.query.to || req.body?.to);
       if (!/@tuffshop\.co\.uk$/.test(to)) return res.status(400).json({ error: "Samples only go to @tuffshop.co.uk addresses" });
-      const { subject, html } = renderEmail({ product: { name: "Snickers 6241 AllroundWork Stretch Trousers", colour: "Black", size: "34 Waist 32 Leg" }, firstName: "Sam", email: to });
+      const { subject, html } = renderEmail({ item: { name: "Carhartt 106674 Firm Duck Traditional Coat", url: "https://tuffshop.co.uk/sale.html" }, firstName: "Sam", email: to });
       res.json(await send(to, "[SAMPLE] " + subject, html));
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
