@@ -17,7 +17,7 @@
 //       live:   customers are emailed.
 //   SALE_ALERTS_SECRET   signs unsubscribe links (required for review and live)
 //   SALE_ALERTS_FROM (info@tuffshop.co.uk), SALE_ALERTS_REVIEW_TO (dec@tuffshop.co.uk), SALE_ALERTS_PER_DAY (5),
-//   SALE_ALERTS_AT (10:00, weekdays, until +60 min), SALE_ALERTS_LINK (https://tuffshop.co.uk/),
+//   SALE_ALERTS_AT (10:00, weekdays, until +60 min), SALE_ALERTS_LINK (https://tuffshop.co.uk/sale.html),
 //   SALE_ALERTS_TRADE (off), SALE_ALERTS_LOOKBACK_DAYS (1095), SALE_ALERTS_PUBLIC_URL (this service's base URL)
 
 import crypto from "crypto";
@@ -37,7 +37,7 @@ const cfg = () => ({
   reviewTo: process.env.SALE_ALERTS_REVIEW_TO || "dec@tuffshop.co.uk",
   perDay: Math.max(1, Math.min(20, Number(process.env.SALE_ALERTS_PER_DAY) || 5)),
   at: process.env.SALE_ALERTS_AT || "10:00",
-  link: process.env.SALE_ALERTS_LINK || "https://tuffshop.co.uk/",
+  link: process.env.SALE_ALERTS_LINK || "https://tuffshop.co.uk/sale.html",
   trade: String(process.env.SALE_ALERTS_TRADE || "off").toLowerCase() === "on",
   lookbackDays: Number(process.env.SALE_ALERTS_LOOKBACK_DAYS) || 1095,
   publicUrl: (process.env.SALE_ALERTS_PUBLIC_URL || "https://server-backend-1i47.onrender.com").replace(/\/$/, ""),

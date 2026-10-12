@@ -33,6 +33,7 @@ import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
 import { registerPickingSheet } from './pickingSheet.js';
+import { registerSaleAlerts } from './saleAlerts.js';
 import { registerCallReport } from './callReport.js';
 import { bpSafeText } from './bpText.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
@@ -15492,6 +15493,7 @@ registerReturnsRoutes(app, {
 
 // Storage-unit picking list -> Bob on WhatsApp, weekdays 15:00 (off until PICKING_ENABLED=on).
 registerPickingSheet(app, { getPool: () => pool, waPhoneNumberId });
+registerSaleAlerts(app, { getPool: () => pool });   // STW sale-item emails; off unless SALE_ALERTS_ENABLED=review|live
 
 // Weekly sales activity email (Webex calls + BP orders), Mondays. Off until CALL_REPORT_ENABLED=on.
 registerCallReport(app, { getPool: () => pool, bpLive });
