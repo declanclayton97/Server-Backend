@@ -33,7 +33,7 @@ import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
 import { registerPickingSheet } from './pickingSheet.js';
-import { registerSaleAlerts } from './saleAlerts.js';
+import { registerSaleAlerts, saleAlertsOptOut } from './saleAlerts.js';
 import { registerCallReport } from './callReport.js';
 import { bpSafeText } from './bpText.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
@@ -6221,12 +6221,36 @@ async function fetchWhatsAppTemplates() {
       // on a customer's phone, because nothing here showed the surrounding text.
       headerText: header?.format === 'TEXT' ? (header.text || '') : null,
       headerHasParam: !!(header && header.format === 'TEXT' && /\{\{\d+\}\}/.test(header.text || '')),
-      buttons: (comps.find((c) => c.type === 'BUTTONS')?.buttons || []).map((b) => ({ type: b.type, text: b.text })),
+      // url kept so the send can tell a link button that needs a value ({{1}} in it) from a fixed one.
+      buttons: (comps.find((c) => c.type === 'BUTTONS')?.buttons || []).map((b) => ({ type: b.type, text: b.text, url: b.url || null })),
     };
   });
   _waTemplateCache = { at: Date.now(), templates };
   return templates;
 }
+
+// GET /track/<courier>-<ref> - the "Track parcel" button on the order_tracking WhatsApp template
+// (Dec, 12 Oct). One template serves every courier: the button carries "rm-VJ210591489GB" and
+// this sends the customer on to that courier's own tracking page.
+const TRACK_COURIERS = {
+  rm: (r) => `https://www.royalmail.com/track-your-item#/tracking-results/${r}`,
+  pf: (r) => `https://www.parcelforce.com/track-trace?trackNumber=${r}`,
+  dpd: (r) => `https://track.dpd.co.uk/parcels/${r}`,
+  dhl: (r) => `https://www.dhl.com/gb-en/home/tracking/tracking-express.html?tracking-id=${r}`,
+  ups: (r) => `https://www.ups.com/track?tracknum=${r}`,
+  evri: (r) => `https://www.evri.com/track/parcel/${r}`,
+  fedex: (r) => `https://www.fedex.com/fedextrack/?trknbr=${r}`,
+};
+app.get('/track/:code', (req, res) => {
+  const m = /^([a-z]+)-([A-Za-z0-9]{5,40})$/.exec(String(req.params.code || ''));
+  const go = m && TRACK_COURIERS[m[1]];
+  if (go) return res.redirect(302, go(m[2].toUpperCase()));
+  const ref = String(req.params.code || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 60);
+  res.type('html').send(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tracking</title>
+<body style="font-family:Arial,sans-serif;padding:30px;max-width:520px;margin:auto"><h2>Your parcel</h2>
+<p>Tracking reference: <b>${ref}</b></p><p>Enter this on the courier's website, or reply to our WhatsApp message and we'll check it for you.</p>
+<p style="color:#666">Tuff Workwear</p></body>`);
+});
 
 app.get('/api/whatsapp/templates', async (req, res) => {
   try {
@@ -12352,6 +12376,9 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
             channel,
           });
           console.log(`[whatsapp/webhook] inbound (${channel}) from ${peer}: ${text?.slice(0, 80)}`);
+          // "Stop promotions" on a sale_item_alert: record the opt-out (saleAlerts.js) and confirm in the chat.
+          if ((m.type === "button" || m.type === "interactive") && /^\s*stop promotions\s*$/i.test(text || ""))
+            saleAlertsOptOut({ pool, phone: peer, channel }).catch((err) => console.error("[sale-alerts] opt-out failed:", err.message));
           // Sales messages are a human conversation on the Quote Sent page —
           // no cross-sell handling and no "proof only" auto-reply.
           if (channel !== "proof") continue;
@@ -12820,7 +12847,7 @@ app.post("/api/whatsapp/send-template", requireHubForSales, async (req, res) => 
   if (!token || !phoneNumberId) {
     return res.status(503).json({ error: `WhatsApp ${channel} number not configured` });
   }
-  const { phone, templateName, templateLang, bodyParams, sentBy, orderNumber, quoteOrderId } = req.body || {};
+  const { phone, templateName, templateLang, bodyParams, sentBy, orderNumber, quoteOrderId, buttonParams } = req.body || {};
   const to = normaliseWhatsAppNumber(phone);
   if (!to) return res.status(400).json({ error: "A valid phone number is required" });
   const name = (templateName || "").toString().trim();
@@ -12872,6 +12899,14 @@ app.post("/api/whatsapp/send-template", requireHubForSales, async (req, res) => 
   const components = clean.length
     ? [{ type: "body", parameters: clean.map((text) => ({ type: "text", text })) }]
     : [];
+  // Link buttons with a variable (order_tracking's "Track parcel" -> /track/{{1}}): one value
+  // each, in button order. Missing values refuse the send rather than sending a dead button.
+  const dynButtons = (tpl.buttons || []).map((b, i) => ({ ...b, index: i })).filter((b) => b.type === "URL" && /{{1}}/.test(b.url || ""));
+  const bVals = Array.isArray(buttonParams) ? buttonParams.map((v) => String(v == null ? "" : v).trim()) : [];
+  if (dynButtons.length && dynButtons.some((_, i) => !bVals[i])) {
+    return res.status(400).json({ error: `Template "${name}" has a link button that needs a value - pass buttonParams` });
+  }
+  dynButtons.forEach((b, i) => components.push({ type: "button", sub_type: "url", index: String(b.index), parameters: [{ type: "text", text: bVals[i].slice(0, 200) }] }));
   if (wantsHeaderText) {
     // Same sanitising as the body: WhatsApp rejects newlines, tabs and runs of
     // spaces inside any variable, header included.
