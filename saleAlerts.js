@@ -39,6 +39,7 @@ const cfg = () => ({
   perDay: Math.max(1, Math.min(20, Number(process.env.SALE_ALERTS_PER_DAY) || 5)),
   at: process.env.SALE_ALERTS_AT || "10:00",
   trade: String(process.env.SALE_ALERTS_TRADE || "off").toLowerCase() === "on",
+  whatsapp: String(process.env.SALE_ALERTS_WHATSAPP || "on").toLowerCase() !== "off",   // Dec 12 Oct: everyone with a UK mobile gets WhatsApp
   lookbackDays: Number(process.env.SALE_ALERTS_LOOKBACK_DAYS) || 1095,
   publicUrl: (process.env.SALE_ALERTS_PUBLIC_URL || "https://server-backend-1i47.onrender.com").replace(/\/$/, ""),
 });
@@ -104,21 +105,26 @@ export async function recipientsFor(pid, { pool, cutoffDays = 7 } = {}) {
   const eligible = [];
   const contacts = new Map();
   for (const cc of chunk([...best.keys()].sort((a, b) => a - b), 60)) for (const x of (await bpLiveGet(`/contact-service/contact/${idSet(cc)}`)) || []) contacts.set(x.contactId, x);
+  // Opt-outs and history are matched on BOTH the email and the mobile: "Stop promotions" on WhatsApp stores
+  // "wa:447...", the email unsubscribe stores the address, and either one stops every channel.
   const unsub = new Set(), recent = new Set(), already = new Set();
   if (pool) {
     (await pool.query(`SELECT email FROM sale_alert_unsubs`)).rows.forEach((r) => unsub.add(r.email));
-    (await pool.query(`SELECT email FROM sale_alert_sends WHERE status = 'sent' AND at > now() - ($1 || ' days')::interval`, [String(cutoffDays)])).rows.forEach((r) => recent.add(r.email));
-    (await pool.query(`SELECT email FROM sale_alert_sends WHERE status = 'sent' AND product_id = $1`, [pid])).rows.forEach((r) => already.add(r.email));
+    for (const r of (await pool.query(`SELECT email, phone FROM sale_alert_sends WHERE status = 'sent' AND at > now() - ($1 || ' days')::interval`, [String(cutoffDays)])).rows) { if (r.email) recent.add(r.email); if (r.phone) recent.add("wa:" + r.phone); }
+    for (const r of (await pool.query(`SELECT email, phone FROM sale_alert_sends WHERE status = 'sent' AND product_id = $1`, [pid])).rows) { if (r.email) already.add(r.email); if (r.phone) already.add("wa:" + r.phone); }
   }
-  const seenEmail = new Set();
+  const seen = new Set(), useWa = cfg().whatsapp;
   for (const b of best.values()) {
     const x = contacts.get(b.contactId) || {}, email = normEmail(x.communication?.emails?.PRI?.email);
-    const why = !email ? "no email" : x.relationshipToAccount?.isStaff || x.relationshipToAccount?.isSupplier ? "staff/supplier"
-      : unsub.has(email) ? "unsubscribed" : already.has(email) ? "already told about this item" : recent.has(email) ? "had a sale email in the last 7 days"
-      : seenEmail.has(email) ? "duplicate email" : "";
-    if (why) { skipped.push({ contactId: b.contactId, email, orderId: b.orderId, reason: why }); continue; }
-    seenEmail.add(email);
-    eligible.push({ ...b, email, firstName: String(x.firstName || "").trim() });
+    const tel = x.communication?.telephones || {}, phone = ukMobile(tel.MOB) || ukMobile(tel.PRI) || ukMobile(tel.SEC);
+    const keys = [email, phone && "wa:" + phone].filter(Boolean);
+    const channel = useWa && phone ? "whatsapp" : email ? "email" : null;
+    const why = !channel ? (useWa ? "no email or UK mobile" : "no email") : x.relationshipToAccount?.isStaff || x.relationshipToAccount?.isSupplier ? "staff/supplier"
+      : keys.some((k) => unsub.has(k)) ? "unsubscribed" : keys.some((k) => already.has(k)) ? "already told about this item"
+      : keys.some((k) => recent.has(k)) ? "had a sale message in the last 7 days" : keys.some((k) => seen.has(k)) ? "duplicate contact" : "";
+    if (why) { skipped.push({ contactId: b.contactId, email, phone, orderId: b.orderId, reason: why }); continue; }
+    keys.forEach((k) => seen.add(k));
+    eligible.push({ ...b, email, phone, channel, key: channel === "whatsapp" ? "wa:" + phone : email, firstName: String(x.firstName || "").trim() });
   }
   return { eligible, skipped };
 }
@@ -238,7 +244,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
       if (!orig) { skipped.push({ reason: `sale SKU ${v.sku} not matched to a product` }); continue; }
       sizes.push({ ...v, pid: orig.pid, origSku: orig.sku });
       const r = await recipientsFor(orig.pid, { pool });
-      for (const e of r.eligible) if (!eligible.has(e.email)) eligible.set(e.email, { ...e, size: v.size, pid: orig.pid });
+      for (const e of r.eligible) if (!eligible.has(e.key)) eligible.set(e.key, { ...e, size: v.size, pid: orig.pid });
       skipped.push(...r.skipped);
     }
     evaluated.push({ url, name: page.name, sizes: sizes.length, eligible: eligible.size });
@@ -253,37 +259,42 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
   for (const b of batch) {
     const pid0 = b.sizes[0]?.pid || null;
     const p = { url: b.page.url, name: b.page.name, image: b.page.image || "", sizes: b.sizes.map((s) => s.size || s.origSku), sku: b.sizes.map((s) => s.origSku).join(", "),
-      recipients: b.eligible.map((e) => ({ email: e.email, firstName: e.firstName, size: e.size, orderId: e.orderId, date: e.date })),
+      recipients: b.eligible.map((e) => ({ channel: e.channel, email: e.email, phone: e.phone, firstName: e.firstName, size: e.size, orderId: e.orderId, date: e.date })),
       skipped: b.skipped.map((s) => ({ email: s.email || null, orderId: s.orderId, reason: s.reason })), sent: 0, failed: 0 };
     result.products.push(p);
     if (dryRun) continue;
     await pool.query(`INSERT INTO sale_alert_pages (url, name, featured_on, status, recipients) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (url) DO UPDATE SET status = EXCLUDED.status, featured_on = EXCLUDED.featured_on, recipients = EXCLUDED.recipients`,
       [b.page.url, b.page.name, day, mode, b.eligible.length]);
-    for (const s of b.skipped) await logSend(pool, { day, pid: pid0, contactId: s.contactId, email: s.email, status: "skipped", reason: s.reason });
-    if (mode !== "live") { for (const e of b.eligible) await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "review", reason: "review mode - not sent" }); continue; }
+    for (const s of b.skipped) await logSend(pool, { day, pid: pid0, contactId: s.contactId, email: s.email, phone: s.phone, status: "skipped", reason: s.reason });
+    if (mode !== "live") { for (const e of b.eligible) await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, phone: e.phone, channel: e.channel, status: "review", reason: "review mode - not sent" }); continue; }
     let live = b.page, checkedAt = Date.now();
     for (const e of b.eligible) {
       // first come, first served: re-read the page every 2 minutes and stop for a size the moment it has gone
       if (Date.now() - checkedAt > 120000) { live = await salePage(b.page.url); checkedAt = Date.now(); }
-      if (!live.variants.some((v) => (v.size || "") === (e.size || ""))) { await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "skipped", reason: "sold out before sending" }); continue; }
-      const { subject, html } = renderEmail({ item: { name: b.page.name, url: b.page.url, image: b.page.image }, firstName: e.firstName, email: e.email });
-      try { const r = await send(e.email, subject, html); p.sent++; await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "sent", reason: r?.via || "graph" }); }
-      catch (err) { p.failed++; await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "failed", reason: err.message.slice(0, 300) }); }
+      if (!live.variants.some((v) => (v.size || "") === (e.size || ""))) { await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, phone: e.phone, channel: e.channel, status: "skipped", reason: "sold out before sending" }); continue; }
+      const item = { name: b.page.name, url: b.page.url, image: b.page.image };
+      const who = { day, pid: e.pid, contactId: e.contactId, email: e.email, phone: e.phone, channel: e.channel };
+      try {
+        let r;
+        if (e.channel === "whatsapp") r = await sendSaleWhatsApp({ to: e.phone, firstName: e.firstName, item });
+        else { const { subject, html } = renderEmail({ item, firstName: e.firstName, email: e.email }); r = await send(e.email, subject, html); }
+        p.sent++; await logSend(pool, { ...who, status: "sent", reason: r?.messageId || r?.via || e.channel });
+      } catch (err) { p.failed++; await logSend(pool, { ...who, status: "failed", reason: err.message.slice(0, 300) }); }
     }
   }
   if (!dryRun && mode === "review") await sendReview(result).catch((e) => { result.reviewError = e.message; });
   return result;
 }
 
-async function logSend(pool, { day, pid, contactId, email, status, reason }) {
-  await pool.query(`INSERT INTO sale_alert_sends (day, product_id, contact_id, email, status, reason) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [day, pid, contactId || null, email || null, status, reason || null]);
+async function logSend(pool, { day, pid, contactId, email, phone, channel, status, reason }) {
+  await pool.query(`INSERT INTO sale_alert_sends (day, product_id, contact_id, email, phone, channel, status, reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [day, pid, contactId || null, email || null, phone || null, channel || null, status, reason || null]);
 }
 
 async function sendReview(result) {
   const c = cfg();
   const rows = result.products.map((p) => `<h3 style="margin:18px 0 4px"><a href="${esc(p.url)}">${esc(p.name)}</a> <span style="color:#888">(${esc(p.sku)}${p.sizes.some(Boolean) ? `; sizes ${esc(p.sizes.join(", "))}` : ""})</span></h3>
-<p style="margin:0">Would email <b>${p.recipients.length}</b>: ${p.recipients.map((r) => esc(r.email) + (r.size ? ` (${esc(r.size)})` : "")).join(", ")}</p>
+<p style="margin:0">Would message <b>${p.recipients.length}</b> (${p.recipients.filter((r) => r.channel === "whatsapp").length} WhatsApp, ${p.recipients.filter((r) => r.channel === "email").length} email): ${p.recipients.map((r) => (r.channel === "whatsapp" ? "📱 0" + esc(r.phone.slice(2)) : "✉ " + esc(r.email)) + (r.size ? ` (${esc(r.size)})` : "")).join(", ")}</p>
 <p style="margin:0;color:#888;font-size:13px">Skipped ${p.skipped.length}: ${Object.entries(p.skipped.reduce((a, s) => ((a[s.reason] = (a[s.reason] || 0) + 1), a), {})).map(([k, v]) => `${esc(k)} ${v}`).join(", ") || "none"}</p>`).join("");
   const sample = result.products[0] ? renderEmail({ item: { name: result.products[0].name, url: result.products[0].url, image: result.products[0].image }, firstName: "Sam", email: c.reviewTo }) : null;
   await send(c.reviewTo, `Sale alerts ${result.day}: ${result.products.length} items, ${result.products.reduce((a, p) => a + p.recipients.length, 0)} customers (review - nothing sent)`,
@@ -326,6 +337,26 @@ export async function sendSaleWhatsApp({ to, firstName, item }) {
   return { via: "whatsapp", messageId: (j.messages && j.messages[0] && j.messages[0].id) || null };
 }
 
+/**
+ * A customer tapped "Stop promotions" on a sale_item_alert WhatsApp. Called from the WhatsApp webhook in server.js.
+ * Records the opt-out (stops email too if the same contact has an address on file) and confirms in the chat -
+ * free text is allowed because they have just messaged us.
+ */
+export async function saleAlertsOptOut({ pool, phone, channel = "sales" }) {
+  const p = ukMobile(phone) || String(phone || "").replace(/\D/g, "");
+  if (!pool || !p) return false;
+  await pool.query(`CREATE TABLE IF NOT EXISTS sale_alert_unsubs (email text PRIMARY KEY, at timestamptz NOT NULL DEFAULT now())`);
+  await pool.query(`INSERT INTO sale_alert_unsubs (email) VALUES ($1) ON CONFLICT DO NOTHING`, ["wa:" + p]);
+  console.log(`[sale-alerts] opt-out recorded for ${p}`);
+  const id = channel === "sales" ? process.env.WHATSAPP_SALES_PHONE_NUMBER_ID : process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (process.env.WHATSAPP_TOKEN && id) {
+    const v = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
+    await fetch(`https://graph.facebook.com/${v}/${id}/messages`, { method: "POST", headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", to: p, type: "text", text: { body: "Done - you won't get any more sale messages from Tuffshop. Thanks!" } }) }).catch(() => {});
+  }
+  return true;
+}
+
 // ---- routes + schedule ---------------------------------------------------------------------------
 export function registerSaleAlerts(app, { getPool }) {
   const requireUser = (req, res, next) => app.locals.requireHubUser(req, res, next);
@@ -333,6 +364,8 @@ export function registerSaleAlerts(app, { getPool }) {
     CREATE TABLE IF NOT EXISTS sale_alert_items (product_id bigint PRIMARY KEY, sku text, featured_on date NOT NULL, status text, recipients int);
     CREATE TABLE IF NOT EXISTS sale_alert_pages (url text PRIMARY KEY, name text, featured_on date NOT NULL, status text, recipients int);
     CREATE TABLE IF NOT EXISTS sale_alert_sends (id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), day date, product_id bigint, contact_id bigint, email text, status text NOT NULL, reason text);
+    ALTER TABLE sale_alert_sends ADD COLUMN IF NOT EXISTS phone text;
+    ALTER TABLE sale_alert_sends ADD COLUMN IF NOT EXISTS channel text;
     CREATE INDEX IF NOT EXISTS idx_sale_alert_sends_email ON sale_alert_sends(email, at);
     CREATE TABLE IF NOT EXISTS sale_alert_unsubs (email text PRIMARY KEY, at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS sale_alert_runs (day date PRIMARY KEY, ran_at timestamptz NOT NULL DEFAULT now(), result jsonb);`);
