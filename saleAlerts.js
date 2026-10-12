@@ -62,18 +62,21 @@ async function stwLocations() {
   return new Set(locs.filter((l) => String(l.groupingA || "").toUpperCase() === "STW").map((l) => Number(l.id)));
 }
 
-/** Every product with free stock in an STW location: Map(pid -> units). Reads the whole catalogue in ranges. */
+/** Every product with free stock in an STW location: Map(pid -> units). Reads the whole catalogue in SMALL ranges:
+ *  a 60k-id range is tens of MB of JSON and pushed this service over its memory limit on 12 Oct (crash + restart). */
 async function stwStock(stw) {
   const lo = rowsOf(await bpLiveGet(`/product-service/product-search?sort=productId%7CASC&pageSize=1`))[0].productId;
   const hi = rowsOf(await bpLiveGet(`/product-service/product-search?sort=productId%7CDESC&pageSize=1`))[0].productId;
   const out = new Map();
-  for (let a = lo; a <= hi; a += 60000) {
-    const resp = (await bpLiveGet(`/warehouse-service/product-availability/${a}-${Math.min(hi, a + 59999)}?includeOptional=breakDownByLocation`)) || {};
+  const STEP = 4000;
+  for (let a = lo; a <= hi; a += STEP) {
+    const resp = (await bpLiveGet(`/warehouse-service/product-availability/${a}-${Math.min(hi, a + STEP - 1)}?includeOptional=breakDownByLocation`)) || {};
     for (const [pid, v] of Object.entries(resp)) {
       const byLoc = v.warehouses?.[WAREHOUSE]?.byLocation || {};
       let q = 0; for (const [lid, x] of Object.entries(byLoc)) if (stw.has(Number(lid))) q += Math.max(0, Number(x.onHand ?? x.inStock) || 0);
       if (q > 0) out.set(Number(pid), q);
     }
+    await new Promise((r) => setTimeout(r, 300));   // gentle on BP and on memory
   }
   return out;
 }
