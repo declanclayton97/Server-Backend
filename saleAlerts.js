@@ -360,7 +360,8 @@ export function registerSaleAlerts(app, { getPool }) {
       const to = ukMobile(process.env.SALE_ALERTS_TEST_TO || "447892872364");
       const url = String(req.query.url || "https://tuffshop.co.uk/carhartt-106674-firm-duck-traditional-coat-black.html");
       if (!/^https:\/\/tuffshop\.co\.uk\//.test(url)) return res.status(400).json({ error: "url must be a tuffshop.co.uk page" });
-      const page = await salePage(url);
+      // ?item=&image= lets a test run before the site is readable (SALE_ALERTS_SITE_HEADER not set yet)
+      const page = req.query.item ? { url, name: String(req.query.item), image: String(req.query.image || ""), variants: [] } : await salePage(url);
       if (!page.name) return res.status(400).json({ error: "could not read that page", page });
       const r = await sendSaleWhatsApp({ to, firstName: String(req.query.name || "Dec"), item: page });
       res.json({ ok: true, to, item: { name: page.name, url: page.url, image: page.image, sizes: page.variants.map((v) => v.size || v.sku) }, ...r });
