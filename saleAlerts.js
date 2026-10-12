@@ -167,6 +167,7 @@ export async function salePage(url) {
   try { h = await getPage(url); } catch (e) { if (e.status === 404) return { url, name: "", variants: [], gone: true }; throw e; }
   // "Carhartt K126 ... - Black - XL - SALE" reads oddly as "the ... you bought": drop the trailing "- SALE"
   const name = decode((h.match(/<h1[^>]*>\s*<span[^>]*>([^<]+)/) || h.match(/<title>([^<]+)/) || [])[1]).replace(/\s*\|.*$/, "").replace(/\s*-\s*sale$/i, "");
+  const image = decode((h.match(/<meta property="og:image" content="([^"]+)"/) || [])[1]);   // product photo for the message header
   const cfgM = h.match(/"attributes":(\{.*?\}),"template"/), skuM = h.match(/"sku":(\{[^}]*\})/), salM = h.match(/"salable":(\{.*?\}\})/);
   if (cfgM && skuM) {                                          // full product: one variant per salable size
     const attrs = JSON.parse(cfgM[1]), skus = JSON.parse(skuM[1]), salable = salM ? JSON.parse(salM[1]) : null;
@@ -174,12 +175,12 @@ export async function salePage(url) {
     const ok = new Set(salable ? Object.values(salable).flatMap((o) => Object.values(o).flat()) : Object.keys(skus));
     const variants = [];
     for (const opt of sizeAttr?.options || []) for (const pid of opt.products) if (ok.has(String(pid)) && skus[pid]) variants.push({ sku: skus[pid], size: decode(opt.label) });
-    return { url, name, variants };
+    return { url, name, image, variants };
   }
   const sku = decode((h.match(/itemprop="sku"[^>]*>([^<]*)/) || h.match(/"sku":"([^"]+)"/) || [])[1]);   // JSON-LD on single-size sale pages
   // JSON-LD writes the flag with escaped slashes: "availability":"https:\/\/schema.org\/InStock"
   const inStock = /"availability":"[^"]*InStock"|stock available|title="Availability"[\s\S]{0,200}In stock/i.test(h) && !/"availability":"[^"]*OutOfStock"|stock unavailable/i.test(h);
-  return { url, name, variants: sku && inStock ? [{ sku, size: "" }] : [] };
+  return { url, name, image, variants: sku && inStock ? [{ sku, size: "" }] : [] };
 }
 
 /** The BP product a sale SKU stands for: the original. Sale copies are the original SKU + "-N" (337910429899XL-1)
@@ -196,14 +197,15 @@ async function originalProductId(saleSku) {
 }
 
 // ---- the message --------------------------------------------------------------------------------
-// Short on purpose (Dec): one line of news, the link, the first-come warning.
+// Short on purpose (Dec), and matching the WhatsApp template sale_item_alert (v2, 12 Oct): the item named in the
+// subject (that is what gets an email opened), a photo, the hook first, urgency framed as "stock is limited".
 export function renderEmail({ item, firstName, email }) {
-  const subject = "Did you know? Something you bought is now in our sale";
+  const subject = `${item.name} – now in our sale, in your size`;
   const html = `<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.5;color:#222;max-width:560px">
-<p>Hi ${esc(firstName || "there")},</p>
-<p><b>Did you know?</b> The ${esc(item.name)} you bought from us is now in our sale, in your size.</p>
+<p><b>Hi ${esc(firstName || "there")}, your size is in our sale 👀</b></p>
+${item.image ? `<p><a href="${esc(item.url)}"><img src="${esc(item.image)}" alt="${esc(item.name)}" style="max-width:100%;width:320px;border-radius:6px"></a></p>` : ""}
+<p>The ${esc(item.name)} you bought from us is now reduced. Stock is limited, so it's first come, first served.</p>
 <p><a href="${esc(item.url)}" style="display:inline-block;background:#1f5fbf;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">See it in the sale</a></p>
-<p>It's first come, first served, so if the link doesn't work, somebody beat you to it!</p>
 <p>The Tuffshop team</p>
 <p style="font-size:12px;color:#888;margin-top:28px">You're getting this because you bought this item from Tuffshop. <a href="${esc(unsubUrl(email))}" style="color:#888">Unsubscribe from sale emails</a>.</p>
 </div>`;
@@ -250,7 +252,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
   const result = { day, mode: dryRun ? "preview" : mode, salePages: pages.length, notYetFeatured: queue.length, evaluated, products: [] };
   for (const b of batch) {
     const pid0 = b.sizes[0]?.pid || null;
-    const p = { url: b.page.url, name: b.page.name, sizes: b.sizes.map((s) => s.size || s.origSku), sku: b.sizes.map((s) => s.origSku).join(", "),
+    const p = { url: b.page.url, name: b.page.name, image: b.page.image || "", sizes: b.sizes.map((s) => s.size || s.origSku), sku: b.sizes.map((s) => s.origSku).join(", "),
       recipients: b.eligible.map((e) => ({ email: e.email, firstName: e.firstName, size: e.size, orderId: e.orderId, date: e.date })),
       skipped: b.skipped.map((s) => ({ email: s.email || null, orderId: s.orderId, reason: s.reason })), sent: 0, failed: 0 };
     result.products.push(p);
@@ -264,7 +266,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
       // first come, first served: re-read the page every 2 minutes and stop for a size the moment it has gone
       if (Date.now() - checkedAt > 120000) { live = await salePage(b.page.url); checkedAt = Date.now(); }
       if (!live.variants.some((v) => (v.size || "") === (e.size || ""))) { await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "skipped", reason: "sold out before sending" }); continue; }
-      const { subject, html } = renderEmail({ item: { name: b.page.name, url: b.page.url }, firstName: e.firstName, email: e.email });
+      const { subject, html } = renderEmail({ item: { name: b.page.name, url: b.page.url, image: b.page.image }, firstName: e.firstName, email: e.email });
       try { const r = await send(e.email, subject, html); p.sent++; await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "sent", reason: r?.via || "graph" }); }
       catch (err) { p.failed++; await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, status: "failed", reason: err.message.slice(0, 300) }); }
     }
@@ -283,7 +285,7 @@ async function sendReview(result) {
   const rows = result.products.map((p) => `<h3 style="margin:18px 0 4px"><a href="${esc(p.url)}">${esc(p.name)}</a> <span style="color:#888">(${esc(p.sku)}${p.sizes.some(Boolean) ? `; sizes ${esc(p.sizes.join(", "))}` : ""})</span></h3>
 <p style="margin:0">Would email <b>${p.recipients.length}</b>: ${p.recipients.map((r) => esc(r.email) + (r.size ? ` (${esc(r.size)})` : "")).join(", ")}</p>
 <p style="margin:0;color:#888;font-size:13px">Skipped ${p.skipped.length}: ${Object.entries(p.skipped.reduce((a, s) => ((a[s.reason] = (a[s.reason] || 0) + 1), a), {})).map(([k, v]) => `${esc(k)} ${v}`).join(", ") || "none"}</p>`).join("");
-  const sample = result.products[0] ? renderEmail({ item: { name: result.products[0].name, url: result.products[0].url }, firstName: "Sam", email: c.reviewTo }) : null;
+  const sample = result.products[0] ? renderEmail({ item: { name: result.products[0].name, url: result.products[0].url, image: result.products[0].image }, firstName: "Sam", email: c.reviewTo }) : null;
   await send(c.reviewTo, `Sale alerts ${result.day}: ${result.products.length} items, ${result.products.reduce((a, p) => a + p.recipients.length, 0)} customers (review - nothing sent)`,
     `<div style="font-family:Arial,sans-serif;font-size:14px">${rows || "<p>Nothing to send today.</p>"}${sample ? `<hr><p><b>What customers would receive:</b></p>${sample.html}` : ""}</div>`);
 }
