@@ -352,12 +352,15 @@ export function registerSaleAlerts(app, { getPool }) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   // Test the WhatsApp template with a real sale item. Locked twice: needs SALE_ALERTS_SECRET as ?key=, and only
-  // ever sends to SALE_ALERTS_TEST_TO (default Dec's mobile) - it cannot message a customer.
+  // ever sends to a number on SALE_ALERTS_TEST_TO (default: Dec's test numbers) - it cannot message a customer.
   app.post("/api/sale-alerts/whatsapp-test", async (req, res) => {
     try {
       const secret = cfg().secret, key = String(req.query.key || "");
       if (!secret || key.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(secret))) return res.status(403).json({ error: "forbidden" });
-      const to = ukMobile(process.env.SALE_ALERTS_TEST_TO || "447892872364");
+      // Only numbers on the test list (SALE_ALERTS_TEST_TO, comma separated) can ever receive a test.
+      const allowed = String(process.env.SALE_ALERTS_TEST_TO || "447892872364,447720944723").split(",").map(ukMobile).filter(Boolean);
+      const to = req.query.to ? ukMobile(req.query.to) : allowed[0];
+      if (!to || !allowed.includes(to)) return res.status(400).json({ error: "that number is not on the test list (SALE_ALERTS_TEST_TO)" });
       const url = String(req.query.url || "https://tuffshop.co.uk/carhartt-106674-firm-duck-traditional-coat-black.html");
       if (!/^https:\/\/tuffshop\.co\.uk\//.test(url)) return res.status(400).json({ error: "url must be a tuffshop.co.uk page" });
       // ?item=&image= lets a test run before the site is readable (SALE_ALERTS_SITE_HEADER not set yet)
