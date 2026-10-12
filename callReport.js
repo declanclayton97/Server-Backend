@@ -60,7 +60,9 @@ const TZ = "Europe/London";
 const INTERNAL = "SIP_ENTERPRISE";
 const isLive = () => String(process.env.CALL_REPORT_LIVE || "").toLowerCase() === "on";
 const testEmail = () => process.env.CALL_REPORT_TEST_EMAIL || "dec@tuffshop.co.uk";
-const managerEmail = () => process.env.CALL_REPORT_MANAGER || "dec@tuffshop.co.uk";
+// Who gets the full (everyone) report each Monday.
+const reportRecipients = () => String(process.env.CALL_REPORT_RECIPIENTS || "dec@tuffshop.co.uk,helen@tuffshop.co.uk,tim@tuffshop.co.uk")
+  .split(",").map((s) => s.trim()).filter(Boolean);
 // Tuffshop is an EU org (the global host answers 451 and names this one); a 451 also
 // switches host at run time, so a region move fixes itself.
 let cdrHost = null;
@@ -1012,8 +1014,18 @@ export async function sendReport(r, { onlyTo, viewUrl = null, managerOnly = fals
     try { await sendNew({ to, subject: subj, html, attachments }); sent.push({ to, realTo, subject: subj }); }
     catch (e) { sent.push({ to, realTo, subject: subj, error: e.message }); }
   };
-  await send(managerEmail(), `Sales activity - week of ${dayLabel(r.week)}`, managerEmailHtml(r, { viewUrl }), []);
-  if (!managerOnly) for (const p of r.people) await send(p.email, `Your week - ${dayLabel(r.week)} to ${dayLabel(r.weekEnd)}`, personEmailHtml(r, p), await timelineAttachments(r, [p]));
+  // The full report is LIVE (Dec, 12 Oct): it goes for real to each address in
+  // CALL_REPORT_RECIPIENTS (default Dec, Helen and Tim). onlyTo (send-test) still overrides.
+  for (const addr of reportRecipients()) {
+    const to = onlyTo || addr;
+    try { await sendNew({ to, subject: `Sales activity - week of ${dayLabel(r.week)}`, html: managerEmailHtml(r, { viewUrl }), attachments: [] }); sent.push({ to, realTo: addr }); }
+    catch (e) { sent.push({ to, realTo: addr, error: e.message }); }
+    if (onlyTo) break;   // a test goes to the one address once
+  }
+  // Each person's own report is NOT sent yet - only with CALL_REPORT_PERSONAL=on (and then to
+  // them only with CALL_REPORT_LIVE=on; otherwise to the test address).
+  const personal = String(process.env.CALL_REPORT_PERSONAL || "").toLowerCase() === "on";
+  if (!managerOnly && (personal || onlyTo)) for (const p of r.people) await send(p.email, `Your week - ${dayLabel(r.week)} to ${dayLabel(r.weekEnd)}`, personEmailHtml(r, p), await timelineAttachments(r, [p]));
   if (sent.every((s) => s.error)) throw new Error(`No report email could be sent: ${sent[0] && sent[0].error}`);
   return sent;
 }
@@ -1287,6 +1299,21 @@ ${body.join("") || `<tr><td ${TD} colspan="7">No recorded calls yet.</td></tr>`}
         return res.type("html").send(p ? personEmailHtml(r, p, { imgSrc }) : managerEmailHtml(r, { imgSrc }));
       }
       res.json(r);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  // What each Monday run sent (?week= one week).
+  app.get("/api/call-report/runs", requireUser, guard, async (req, res) => {
+    try {
+      await ensureTables(getPool());
+      const r = await getPool().query(`SELECT to_char(week,'YYYY-MM-DD') week, ran_at, result FROM call_report_runs ORDER BY week DESC LIMIT 6`);
+      res.json(r.rows);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  // POST: send that week's FULL report to the live recipients now (no personal emails).
+  app.post("/api/call-report/send-full", requireUser, guard, async (req, res) => {
+    try {
+      const r = await buildReport({ pool: getPool(), bpLive, week: weekOf(req.query.week), collect: false });
+      res.json({ week: r.week, sent: await sendReport(r, { viewUrl: await viewLink(getPool(), r.week), managerOnly: true }) });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   // Sends every email of that week's report to ONE address (default the test address).
