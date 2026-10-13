@@ -5079,6 +5079,9 @@ export async function blakladerErpReconcile(pool, altItemsUrl, { days = 21, dryR
     const want = new Map();
     for (const id of ids) for (const l of await bp.getOrderCartLines(id)) {
       const k = norm(l.sku); if (!k) continue;
+      // A free-text row (productId 1000/1001 — carriage, or the "5 pairs" MISC row PO 496017 carried
+      // for a carry-forward line) is not a product Blaklader can hold; it flagged "missing MISC1" on 13 Oct.
+      if (!(Number(l.productId) > 1001)) continue;
       const w = want.get(k) || { sku: l.sku, qty: 0, productId: l.productId, name: l.name };
       w.qty += Math.round(l.qty); want.set(k, w);
     }
