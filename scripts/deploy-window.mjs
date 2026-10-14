@@ -52,7 +52,8 @@ if (atArg) {
 const POLLERS = [
   { name: 'Blaklader', h: 9, m: 30, days: 'Mon-Fri' },
   { name: 'Snickers', h: 10, m: 0, days: 'Mon-Fri' },
-  { name: 'Fristads', h: 10, m: 30, days: 'Mon-Fri' },
+  { name: 'Rockfall', h: 10, m: 20, days: 'Mon-Fri' },   // live 10:20 from 2026-10-15
+  { name: 'Fristads', h: 10, m: 40, days: 'Mon-Fri' },
   { name: 'Helly Hansen', h: 11, m: 0, days: 'Mon-Fri' },
   { name: 'Tranemo', h: 11, m: 20, days: 'Mon-Fri' },
   { name: 'Mascot', h: 11, m: 40, days: 'Mon-Fri' },   // moved from 11:30 (2026-10-02)

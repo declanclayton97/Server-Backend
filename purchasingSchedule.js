@@ -2581,6 +2581,82 @@ async function placeBrookTavernerOrder(pool, altItemsUrl, { live = true } = {}) 
   return { poId, orderNo, steps };
 }
 
+// ── Rockfall placement chain (portal.rockfall.com, Laravel) ─────────────────
+// Alt-Items /api/rockfall-order: refuse if Rockfall already hold an order with our reference →
+// empty basket → add each size (our SKU IS their code, PM4008/008) → read the lines back off the
+// checkout page → step 2 OUR saved address (LS26 8LG) → step 3 cheapest delivery that is not
+// Collection (Express £7.95 under £200 ex VAT, free over) → step 4 on account, our PO number as
+// their required Reference. Mapped from Dec's HAR of a checkout on 2026-10-14.
+// The order number comes back from their order history (reference = our PO number).
+const ROCKFALL_SUPPLIER_CONTACT = 38733;
+async function placeRockfallOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await createPo({ supplierKey: 'ROCKFALL', execute: live, padToThreshold, logPool: pool }); }
+  catch (e) { throw createPoErr(e); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name, productId: l.productId }));
+  if (!orderLines.length) throw stepErr('cart', 'no orderable Rockfall lines');
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  let r;
+  try {
+    r = await jfetch('checkout', `${altItemsUrl}/api/rockfall-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lines: orderLines.map((l) => ({ sku: l.sku, qty: l.qty })), reference: String(poId), execute: live }),
+    });
+  } catch (e) {
+    // The submit may have gone through even though we lost the answer. Never retry — say so.
+    throw stepErr('checkout', `Rockfall order call failed: ${e.message} — check portal.rockfall.com/orders for Reference ${poId} before re-running PO#${poId}.`, { poId });
+  }
+  steps.rf = { add: r.steps && r.steps.add, cart: r.steps && r.steps.cart, checkout: r.steps && r.steps.checkout, delivery: r.steps && r.steps.step3 };
+  if (r.unresolved && r.unresolved.length) throw stepErr('resolve', `Rockfall have no matching size for ${r.unresolved.length} line(s) on PO#${poId} — NOT ordering: ${r.error}`, { poId, rf: steps.rf });
+  if (r.rehearsed) throw stepErr('checkout', `Rockfall rehearsed only (the call was not made with execute:true) — PO#${poId} built, nothing sent.`, { poId, rf: steps.rf });
+  if (!r.ok && !r.alreadyPlaced) {
+    const cart = (r.steps && r.steps.cart) || {};
+    const miss = (cart.missing && cart.missing.length) ? ` — not in the basket as asked: ${cart.missing.map((m) => `${m.item} want ${m.want} got ${m.got}`).join(', ')}` : '';
+    throw stepErr(cart.missing && cart.missing.length ? 'cart' : 'checkout', `Rockfall did not confirm the order: ${r.error || 'no order with our reference in their history'}${miss}`, { poId, rf: r.steps });
+  }
+  const orderNo = String(r.orderNo).trim();
+  steps.checkout = { ok: true, orderNo, alreadyPlaced: !!r.alreadyPlaced };
+
+  const co = (r.steps && r.steps.checkout) || {};
+  // PRICE CHECK: their goods total (ex VAT) against the PO. Diagnostic only — already placed.
+  try {
+    const poNet = +[...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (Number(l.cost) || 0) * (Number(l.qty) || 0), 0).toFixed(2);
+    if (co.goodsExVat != null) {
+      const gap = +(co.goodsExVat - poNet).toFixed(2);
+      steps.priceCheck = { theirs: co.goodsExVat, poNet, gap };
+      if (Math.abs(gap) >= 0.01) {
+        await logPriceCheck(pool, steps, {
+          supplierKey: 'ROCKFALL', poId, changes: [],
+          message: `Prices don't match: Rockfall goods total £${co.goodsExVat.toFixed(2)} vs our PO net £${poNet.toFixed(2)} (diff £${gap}). A Brightpearl cost price (list 20) may need adjusting. Order ${orderNo} still placed.`,
+          context: { poId, orderNo, theirs: co.goodsExVat, poNet, gap },
+        });
+      }
+    }
+  } catch (e) { steps.priceCheck = { skipped: e.message }; }
+  if (live && co.carriage > 0) {
+    try { steps.carriage = await bp.addPoMiscRowLive({ poId, name: 'Carriage - Express (Rockfall, under £200 ex-VAT)', net: co.carriage, qty: 1, execute: true }); }
+    catch (e) { steps.carriage = { error: e.message }; }
+  }
+
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, orderNo); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Rockfall — order ${orderNo}. Reference-set failed: ${e.message}`, ROCKFALL_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: orderNo, refWritten, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'ROCKFALL', poId, noteContactId: ROCKFALL_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -4297,6 +4373,9 @@ const SCHEDULED_SUPPLIERS = {
   LEO: { supplierKey: 'LEO', stateId: 23, placeFn: placeLeoOrder, threshold: Number(process.env.LEO_FREESHIP_THRESHOLD || 200) }, // leoworkwear.com trade portal via Alt-Items /api/leo-order; carriage paid @ £200 ex-VAT, else £7.50 (read off Leo's Review page). 16:10 UK, live since 2026-10-14 (no env gate)
   // noPad: never top up with extra low-inv to reach the threshold (owner, 2026-10-12) — on day 3 it
   // places as it stands with Standard delivery. 14:30 UK, live since 2026-10-14 (no env gate).
+  // Rockfall (contact 38733): portal.rockfall.com via Alt-Items /api/rockfall-order. Free delivery over
+  // £200 ex VAT, else Express £7.95 (Dec, 2026-10-14). Weekdays 10:20, between Snickers and Fristads.
+  ROCKFALL: { supplierKey: 'ROCKFALL', stateId: 26, placeFn: placeRockfallOrder, threshold: Number(process.env.ROCKFALL_FREESHIP_THRESHOLD || 200) },
   'BROOK TAVERNER': { supplierKey: 'BROOK TAVERNER', stateId: 25, placeFn: placeBrookTavernerOrder, noPad: true, threshold: Number(process.env.BROOKTAVERNER_FREESHIP_THRESHOLD || 100) },
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
@@ -4332,13 +4411,14 @@ const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
   SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811, BUCKLER: 8981,
-  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205, 'BROOK TAVERNER': 5499,
+  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205, 'BROOK TAVERNER': 5499, ROCKFALL: 38733,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
   BLAKLADER: { at: '09:30' },
   SNICKERS: { at: '10:00' },
-  FRISTADS: { at: '10:30' },
+  ROCKFALL: { at: '10:20' },
+  FRISTADS: { at: '10:40' },
   'HELLY HANSEN': { at: '11:00' },
   TRANEMO: { at: '11:20' },
   MASCOT: { at: '11:40' },
