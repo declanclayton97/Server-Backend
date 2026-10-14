@@ -13,9 +13,9 @@
 // Every send, skip and failure is a row in sale_alert_sends.
 //
 // Env:
-//   SALE_ALERTS_ENABLED  off (default) | review | live
-//       review: the daily run emails SALE_ALERTS_REVIEW_TO the batch it WOULD send; no customer is emailed.
-//       live:   customers are emailed.
+// LIVE since 14 Oct 2026 (Dec): 5 products a day, at most 5 customers each (most recent buyers first).
+// Dec emails a summary of who was messaged. SALE_ALERTS_ENABLED=off is only an emergency stop; any other value
+// (including the old "review") runs live - go-live was switched in code, not on Render (Dec dislikes env gates).
 //   SALE_ALERTS_SECRET   signs unsubscribe links (required for review and live)
 //   SALE_ALERTS_FROM (info@tuffshop.co.uk), SALE_ALERTS_REVIEW_TO (dec@tuffshop.co.uk), SALE_ALERTS_PER_DAY (5),
 //   SALE_ALERTS_AT (10:00, weekdays, until +60 min),
@@ -33,11 +33,12 @@ const TRADE_CHANNELS = new Set([1, 4, 5, 6, 8, 10, 11, 12, 15, 16, 21, 33, 34]);
 const DECORATION = /^OP(EM|PR)/i, DECORATION_NAME = /embroid|\bprint(ed|ing)?\b|set ?up fee|upload logo|logo design/i;
 
 const cfg = () => ({
-  mode: String(process.env.SALE_ALERTS_ENABLED || "off").toLowerCase(),
+  mode: String(process.env.SALE_ALERTS_ENABLED || "").toLowerCase() === "off" ? "off" : "live",
+  perProduct: 5,   // Dec 14 Oct: at most 5 customers per sale item
   secret: process.env.SALE_ALERTS_SECRET || "",
   from: process.env.SALE_ALERTS_FROM || "info@tuffshop.co.uk",
   reviewTo: process.env.SALE_ALERTS_REVIEW_TO || "dec@tuffshop.co.uk",
-  perDay: Math.max(1, Math.min(20, Number(process.env.SALE_ALERTS_PER_DAY) || 5)),
+  perDay: 5,   // Dec 14 Oct: 5 products a day
   at: process.env.SALE_ALERTS_AT || "10:00",
   trade: String(process.env.SALE_ALERTS_TRADE || "off").toLowerCase() === "on",
   whatsapp: String(process.env.SALE_ALERTS_WHATSAPP || "on").toLowerCase() !== "off",   // Dec 12 Oct: everyone with a UK mobile gets WhatsApp
@@ -272,7 +273,9 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
       if (!dryRun) await pool.query(`INSERT INTO sale_alert_pages (url, name, featured_on, status, recipients) VALUES ($1,$2,$3,$4,0) ON CONFLICT (url) DO NOTHING`, [url, page.name, day, page.variants.length ? "no buyers" : "sold out"]);
       continue;
     }
-    batch.push({ page, sizes, eligible: [...eligible.values()], skipped });
+    // at most c.perProduct people per item, most recent buyers first (they are likeliest to still want it)
+    const ranked = [...eligible.values()].sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+    batch.push({ page, sizes, eligible: ranked.slice(0, c.perProduct), notMessaged: ranked.length - Math.min(ranked.length, c.perProduct), skipped });
     await pause(300);
   }
   const result = { day, mode: dryRun ? "preview" : mode, salePages: pages.length, notYetFeatured: queue.length, evaluated, products: [] };
@@ -280,7 +283,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
     const pid0 = b.sizes[0]?.pid || null;
     const p = { url: b.page.url, name: b.page.name, image: b.page.image || "", sizes: b.sizes.map((s) => s.size || s.origSku), sku: b.sizes.map((s) => s.origSku).join(", "),
       recipients: b.eligible.map((e) => ({ channel: e.channel, email: e.email, phone: e.phone, firstName: e.firstName, size: e.sizes.join(" / "), orderId: e.orderId, date: e.date })),
-      skipped: b.skipped.map((s) => ({ email: s.email || null, orderId: s.orderId, reason: s.reason })), sent: 0, failed: 0 };
+      skipped: b.skipped.map((s) => ({ email: s.email || null, orderId: s.orderId, reason: s.reason })), notMessaged: b.notMessaged || 0, sent: 0, failed: 0 };
     result.products.push(p);
     if (dryRun) continue;
     await pool.query(`INSERT INTO sale_alert_pages (url, name, featured_on, status, recipients) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (url) DO UPDATE SET status = EXCLUDED.status, featured_on = EXCLUDED.featured_on, recipients = EXCLUDED.recipients`,
@@ -309,7 +312,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
       } catch (err) { p.failed++; await logSend(pool, { ...who, status: "failed", reason: err.message.slice(0, 300) }); }
     }
   }
-  if (!dryRun && mode === "review") await sendReview(result).catch((e) => { result.reviewError = e.message; });
+  if (!dryRun && (mode === "review" || mode === "live")) await sendReview(result).catch((e) => { result.reviewError = e.message; });
   return result;
 }
 
@@ -321,12 +324,12 @@ async function logSend(pool, { day, pid, contactId, email, phone, channel, statu
 async function sendReview(result) {
   const c = cfg();
   const rows = result.products.map((p) => `<h3 style="margin:18px 0 4px"><a href="${esc(p.url)}">${esc(p.name)}</a> <span style="color:#888">(${esc(p.sku)}${p.sizes.some(Boolean) ? `; in the sale: ${esc(p.sizes.join(", "))}` : ""})</span></h3>
-<p style="margin:0">Would message <b>${p.recipients.length}</b> (${p.recipients.filter((r) => r.channel === "whatsapp").length} WhatsApp, ${p.recipients.filter((r) => r.channel === "email").length} email):</p>${bySize(p.recipients)}
+<p style="margin:0">${result.mode === "live" ? `Messaged <b>${p.sent}</b> of ${p.recipients.length}${p.failed ? ` (<b style="color:#b00">${p.failed} failed</b>)` : ""}` : `Would message <b>${p.recipients.length}</b>`}${p.notMessaged ? ` - cap of 5, ${p.notMessaged} more past buyers not messaged` : ""} (${p.recipients.filter((r) => r.channel === "whatsapp").length} WhatsApp, ${p.recipients.filter((r) => r.channel === "email").length} email):</p>${bySize(p.recipients)}
 <p style="margin:0;color:#888;font-size:13px">Skipped ${p.skipped.length}: ${Object.entries(p.skipped.reduce((a, s) => ((a[s.reason] = (a[s.reason] || 0) + 1), a), {})).map(([k, v]) => `${esc(k)} ${v}`).join(", ") || "none"}</p>`).join("");
   const sample = result.products[0] ? renderEmail({ item: { name: withSize(result.products[0].name, [result.products[0].recipients[0]?.size].filter(Boolean)), url: result.products[0].url, image: result.products[0].image }, firstName: "Sam", email: c.reviewTo }) : null;
   // The review goes from the sales mailbox (known good): info@ is not a mailbox the Graph app can send as (14 Oct: "user invalid").
-  await mailboxContext.run({ box: salesMailbox() }, () => sendNew({ to: c.reviewTo, subject: `Sale alerts ${result.day}: ${result.products.length} items, ${result.products.reduce((a, p) => a + p.recipients.length, 0)} customers (review - nothing sent)`,
-    html: `<div style="font-family:Arial,sans-serif;font-size:14px">${rows || "<p>Nothing to send today.</p>"}${sample ? `<hr><p><b>What customers would receive:</b></p>${sample.html}` : ""}</div>` }));
+  await mailboxContext.run({ box: salesMailbox() }, () => sendNew({ to: c.reviewTo, subject: `Sale alerts ${result.day}: ${result.products.length} items, ${result.products.reduce((a, p) => a + p.recipients.length, 0)} customers ${result.mode === "live" ? "(SENT)" : "(review - nothing sent)"}`,
+    html: `<div style="font-family:Arial,sans-serif;font-size:14px">${rows || "<p>Nothing to send today.</p>"}${sample ? `<hr><p><b>What customers receive:</b></p>${sample.html}` : ""}</div>` }));
 }
 
 // Review list grouped by the size each person bought - one line per size, so "only buyers of that size" is visible.
