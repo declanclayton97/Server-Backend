@@ -467,11 +467,13 @@ export function registerSaleAlerts(app, { getPool }) {
       const runs = await getPool().query(`SELECT day, ran_at, result FROM sale_alert_runs ORDER BY day DESC LIMIT 14`);
       const sends = await getPool().query(`SELECT day, channel, status, count(*)::int n FROM sale_alert_sends GROUP BY 1,2,3 ORDER BY 1 DESC`);
       const unsubs = await getPool().query(`SELECT count(*)::int n FROM sale_alert_unsubs`);
+      const recentUnsubs = (await getPool().query(`SELECT email, at FROM sale_alert_unsubs ORDER BY at DESC LIMIT 20`)).rows
+        .map((r) => ({ via: r.email.startsWith("wa:") ? "whatsapp" : "email", who: r.email.startsWith("wa:") ? "..." + r.email.slice(-4) : r.email.replace(/^(.).*@/, "$1***@"), at: r.at }));   // masked: counts route
       res.json({ mode: cfg().mode, whatsapp: cfg().whatsapp, siteHeader: !!process.env.SALE_ALERTS_SITE_HEADER,
         runs: runs.rows.map((r) => ({ day: r.day, ranAt: r.ran_at, error: r.result?.error || null, mode: r.result?.mode, salePages: r.result?.salePages,
           items: (r.result?.products || []).map((p) => ({ name: p.name, recipients: p.recipients?.length || 0, whatsapp: (p.recipients || []).filter((x) => x.channel === "whatsapp").length, skipped: p.skipped?.length || 0, sent: p.sent, failed: p.failed })),
           running: !!r.result?.running, reviewError: r.result?.reviewError || null })),
-        sends: sends.rows, unsubscribed: unsubs.rows[0].n });
+        sends: sends.rows, unsubscribed: unsubs.rows[0].n, recentUnsubs });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   // Deliverability check: one email through smtp2go from info@ to the proofing Gmail only (fixed address), so its
