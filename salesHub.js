@@ -570,21 +570,27 @@ export function etaSentenceMulti(pos, { today = new Date(), allowanceDays = DELI
     if (!prev || new Date(p.expectedDate || 0) > new Date(prev.expectedDate || 0)) bySupplier.set(k, p);
   }
   if (bySupplier.size < 2) return null;
-  const dates = [], parts = [], leads = [];
-  let undated = false;
+  // We send the order out complete once the LAST supplier's stock is in - never in
+  // separate parcels per supplier - so the customer gets ONE date: the latest one
+  // (Dec, 14 Oct: "it sounds like we're sending them all separate, but we don't").
+  const names = [], leads = [], unconfirmed = [];
+  let latest = null;
   for (const [label, p] of bySupplier) {
+    names.push(esc(label));
     const win = windowFromPo(p, allowanceDays);
-    const phrase = win ? phraseWindow(win, today) : null;
-    if (phrase) { parts.push(`the ${esc(label)} items should be with you ${phrase}`); dates.push(windowKey(win)); }
-    else { undated = true; parts.push(`the ${esc(label)} items are on order, but ${esc(label)} haven't confirmed a date yet`); }
+    if (win && phraseWindow(win, today)) { if (!latest || compareWindows(win, latest) > 0) latest = win; }
+    else unconfirmed.push(esc(label));
     const lt = leadTimeClause(p, { short: true });
     if (lt) leads.push(lt);
   }
+  const head = `We're waiting on stock from ${joinAnd(names)} for this order, and we'll send everything out together in one delivery once it's all arrived`;
+  const when = unconfirmed.length
+    ? `. ${joinAnd(unconfirmed)} ${unconfirmed.length === 1 ? "hasn't" : "haven't"} confirmed a date yet, so I'm chasing ${unconfirmed.length === 1 ? "it" : "them"} and will come straight back to you with a delivery date.`
+    : `, so it should be with you ${phraseWindow(latest, today)}.`;
   return {
-    text: `We're waiting on stock from ${bySupplier.size} suppliers for this order: ${joinAnd(parts)}.` +
-      (leads.length ? ` For reference, ${joinAnd(leads)} to get stock to us.` : "") +
-      (undated ? " I'm chasing the ones without a date and will come straight back to you." : ""),
-    dates, source: "po-multi",
+    text: head + when + (leads.length ? ` For reference, ${joinAnd(leads)} to get stock to us.` : ""),
+    dates: !unconfirmed.length && latest ? [windowKey(latest)] : [],
+    source: "po-multi",
   };
 }
 

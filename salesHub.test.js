@@ -29,6 +29,7 @@ import {
   isLogoOrder,
   poArrival,
   setSupplierLeadTimes,
+  etaSentenceMulti,
 } from "./salesHub.js";
 
 let pass = 0, fail = 0;
@@ -536,3 +537,15 @@ assertTrue("note lists attachments", withFiles.includes("Attached: proof.pdf, ph
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
+
+// --- several suppliers: ONE delivery, ONE date (the latest) ----------------------
+{
+  const today = new Date("2026-10-14T10:00:00+01:00");
+  const m = etaSentenceMulti([
+    { supplier: "Snickers", placedOn: "2026-10-13", expectedDate: "2026-10-20" },
+    { supplier: "Portwest", placedOn: "2026-10-13", expectedDate: "2026-10-27" },
+  ], { today });
+  assertTrue("multi: says it goes out together", m.text.includes("send everything out together in one delivery"));
+  assertTrue("multi: no per-supplier dates", !/items should be with you/.test(m.text));
+  assertEq("multi: one date, the latest", m.dates.length, 1);
+}
