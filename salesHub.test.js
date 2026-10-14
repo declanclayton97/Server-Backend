@@ -482,7 +482,9 @@ assertEq("impossible date -> measured", iso(poArrival({ supplierContactId: 1, pl
 // Vigilant with lead time 0 (due = placed) -> five weeks, not 'late'
 assertEq("unset lead time -> measured", iso(poArrival({ supplierContactId: 2, placedOn: "2026-09-21T10:00:00+01:00", expectedDate: "2026-09-21T00:00:00+01:00" })), "2026-10-23");
 // Unknown supplier with an impossible date -> no date at all (we chase, we do not call it late)
-assertEq("impossible and unmeasured -> null", poArrival({ supplierContactId: 999, placedOn: "2026-09-21T10:00:00+01:00", expectedDate: "2026-09-01T00:00:00+01:00" }), null);
+const unmeasured = poArrival({ supplierContactId: 999, placedOn: "2026-09-21T10:00:00+01:00", expectedDate: "2026-09-01T00:00:00+01:00" });
+assertEq("impossible and unmeasured -> our general p75, not null", !!unmeasured && unmeasured > new Date("2026-09-21"), true);
+assertEq("no date and unmeasured -> our general p75", +poArrival({ supplierContactId: 999, placedOn: "2026-09-21T10:00:00+01:00" }), +unmeasured);
 setSupplierLeadTimes([]);
 
 // --- plain reply (no template) --------------------------------------------------

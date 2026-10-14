@@ -1022,11 +1022,21 @@ export function windowFromPo(po, allowanceDays = DELIVERY_ALLOWANCE_DAYS) {
 // to what the supplier told them is kept as it is.
 // ---------------------------------------------------------------------------
 let SUPPLIER_LEAD = {};
+// For a supplier we have no history with: what our suppliers take overall - the 75th
+// percentile across every measured PO (each supplier's p75 weighted by its PO count). Used
+// only when a PO has NO date, so the reply still gives a window from our data rather than
+// "not confirmed" (Dec, 14 Oct: "use our data, not the BP one").
+let GENERAL_P75 = 5;
+const generalP75 = (rows) => {
+  const all = rows.flatMap((r) => Array(Math.max(1, Number(r.pos) || 1)).fill(Number(r.p75))).filter((n) => n > 0).sort((a, b) => a - b);
+  return all.length ? all[Math.floor(0.75 * (all.length - 1))] : 5;
+};
 try {
   const j = JSON.parse(readFileSync(new URL("./scripts/supplier-leadtimes.json", import.meta.url), "utf8"));
   for (const r of j.suppliers || []) SUPPLIER_LEAD[r.contactId] = r;
+  GENERAL_P75 = generalP75(j.suppliers || []);
 } catch { /* no measurements: fall back to the PO dates as they stand */ }
-export const setSupplierLeadTimes = (rows) => { SUPPLIER_LEAD = Object.fromEntries(rows.map((r) => [r.contactId, r])); };
+export const setSupplierLeadTimes = (rows) => { SUPPLIER_LEAD = Object.fromEntries(rows.map((r) => [r.contactId, r])); GENERAL_P75 = generalP75(rows); };
 
 export function poArrival(po) {
   if (!po) return null;
@@ -1037,7 +1047,9 @@ export function poArrival(po) {
   const isDefault = !due || (placed && due < placed) ||
     (m && m.bpLeadTimeDays != null && dueDays != null && Math.abs(dueDays - m.bpLeadTimeDays) <= 1);
   if (isDefault && m && placed) return addWorkingDays(placed, m.p75);
-  if (placed && due && due < placed) return null;                 // impossible date and nothing measured
+  // No date (or an impossible one) and no history with this supplier: our overall figure,
+  // never "not confirmed" when we know roughly how long these take.
+  if (placed && (!due || due < placed)) return addWorkingDays(placed, GENERAL_P75);
   return due;
 }
 
