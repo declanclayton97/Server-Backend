@@ -2412,6 +2412,27 @@ async function placeRalawiseOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   steps.link = { reference: orderNo, refWritten, status: 7 };
 
   if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'RALAWISE', poId, noteContactId: RALAWISE_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+
+  // Lines handed over from PenCarrie (pencarrieHandover.js) ride as carry lines with no SO of their
+  // own on the PO, so the finalise above never sees their sales orders. Settle them here:
+  //   only  — every PenCarrie line on the SO came to us, PenCarrie never finalises it, so clear its
+  //           PENCARRIE tag (→ Ordered Stock once nothing else is outstanding) and note the items.
+  //   mixed — PenCarrie ordered the rest and settles its own tag; just note what Ralawise bought.
+  const handed = (po.carryLines || []).filter((l) => l.soId && /^handover:PENCARRIE/.test(String(l.addedBy || '')));
+  if (handed.length && live) {
+    const byKind = { only: {}, mixed: {} };
+    for (const l of handed) {
+      const kind = /:only$/.test(String(l.addedBy)) ? 'only' : 'mixed';
+      (byKind[kind][l.soId] = byKind[kind][l.soId] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId });
+    }
+    steps.handover = {};
+    for (const [kind, key] of [['only', 'PENCARRIE'], ['mixed', 'RALAWISE']]) {
+      const ids = Object.keys(byKind[kind]).map(Number);
+      if (!ids.length) continue;
+      try { steps.handover[kind] = await bp.finalizeSupplierTagsLive({ orderIds: ids, supplierKey: key, poId, noteContactId: RALAWISE_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder: byKind[kind], execute: true }); }
+      catch (e) { throw stepErr('finalize', `order placed + PO linked, but settling the SOs of lines handed over from PenCarrie failed: ${e.message}`); }
+    }
+  }
   return { poId, orderNo, steps };
 }
 

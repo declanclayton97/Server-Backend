@@ -1804,7 +1804,8 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
       // "why did it order N?" is answerable from the exact decision-time figures.
       demandAudit.push({ soId: id, rowId, productId: r.productId, sku: r.productSku, name: r.productName, ordered, allocated: a.allocated || 0, fulfilled: a.fulfilled || 0, onOrder: a.onOrder || 0, inStock: a.inStock || 0, toOrder, ...(skipQty ? { skipped: skipQty, note: `${skipQty} withheld via ${SKIP_SKU_FIELD}` } : {}) });
       if (toOrder <= 0) continue; // fully allocated / already ordered — skip
-      rows.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty: toOrder, orderedQty: ordered, allocation: a, itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0, taxCode: (r.rowValue && r.rowValue.taxCode) || null });
+      rows.push({ productId: r.productId, sku: r.productSku, name: r.productName, qty: toOrder, orderedQty: ordered, allocation: a, itemCost: r.itemCost ? parseFloat(r.itemCost.value) : 0, taxCode: (r.rowValue && r.rowValue.taxCode) || null,
+        colour: optValue(r.productOptions, /colou?r/i), size: optValue(r.productOptions, /size/i) });
     }
     // "+" TAG — order something for this SO that its rows cannot ask for: "SCRUFFS (+ 1x T53545)".
     // The rows read as fulfilled (shipped, allocated) so the arithmetic above orders nothing, and
@@ -1827,7 +1828,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     if (!rows.length) continue;
     contributors.push({
       id, ref: order.reference || '', tag,
-      lines: rows.map((r) => ({ productId: r.productId, sku: r.sku, name: r.name, qty: r.qty, orderedQty: r.orderedQty, allocation: r.allocation, itemCost: r.itemCost, taxCode: r.taxCode })),
+      lines: rows.map((r) => ({ productId: r.productId, sku: r.sku, name: r.name, qty: r.qty, orderedQty: r.orderedQty, allocation: r.allocation, itemCost: r.itemCost, taxCode: r.taxCode, colour: r.colour || null, size: r.size || null })),
     });
   }
   return { contributors, demandAudit, tagFlags };
@@ -2064,8 +2065,54 @@ export async function createComboPOLive(opts = {}) {
   const soLines = []; const soQtyBySku = {};
   for (const c of orderedContributors) for (const l of c.lines) {
     const cost = await costOfLive(l.productId, priceListId, l.itemCost);
-    soLines.push({ productId: l.productId, sku: l.sku, name: l.name, qty: l.qty, cost, order: c.id, taxCode: l.taxCode });
+    soLines.push({ productId: l.productId, sku: l.sku, name: l.name, qty: l.qty, cost, order: c.id, taxCode: l.taxCode, colour: l.colour || null, size: l.size || null });
     const k = String(l.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + l.qty;
+  }
+
+  // 1a. PENCARRIE → RALAWISE HANDOVER (see pencarrieHandover.js). Two halves:
+  //   • a line ever handed over is never demand for PenCarrie OR Ralawise again — it was bought, or
+  //     is about to be, as a Ralawise carry line. Fails closed: an unreadable record throws.
+  //   • on a PenCarrie build, lines PenCarrie cannot supply (discontinued / short) that Ralawise can
+  //     take whole come off this order and become Ralawise carry lines (written only on execute).
+  let handover = null;
+  if (opts.logPool && includeSalesOrders && (supplierKey === 'PENCARRIE' || supplierKey === 'RALAWISE')) {
+    const ho = await import('./pencarrieHandover.js');
+    const past = await ho.handedOverKeys(opts.logPool);
+    const drop = (pred, note) => {
+      for (let i = soLines.length - 1; i >= 0; i--) {
+        const l = soLines[i];
+        if (!pred(l)) continue;
+        soLines.splice(i, 1);
+        if (Array.isArray(demandAudit)) demandAudit.push({ soId: l.order, rowId: null, productId: l.productId, sku: l.sku, name: l.name, ordered: l.qty, allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0, note });
+      }
+    };
+    drop((l) => past.has(ho.handoverKey(l.order, l.sku)), 'handed from PenCarrie to Ralawise earlier — ordered as a Ralawise carry line, never from either lane again');
+    handover = { excludedPast: past.size };
+    if (supplierKey === 'PENCARRIE' && ho.ralawiseFallbackLive()) {
+      const identityOf = async (pids) => {
+        const out = {};
+        const sorted = [...pids].map(Number).filter(Boolean).sort((a, b) => a - b);
+        for (let i = 0; i < sorted.length; i += 100) {
+          const ps = await liveGet(`/product-service/product/${sorted.slice(i, i + 100).join(',')}`);
+          for (const p of ps || []) out[String(p.id)] = p.identity || {};
+        }
+        return out;
+      };
+      const r = await ho.checkHandover({ lines: soLines, identityOf, execute, pool: opts.logPool });
+      const handedKeys = new Set(r.handed.map((h) => `${h.order}:${h.productId}:${String(h.sku).toUpperCase()}`));
+      drop((l) => handedKeys.has(`${l.order}:${l.productId}:${String(l.sku).toUpperCase()}`), 'PenCarrie cannot supply the whole line — handed to Ralawise (whole line)');
+      handover.handed = r.handed.map((h) => ({ so: h.order, sku: h.sku, qty: h.qty, ralSku: h.decision.ralSku, why: h.decision.why }));
+      handover.kept = (r.decisions || []).filter((d) => !d.handover && d.reason).map((d) => ({ sku: d.sku, qty: d.qty, why: d.why }));
+      if (r.error) handover.error = r.error;
+      if (execute) {
+        for (const so of [...new Set(r.handed.map((h) => h.order))]) {
+          const items = r.handed.filter((h) => h.order === so).map((h) => `${h.sku} x${h.qty} (${h.decision.reason})`).join(', ');
+          await addOrderNoteLive(so, bpSafeText(`PenCarrie cannot supply ${items} - passed to Ralawise as whole lines, ordered on Ralawise's next run.`), 204).catch(() => {});
+        }
+      }
+    }
+    for (const k of Object.keys(soQtyBySku)) delete soQtyBySku[k];
+    for (const l of soLines) { const k = String(l.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + l.qty; }
   }
 
   // 1b. CARRY-FORWARD LINES — things owed that no demand scan can see (see pendingLines.js): a
@@ -2087,7 +2134,7 @@ export async function createComboPOLive(opts = {}) {
       const name = await liveGet(`/product-service/product/${productId}`)
         .then((r) => { const pr = (r || [])[0]; const sc = pr && pr.salesChannels && pr.salesChannels[0]; return (sc && sc.productName) || null; })
         .catch(() => null) || p.sku;
-      const line = { productId, sku: p.sku, name, qty: Math.round(Number(p.qty) || 0), cost, order: null, carry: true, pendingId: p.id, soId: p.so_id || null, note: p.note || null };
+      const line = { productId, sku: p.sku, name, qty: Math.round(Number(p.qty) || 0), cost, order: null, carry: true, pendingId: p.id, soId: p.so_id || null, note: p.note || null, addedBy: p.added_by || null };
       if (line.qty <= 0) continue;
       soLines.push(line); carryLines.push(line);
       const k = String(p.sku).toUpperCase(); soQtyBySku[k] = (soQtyBySku[k] || 0) + line.qty;
@@ -2258,7 +2305,8 @@ export async function createComboPOLive(opts = {}) {
       ? adopted.cleared.filter((c) => ![...soLines, ...lowLines].some((l) => String(l.sku || '').toUpperCase() === c.sku)).map((c) => c.sku)
       : [],
     soLines, separator: '=====LOW INV====', lowLines, padInfo, includeLowInv, includeSalesOrders,
-    carryLines: carryLines.map((l) => ({ pendingId: l.pendingId, sku: l.sku, qty: l.qty, cost: l.cost, soId: l.soId, note: l.note })), carryUnresolved,
+    carryLines: carryLines.map((l) => ({ pendingId: l.pendingId, sku: l.sku, qty: l.qty, cost: l.cost, soId: l.soId, note: l.note, addedBy: l.addedBy, name: l.name, productId: l.productId })), carryUnresolved,
+    handover,                                                       // PenCarrie → Ralawise: what was excluded / handed over / kept (pencarrieHandover.js)
     priceOverridesApplied,                                          // portal-price overrides applied to line costs (Elastic suppliers)
     markdownKept,                                                   // Carhartt: portal above our cost = markdown, our cost kept
     soUnits: soLines.reduce((a, l) => a + l.qty, 0),
