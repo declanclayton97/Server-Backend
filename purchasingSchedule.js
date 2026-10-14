@@ -2421,7 +2421,7 @@ async function placeRalawiseOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 // with our PO number in Leo's mandatory "Purchase Order #" → Review → Finalise. Our BP SKU IS the
 // Leo SKU (W11-Y/NV-LEO-XL), so there is no resolver. Leo add carriage (£7.50 under £200 ex-VAT)
 // at Review, so the charge we put on the PO is the one THEY showed, not a guess.
-// A real order needs LEO_ORDER_LIVE=true on Alt-Items as well; without it the route only rehearses
+// LIVE since 2026-10-14 (owner) — no env gate; the Alt-Items route only rehearses when execute is false
 // and this run stops at 'checkout' with the PO built and nothing sent.
 const LEO_SUPPLIER_CONTACT = 7919;
 async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
@@ -2457,7 +2457,7 @@ async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = tru
     throw stepErr('checkout', `Leo order call failed: ${e.message}${found && found.found ? ` — BUT Leo's order list shows PO ${poId}: ${found.context}. Do NOT re-run; link it by hand.` : ' — not found on Leo\'s order list.'}`, { poId, lookup: found });
   }
   steps.leo = { cart: r.steps && r.steps.cart, review: r.steps && r.steps.review && { totals: r.steps.review.totals, poShown: r.steps.review.poShown } };
-  if (r.rehearsed) throw stepErr('checkout', `Leo rehearsed only (LEO_ORDER_LIVE is not "true" on Alt-Items) — PO#${poId} built, nothing sent to Leo.`, { poId, leo: steps.leo });
+  if (r.rehearsed) throw stepErr('checkout', `Leo rehearsed only (the call was not made with execute:true) — PO#${poId} built, nothing sent to Leo.`, { poId, leo: steps.leo });
   if (!r.ok) {
     const cart = (r.steps && r.steps.cart) || {};
     const miss = (cart.missing && cart.missing.length) ? ` — not in Leo's cart as asked: ${cart.missing.map((m) => `${m.sku} want ${m.want} got ${m.got}`).join(', ')}` : '';
@@ -4270,14 +4270,14 @@ const SCHEDULED_SUPPLIERS = {
   // Each half needs its OWN stateId: the day-claim is per state row, so sharing one would mean the
   // morning run claimed the day and the afternoon never fired.
   SNICKERS: { supplierKey: 'SNICKERS', stateId: 5, placeFn: placeSnickersOrder, threshold: Number(process.env.SNICKERS_FREESHIP_THRESHOLD || 300), lineMode: 'so' }, // Hultafors portal worker; £300 ex-VAT failsafe (rarely hit — high volume) so tiny orders accumulate instead of placing daily. Real Snickers carriage terms are "?" on the supplier sheet — confirm
-  SNICKERS_LOW: { supplierKey: 'SNICKERS', stateId: 18, placeFn: placeSnickersOrder, threshold: Number(process.env.SNICKERS_FREESHIP_THRESHOLD || 300), lineMode: 'low' }, // reorder half, 16:40
+  SNICKERS_LOW: { supplierKey: 'SNICKERS', stateId: 18, placeFn: placeSnickersOrder, threshold: Number(process.env.SNICKERS_FREESHIP_THRESHOLD || 300), lineMode: 'low' }, // reorder half, 17:00
   UNEEK: { supplierKey: 'UNEEK', stateId: 3, placeFn: placeUneekOrder, threshold: Number(process.env.UNEEK_FREESHIP_THRESHOLD || 100) }, // email supplier, free carriage @ £100 ex-VAT, no min order
   CASTLE: { supplierKey: 'CASTLE', stateId: 2, placeFn: placeCastleOrder, threshold: Number(process.env.CASTLE_FREESHIP_THRESHOLD || 150) }, // Castle free carriage @ £150 ex-VAT
   STERLING: { supplierKey: 'STERLING', stateId: 4, placeFn: placeSterlingOrder, threshold: Number(process.env.STERLING_FREESHIP_THRESHOLD || 150) },
   PORTWEST: { supplierKey: 'PORTWEST', stateId: 8, placeFn: placePortwestOrder, threshold: Number(process.env.PORTWEST_FREESHIP_THRESHOLD || 150) }, // portwest.com CSV upload + checkout_summary; free carriage @ £150 ex-VAT (else £7.50)
   PENCARRIE: { supplierKey: 'PENCARRIE', stateId: 9, placeFn: placePencarrieOrder, threshold: Number(process.env.PENCARRIE_FREESHIP_THRESHOLD || 175) }, // official pcautoorder XML API (parkorder=2); carriage paid @ £175 ex-VAT, else £8.70 (BRANDS_supplier_list_NEW_2025.xlsx "Supplier Info", 2026-08-17 — was a £150 guess)
   BLAKLADER: { supplierKey: 'BLAKLADER', stateId: 10, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300), lineMode: 'so' }, // api.blaklader.com order API (POST /order/orders); carriage paid @ £300 ex-VAT, else £13.00 (same sheet — was a £150 guess); submit body still needs first-order validation
-  BLAKLADER_LOW: { supplierKey: 'BLAKLADER', stateId: 17, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300), lineMode: 'low' }, // reorder half, 16:20
+  BLAKLADER_LOW: { supplierKey: 'BLAKLADER', stateId: 17, placeFn: placeBlakladerOrder, threshold: Number(process.env.BLAKLADER_FREESHIP_THRESHOLD || 300), lineMode: 'low' }, // reorder half, 16:30
   SCRUFFS: { supplierKey: 'SCRUFFS', stateId: 11, placeFn: placeScruffsOrder, threshold: Number(process.env.SCRUFFS_FREESHIP_THRESHOLD || 100) }, // email supplier (salesorders@scruffs.com), BP emails its own PO PDF; carriage minimum £100 ex-VAT — a £90 order was seen carrying carriage
   'PERFORMANCE BRANDS': { supplierKey: 'PERFORMANCE BRANDS', stateId: 12, placeFn: placePerformanceBrandsOrder, threshold: Number(process.env.PERFORMANCE_BRANDS_FREESHIP_THRESHOLD || 200) }, // WooCommerce trade shop; free delivery @ £200 ex-VAT (user), else £7.00 flat. Needs PERFORMANCE_BRANDS_USER/PASS on Alt-Items
   MASCOT: { supplierKey: 'MASCOT', stateId: 13, placeFn: placeMascotOrder, threshold: Number(process.env.MASCOT_FREESHIP_THRESHOLD || 250) }, // b2b.mascot.dk two-stage SAP commit (CreateOrder then ReleaseOrder); free carriage @ £250 ex-VAT. Basket shows LIST price (~1.695x our cost) — never threshold-test on it
@@ -4294,7 +4294,7 @@ const SCHEDULED_SUPPLIERS = {
   BEESWIFT: { supplierKey: 'BEESWIFT', stateId: 20, placeFn: placeBeeswiftOrder, extraNet: (pool, lines) => beeswiftPackExtraNet(pool, lines), threshold: Number(process.env.BEESWIFT_FREESHIP_THRESHOLD || 150) },
   BUCKLER: { supplierKey: 'BUCKLER', stateId: 16, placeFn: placeBucklerOrder, threshold: Number(process.env.BUCKLER_FREESHIP_THRESHOLD || 0) }, // Buckler Boots — email supplier; carriage terms not yet confirmed, so no threshold and no charge added until they are
   RALAWISE: { supplierKey: 'RALAWISE', stateId: 24, placeFn: placeRalawiseOrder, threshold: Number(process.env.RALAWISE_FREESHIP_THRESHOLD || 185) }, // api.ralawise.com POST /v1/order via Alt-Items /api/ralawise-place (exact SKU resolver, no test orders); free delivery @ £185 ex-VAT else £8.70 (read off their response). 15:30 UK, gated by RALAWISE_SCHEDULE_ENABLED=true + RALAWISE_ORDER_LIVE=true on Alt-Items
-  LEO: { supplierKey: 'LEO', stateId: 23, placeFn: placeLeoOrder, threshold: Number(process.env.LEO_FREESHIP_THRESHOLD || 200) }, // leoworkwear.com trade portal via Alt-Items /api/leo-order; carriage paid @ £200 ex-VAT, else £7.50 (read off Leo's Review page). 09:00 UK, gated by LEO_SCHEDULE_ENABLED=true + LEO_ORDER_LIVE=true on Alt-Items
+  LEO: { supplierKey: 'LEO', stateId: 23, placeFn: placeLeoOrder, threshold: Number(process.env.LEO_FREESHIP_THRESHOLD || 200) }, // leoworkwear.com trade portal via Alt-Items /api/leo-order; carriage paid @ £200 ex-VAT, else £7.50 (read off Leo's Review page). 16:10 UK, live since 2026-10-14 (no env gate)
   // noPad: never top up with extra low-inv to reach the threshold (owner, 2026-10-12) — on day 3 it
   // places as it stands with Standard delivery. 14:30 UK, live since 2026-10-14 (no env gate).
   'BROOK TAVERNER': { supplierKey: 'BROOK TAVERNER', stateId: 25, placeFn: placeBrookTavernerOrder, noPad: true, threshold: Number(process.env.BROOKTAVERNER_FREESHIP_THRESHOLD || 100) },
@@ -4336,7 +4336,6 @@ const SUPPLIER_CONTACT = {
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
-  LEO: { at: '09:00' },
   BLAKLADER: { at: '09:30' },
   SNICKERS: { at: '10:00' },
   FRISTADS: { at: '10:30' },
@@ -4362,8 +4361,9 @@ const WINDOW_DISPLAY = {
   // The reorder halves of the split suppliers. Deliberately last in the day: replenishment is not
   // customer-urgent, and by running after every other window they see the day's orders already on
   // the PO, so the reorder is calculated against what has actually been bought.
-  BLAKLADER_LOW: { at: '16:20' },
-  SNICKERS_LOW: { at: '16:40' },
+  LEO: { at: '16:10' },
+  BLAKLADER_LOW: { at: '16:30' },
+  SNICKERS_LOW: { at: '17:00' },
 };
 
 export async function schedulerState(pool) {

@@ -50,7 +50,6 @@ if (atArg) {
 // Every poller window (start hour:minute, 30 minutes long). KEEP IN STEP WITH server.js — if you
 // add a poller there and not here, this will cheerfully clear a deploy into its window.
 const POLLERS = [
-  { name: 'Leo', h: 9, m: 0, days: 'Mon-Fri' },   // 2026-10-10, gated off until LEO_SCHEDULE_ENABLED=true
   { name: 'Blaklader', h: 9, m: 30, days: 'Mon-Fri' },
   { name: 'Snickers', h: 10, m: 0, days: 'Mon-Fri' },
   { name: 'Fristads', h: 10, m: 30, days: 'Mon-Fri' },
@@ -73,8 +72,9 @@ const POLLERS = [
   { name: 'Ralawise', h: 15, m: 30, days: 'Mon-Fri' },   // 2026-10-10, gated off until RALAWISE_SCHEDULE_ENABLED=true
   { name: 'PenCarrie', h: 15, m: 40, days: 'Mon-Fri' },
   { name: 'Uneek', h: 16, m: 0, days: 'Mon-Fri' },
-  { name: 'Blaklader reorder', h: 16, m: 20, days: 'Mon-Fri' },
-  { name: 'Snickers reorder', h: 16, m: 40, days: 'Mon-Fri' },
+  { name: 'Leo', h: 16, m: 10, days: 'Mon-Fri' },   // live 16:10 since 2026-10-14 (was a gated 09:00)
+  { name: 'Blaklader reorder', h: 16, m: 30, days: 'Mon-Fri' },   // was 16:20
+  { name: 'Snickers reorder', h: 17, m: 0, days: 'Mon-Fri' },   // was 16:40
   { name: 'Retry sweep', h: 17, m: 0, days: 'Mon-Fri' },   // re-runs suppliers whose failure never reached them
 ];
 const runsToday = (p) => (p.days === 'Mon/Wed/Fri' ? ['Mon', 'Wed', 'Fri'] : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']).includes(day);
