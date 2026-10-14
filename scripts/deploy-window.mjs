@@ -66,8 +66,8 @@ const POLLERS = [
   { name: 'Carhartt', h: 13, m: 20, days: 'Mon/Wed/Fri' },   // moved from 13:30 for BeeSwift (2026-10-01)
   { name: 'BeeSwift', h: 13, m: 40, days: 'Mon-Fri' },
   { name: 'Scruffs', h: 14, m: 0, days: 'Mon-Fri' },
-  { name: 'Performance Brands', h: 14, m: 20, days: 'Mon-Fri' },   // moved from 14:30 (2026-10-02)
-  { name: 'AS Apparel', h: 14, m: 40, days: 'Mon-Fri' },
+  { name: 'Performance Brands', h: 14, m: 10, days: 'Mon-Fri' },   // 14:10 since 2026-10-14 (was 14:20)
+  { name: 'AS Apparel', h: 14, m: 50, days: 'Mon-Fri' },   // 14:50 since 2026-10-14 (was 14:40)
   { name: 'Portwest', h: 15, m: 0, days: 'Mon-Fri' },
   { name: 'Hellberg', h: 15, m: 20, days: 'Mon-Fri' },   // emailed PO, split from Snickers 2026-09-16 — runs on Purchasing-Automation
   { name: 'Ralawise', h: 15, m: 30, days: 'Mon-Fri' },   // 2026-10-10, gated off until RALAWISE_SCHEDULE_ENABLED=true
