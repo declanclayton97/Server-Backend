@@ -547,6 +547,47 @@ export function greeting(order) {
 //
 // Returns { text, dates: [windowKey], source, slippedFrom? } where source is
 // "note" | "po" | "po-slipped" | "none".
+// How long a supplier usually takes to get stock to us, from our own purchase history
+// (scripts/supplier-leadtimes.json: median to 75th percentile, in working days). Said after
+// "we're waiting on ..." so the customer knows what the wait normally is (sales team, 14 Oct).
+export function leadTimeClause(po, { short = false } = {}) {
+  const m = po && SUPPLIER_LEAD[po.supplierContactId];
+  if (!m || !m.p75) return "";
+  const lo = Math.max(1, Math.min(m.median || m.p75, m.p75)), hi = m.p75;
+  const span = lo === hi ? `around ${hi} working day${hi === 1 ? "" : "s"}` : `${lo}-${hi} working days`;
+  return `${esc(supplierLabel(po.supplier) || "the supplier")} usually take ${span}${short ? "" : " to get stock to us"}`;
+}
+const joinAnd = (xs) => xs.length <= 1 ? (xs[0] || "") : xs.slice(0, -1).join(", ") + " and " + xs[xs.length - 1];
+
+// Waiting on MORE THAN ONE supplier: name each one with its own window, not just the one that
+// finishes last (sales team, 14 Oct: "it only mentions the one that will take the longest").
+// Takes the open POs (not fully received); one entry per supplier, its latest-due PO.
+export function etaSentenceMulti(pos, { today = new Date(), allowanceDays = DELIVERY_ALLOWANCE_DAYS } = {}) {
+  const bySupplier = new Map();
+  for (const p of pos || []) {
+    const k = supplierLabel(p.supplier) || String(p.supplier || "our supplier");
+    const prev = bySupplier.get(k);
+    if (!prev || new Date(p.expectedDate || 0) > new Date(prev.expectedDate || 0)) bySupplier.set(k, p);
+  }
+  if (bySupplier.size < 2) return null;
+  const dates = [], parts = [], leads = [];
+  let undated = false;
+  for (const [label, p] of bySupplier) {
+    const win = windowFromPo(p, allowanceDays);
+    const phrase = win ? phraseWindow(win, today) : null;
+    if (phrase) { parts.push(`the ${esc(label)} items should be with you ${phrase}`); dates.push(windowKey(win)); }
+    else { undated = true; parts.push(`the ${esc(label)} items are on order, but ${esc(label)} haven't confirmed a date yet`); }
+    const lt = leadTimeClause(p, { short: true });
+    if (lt) leads.push(lt);
+  }
+  return {
+    text: `We're waiting on stock from ${bySupplier.size} suppliers for this order: ${joinAnd(parts)}.` +
+      (leads.length ? ` For reference, ${joinAnd(leads)} to get stock to us.` : "") +
+      (undated ? " I'm chasing the ones without a date and will come straight back to you." : ""),
+    dates, source: "po-multi",
+  };
+}
+
 export function etaSentence(po, { today = new Date(), promised = null, allowanceDays = DELIVERY_ALLOWANCE_DAYS } = {}) {
   const who = po && po.supplier ? `the ${esc(supplierLabel(po.supplier))} items` : "the stock";
   const chasing = "I am chasing this with our supplier now and will come straight back to you with an update.";
@@ -565,12 +606,13 @@ export function etaSentence(po, { today = new Date(), promised = null, allowance
     // No window, or the window has already passed: the goods are late and we
     // do not know when — say we are on it rather than invent one.
     if (po && !po.expectedDate) {
-      return { text: `This is on order with ${esc(supplierLabel(po.supplier) || "our supplier")}. They have not confirmed when it will be with us yet, so ${chasing.charAt(0).toLowerCase() + chasing.slice(1)}`, dates: [], source: "none" };
+      const lt = leadTimeClause(po);
+      return { text: `This is on order with ${esc(supplierLabel(po.supplier) || "our supplier")}${lt ? ` - ${lt}` : ""}. They have not confirmed when it will be with us yet, so ${chasing.charAt(0).toLowerCase() + chasing.slice(1)}`, dates: [], source: "none" };
     }
     return { text: win ? `This is running a little later than expected. ${chasing}` : chasing, dates: [], source: win ? "overdue" : "none" };
   }
   return {
-    text: `We're just waiting on ${who} to arrive, and it should be with you ${phrase}.`,
+    text: `We're just waiting on ${who} to arrive${leadTimeClause(po) ? ` (${leadTimeClause(po)})` : ""}, and it should be with you ${phrase}.`,
     dates: [windowKey(win)],
     phrase,
     source,
@@ -862,6 +904,8 @@ export function backorderSentence(stock, today = new Date()) {
   };
 }
 
+// Purchase orders still bringing goods in for this order (a fully received PO - POA - is done).
+const openPos = (order) => ((order && order.pos) || []).filter((p) => p && p.stockStatus !== "POA");
 export function deliverySentence(order, po, etaOpts = {}) {
   const tracking = trackingFromNotes(order && order.timeline);
   if (tracking) {
@@ -878,6 +922,8 @@ export function deliverySentence(order, po, etaOpts = {}) {
   // while Portwest's own feed said none in stock until 22/01/27 (Dec, 1 Oct).
   const bo = backorderSentence(order && order.supplierStock, etaOpts.today);
   if (bo) return bo;
+  const multi = etaSentenceMulti(openPos(order), etaOpts);
+  if (multi) return multi;
   const eta = etaSentence(po, etaOpts);
   // No purchase order and no colleague's promise: fall back to how long orders
   // like this one actually take, rather than just "I am chasing it".
@@ -1057,7 +1103,7 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
     }
     const sent = trackingFromNotes(order && order.timeline);
     if (sent) lines.push(`The part already sent is on its way. ${trackingLine(sent)}`);
-    eta = etaSentence(po, etaOpts);
+    eta = etaSentenceMulti(openPos(order), etaOpts) || etaSentence(po, etaOpts);
     lines.push(eta.text);
     proposedDates = eta.dates;
   } else if (intent === "delay") {
@@ -1088,6 +1134,8 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
   // quicker than the suppliers allow, so it promises something we cannot do.
   // Whoever is signed in signs it; the order's salesperson is only a fallback
   // for a draft built outside the hub.
+  // Every reply about where an order is ends with this (sales team, 14 Oct).
+  if (["eta", "delay", "part_shipped"].includes(intent)) lines.push("Thanks for your patience.");
   lines.push(`Kind regards,<br>${esc(String(signedBy || "").trim() || salesperson?.name || "")}`);
 
   const html =

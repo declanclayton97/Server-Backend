@@ -143,7 +143,7 @@ export async function listThread(conversationId) {
 }
 
 export async function getMessage(id) {
-  const sel = "$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,lastModifiedDateTime,isDraft,body,conversationId,parentFolderId";
+  const sel = "$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,replyTo,receivedDateTime,sentDateTime,lastModifiedDateTime,isDraft,body,conversationId,parentFolderId";
   // Text for the order lookup, HTML for showing it the way Outlook does.
   const [m, h] = await Promise.all([
     graph("GET", `${mb()}/messages/${encodeURIComponent(id)}?${sel}`),
@@ -157,6 +157,8 @@ export async function getMessage(id) {
     to: (m.toRecipients || []).map(addr),
     cc: (m.ccRecipients || []).map(addr),
     bcc: (m.bccRecipients || []).map(addr),
+    // Website forms send FROM us with the customer in Reply-To (or only in the body).
+    replyTo: (m.replyTo || []).map(addr),
     receivedAt: m.receivedDateTime || (m.isDraft ? m.lastModifiedDateTime : null),
     isDraft: !!m.isDraft,
     conversationId: m.conversationId || null,
