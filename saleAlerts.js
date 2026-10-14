@@ -193,12 +193,17 @@ export async function salePage(url) {
 /** The BP product a sale SKU stands for: the original. Sale copies are the original SKU + "-N" (337910429899XL-1)
  *  or + "#SALE" / "#Sale" (K126-BLKXLREG#SALE). */
 export const originalSkuOf = (saleSku) => String(saleSku).replace(/#sale$/i, "").replace(/-\d+$/, "");
+/** The size BP holds for a product (its "Size" variation), or "" - names the size on single-size sale pages. */
+async function bpSize(pid) {
+  try { const p = ((await bpLiveGet(`/product-service/product/${pid}`)) || [])[0] || {};
+    return String(((p.variations || []).find((v) => /size/i.test(v.optionName || "")) || {}).optionValue || "").trim(); } catch { return ""; }
+}
 async function originalProductId(saleSku) {
   const base = originalSkuOf(saleSku);
   const tries = base !== saleSku ? [base, saleSku.replace(/#sale$/i, ""), saleSku] : [saleSku];
   for (const sku of tries) {
     const rows = rowsOf(await bpLiveGet(`/product-service/product-search?SKU=${encodeURIComponent(sku)}&pageSize=10`)).filter((r) => String(r.SKU).toUpperCase() === sku.toUpperCase());
-    if (rows.length) return { pid: rows[0].productId, sku: rows[0].SKU };
+    if (rows.length) return { pid: rows[0].productId, sku: rows[0].SKU, size: await bpSize(rows[0].productId) };
   }
   return null;
 }
@@ -255,6 +260,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
     for (const v of page.variants) {
       const orig = await originalProductId(v.sku);
       if (!orig) { skipped.push({ reason: `sale SKU ${v.sku} not matched to a product` }); continue; }
+      if (!v.size && orig.size) v.size = orig.size;   // single-size "-sale" page: the size lives on the BP product
       sizes.push({ ...v, pid: orig.pid, origSku: orig.sku });
       const r = await recipientsFor(orig.pid, { pool });
       // keyed per person: someone who bought two of the sale sizes is told once, naming both
@@ -285,7 +291,9 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
     for (const e of b.eligible) {
       // first come, first served: re-read the page every 2 minutes and stop for a size the moment it has gone
       if (Date.now() - checkedAt > 120000) { live = await salePage(b.page.url); checkedAt = Date.now(); }
-      const still = e.sizes.length ? e.sizes.filter((z) => live.variants.some((v) => v.size === z)) : live.variants.length ? [""] : [];
+      // a single-size page has no size label on the site (it came from BP), so "still there" = still in stock
+      const unlabelled = live.variants.length && live.variants.every((v) => !v.size);
+      const still = unlabelled ? (e.sizes.length ? e.sizes : [""]) : e.sizes.length ? e.sizes.filter((z) => live.variants.some((v) => v.size === z)) : live.variants.length ? [""] : [];
       if (!still.length) { await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, phone: e.phone, channel: e.channel, status: "skipped", reason: "sold out before sending" }); continue; }
       // name THEIR size: the page link shows every sale size, the message must say which one is theirs
       const item = { name: withSize(b.page.name, still), url: b.page.url, image: b.page.image };
