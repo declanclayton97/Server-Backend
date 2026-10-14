@@ -23,7 +23,7 @@
 
 import crypto from "crypto";
 import { bpLiveGet } from "./purchasingAuto.js";
-import { sendNew, mailboxContext, graphConfigured } from "./graphMail.js";
+import { sendNew, mailboxContext, graphConfigured, salesMailbox } from "./graphMail.js";
 
 const WAREHOUSE = 2;
 const WEBSITE_CHANNELS = new Set([2, 3, 14, 17]);                                   // tuffshop.co.uk (old/online/Magento), tuffkids
@@ -297,8 +297,9 @@ async function sendReview(result) {
 <p style="margin:0">Would message <b>${p.recipients.length}</b> (${p.recipients.filter((r) => r.channel === "whatsapp").length} WhatsApp, ${p.recipients.filter((r) => r.channel === "email").length} email): ${p.recipients.map((r) => (r.channel === "whatsapp" ? "📱 0" + esc(r.phone.slice(2)) : "✉ " + esc(r.email)) + (r.size ? ` (${esc(r.size)})` : "")).join(", ")}</p>
 <p style="margin:0;color:#888;font-size:13px">Skipped ${p.skipped.length}: ${Object.entries(p.skipped.reduce((a, s) => ((a[s.reason] = (a[s.reason] || 0) + 1), a), {})).map(([k, v]) => `${esc(k)} ${v}`).join(", ") || "none"}</p>`).join("");
   const sample = result.products[0] ? renderEmail({ item: { name: result.products[0].name, url: result.products[0].url, image: result.products[0].image }, firstName: "Sam", email: c.reviewTo }) : null;
-  await send(c.reviewTo, `Sale alerts ${result.day}: ${result.products.length} items, ${result.products.reduce((a, p) => a + p.recipients.length, 0)} customers (review - nothing sent)`,
-    `<div style="font-family:Arial,sans-serif;font-size:14px">${rows || "<p>Nothing to send today.</p>"}${sample ? `<hr><p><b>What customers would receive:</b></p>${sample.html}` : ""}</div>`);
+  // The review goes from the sales mailbox (known good): info@ is not a mailbox the Graph app can send as (14 Oct: "user invalid").
+  await mailboxContext.run({ box: salesMailbox() }, () => sendNew({ to: c.reviewTo, subject: `Sale alerts ${result.day}: ${result.products.length} items, ${result.products.reduce((a, p) => a + p.recipients.length, 0)} customers (review - nothing sent)`,
+    html: `<div style="font-family:Arial,sans-serif;font-size:14px">${rows || "<p>Nothing to send today.</p>"}${sample ? `<hr><p><b>What customers would receive:</b></p>${sample.html}` : ""}</div>` }));
 }
 
 // ---- WhatsApp ---------------------------------------------------------------------------------------
@@ -418,6 +419,18 @@ export function registerSaleAlerts(app, { getPool }) {
           items: (r.result?.products || []).map((p) => ({ name: p.name, recipients: p.recipients?.length || 0, whatsapp: (p.recipients || []).filter((x) => x.channel === "whatsapp").length, skipped: p.skipped?.length || 0, sent: p.sent, failed: p.failed })),
           reviewError: r.result?.reviewError || null })),
         sends: sends.rows, unsubscribed: unsubs.rows[0].n });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  // Re-send a day's review email from its stored result (nothing is re-picked or sent to customers).
+  app.post("/api/sale-alerts/resend-review", async (req, res) => {
+    try {
+      const secret = cfg().secret, key = String(req.query.key || "");
+      if (!secret || key.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(secret))) return res.status(403).json({ error: "forbidden" });
+      await ensure();
+      const r = await getPool().query(`SELECT result FROM sale_alert_runs WHERE day = $1`, [String(req.query.day || ukDay())]);
+      if (!r.rows[0]?.result?.products) return res.status(404).json({ error: "no stored run for that day" });
+      await sendReview(r.rows[0].result);
+      res.json({ ok: true, day: r.rows[0].result.day, items: r.rows[0].result.products.length, to: cfg().reviewTo });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   app.get("/api/sale-alerts/log", requireUser, async (req, res) => {
