@@ -403,6 +403,23 @@ export function registerSaleAlerts(app, { getPool }) {
       res.json({ ok: true, to, item: { name: page.name, url: page.url, image: page.image, sizes: page.variants.map((v) => v.size || v.sku) }, ...r });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
+  // Read-only run summary for checking from outside the Sales Hub. Same lock as the WhatsApp test (?key=secret);
+  // returns counts only - no customer contact details.
+  app.get("/api/sale-alerts/status", async (req, res) => {
+    try {
+      const secret = cfg().secret, key = String(req.query.key || "");
+      if (!secret || key.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(secret))) return res.status(403).json({ error: "forbidden" });
+      await ensure();
+      const runs = await getPool().query(`SELECT day, ran_at, result FROM sale_alert_runs ORDER BY day DESC LIMIT 14`);
+      const sends = await getPool().query(`SELECT day, channel, status, count(*)::int n FROM sale_alert_sends GROUP BY 1,2,3 ORDER BY 1 DESC`);
+      const unsubs = await getPool().query(`SELECT count(*)::int n FROM sale_alert_unsubs`);
+      res.json({ mode: cfg().mode, whatsapp: cfg().whatsapp, siteHeader: !!process.env.SALE_ALERTS_SITE_HEADER,
+        runs: runs.rows.map((r) => ({ day: r.day, ranAt: r.ran_at, error: r.result?.error || null, mode: r.result?.mode, salePages: r.result?.salePages,
+          items: (r.result?.products || []).map((p) => ({ name: p.name, recipients: p.recipients?.length || 0, whatsapp: (p.recipients || []).filter((x) => x.channel === "whatsapp").length, skipped: p.skipped?.length || 0, sent: p.sent, failed: p.failed })),
+          reviewError: r.result?.reviewError || null })),
+        sends: sends.rows, unsubscribed: unsubs.rows[0].n });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
   app.get("/api/sale-alerts/log", requireUser, async (req, res) => {
     try {
       await ensure();
