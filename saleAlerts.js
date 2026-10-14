@@ -218,6 +218,15 @@ ${item.image ? `<p><a href="${esc(item.url)}"><img src="${esc(item.image)}" alt=
   return { subject, html };
 }
 
+// smtp2go - the relay the other system emails use. Lets us send FROM info@ (Graph cannot: info@ is not a mailbox).
+async function sendSmtp2go({ to, from, subject, html }) {
+  const { default: nodemailer } = await import("nodemailer");
+  const t = nodemailer.createTransport({ host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com", port: parseInt(process.env.SMTP_PORT || "2525", 10), secure: false,
+    auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS } });
+  const info = await t.sendMail({ from, to, subject, html });
+  return { via: "smtp2go", messageId: info.messageId, response: info.response };
+}
+
 async function send(to, subject, html) {
   const c = cfg();
   return mailboxContext.run({ box: c.from }, () => sendNew({ to, subject, html }));
@@ -419,6 +428,17 @@ export function registerSaleAlerts(app, { getPool }) {
           items: (r.result?.products || []).map((p) => ({ name: p.name, recipients: p.recipients?.length || 0, whatsapp: (p.recipients || []).filter((x) => x.channel === "whatsapp").length, skipped: p.skipped?.length || 0, sent: p.sent, failed: p.failed })),
           reviewError: r.result?.reviewError || null })),
         sends: sends.rows, unsubscribed: unsubs.rows[0].n });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  // Deliverability check: one email through smtp2go from info@ to the proofing Gmail only (fixed address), so its
+  // SPF/DKIM/DMARC verdict can be read. Secret-locked; cannot email anyone else.
+  app.post("/api/sale-alerts/smtp-test", async (req, res) => {
+    try {
+      const secret = cfg().secret, key = String(req.query.key || "");
+      if (!secret || key.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(secret))) return res.status(403).json({ error: "forbidden" });
+      const r = await sendSmtp2go({ to: "tuffshopproofing@gmail.com", from: "Tuffshop <info@tuffshop.co.uk>", subject: "smtp2go deliverability test " + new Date().toISOString(),
+        html: "<p>Deliverability test for the sale alerts (smtp2go, from info@). No action needed.</p>" });
+      res.json({ ok: true, ...r });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   // Re-send a day's review email from its stored result (nothing is re-picked or sent to customers).
