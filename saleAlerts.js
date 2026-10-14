@@ -203,11 +203,14 @@ async function originalProductId(saleSku) {
   return null;
 }
 
+/** "Carhartt 106674 ... (Black)" + ["L"] -> "Carhartt 106674 ... (Black) in size L" (single-size pages carry no size). */
+export const withSize = (name, sizes) => { const z = (sizes || []).filter(Boolean); return z.length ? `${name} in size ${z.join(" or ")}` : name; };
+
 // ---- the message --------------------------------------------------------------------------------
 // Short on purpose (Dec), and matching the WhatsApp template sale_item_alert (v2, 12 Oct): the item named in the
 // subject (that is what gets an email opened), a photo, the hook first, urgency framed as "stock is limited".
 export function renderEmail({ item, firstName, email }) {
-  const subject = `${item.name} – now in our sale, in your size`;
+  const subject = `${item.name} – now in our sale`;
   const html = `<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.5;color:#222;max-width:560px">
 <p><b>Hi ${esc(firstName || "there")}, your size is in our sale 👀</b></p>
 ${item.image ? `<p><a href="${esc(item.url)}"><img src="${esc(item.image)}" alt="${esc(item.name)}" style="max-width:100%;width:320px;border-radius:6px"></a></p>` : ""}
@@ -254,7 +257,8 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
       if (!orig) { skipped.push({ reason: `sale SKU ${v.sku} not matched to a product` }); continue; }
       sizes.push({ ...v, pid: orig.pid, origSku: orig.sku });
       const r = await recipientsFor(orig.pid, { pool });
-      for (const e of r.eligible) if (!eligible.has(e.key)) eligible.set(e.key, { ...e, size: v.size, pid: orig.pid });
+      // keyed per person: someone who bought two of the sale sizes is told once, naming both
+      for (const e of r.eligible) { const had = eligible.get(e.key); if (had) { if (v.size && !had.sizes.includes(v.size)) had.sizes.push(v.size); } else eligible.set(e.key, { ...e, size: v.size, sizes: v.size ? [v.size] : [], pid: orig.pid }); }
       skipped.push(...r.skipped);
     }
     evaluated.push({ url, name: page.name, sizes: sizes.length, eligible: eligible.size });
@@ -269,7 +273,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
   for (const b of batch) {
     const pid0 = b.sizes[0]?.pid || null;
     const p = { url: b.page.url, name: b.page.name, image: b.page.image || "", sizes: b.sizes.map((s) => s.size || s.origSku), sku: b.sizes.map((s) => s.origSku).join(", "),
-      recipients: b.eligible.map((e) => ({ channel: e.channel, email: e.email, phone: e.phone, firstName: e.firstName, size: e.size, orderId: e.orderId, date: e.date })),
+      recipients: b.eligible.map((e) => ({ channel: e.channel, email: e.email, phone: e.phone, firstName: e.firstName, size: e.sizes.join(" / "), orderId: e.orderId, date: e.date })),
       skipped: b.skipped.map((s) => ({ email: s.email || null, orderId: s.orderId, reason: s.reason })), sent: 0, failed: 0 };
     result.products.push(p);
     if (dryRun) continue;
@@ -281,8 +285,10 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
     for (const e of b.eligible) {
       // first come, first served: re-read the page every 2 minutes and stop for a size the moment it has gone
       if (Date.now() - checkedAt > 120000) { live = await salePage(b.page.url); checkedAt = Date.now(); }
-      if (!live.variants.some((v) => (v.size || "") === (e.size || ""))) { await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, phone: e.phone, channel: e.channel, status: "skipped", reason: "sold out before sending" }); continue; }
-      const item = { name: b.page.name, url: b.page.url, image: b.page.image };
+      const still = e.sizes.length ? e.sizes.filter((z) => live.variants.some((v) => v.size === z)) : live.variants.length ? [""] : [];
+      if (!still.length) { await logSend(pool, { day, pid: e.pid, contactId: e.contactId, email: e.email, phone: e.phone, channel: e.channel, status: "skipped", reason: "sold out before sending" }); continue; }
+      // name THEIR size: the page link shows every sale size, the message must say which one is theirs
+      const item = { name: withSize(b.page.name, still), url: b.page.url, image: b.page.image };
       const who = { day, pid: e.pid, contactId: e.contactId, email: e.email, phone: e.phone, channel: e.channel };
       try {
         let r;
@@ -306,15 +312,21 @@ async function logSend(pool, { day, pid, contactId, email, phone, channel, statu
 
 async function sendReview(result) {
   const c = cfg();
-  const rows = result.products.map((p) => `<h3 style="margin:18px 0 4px"><a href="${esc(p.url)}">${esc(p.name)}</a> <span style="color:#888">(${esc(p.sku)}${p.sizes.some(Boolean) ? `; sizes ${esc(p.sizes.join(", "))}` : ""})</span></h3>
-<p style="margin:0">Would message <b>${p.recipients.length}</b> (${p.recipients.filter((r) => r.channel === "whatsapp").length} WhatsApp, ${p.recipients.filter((r) => r.channel === "email").length} email): ${p.recipients.map((r) => (r.channel === "whatsapp" ? "📱 0" + esc(r.phone.slice(2)) : "✉ " + esc(r.email)) + (r.size ? ` (${esc(r.size)})` : "")).join(", ")}</p>
+  const rows = result.products.map((p) => `<h3 style="margin:18px 0 4px"><a href="${esc(p.url)}">${esc(p.name)}</a> <span style="color:#888">(${esc(p.sku)}${p.sizes.some(Boolean) ? `; in the sale: ${esc(p.sizes.join(", "))}` : ""})</span></h3>
+<p style="margin:0">Would message <b>${p.recipients.length}</b> (${p.recipients.filter((r) => r.channel === "whatsapp").length} WhatsApp, ${p.recipients.filter((r) => r.channel === "email").length} email):</p>${bySize(p.recipients)}
 <p style="margin:0;color:#888;font-size:13px">Skipped ${p.skipped.length}: ${Object.entries(p.skipped.reduce((a, s) => ((a[s.reason] = (a[s.reason] || 0) + 1), a), {})).map(([k, v]) => `${esc(k)} ${v}`).join(", ") || "none"}</p>`).join("");
-  const sample = result.products[0] ? renderEmail({ item: { name: result.products[0].name, url: result.products[0].url, image: result.products[0].image }, firstName: "Sam", email: c.reviewTo }) : null;
+  const sample = result.products[0] ? renderEmail({ item: { name: withSize(result.products[0].name, [result.products[0].recipients[0]?.size].filter(Boolean)), url: result.products[0].url, image: result.products[0].image }, firstName: "Sam", email: c.reviewTo }) : null;
   // The review goes from the sales mailbox (known good): info@ is not a mailbox the Graph app can send as (14 Oct: "user invalid").
   await mailboxContext.run({ box: salesMailbox() }, () => sendNew({ to: c.reviewTo, subject: `Sale alerts ${result.day}: ${result.products.length} items, ${result.products.reduce((a, p) => a + p.recipients.length, 0)} customers (review - nothing sent)`,
     html: `<div style="font-family:Arial,sans-serif;font-size:14px">${rows || "<p>Nothing to send today.</p>"}${sample ? `<hr><p><b>What customers would receive:</b></p>${sample.html}` : ""}</div>` }));
 }
 
+// Review list grouped by the size each person bought - one line per size, so "only buyers of that size" is visible.
+function bySize(recipients) {
+  const groups = new Map();
+  for (const r of recipients) { const k = r.size || "one size"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r.channel === "whatsapp" ? "📱 0" + esc(r.phone.slice(2)) : "✉ " + esc(r.email)); }
+  return [...groups].map(([k, v]) => `<p style="margin:0 0 0 12px"><b>${esc(k)}</b> (${v.length}): ${v.join(", ")}</p>`).join("");
+}
 // ---- WhatsApp ---------------------------------------------------------------------------------------
 // Approved Marketing template sale_item_alert (id 1081768568097569): IMAGE header (the item photo),
 // body "Hi {{1}}, your size is in our sale 👀 / The {{2}} you bought from us is now reduced. Stock is limited,
@@ -413,7 +425,7 @@ export function registerSaleAlerts(app, { getPool }) {
       // ?item=&image= lets a test run before the site is readable (SALE_ALERTS_SITE_HEADER not set yet)
       const page = req.query.item ? { url, name: String(req.query.item), image: String(req.query.image || ""), variants: [] } : await salePage(url);
       if (!page.name) return res.status(400).json({ error: "could not read that page", page });
-      const r = await sendSaleWhatsApp({ to, firstName: String(req.query.name || "Dec"), item: page });
+      const r = await sendSaleWhatsApp({ to, firstName: String(req.query.name || "Dec"), item: { ...page, name: withSize(page.name, req.query.size ? [String(req.query.size)] : []) } });
       res.json({ ok: true, to, item: { name: page.name, url: page.url, image: page.image, sizes: page.variants.map((v) => v.size || v.sku) }, ...r });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
