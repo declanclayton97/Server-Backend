@@ -535,8 +535,6 @@ assertTrue("note lists attachments", withFiles.includes("Attached: proof.pdf, ph
   assertTrue("logo order: 3 days for decoration -> the week after next", logo.text.includes("the week after next"));
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
 
 // --- several suppliers: ONE delivery, ONE date (the latest) ----------------------
 {
@@ -549,3 +547,6 @@ process.exit(fail ? 1 : 0);
   assertTrue("multi: no per-supplier dates", !/items should be with you/.test(m.text));
   assertEq("multi: one date, the latest", m.dates.length, 1);
 }
+
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);
