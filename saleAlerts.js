@@ -258,7 +258,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
   // Featured already? A page only REVIEWED is still owed its real send once live; in review mode it is not re-reviewed.
   const done = new Set((await pool.query(`SELECT url, status FROM sale_alert_pages`)).rows.filter((r) => r.status !== "review" || mode === "review").map((r) => r.url));
   const queue = pages.filter((u) => !done.has(u));
-  const batch = [], evaluated = [];
+  const batch = [], evaluated = [], told = new Set();   // told: one message per person per run, even if they bought two of the items
   for (const url of queue) {
     if (batch.length >= c.perDay || evaluated.length >= maxEvaluate) break;
     const page = await salePage(url);
@@ -279,8 +279,11 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
       continue;
     }
     // at most c.perProduct people per item, most recent buyers first (they are likeliest to still want it)
-    const ranked = [...eligible.values()].sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
-    batch.push({ page, sizes, eligible: ranked.slice(0, c.perProduct), notMessaged: ranked.length - Math.min(ranked.length, c.perProduct), skipped });
+    const ranked = [...eligible.values()].filter((e) => !told.has(e.key)).sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+    if (!ranked.length) continue;   // everyone is already getting an earlier item today: leave this page for another day
+    const chosen = ranked.slice(0, c.perProduct);
+    for (const e of chosen) told.add(e.key);
+    batch.push({ page, sizes, eligible: chosen, notMessaged: ranked.length - chosen.length, skipped });
     await pause(300);
   }
   const result = { day, mode: dryRun ? "preview" : mode, salePages: pages.length, notYetFeatured: queue.length, evaluated, products: [] };
@@ -458,7 +461,7 @@ export function registerSaleAlerts(app, { getPool }) {
       res.json({ mode: cfg().mode, whatsapp: cfg().whatsapp, siteHeader: !!process.env.SALE_ALERTS_SITE_HEADER,
         runs: runs.rows.map((r) => ({ day: r.day, ranAt: r.ran_at, error: r.result?.error || null, mode: r.result?.mode, salePages: r.result?.salePages,
           items: (r.result?.products || []).map((p) => ({ name: p.name, recipients: p.recipients?.length || 0, whatsapp: (p.recipients || []).filter((x) => x.channel === "whatsapp").length, skipped: p.skipped?.length || 0, sent: p.sent, failed: p.failed })),
-          reviewError: r.result?.reviewError || null })),
+          running: !!r.result?.running, reviewError: r.result?.reviewError || null })),
         sends: sends.rows, unsubscribed: unsubs.rows[0].n });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -484,6 +487,30 @@ export function registerSaleAlerts(app, { getPool }) {
       await sendReview(r.rows[0].result);
       res.json({ ok: true, day: r.rows[0].result.day, items: r.rows[0].result.products.length, to: cfg().reviewTo });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  // Fire today's LIVE run by hand (Dec 14 Oct: go-live after the 10:00 slot had been used by review). Refuses if
+  // today already had a live run or one is in flight, so nobody can be messaged twice. Runs in the background;
+  // the result lands in sale_alert_runs (see /status) and Dec gets the "(SENT)" summary.
+  let manualRunning = false;
+  app.post("/api/sale-alerts/run-now", async (req, res) => {
+    try {
+      const secret = cfg().secret, key = String(req.query.key || "");
+      if (!secret || key.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(secret))) return res.status(403).json({ error: "forbidden" });
+      if (cfg().mode !== "live") return res.status(409).json({ error: "sale alerts are not live" });
+      if (manualRunning) return res.status(409).json({ error: "a run is already in progress" });
+      await ensure();
+      const day = ukDay();
+      const prev = (await getPool().query(`SELECT result FROM sale_alert_runs WHERE day = $1`, [day])).rows[0];
+      if (prev?.result?.mode === "live" || prev?.result?.running) return res.status(409).json({ error: "today already had a live run" });
+      await getPool().query(`INSERT INTO sale_alert_runs (day, result) VALUES ($1, $2) ON CONFLICT (day) DO UPDATE SET result = EXCLUDED.result`, [day, JSON.stringify({ running: true, mode: "live", startedAt: new Date().toISOString() })]);
+      manualRunning = true;
+      res.json({ ok: true, day, started: true });
+      runSaleAlerts({ pool: getPool(), mode: "live" })
+        .then((result) => getPool().query(`UPDATE sale_alert_runs SET result = $2 WHERE day = $1`, [day, JSON.stringify(result)]))
+        .catch((e) => getPool().query(`UPDATE sale_alert_runs SET result = $2 WHERE day = $1`, [day, JSON.stringify({ mode: "live", error: e.message })]))
+        .catch((e) => console.error("[sale-alerts] run-now:", e.message))
+        .finally(() => { manualRunning = false; });
+    } catch (e) { manualRunning = false; res.status(500).json({ error: e.message }); }
   });
   app.get("/api/sale-alerts/log", requireUser, async (req, res) => {
     try {
