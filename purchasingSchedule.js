@@ -2510,8 +2510,8 @@ async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = tru
 // NO PADDING (owner, 2026-10-12): a low-quantity supplier, so the day-3 top-up that tips Snickers
 // over its threshold never runs here — after 3 working days it simply places with Standard
 // delivery (£8.95 under £100 ex-VAT). Genuine low-inventory lines still go on as normal.
-// A real order needs BROOKTAVERNER_ORDER_LIVE=true on Alt-Items; without it the route only
-// rehearses and this run stops at 'checkout' with the PO built and nothing sent.
+// LIVE since 2026-10-14 (owner) — no env gate on either service. execute:false on the Alt-Items
+// route still rehearses (fills the checkout, reads their totals, empties the basket).
 const BROOK_TAVERNER_SUPPLIER_CONTACT = 5499;
 async function placeBrookTavernerOrder(pool, altItemsUrl, { live = true } = {}) {
   const steps = {};
@@ -2541,7 +2541,7 @@ async function placeBrookTavernerOrder(pool, altItemsUrl, { live = true } = {}) 
   }
   steps.bt = { resolve: r.steps && r.steps.resolve, cart: r.steps && r.steps.cart, checkout: r.steps && r.steps.checkout };
   if (r.unresolved && r.unresolved.length) throw stepErr('resolve', `Brook Taverner did not accept ${r.unresolved.length} line(s) on PO#${poId} — NOT ordering: ${r.error}`, { poId, bt: steps.bt });
-  if (r.rehearsed) throw stepErr('checkout', `Brook Taverner rehearsed only (BROOKTAVERNER_ORDER_LIVE is not "true" on Alt-Items) — PO#${poId} built, nothing sent.`, { poId, bt: steps.bt });
+  if (r.rehearsed) throw stepErr('checkout', `Brook Taverner rehearsed only (the call was not made with execute:true) — PO#${poId} built, nothing sent.`, { poId, bt: steps.bt });
   if (!r.ok) {
     const cart = (r.steps && r.steps.cart) || {};
     const miss = (cart.missing && cart.missing.length) ? ` — not in the basket as asked: ${cart.missing.map((m) => `${m.item} want ${m.want} got ${m.got}`).join(', ')}` : '';
@@ -4296,8 +4296,7 @@ const SCHEDULED_SUPPLIERS = {
   RALAWISE: { supplierKey: 'RALAWISE', stateId: 24, placeFn: placeRalawiseOrder, threshold: Number(process.env.RALAWISE_FREESHIP_THRESHOLD || 185) }, // api.ralawise.com POST /v1/order via Alt-Items /api/ralawise-place (exact SKU resolver, no test orders); free delivery @ £185 ex-VAT else £8.70 (read off their response). 15:30 UK, gated by RALAWISE_SCHEDULE_ENABLED=true + RALAWISE_ORDER_LIVE=true on Alt-Items
   LEO: { supplierKey: 'LEO', stateId: 23, placeFn: placeLeoOrder, threshold: Number(process.env.LEO_FREESHIP_THRESHOLD || 200) }, // leoworkwear.com trade portal via Alt-Items /api/leo-order; carriage paid @ £200 ex-VAT, else £7.50 (read off Leo's Review page). 09:00 UK, gated by LEO_SCHEDULE_ENABLED=true + LEO_ORDER_LIVE=true on Alt-Items
   // noPad: never top up with extra low-inv to reach the threshold (owner, 2026-10-12) — on day 3 it
-  // places as it stands with Standard delivery. 09:20 UK, gated by BROOKTAVERNER_SCHEDULE_ENABLED=true
-  // here + BROOKTAVERNER_ORDER_LIVE=true on Alt-Items.
+  // places as it stands with Standard delivery. 14:30 UK, live since 2026-10-14 (no env gate).
   'BROOK TAVERNER': { supplierKey: 'BROOK TAVERNER', stateId: 25, placeFn: placeBrookTavernerOrder, noPad: true, threshold: Number(process.env.BROOKTAVERNER_FREESHIP_THRESHOLD || 100) },
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
@@ -4338,7 +4337,6 @@ const SUPPLIER_CONTACT = {
 };
 const WINDOW_DISPLAY = {
   LEO: { at: '09:00' },
-  'BROOK TAVERNER': { at: '09:20' },
   BLAKLADER: { at: '09:30' },
   SNICKERS: { at: '10:00' },
   FRISTADS: { at: '10:30' },
@@ -4351,6 +4349,7 @@ const WINDOW_DISPLAY = {
   BEESWIFT: { at: '13:40' },
   SCRUFFS: { at: '14:00' },
   'PERFORMANCE BRANDS': { at: '14:10' },
+  'BROOK TAVERNER': { at: '14:30' },
   'AS APPAREL': { at: '14:50' },
   PORTWEST: { at: '15:00' },
   RALAWISE: { at: '15:30' },
