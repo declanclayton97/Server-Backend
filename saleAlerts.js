@@ -210,7 +210,12 @@ async function originalProductId(saleSku) {
 }
 
 /** "Carhartt 106674 ... (Black)" + ["L"] -> "Carhartt 106674 ... (Black) in size L" (single-size pages carry no size). */
-export const withSize = (name, sizes) => { const z = (sizes || []).filter(Boolean); return z.length ? `${name} in size ${z.join(" or ")}` : name; };
+// Single-size sale pages already end in the size ("... - Army Green/Black - C42"): don't say it twice.
+export const withSize = (name, sizes) => {
+  const z = (sizes || []).filter(Boolean), n = String(name).trim().toLowerCase();
+  if (z.length === 1 && (n.endsWith(" " + z[0].toLowerCase()) || n.endsWith("-" + z[0].toLowerCase()))) return name;
+  return z.length ? `${name} in size ${z.join(" or ")}` : name;
+};
 
 // ---- the message --------------------------------------------------------------------------------
 // Short on purpose (Dec), and matching the WhatsApp template sale_item_alert (v2, 12 Oct): the item named in the
