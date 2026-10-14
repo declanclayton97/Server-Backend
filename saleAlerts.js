@@ -405,7 +405,7 @@ export function registerSaleAlerts(app, { getPool }) {
       const secret = cfg().secret, key = String(req.query.key || "");
       if (!secret || key.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(secret))) return res.status(403).json({ error: "forbidden" });
       // Only numbers on the test list (SALE_ALERTS_TEST_TO, comma separated) can ever receive a test.
-      const allowed = String(process.env.SALE_ALERTS_TEST_TO || "447892872364,447720944723,447890562384").split(",").map(ukMobile).filter(Boolean);
+      const allowed = String(process.env.SALE_ALERTS_TEST_TO || "447892872364,447720944723,447890562384,447854464066").split(",").map(ukMobile).filter(Boolean);
       const to = req.query.to ? ukMobile(req.query.to) : allowed[0];
       if (!to || !allowed.includes(to)) return res.status(400).json({ error: "that number is not on the test list (SALE_ALERTS_TEST_TO)" });
       const url = String(req.query.url || "https://tuffshop.co.uk/carhartt-106674-firm-duck-traditional-coat-black.html");
