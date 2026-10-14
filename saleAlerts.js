@@ -13,7 +13,8 @@
 // Every send, skip and failure is a row in sale_alert_sends.
 //
 // Env:
-// LIVE since 14 Oct 2026 (Dec): 5 products a day, at most 5 customers each (most recent buyers first).
+// LIVE since 14 Oct 2026 (Dec): 5 item slots a day, at most 5 customers each (most recent buyers first); an item
+// keeps its slot on following days until all its buyers are told, then a new item takes the slot.
 // Dec emails a summary of who was messaged. SALE_ALERTS_ENABLED=off is only an emergency stop; any other value
 // (including the old "review") runs live - go-live was switched in code, not on Render (Dec dislikes env gates).
 //   SALE_ALERTS_SECRET   signs unsubscribe links (required for review and live)
@@ -255,9 +256,17 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
   if (!dryRun && !graphConfigured()) throw new Error("Graph mail is not configured");
   const day = ukDay();
   const pages = await saleCatalogue();
-  // Featured already? A page only REVIEWED is still owed its real send once live; in review mode it is not re-reviewed.
-  const done = new Set((await pool.query(`SELECT url, status FROM sale_alert_pages`)).rows.filter((r) => r.status !== "review" || mode === "review").map((r) => r.url));
-  const queue = pages.filter((u) => !done.has(u));
+  // Dec 14 Oct: an item keeps its slot until all its buyers are told - 5 a day. A page already sent ("live") comes back
+  // FIRST the next day; whoever was messaged is excluded (already told for that product / last 7 days), and once nobody
+  // is left it is closed as "no buyers" and the slot goes to a new item. A page only REVIEWED is still owed its real send.
+  // Closed: "no buyers" / "sold out" (and, in review mode, pages already reviewed).
+  const known = (await pool.query(`SELECT url, status, featured_on FROM sale_alert_pages`)).rows;
+  const done = new Set(known.filter((r) => ["no buyers", "sold out"].includes(r.status) || (mode === "review" && r.status === "review")).map((r) => r.url));
+  const carry = known.filter((r) => r.status === "live").sort((a, b) => new Date(a.featured_on) - new Date(b.featured_on)).map((r) => r.url);
+  const onSite = new Set(pages);
+  const queue = [...carry.filter((u) => onSite.has(u)), ...pages.filter((u) => !done.has(u) && !carry.includes(u))];
+  // a carried-over page that has left the sale section is finished
+  if (!dryRun) for (const u of carry.filter((u) => !onSite.has(u))) await pool.query(`UPDATE sale_alert_pages SET status = 'sold out' WHERE url = $1`, [u]);
   const batch = [], evaluated = [], told = new Set();   // told: one message per person per run, even if they bought two of the items
   for (const url of queue) {
     if (batch.length >= c.perDay || evaluated.length >= maxEvaluate) break;
@@ -275,7 +284,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
     }
     evaluated.push({ url, name: page.name, sizes: sizes.length, eligible: eligible.size });
     if (!eligible.size) {
-      if (!dryRun) await pool.query(`INSERT INTO sale_alert_pages (url, name, featured_on, status, recipients) VALUES ($1,$2,$3,$4,0) ON CONFLICT (url) DO NOTHING`, [url, page.name, day, page.variants.length ? "no buyers" : "sold out"]);
+      if (!dryRun) await pool.query(`INSERT INTO sale_alert_pages (url, name, featured_on, status, recipients) VALUES ($1,$2,$3,$4,0) ON CONFLICT (url) DO UPDATE SET status = EXCLUDED.status`, [url, page.name, day, page.variants.length ? "no buyers" : "sold out"]);
       continue;
     }
     // at most c.perProduct people per item, most recent buyers first (they are likeliest to still want it)
@@ -332,7 +341,7 @@ async function logSend(pool, { day, pid, contactId, email, phone, channel, statu
 async function sendReview(result) {
   const c = cfg();
   const rows = result.products.map((p) => `<h3 style="margin:18px 0 4px"><a href="${esc(p.url)}">${esc(p.name)}</a> <span style="color:#888">(${esc(p.sku)}${p.sizes.some(Boolean) ? `; in the sale: ${esc(p.sizes.join(", "))}` : ""})</span></h3>
-<p style="margin:0">${result.mode === "live" ? `Messaged <b>${p.sent}</b> of ${p.recipients.length}${p.failed ? ` (<b style="color:#b00">${p.failed} failed</b>)` : ""}` : `Would message <b>${p.recipients.length}</b>`}${p.notMessaged ? ` - cap of 5, ${p.notMessaged} more past buyers not messaged` : ""} (${p.recipients.filter((r) => r.channel === "whatsapp").length} WhatsApp, ${p.recipients.filter((r) => r.channel === "email").length} email):</p>${bySize(p.recipients)}
+<p style="margin:0">${result.mode === "live" ? `Messaged <b>${p.sent}</b> of ${p.recipients.length}${p.failed ? ` (<b style="color:#b00">${p.failed} failed</b>)` : ""}` : `Would message <b>${p.recipients.length}</b>`}${p.notMessaged ? ` - ${p.notMessaged} more buyers left, they get it on the next run` : ""} (${p.recipients.filter((r) => r.channel === "whatsapp").length} WhatsApp, ${p.recipients.filter((r) => r.channel === "email").length} email):</p>${bySize(p.recipients)}
 <p style="margin:0;color:#888;font-size:13px">Skipped ${p.skipped.length}: ${Object.entries(p.skipped.reduce((a, s) => ((a[s.reason] = (a[s.reason] || 0) + 1), a), {})).map(([k, v]) => `${esc(k)} ${v}`).join(", ") || "none"}</p>`).join("");
   const sample = result.products[0] ? renderEmail({ item: { name: withSize(result.products[0].name, [result.products[0].recipients[0]?.size].filter(Boolean)), url: result.products[0].url, image: result.products[0].image }, firstName: "Sam", email: c.reviewTo }) : null;
   // The review goes from the sales mailbox (known good): info@ is not a mailbox the Graph app can send as (14 Oct: "user invalid").
