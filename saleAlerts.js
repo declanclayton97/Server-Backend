@@ -3,7 +3,8 @@
 // Items come from the website's sale section (tuffshop.co.uk/sale.html, Dec 12 Oct 2026 - replaced the STW
 // warehouse source). Each weekday it features a few sale pages it has not featured before, maps every size still
 // salable on the page back to the original BP product, finds everyone who bought that exact product and size
-// (BP goods-out movements) and emails them from info@ through Graph with a direct link to the sale item.
+// (BP goods-out movements) and messages them: WhatsApp (template sale_item_alert) if they have a UK mobile, else email
+// from info@ through smtp2go (authorised: DKIM+SPF -> DMARC pass), with a direct link to the sale item.
 // No price in the message; first come, first served. Never emailed:
 //   - anyone with a sales credit for that product (returned it)
 //   - Amazon / eBay buyers (relay addresses), company webstores, decorated (embroidered/printed) purchases
@@ -219,11 +220,11 @@ ${item.image ? `<p><a href="${esc(item.url)}"><img src="${esc(item.image)}" alt=
 }
 
 // smtp2go - the relay the other system emails use. Lets us send FROM info@ (Graph cannot: info@ is not a mailbox).
-async function sendSmtp2go({ to, from, subject, html }) {
+async function sendSmtp2go({ to, from, subject, html, headers }) {
   const { default: nodemailer } = await import("nodemailer");
   const t = nodemailer.createTransport({ host: process.env.SMTP_SERVER || "mail-eu.smtp2go.com", port: parseInt(process.env.SMTP_PORT || "2525", 10), secure: false,
     auth: { user: process.env.SMTP_USERNAME || "tuffshop.co.uk", pass: process.env.SMTP_PASS } });
-  const info = await t.sendMail({ from, to, subject, html });
+  const info = await t.sendMail({ from, to, subject, html, ...(headers ? { headers } : {}) });
   return { via: "smtp2go", messageId: info.messageId, response: info.response };
 }
 
@@ -286,7 +287,10 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
       try {
         let r;
         if (e.channel === "whatsapp") r = await sendSaleWhatsApp({ to: e.phone, firstName: e.firstName, item });
-        else { const { subject, html } = renderEmail({ item, firstName: e.firstName, email: e.email }); r = await send(e.email, subject, html); }
+        else { const { subject, html } = renderEmail({ item, firstName: e.firstName, email: e.email }); // Customer emails go through smtp2go FROM info@: authorised for tuffshop.co.uk (DKIM s685857 + SPF em685857 -> DMARC pass,
+          // verified 14 Oct). One-click unsubscribe headers help inbox placement.
+          r = await sendSmtp2go({ to: e.email, from: "Tuffshop <info@tuffshop.co.uk>", subject, html,
+            headers: { "List-Unsubscribe": `<${unsubUrl(e.email)}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } }); }
         p.sent++; await logSend(pool, { ...who, status: "sent", reason: r?.messageId || r?.via || e.channel });
       } catch (err) { p.failed++; await logSend(pool, { ...who, status: "failed", reason: err.message.slice(0, 300) }); }
     }
@@ -464,7 +468,9 @@ export function registerSaleAlerts(app, { getPool }) {
   });
 
   // Unsubscribe (public, from the email footer).
-  app.get("/sale-alerts/unsubscribe", async (req, res) => {
+  // GET = the link in the email footer; POST = mail apps' one-click unsubscribe (List-Unsubscribe-Post, RFC 8058).
+  app.all("/sale-alerts/unsubscribe", async (req, res) => {
+    if (req.method !== "GET" && req.method !== "POST") return res.sendStatus(405);
     const email = normEmail(req.query.e), t = String(req.query.t || "");
     const page = (msg) => res.type("html").send(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tuffshop</title><div style="font-family:Arial,sans-serif;max-width:480px;margin:60px auto;padding:0 16px;font-size:16px">${msg}</div>`);
     const secret = cfg().secret;
