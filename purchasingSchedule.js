@@ -1537,6 +1537,28 @@ async function splitSterlingBackorder(pool, { poId, orderNo, short, linesByOrder
   return bo;
 }
 
+// Email a PO through Brightpearl and PROVE it went. The send form answers 200 whether or not
+// the email left: on 6 Oct and 12-13 Oct 2026 BP's OAuth mailbox was disconnected, every send
+// failed behind a 200, and ten POs were marked Placed that no supplier ever received. A real
+// send makes BP write its own note "Emailed <b>…</b> to <addr>" — that note is the proof, so
+// no note within ~40s means NOT sent, whatever the form said.
+async function emailOrderDocumentConfirmed(poId, opts) {
+  const startedAt = Date.now() - 120000;   // BP note times can lag our clock a little
+  const mail = await emailOrderDocument(poId, opts);
+  if (!opts.send || mail.dryRun) return mail;
+  if (!(mail.status >= 200 && mail.status < 300)) return { ...mail, sent: false, confirmed: false };
+  const to = String(opts.to || '').toLowerCase();
+  for (let i = 0; i < 8; i++) {
+    const notes = await bp.bpLiveGet(`/order-service/order/${poId}/note`).catch(() => null);
+    const hit = (notes || []).some((n) => /Emailed <b>/i.test(n && n.text || '')
+      && String(n.text).toLowerCase().includes(to)
+      && Date.parse(n.addedOn) >= startedAt);
+    if (hit) return { ...mail, sent: true, confirmed: true };
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  return { ...mail, sent: false, confirmed: false, reason: `Brightpearl wrote no "Emailed … to ${opts.to}" note on PO#${poId} — the email did NOT go${mail.error ? ` (BP said: ${mail.error})` : ''}. If it says Oauth, the Brightpearl email account needs reconnecting.` };
+}
+
 // ── Uneek placement chain (EMAIL supplier) ───────────────────────────────────
 // No portal: create the combined PO, EMAIL Brightpearl's OWN PO PDF to Uneek's order desk
 // (template_print.php via the File Uploader — send_type=pdf, recipient = ONLY email_to_0),
@@ -1560,7 +1582,7 @@ async function placeUneekOrder(pool, altItemsUrl, { padToThreshold = 0 } = {}) {
   // 2. EMAIL Brightpearl's real PO PDF to Uneek's order desk (only email_to_0 = the order
   // address; BP's pre-filled supplier/account rows are cleared inside emailOrderDocument).
   steps.skuCheck = await assertPoRowSkusAreProductSkus(poId, 'Uneek');
-  const mail = await emailOrderDocument(poId, { contactId: UNEEK_SUPPLIER_CONTACT, to: UNEEK_ORDER_EMAIL, send: true });
+  const mail = await emailOrderDocumentConfirmed(poId, { contactId: UNEEK_SUPPLIER_CONTACT, to: UNEEK_ORDER_EMAIL, send: true });
   if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${UNEEK_ORDER_EMAIL}: ${JSON.stringify(mail).slice(0, 200)}`);
   steps.email = { to: UNEEK_ORDER_EMAIL, sent: true, status: mail.status };
 
@@ -1757,7 +1779,7 @@ async function placeEmailSupplierOrder(supplierKey, pool, altItemsUrl, { padToTh
     }).catch(() => {});
   }
 
-  const mail = await emailOrderDocument(poId, { contactId: cfg.contactId, to, messageExtra: cfg.messageExtra || null, send: live });
+  const mail = await emailOrderDocumentConfirmed(poId, { contactId: cfg.contactId, to, messageExtra: cfg.messageExtra || null, send: live });
   if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${to}: ${JSON.stringify(mail).slice(0, 200)}`);
   steps.email = { to, sent: true, status: mail.status };
 
@@ -1804,7 +1826,7 @@ async function placeScruffsOrder(pool, altItemsUrl, { padToThreshold = 0 } = {})
   // "SalesOrders@Scruffs.com / CS@scruffs.com" stored as ONE address and two of our own
   // sales@tuffshop.co.uk rows. Sending those unedited would bounce and CC ourselves.
   steps.skuCheck = await assertPoRowSkusAreProductSkus(poId, 'Scruffs');
-  const mail = await emailOrderDocument(poId, { contactId: SCRUFFS_SUPPLIER_CONTACT, to: SCRUFFS_ORDER_EMAIL, subject: `Purchase Order: #${poId}`, send: true });
+  const mail = await emailOrderDocumentConfirmed(poId, { contactId: SCRUFFS_SUPPLIER_CONTACT, to: SCRUFFS_ORDER_EMAIL, subject: `Purchase Order: #${poId}`, send: true });
   if (!mail.sent) throw stepErr('email', `Brightpearl did not confirm emailing PO#${poId} to ${SCRUFFS_ORDER_EMAIL}: ${JSON.stringify(mail).slice(0, 200)}`);
   steps.email = { to: SCRUFFS_ORDER_EMAIL, sent: true, status: mail.status };
 

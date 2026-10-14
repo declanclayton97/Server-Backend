@@ -580,10 +580,15 @@ async function emailOrderDocument(orderId, { contactId, to, subject, message, me
   const res = await fetch(url, { method: 'POST', headers: { ...BROWSER_HEADERS, Cookie: cookieHeader, 'Content-Type': 'application/x-www-form-urlencoded', Referer: url, Origin: BP_HOST }, body: body.toString(), redirect: 'manual' });
   await ingestCookies(jar, res, url);
   const resBody = await res.text();
-  const okStatus = res.status >= 200 && res.status < 400;
-  // BP re-renders the form page on success; a hard error would show an error banner instead.
-  const errored = /class="[^"]*error[^"]*"|Fatal error|not authorised|permission/i.test(resBody.slice(0, 4000));
-  return { sent: okStatus && !errored, status: res.status, sentTo: to, orderId, errored };
+  // A 3xx is NOT success: an expired session answers the POST with a redirect to the login page.
+  const okStatus = res.status >= 200 && res.status < 300;
+  // BP re-renders the form page either way. A failed send shows a banner — and the one that
+  // matters ("There is a problem with your Oauth email account … Error sending <doc> to <addr>",
+  // 6 + 12-13 Oct 2026, ten POs marked Placed that never left) carries no error class, so match
+  // its words, over the whole body.
+  const errMsg = (resBody.match(/There is a problem with your Oauth email account[^<]*|Error sending [^<]*/i) || [])[0] || null;
+  const errored = !!errMsg || /class="[^"]*error[^"]*"|Fatal error|not authorised|permission/i.test(resBody.slice(0, 4000));
+  return { sent: okStatus && !errored, status: res.status, sentTo: to, orderId, errored, error: errMsg };
 }
 
 // The live session's cookies for BP_HOST, in the shape Playwright's
