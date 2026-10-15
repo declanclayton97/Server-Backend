@@ -4619,7 +4619,11 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
         // Writing the date first flips the failure mode: a crash now means the order is SKIPPED and
         // visible (no run report, demand still queued) instead of DUPLICATED and invisible.
         // A deliberate re-run is still possible with force:true.
-        await saveState(pool, { id: cfg.stateId, workingDaysWaited: 0, lastRunDate: uk.date, result: { supplier: cfg.supplierKey, ran: uk.date, claimedAt: `${uk.hour}:${String(uk.minute).padStart(2, '0')}`, state: 'placing — day claimed before contacting the supplier' } }).catch(() => {});
+        // The claim keeps the wait count: only a PLACED order resets it (below). Zeroing it here
+        // meant a placement that failed lost its hold — Performance Brands on 2026-10-15 was on day 3
+        // (place as it stands), failed at resolve leaving PO 496818, and the retry-sweep then read
+        // "day 1 of 3" and waited, so a held order looked like a fresh one.
+        await saveState(pool, { id: cfg.stateId, workingDaysWaited: state.working_days_waited, lastRunDate: uk.date, result: { supplier: cfg.supplierKey, ran: uk.date, claimedAt: `${uk.hour}:${String(uk.minute).padStart(2, '0')}`, state: 'placing — day claimed before contacting the supplier' } }).catch(() => {});
         placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo, excludeSkus, ...splitOpts });
         decision = `placed — ${reason}` + (lineMode === 'so' ? ' (customer orders)' : lineMode === 'low' ? ' (reorder)' : '');
         newWaitDays = 0;
