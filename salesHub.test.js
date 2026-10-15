@@ -540,12 +540,15 @@ assertTrue("note lists attachments", withFiles.includes("Attached: proof.pdf, ph
 {
   const today = new Date("2026-10-14T10:00:00+01:00");
   const m = etaSentenceMulti([
-    { supplier: "Snickers", placedOn: "2026-10-13", expectedDate: "2026-10-20" },
-    { supplier: "Portwest", placedOn: "2026-10-13", expectedDate: "2026-10-27" },
+    { supplier: "Snickers", placedOn: "2026-10-13", expectedDate: "2026-10-27" },
+    { supplier: "Portwest", placedOn: "2026-10-13", expectedDate: "2026-10-20" },
   ], { today });
   assertTrue("multi: says it goes out together", m.text.includes("send everything out together in one delivery"));
   assertTrue("multi: no per-supplier dates", !/items should be with you/.test(m.text));
   assertEq("multi: one date, the latest", m.dates.length, 1);
+  assertTrue("multi: names both suppliers", m.text.startsWith("We're waiting on your items arriving from both Snickers and Portwest."));
+  assertTrue("multi: overseas vs UK reason", m.text.includes("come from overseas, whereas Portwest is a UK supplier"));
+  assertTrue("multi: when each is due in", /The Portwest items are due in to us .+ and the Snickers items /.test(m.text));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -562,6 +562,11 @@ const joinAnd = (xs) => xs.length <= 1 ? (xs[0] || "") : xs.slice(0, -1).join(",
 // Waiting on MORE THAN ONE supplier: name each one with its own window, not just the one that
 // finishes last (sales team, 14 Oct: "it only mentions the one that will take the longest").
 // Takes the open POs (not fully received); one entry per supplier, its latest-due PO.
+// Suppliers that ship to us from abroad - the reason we give when they're the slow one,
+// the way the team explains it ("the Snickers item takes slightly longer to arrive as
+// this comes from overseas and Portwest is a UK supplier"). Matched on the label.
+const OVERSEAS_SUPPLIERS = /^(snickers|blaklader|mascot|fristads|tranemo|engel|lyngsoe|panther)/i;
+
 export function etaSentenceMulti(pos, { today = new Date(), allowanceDays = DELIVERY_ALLOWANCE_DAYS } = {}) {
   const bySupplier = new Map();
   for (const p of pos || []) {
@@ -570,28 +575,51 @@ export function etaSentenceMulti(pos, { today = new Date(), allowanceDays = DELI
     if (!prev || new Date(p.expectedDate || 0) > new Date(prev.expectedDate || 0)) bySupplier.set(k, p);
   }
   if (bySupplier.size < 2) return null;
-  // We send the order out complete once the LAST supplier's stock is in - never in
-  // separate parcels per supplier - so the customer gets ONE date: the latest one
-  // (Dec, 14 Oct: "it sounds like we're sending them all separate, but we don't").
-  const names = [], leads = [], unconfirmed = [];
-  let latest = null;
+  // We send the order out complete once the LAST supplier's stock is in - never a parcel
+  // per supplier. So, like the team's own emails: who we're waiting on, why one is slower,
+  // when each is due in to US, then ONE delivery date for the customer (Dec, 14-15 Oct).
+  const dated = [], unconfirmed = [];
   for (const [label, p] of bySupplier) {
-    names.push(esc(label));
-    const win = windowFromPo(p, allowanceDays);
-    if (win && phraseWindow(win, today)) { if (!latest || compareWindows(win, latest) > 0) latest = win; }
+    const arrive = windowFromPo(p, 0);                  // reaches us
+    const deliver = windowFromPo(p, allowanceDays);     // reaches the customer
+    const phrase = arrive && phraseWindow(arrive, today);
+    if (phrase && deliver && phraseWindow(deliver, today)) dated.push({ label: esc(label), arrive, deliver, phrase });
     else unconfirmed.push(esc(label));
-    const lt = leadTimeClause(p, { short: true });
-    if (lt) leads.push(lt);
   }
-  const head = `We're waiting on stock from ${joinAnd(names)} for this order, and we'll send everything out together in one delivery once it's all arrived`;
-  const when = unconfirmed.length
-    ? `. ${joinAnd(unconfirmed)} ${unconfirmed.length === 1 ? "hasn't" : "haven't"} confirmed a date yet, so I'm chasing ${unconfirmed.length === 1 ? "it" : "them"} and will come straight back to you with a delivery date.`
-    : `, so it should be with you ${phraseWindow(latest, today)}.`;
-  return {
-    text: head + when + (leads.length ? ` For reference, ${joinAnd(leads)} to get stock to us.` : ""),
-    dates: !unconfirmed.length && latest ? [windowKey(latest)] : [],
-    source: "po-multi",
-  };
+  dated.sort((x, y) => compareWindows(x.arrive, y.arrive));
+  const names = [...bySupplier.keys()].map(esc);
+  const out = [`We're waiting on your items arriving from ${names.length === 2 ? "both " : ""}${joinAnd(names)}.`];
+
+  // Why one takes longer: overseas vs UK when that's the reason, otherwise just say so.
+  const last = dated[dated.length - 1];
+  if (dated.length >= 2 && compareWindows(dated[0].arrive, last.arrive) < 0) {
+    const uk = dated.filter((d) => d !== last && !OVERSEAS_SUPPLIERS.test(d.label)).map((d) => d.label);
+    out.push(OVERSEAS_SUPPLIERS.test(last.label) && uk.length
+      ? `The ${last.label} items take slightly longer to arrive as they come from overseas, whereas ${joinAnd(uk)} ${uk.length === 1 ? "is a UK supplier" : "are UK suppliers"}.`
+      : `The ${last.label} items take slightly longer to get to us.`);
+  }
+
+  // When each is due in to us, earliest first; suppliers due the same week share a clause.
+  const groups = [];
+  for (const d of dated) {
+    const g = groups.find((x) => x.phrase === d.phrase);
+    if (g) g.labels.push(d.label); else groups.push({ phrase: d.phrase, labels: [d.label] });
+  }
+  if (groups.length) {
+    const parts = groups.map((g, i) => `the ${joinAnd(g.labels)} items ${i ? "" : "are due in to us "}${g.phrase}`);
+    const s = joinAnd(parts);
+    out.push(s.charAt(0).toUpperCase() + s.slice(1) + ".");
+  }
+
+  let dates = [];
+  if (unconfirmed.length) {
+    out.push(`${joinAnd(unconfirmed)} ${unconfirmed.length === 1 ? "hasn't" : "haven't"} confirmed a date yet, so I'm chasing ${unconfirmed.length === 1 ? "it" : "them"}. We send everything out together in one delivery, so I'll come straight back to you with a delivery date once ${unconfirmed.length === 1 ? "it's" : "they're"} confirmed.`);
+  } else {
+    const latest = dated.reduce((m, d) => (!m || compareWindows(d.deliver, m) > 0 ? d.deliver : m), null);
+    out.push(`We send everything out together in one delivery, so once it's all here your order should be with you ${phraseWindow(latest, today)}.`);
+    dates = [windowKey(latest)];
+  }
+  return { text: out.join(" "), dates, source: "po-multi" };
 }
 
 export function etaSentence(po, { today = new Date(), promised = null, allowanceDays = DELIVERY_ALLOWANCE_DAYS } = {}) {
