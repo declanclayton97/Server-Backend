@@ -12364,6 +12364,12 @@ app.post("/api/whatsapp/webhook", async (req, res) => {
           else if (mediaId)
             // Use the caption as the bubble text; the image itself renders from media_id.
             text = media?.caption || media?.filename || null;
+          else if (m.type === "reaction") text = m.reaction?.emoji ? `Reacted ${m.reaction.emoji}` : "[reaction removed]";
+          else if (m.type === "location") text = `[location] ${[m.location?.name, m.location?.address].filter(Boolean).join(", ") || `${m.location?.latitude},${m.location?.longitude}`}`;
+          else if (m.type === "contacts") text = `[contact card] ${(m.contacts || []).map((c) => c.name?.formatted_name).filter(Boolean).join(", ")}`;
+          // "unsupported" = WhatsApp would not pass the content to the API (edited, view-once, poll, forwarded
+          // business message ...). Show Meta's own reason so staff know to check the phone, not a bug of ours.
+          else if (m.type === "unsupported") text = `[WhatsApp could not show this message${m.errors?.[0] ? `: ${m.errors[0].error_data?.details || m.errors[0].title || m.errors[0].message}` : ""} - check the phone]`;
           else text = `[${m.type} message]`;
           await recordWhatsAppMessage({
             waMessageId: m.id,
