@@ -3321,6 +3321,25 @@ export async function clearOrderCustomFieldLive({ orderIds = [], field, ifValue 
   return { done: true, field, results };
 }
 
+// LIVE: set one custom field on SOs (PATCH op:add — creates or replaces). Used to flag a
+// discontinued line for Bob: PCF_BOBSORTI ("Bob Sorting", YES_NO) = true (Dec, 2026-10-15).
+// Skips orders where the field already holds the value. Dry-run unless execute:true.
+export async function setOrderCustomFieldLive({ orderIds = [], field, value, execute = false } = {}) {
+  if (!field) return { error: 'field required' };
+  if (!execute) return { dryRun: true, field, value, orderIds };
+  const results = [];
+  for (const id of orderIds) {
+    try {
+      const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
+      if (cf[field] === value) { results.push({ id, skipped: 'already set' }); continue; }
+      await liveWrite('PATCH', `/order-service/order/${id}/custom-field`, [{ op: 'add', path: `/${field}`, value }]);
+      results.push({ id, set: field, value, was: cf[field] === undefined ? null : cf[field] });
+    } catch (e) { results.push({ id, error: e.message }); }
+    await pause(150);
+  }
+  return { done: true, field, results };
+}
+
 // Post-placement: strip the supplier from the tag, flip status when it was the
 // last supplier, and add an "ordered via PO N" note. Call after the order has
 // actually been placed with the supplier.

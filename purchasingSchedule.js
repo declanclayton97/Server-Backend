@@ -2942,6 +2942,17 @@ async function handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, d
     } catch (e) { done.problems.push(`settle tags ${strandedOrders.join(',')}: ${e.message}`); }
   }
 
+  // 2b. flag every affected order for Bob: "Bob Sorting" = Yes, so it shows in his tab and he picks
+  // it up there as well as from the email (Dec, 2026-10-15). Only that field — Bob Status/Details
+  // are his to fill in.
+  if (affectedOrders.length) {
+    try {
+      const r = await bp.setOrderCustomFieldLive({ orderIds: affectedOrders, field: 'PCF_BOBSORTI', value: true, execute: true });
+      done.bobSorting = (r && r.results) || [];
+      for (const x of done.bobSorting) if (x.error) done.problems.push(`Bob Sorting on SO ${x.id}: ${x.error}`);
+    } catch (e) { done.problems.push(`Bob Sorting ${affectedOrders.join(',')}: ${e.message}`); }
+  }
+
   // 3. tell sales — a customer is usually waiting and only a person can decide what to do
   try { done.emailed = await emailDiscontinued({ supplierKey, poId, items }); }
   catch (e) { done.problems.push(`email sales: ${e.message}`); }
