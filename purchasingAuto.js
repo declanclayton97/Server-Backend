@@ -275,7 +275,13 @@ export const SUPPLIERS = {
   // with Scuff Cap RBLSSC", "Click SW2011 …"), hence brandIds. Contact 326 belongs to BeeSwift alone,
   // so its low-inventory report is all ours (lowInvOwnsAll) — the name detect would miss most of it.
   // The generic hi-vis waistcoats are claimed here as well as by Uneek; the order TAG decides.
-  BEESWIFT: { contactId: 326, costList: 20, poField: 'PCF_BEESPO', lowInvSupplierId: 326, brandIds: [103], lowInvOwnsAll: true,
+  // listedSupplierCounts (Dec, 2026-10-16): BeeSwift also distributes other makers' products —
+  // Centurion's Nexus CORE helmet (brand 123, SKU 9015002) lists BeeSwift (326) AND Centurion
+  // direct (337) as suppliers, with Centurion primary — so on an order TAGGED BEESWIFT, a product
+  // that merely LISTS BeeSwift among its suppliers is BeeSwift's to buy. Not every Centurion line
+  // goes through BeeSwift, which is why this is per-product and not a brand claim. SO 496580's
+  // helmet was missed by PO 497064 for exactly this reason.
+  BEESWIFT: { contactId: 326, costList: 20, poField: 'PCF_BEESPO', lowInvSupplierId: 326, brandIds: [103], lowInvOwnsAll: true, listedSupplierCounts: true,
     excludeIf: (n, s) => /new\s*balance/i.test(n || '') || /^NWB0/i.test(s || ''),
     claimProductIds: [53344, 53345, 53346, 53347, 53348, 53349, 53350, 53351, 53352, 53353, 53354, 53355, 53356, 53357, 53358, 53359, 53360, 53361, 56975, 56976],
     detect: (n) => /bee\s*swift|\bb[-\s]?brand\b|\bb[-\s]?seen\b|\bclimax\b|\bclick\b/i.test(n || '') },
@@ -1517,6 +1523,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // Only the rows the name REJECTED need looking up, batched into one call per order.
     const supplierOwned = new Set();
     const brandOwned = new Set();
+    const listedOwned = new Set();   // product lists this supplier among its suppliers (listedSupplierCounts lanes only)
     // productId → the OTHER supplier Brightpearl names as its primary. A shared brand is not proof
     // the line is ours to buy: Chadwick matches on brandId 213, and Behrens Group products carry
     // that same brand. See belongsHere below.
@@ -1552,6 +1559,29 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
           }
         } catch { /* additive only: if the lookup fails we fall back to name matching, never worse */ }
         await pause(150);
+        // LISTED SUPPLIER (opt-in, listedSupplierCounts): the product names this supplier anywhere
+        // in its supplier list, not just as primary. Only on an order tagged for this supplier
+        // (this whole function only reads those), and never for a row another supplier tagged on
+        // the same order would claim by its own name/brand detect or primary attribution, so a
+        // multi-tag order cannot be bought twice. Same ascending-id rule as above.
+        if (contactId && SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].listedSupplierCounts) {
+          const peersTagged = Object.entries(SUPPLIERS).filter(([k]) => k !== supplierKey && allTags.some((t) => groupHasSupplier(t, k)));
+          try {
+            const lists = await liveGet(`/product-service/product/${unknown.join(',')}/supplier`) || {};
+            const obj = Array.isArray(lists) ? (lists[0] || {}) : lists;
+            const rowByPid = new Map(orderableRows.map(([, r]) => [String(r.productId), r]));
+            for (const [pid, ids] of Object.entries(obj)) {
+              if (!Array.isArray(ids) || !ids.map(String).includes(String(contactId))) continue;
+              const r = rowByPid.get(String(pid));
+              const peerClaims = peersTagged.some(([, s2]) =>
+                (s2.detect && r && s2.detect(r.productName, r.productSku))
+                || (s2.brandIds && brandOf.has(String(pid)) && s2.brandIds.map(String).includes(brandOf.get(String(pid))))
+                || (s2.contactId && foreignSupplier.get(String(pid)) === String(s2.contactId)));
+              if (!peerClaims) listedOwned.add(String(pid));
+            }
+          } catch { /* additive only, as above */ }
+          await pause(150);
+        }
       }
     }
     // Explicit per-supplier claims count too: products BP attributes elsewhere that we nonetheless
@@ -1573,7 +1603,7 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     const notOurs = (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].notOurs) || null;
     const excludeIf = (SUPPLIERS[supplierKey] && SUPPLIERS[supplierKey].excludeIf) || null;
     const belongsHere = (r) => belongsToSupplier(String(r.productId), {
-      sku: r.productSku, name: r.productName, nameDetect: !!detect(r.productName, r.productSku), supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier, notOurs, excludeIf,
+      sku: r.productSku, name: r.productName, nameDetect: !!detect(r.productName, r.productSku), supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier, notOurs, excludeIf, listedOwned,
     });
     let candidateRows = (singleSupplier && !hasBrandDetect)
       ? orderableRows
@@ -1900,7 +1930,7 @@ async function writeDemandLog(pool, poId, supplierKey, demandAudit) {
 // The three stronger signals win outright either way: our own name/code detect, BP naming THIS
 // supplier, and claimProductIds — which exists precisely for products BP attributes elsewhere that
 // we do buy here, so a wrong attribution stays correctable without weakening this rule.
-export function belongsToSupplier(pid, { sku, name, nameDetect, supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier = false, notOurs = null, excludeIf = null }) {
+export function belongsToSupplier(pid, { sku, name, nameDetect, supplierOwned, claimed, brandOwned, foreignSupplier, brandNeedsOwnSupplier = false, notOurs = null, excludeIf = null, listedOwned = null }) {
   const k = String(pid);
   // A HARD veto, before any of the claims below. `notOurs` cannot do this job: it reads the SKU
   // only, and it is consulted in the brand-only branch, so it can never overrule a name match or a
@@ -1911,6 +1941,7 @@ export function belongsToSupplier(pid, { sku, name, nameDetect, supplierOwned, c
   if (nameDetect) return true;
   if (supplierOwned.has(k)) return true;
   if (claimed.has(k)) return true;
+  if (listedOwned && listedOwned.has(k)) return true;   // lists this supplier; peer claims already removed upstream
   if (!brandOwned.has(k)) return false;
   // Brand-only from here. Two independent vetoes, because each covers what the other cannot:
   // BP attribution is authoritative when present but is often absent, and a code shape works
