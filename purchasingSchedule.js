@@ -2445,21 +2445,70 @@ async function placeRalawiseOrder(pool, altItemsUrl, { padToThreshold = 0, live 
 // LIVE since 2026-10-14 (owner) — no env gate; the Alt-Items route only rehearses when execute is false
 // and this run stops at 'checkout' with the PO built and nothing sent.
 const LEO_SUPPLIER_CONTACT = 7919;
-async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = true } = {}) {
+// Styles Leo sell only in fixed packs, keyed by the style before the first "-". Leo's cart rounds a
+// short quantity UP to the pack, so asking for 2 put 5 in the cart and the read-back refused the
+// whole order — PO 497130, 2026-10-16: S01-O-LEO-M/S and S01-Y-LEO-XXL x2 each became x5 (owner:
+// round S01 up to 5s and put the true qty and cost on the PO).
+export const LEO_PACK_SIZES = { S01: 5 };
+export function leoPackRound(lines, packs = LEO_PACK_SIZES) {
+  const extras = [];
+  const out = lines.map((l) => {
+    const p = Number(packs[String(l.sku).split('-')[0].toUpperCase()]) || 0;
+    if (p <= 1 || l.qty % p === 0) return l;
+    const to = Math.ceil(l.qty / p) * p;
+    extras.push({ sku: l.sku, productId: l.productId, cost: Number(l.cost) || 0, from: l.qty, to, extra: to - l.qty, packOf: p });
+    return { ...l, qty: to };
+  });
+  return { lines: out, extras };
+}
+// A Leo run that failed before Leo took the order leaves an unsent auto-PO whose rows still count as
+// on order, so the next run neither re-asks for that demand nor orders it — it would sit there
+// (PO 497130). Pick it up instead: the newest Leo PO named by an error in the last 10 days that is
+// still a draft auto-PO. existingAutoPo refuses anything placed, referenced or not ours.
+async function findUnsentLeoPo(pool) {
+  if (!pool) return null;
+  const q = await pool.query(
+    "SELECT DISTINCT (context->>'poId')::int AS po FROM purchasing_error_log WHERE upper(supplier) = 'LEO' AND severity = 'error' AND context ? 'poId' AND created_at > now() - interval '10 days' ORDER BY 1 DESC").catch(() => ({ rows: [] }));
+  for (const { po } of q.rows) {
+    if (!po) continue;
+    try { return await existingAutoPo(po, { contactIds: [LEO_SUPPLIER_CONTACT], autoKey: 'LEO' }); }
+    catch { /* placed, removed or not an auto-PO — try the next */ }
+  }
+  return null;
+}
+async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, poId: existingPoId = null } = {}) {
   const steps = {};
   let po;
-  try { po = await createPo({ supplierKey: 'LEO', execute: live, padToThreshold, logPool: pool }); }
-  catch (e) { throw createPoErr(e); }
+  if (existingPoId) po = await existingAutoPo(existingPoId, { contactIds: [LEO_SUPPLIER_CONTACT], autoKey: 'LEO' });
+  else if (live) po = await findUnsentLeoPo(pool);
+  if (!po) {
+    try { po = await createPo({ supplierKey: 'LEO', execute: live, padToThreshold, logPool: pool }); }
+    catch (e) { throw createPoErr(e); }
+  }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
-  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [], ...(po.reused ? { reused: true } : {}) };
 
   // One line per SKU — the cart read-back compares per-SKU quantities, and Leo merges repeats.
-  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name, productId: l.productId }));
-  if (!orderLines.length) throw stepErr('cart', 'no orderable Leo lines');
+  const merged = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name, productId: l.productId }));
+  if (!merged.length) throw stepErr('cart', 'no orderable Leo lines');
+  // Round pack-only styles up BEFORE the basket, and put the extra units on the PO (after the
+  // low-inventory separator, at the line's own cost) so the PO says what Leo will deliver.
+  const { lines: orderLines, extras: packExtras } = leoPackRound(merged);
+  if (packExtras.length) {
+    steps.packs = packExtras.map((x) => `${x.sku} ${x.from} -> ${x.to} (packs of ${x.packOf})`);
+    if (live) {
+      for (const x of packExtras) {
+        if (!x.productId || !(x.cost > 0)) throw stepErr('cart', `pack round-up for ${x.sku} has no product id or a £0 cost — NOT ordering`, { poId, pack: x });
+        const added = await bp.addPoProductUnitsLive({ poId, productId: x.productId, qty: x.extra, unitCost: x.cost, execute: true });
+        if (!added.done) throw stepErr('cart', `could not add ${x.extra} x ${x.sku} to PO#${poId} for the pack round-up — NOT ordering`, { poId, added });
+        (po.lowLines = po.lowLines || []).push({ sku: x.sku, qty: x.extra, cost: x.cost, productId: x.productId });
+      }
+    }
+  }
   // Every Leo code ends -LEO-<size>. A product still on an internal code would just be missing
   // from the cart; refuse up front and name it, which is cheaper than a basket round-trip.
   const notLeo = orderLines.filter((l) => !/-LEO-[A-Z0-9]+$/i.test(l.sku));
