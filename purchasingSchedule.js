@@ -4212,6 +4212,20 @@ async function blakladerOrderForPo(altItemsUrl, poId, { scan = 8 } = {}) {
   }
   return null;
 }
+// Our own recent Blaklader orders, newest first: the PO numbers on Blaklader's order list whose BP PO
+// carries the "Auto-PO for BLAKLADER" note. A hand-placed order (cloned from a sale, no auto note) is
+// left out, so its delivery/payment values never become the template. Best-effort: [] on any failure.
+async function ourRecentBlakladerPos(altItemsUrl, { days = 21, max = 5 } = {}) {
+  const r = await fetch(`${altItemsUrl}/api/blaklader-erp-orders?days=${days}`, { signal: AbortSignal.timeout(120000) }).then((x) => x.json());
+  const pos = [...new Set(((r && r.orders) || []).map((o) => Number(o.po)).filter(Boolean))].sort((a, b) => b - a);
+  const ours = [];
+  for (const po of pos) {
+    if (ours.length >= max) break;
+    const notes = await bp.bpLiveGet(`/order-service/order/${po}/note`).catch(() => []);
+    if ((Array.isArray(notes) ? notes : []).some((n) => /Auto-PO for BLAKLADER\b/.test(String(n.text || '')))) ours.push(String(po));
+  }
+  return ours;
+}
 async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live = true, includeSalesOrders = true, includeLowInv = true, poId: existingPoId = null } = {}) {
   const steps = {};
   let po;
@@ -4274,7 +4288,11 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   }
 
   // STEP 2 — build the order body from a template order. Reads the basket for its cartId; writes nothing.
-  const prev = await jfetch('checkout', `${altItemsUrl}/api/blaklader-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: false }) });
+  // The template must be an order WE placed: the newest one on the account was a hand-placed order
+  // (PO 496992, 2026-10-16) and every send templated on it was refused 400 — see blakladerLatestOrder.
+  const templateOrderNumbers = await ourRecentBlakladerPos(altItemsUrl).catch(() => []);
+  steps.template = { ours: templateOrderNumbers };
+  const prev = await jfetch('checkout', `${altItemsUrl}/api/blaklader-order`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: orderLines, purchaseOrder: String(poId), place: false, ...(templateOrderNumbers.length ? { templateOrderNumbers } : {}) }) });
   if (!prev.body) throw stepErr('checkout', `couldn't build the Blaklader order body: ${JSON.stringify(prev).slice(0, 200)}`, { poId });
 
   // STEP 3 — SUBMIT THROUGH THE PORTAL WORKER, never api.blaklader.com directly.
