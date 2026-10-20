@@ -2583,11 +2583,32 @@ async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = tru
 // LIVE since 2026-10-14 (owner) — no env gate on either service. execute:false on the Alt-Items
 // route still rehearses (fills the checkout, reads their totals, empties the basket).
 const BROOK_TAVERNER_SUPPLIER_CONTACT = 5499;
-async function placeBrookTavernerOrder(pool, altItemsUrl, { live = true } = {}) {
+// The garment check in Alt-Items compares Brook Taverner's description ("Paduli Blouse") with OUR
+// name. A sales-order row's name is whatever the salesperson typed — "Women's Blouse - Black-14
+// Embroidered Left Breast - Asda - Travel Money Logo" on SO lines, 20 Oct 2026, so all six lines of
+// PO 497984 were refused although the code was right. The catalogue name ("Brook Taverner Ladies
+// Paduli Blouse") is the one that says which garment it is, so send that; fall back to the row name.
+async function catalogueNames(productIds) {
+  const ids = [...new Set((productIds || []).map(Number).filter((n) => n > 1000))].sort((x, y) => x - y);
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += 100) {
+    const r = await bp.bpLiveGet(`/product-service/product/${ids.slice(i, i + 100).join(',')}`).catch(() => []);
+    for (const p of (Array.isArray(r) ? r : [])) {
+      const n = p && p.salesChannels && p.salesChannels[0] && p.salesChannels[0].productName;
+      if (n) out.set(Number(p.id), String(n));
+    }
+  }
+  return out;
+}
+
+async function placeBrookTavernerOrder(pool, altItemsUrl, { live = true, poId: existingPoId = null } = {}) {
   const steps = {};
   let po;
-  try { po = await createPo({ supplierKey: 'BROOK TAVERNER', execute: live, padToThreshold: 0, logPool: pool }); }
-  catch (e) { throw createPoErr(e); }
+  if (existingPoId) po = await existingAutoPo(existingPoId, { contactIds: [BROOK_TAVERNER_SUPPLIER_CONTACT], autoKey: 'BROOK TAVERNER' });
+  else {
+    try { po = await createPo({ supplierKey: 'BROOK TAVERNER', execute: live, padToThreshold: 0, logPool: pool }); }
+    catch (e) { throw createPoErr(e); }
+  }
   if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
   const poId = po.poId;
   const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
@@ -2595,7 +2616,8 @@ async function placeBrookTavernerOrder(pool, altItemsUrl, { live = true } = {}) 
   for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
 
-  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name, productId: l.productId }));
+  const catNames = await catalogueNames(mergePoLinesBySku(po).map((l) => l.productId));
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: catNames.get(Number(l.productId)) || l.name, productId: l.productId }));
   if (!orderLines.length) throw stepErr('cart', 'no orderable Brook Taverner lines');
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
@@ -5246,6 +5268,7 @@ export async function pencarrieReleaseBackorders({ pool, poId, execute = false, 
 // Blaklader against an existing unsent auto-PO (the basket step clears and verifies first).
 export async function beeswiftPlaceExisting({ pool, altItemsUrl, poId }) { return placeBeeswiftOrder(pool, altItemsUrl, { poId: Number(poId), live: true }); }
 export async function blakladerPlaceExisting({ pool, altItemsUrl, poId }) { return placeBlakladerOrder(pool, altItemsUrl, { poId, live: true }); }
+export async function brookTavernerPlaceExisting({ pool, altItemsUrl, poId }) { return placeBrookTavernerOrder(pool, altItemsUrl, { poId, live: true }); }
 
 // ── BLAKLADER FINAL CHECK: did their back office keep every line? ───────────────────────────
 // The basket check proves only what the BASKET held. Blaklader re-key each order into their ERP a
