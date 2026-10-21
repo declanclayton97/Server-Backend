@@ -31,6 +31,7 @@ import {
 } from './quoteChase.js';
 import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
+import { inboxUnread } from './graphMail.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
 import { registerPickingSheet } from './pickingSheet.js';
 import { registerSaleAlerts, saleAlertsOptOut } from './saleAlerts.js';
@@ -14009,6 +14010,23 @@ app.post("/api/approval-sessions/:sessionId/log-resend", async (req, res) => {
   } catch (err) {
     console.error("[approval] log-resend failed:", err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/proof-gate/email?user=harry - unread count of that person's inbox for the Mock Up
+// Creator's approvals-first gate (Dec, 21 Oct 2026). Only the people listed here, and only a
+// count: no mail is read. Graph refusing the mailbox comes back as ok:false so the page can
+// fail open rather than lock someone out over a permissions problem.
+const PROOF_GATE_MAILBOXES = { harry: "harry@tuffshop.co.uk" };
+app.get("/api/proof-gate/email", async (req, res) => {
+  const box = PROOF_GATE_MAILBOXES[String(req.query.user || "").trim().toLowerCase()];
+  if (!box) return res.status(404).json({ ok: false, error: "no gate mailbox for that user" });
+  try {
+    const n = await inboxUnread(box);
+    res.json({ ok: true, unread: n.unread });
+  } catch (e) {
+    console.error("[proof-gate] inbox count failed:", e.message);
+    res.json({ ok: false, error: e.status === 403 || e.status === 404 ? "mailbox access not granted" : e.message });
   }
 });
 
