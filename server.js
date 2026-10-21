@@ -500,10 +500,25 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     }
     
     const data = await response.json();
-    
+
+    // Urgent mock ups (PCF_URGENTMO = Yes) join the list whatever their status, until a proof
+    // has been sent for them since they were flagged (Dec, 21 Oct 2026).
+    let urgentIds = [];
+    if (pool) {
+      try {
+        const u = await pool.query(`
+          SELECT um.order_id FROM urgent_mockups um
+           WHERE NOT EXISTS (SELECT 1 FROM approval_sessions s
+                              WHERE s.order_number = um.order_id::text AND s.created_at > um.flagged_at)`);
+        urgentIds = u.rows.map((r) => Number(r.order_id));
+      } catch (e) {
+        console.error('[proof-required] urgent mock-up lookup failed:', e.message);
+      }
+    }
+
     // Check if we have results
     if (!data.response || !data.response.results || data.response.results.length === 0) {
-      return res.json([]);
+      data.response = { ...(data.response || {}), results: [] };
     }
     
     // The results array contains order IDs in a specific format
@@ -511,7 +526,9 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     let orderIds = [];
     
     // If results is an array of arrays (each order as an array of fields)
-    if (Array.isArray(data.response.results[0])) {
+    if (data.response.results.length === 0) {
+      orderIds = [];
+    } else if (Array.isArray(data.response.results[0])) {
       orderIds = data.response.results.map(row => row[0]); // First element is usually the order ID
     } 
     // If results is just an array of order IDs
@@ -532,13 +549,15 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     
     console.log('Extracted order IDs:', orderIds);
     
-    if (orderIds.length === 0) {
+    if (orderIds.length === 0 && urgentIds.length === 0) {
       return res.json([]);
     }
     
     // Now fetch the details for these orders
-    // Limit to first 10 orders to avoid URL being too long
-    const limitedOrderIds = orderIds.slice(0, 10);
+    // Limit to first 10 orders to avoid URL being too long (urgent ones always included).
+    // Brightpearl 400s an id list that isn't ascending.
+    const urgentSet = new Set(urgentIds);
+    const limitedOrderIds = [...new Set([...urgentIds, ...orderIds.slice(0, 10).map(Number)])].sort((a, b) => a - b);
     const orderRange = limitedOrderIds.join(',');
     const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderRange}`;
     
@@ -570,8 +589,10 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
                     order.parties?.customer?.addressFullName ||
                     'Unknown',
       placedOn: order.placedOn,
-      deliveryDate: order.delivery?.deliveryDate || null
+      deliveryDate: order.delivery?.deliveryDate || null,
+      urgent: urgentSet.has(Number(order.id)),
     }));
+    orders.sort((a, b) => Number(b.urgent) - Number(a.urgent));
     
     res.json(orders);
   } catch (error) {
@@ -1072,6 +1093,14 @@ async function initializeUrgentOrdersTable() {
       ALTER TABLE urgent_orders
       ADD COLUMN IF NOT EXISTS stale_days INTEGER
     `);
+    // Orders flagged PCF_URGENTMO = Yes ("urgent mock up", Dec 21 Oct 2026). Filled by the
+    // same 5-min scan; the proof-required list shows them until a proof is sent after flagging.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS urgent_mockups (
+        order_id BIGINT PRIMARY KEY,
+        flagged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
     // Approval workflow: new orders default to 'pending' until Mike (or any
     // approver) signs them off. Backfill — pre-existing rows on first deploy
     // were trusted, so they become 'approved'. After this column exists, the
@@ -1285,6 +1314,17 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
       const fields = cfData.response || cfData || {};
       const urgentByDateStr = extractIsoDate(fields.PCF_URGENT);
       const isAsap = isBadgeYes(fields.PCF_ASAP); // reuse the same yes/true/1 matcher
+
+      // Urgent mock up flag rides on the custom fields already fetched - no extra BP call.
+      try {
+        if (isBadgeYes(fields.PCF_URGENTMO)) {
+          await pool.query('INSERT INTO urgent_mockups (order_id) VALUES ($1) ON CONFLICT (order_id) DO NOTHING', [orderId]);
+        } else {
+          await pool.query('DELETE FROM urgent_mockups WHERE order_id = $1', [orderId]);
+        }
+      } catch (e) {
+        console.error(`[urgent-poll/${label}] urgent mock-up flag on ${orderId}:`, e.message);
+      }
 
       if (!urgentByDateStr && !isAsap) {
         // Neither urgent nor ASAP — drop from cache if present
