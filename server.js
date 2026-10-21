@@ -11998,9 +11998,9 @@ async function whatsAppWindow(peerNumber, channel = "proof") {
 // Default auto-reply body, sent once per cooldown when a customer messages
 // the proof number. Wording overridable via env without a deploy.
 const DEFAULT_AUTO_REPLY =
-  "This is a proof only service. For sales or general enquiries please email " +
-  "sales@tuffshop.co.uk. If your message is about your proof, please wait and " +
-  "we will be in touch shortly.";
+  "This is a proof only service. For sales or general enquiries please WhatsApp " +
+  "our sales team on 0113 887 9482: https://wa.me/441138879482. If your message " +
+  "is about your proof, please wait and we will be in touch shortly.";
 
 // Send a one-shot auto-reply to a customer who just messaged us. Skips:
 //  - if WHATSAPP_AUTO_REPLY_DISABLED is set (kill switch)
