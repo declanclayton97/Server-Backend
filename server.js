@@ -14150,7 +14150,7 @@ app.post("/api/approval-sessions/:sessionId/log-resend", async (req, res) => {
 // Creator's approvals-first gate (Dec, 21 Oct 2026). Only the people listed here, and only a
 // count: no mail is read. Graph refusing the mailbox comes back as ok:false so the page can
 // fail open rather than lock someone out over a permissions problem.
-const PROOF_GATE_MAILBOXES = { harry: "harry@tuffshop.co.uk" };
+const PROOF_GATE_MAILBOXES = { harry: "harry.b@tuffshop.co.uk" }; // harry@ does not exist in M365
 app.get("/api/proof-gate/email", async (req, res) => {
   const box = PROOF_GATE_MAILBOXES[String(req.query.user || "").trim().toLowerCase()];
   if (!box) return res.status(404).json({ ok: false, error: "no gate mailbox for that user" });
