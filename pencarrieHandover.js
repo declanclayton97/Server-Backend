@@ -20,12 +20,12 @@
 //                              finalise it, so Ralawise's finalise clears the PENCARRIE tag.
 //   handover:PENCARRIE:mixed — PenCarrie still orders the rest and its own finalise clears the tag.
 //
-// Off while Ralawise is dark (RALAWISE_SCHEDULE_ENABLED): a line handed to a lane that never runs
-// would be stranded. The exclusion of PAST handovers applies regardless.
+// ON since Ralawise went live (owner, 2026-10-21; no env gate). The exclusion of PAST handovers
+// applies regardless.
 import { addPendingLine, listPendingLines } from './pendingLines.js';
 
 export const HANDOVER_TAG = 'handover:PENCARRIE';
-export const ralawiseFallbackLive = () => process.env.RALAWISE_SCHEDULE_ENABLED === 'true';
+export const ralawiseFallbackLive = () => true;
 export const handoverKey = (soId, sku) => `${Number(soId)}:${String(sku || '').trim().toUpperCase()}`;
 const altItems = () => process.env.ALT_ITEMS_URL || 'https://alternate-items.onrender.com';
 
