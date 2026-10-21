@@ -31,7 +31,7 @@ import {
 } from './quoteChase.js';
 import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
-import { inboxUnreadDeep } from './graphMail.js';
+import { inboxUnreadDeep, flaggedMessages } from './graphMail.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
 import { registerPickingSheet } from './pickingSheet.js';
 import { registerSaleAlerts, saleAlertsOptOut } from './saleAlerts.js';
@@ -504,6 +504,7 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     // Urgent mock ups (PCF_URGENTMO = Yes) join the list whatever their status, until a proof
     // has been sent for them since they were flagged (Dec, 21 Oct 2026).
     let urgentIds = [];
+    let urgentMockupIds = new Set();
     if (pool) {
       try {
         const u = await pool.query(`
@@ -511,10 +512,42 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
            WHERE NOT EXISTS (SELECT 1 FROM approval_sessions s
                               WHERE s.order_number = um.order_id::text AND s.created_at > um.flagged_at)`);
         urgentIds = u.rows.map((r) => Number(r.order_id));
+        urgentMockupIds = new Set(urgentIds);
       } catch (e) {
         console.error('[proof-required] urgent mock-up lookup failed:', e.message);
       }
     }
+
+    // Flagged emails in the proof-gate mailboxes that quote an order number become proof to-dos
+    // (Dec, 21 Oct 2026): Harry flags "needs a proof" in Outlook and it shows here until he clears
+    // the flag or a proof is sent for that order after the email arrived.
+    const emailByOrder = new Map();
+    for (const box of Object.values(PROOF_GATE_MAILBOXES)) {
+      try {
+        for (const m of await flaggedMessages(box)) {
+          const hit = /\b(?:SO\s*-?\s*)?([45]\d{5})\b/i.exec(`${m.subject} ${m.preview}`);
+          if (!hit) continue;
+          const id = Number(hit[1]);
+          if (!emailByOrder.has(id)) emailByOrder.set(id, { subject: m.subject, from: m.from, receivedAt: m.receivedAt, webLink: m.webLink });
+        }
+      } catch (e) {
+        console.error('[proof-required] flagged emails for', box, 'failed:', e.message);
+      }
+    }
+    if (pool && emailByOrder.size) {
+      try {
+        const done = await pool.query(
+          `SELECT order_number, MAX(created_at) AS last FROM approval_sessions WHERE order_number = ANY($1::text[]) GROUP BY order_number`,
+          [[...emailByOrder.keys()].map(String)]);
+        for (const r of done.rows) {
+          const e = emailByOrder.get(Number(r.order_number));
+          if (e && new Date(r.last) > new Date(e.receivedAt)) emailByOrder.delete(Number(r.order_number));
+        }
+      } catch (e) {
+        console.error('[proof-required] email to-do session check failed:', e.message);
+      }
+    }
+    for (const id of emailByOrder.keys()) if (!urgentIds.includes(id)) urgentIds.push(id);
 
     // Check if we have results
     if (!data.response || !data.response.results || data.response.results.length === 0) {
@@ -556,7 +589,7 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
     // Now fetch the details for these orders
     // Limit to first 10 orders to avoid URL being too long (urgent ones always included).
     // Brightpearl 400s an id list that isn't ascending.
-    const urgentSet = new Set(urgentIds);
+    const urgentSet = new Set(urgentIds.filter((id) => !emailByOrder.has(id) || urgentMockupIds.has(id)));
     const limitedOrderIds = [...new Set([...urgentIds, ...orderIds.slice(0, 10).map(Number)])].sort((a, b) => a - b);
     const orderRange = limitedOrderIds.join(',');
     const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderRange}`;
@@ -591,8 +624,9 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
       placedOn: order.placedOn,
       deliveryDate: order.delivery?.deliveryDate || null,
       urgent: urgentSet.has(Number(order.id)),
+      email: emailByOrder.get(Number(order.id)) || null,
     }));
-    orders.sort((a, b) => Number(b.urgent) - Number(a.urgent));
+    orders.sort((a, b) => (Number(b.urgent) * 2 + Number(!!b.email)) - (Number(a.urgent) * 2 + Number(!!a.email)));
     
     res.json(orders);
   } catch (error) {
@@ -14156,8 +14190,14 @@ app.get("/api/proof-gate/email", async (req, res) => {
   if (!box) return res.status(404).json({ ok: false, error: "no gate mailbox for that user" });
   try {
     // Inbox plus its subfolders: rules file mail into those and Outlook still shows it as unread.
+    // Flagged ones don't count: a flag means "this needs a proof" and it's on the Proof Required
+    // list instead (Dec, 21 Oct).
     const n = await inboxUnreadDeep(box);
-    res.json({ ok: true, unread: n.unread, folders: n.folders });
+    let flaggedUnread = 0;
+    try {
+      flaggedUnread = (await flaggedMessages(box)).filter((m) => !m.isRead && n.folderIds.has(m.folderId)).length;
+    } catch (e) { console.error("[proof-gate] flagged lookup failed:", e.message); }
+    res.json({ ok: true, unread: Math.max(0, n.unread - flaggedUnread), flaggedUnread, folders: n.folders });
   } catch (e) {
     console.error("[proof-gate] inbox count failed:", e.message);
     res.json({ ok: false, error: e.status === 403 || e.status === 404 ? "mailbox access not granted" : e.message });

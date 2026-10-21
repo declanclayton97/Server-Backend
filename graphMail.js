@@ -80,18 +80,45 @@ const mb = () => `/users/${encodeURIComponent(currentMailbox())}`;
 export async function inboxUnreadDeep(address) {
   const box = `/users/${encodeURIComponent(address)}/mailFolders`;
   const top = await graph("GET", `${box}/inbox?$select=id,displayName,unreadItemCount,childFolderCount`);
-  const folders = [{ name: "Inbox", unread: Number(top.unreadItemCount) || 0 }];
+  const folders = [{ id: top.id, name: "Inbox", unread: Number(top.unreadItemCount) || 0 }];
   const walk = async (id, prefix, depth) => {
     if (depth > 4) return;
     const j = await graph("GET", `${box}/${id}/childFolders?$select=id,displayName,unreadItemCount,childFolderCount&$top=100`);
     for (const f of (j && j.value) || []) {
       const name = `${prefix}/${f.displayName}`;
-      folders.push({ name, unread: Number(f.unreadItemCount) || 0 });
+      folders.push({ id: f.id, name, unread: Number(f.unreadItemCount) || 0 });
       if (f.childFolderCount) await walk(f.id, name, depth + 1);
     }
   };
   if (top.childFolderCount) await walk(top.id, "Inbox", 1);
-  return { unread: folders.reduce((n, f) => n + f.unread, 0), folders: folders.filter((f) => f.unread > 0) };
+  return {
+    unread: folders.reduce((n, f) => n + f.unread, 0),
+    folderIds: new Set(folders.map((f) => f.id)),
+    folders: folders.filter((f) => f.unread > 0).map(({ name, unread }) => ({ name, unread })),
+  };
+}
+
+// Flagged messages anywhere in a mailbox (Outlook's "flag as to do"), newest first:
+// sender, subject, a short preview and read state - what the proof to-do list needs.
+export async function flaggedMessages(address, top = 50) {
+  const q = new URLSearchParams({
+    $filter: "flag/flagStatus eq 'flagged'",
+    $select: "id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId,webLink",
+    $top: String(top),
+  });
+  const j = await graph("GET", `/users/${encodeURIComponent(address)}/messages?${q}`);
+  return ((j && j.value) || [])
+    .map((m) => ({
+      id: m.id,
+      subject: m.subject || "",
+      from: (m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || "",
+      receivedAt: m.receivedDateTime,
+      preview: m.bodyPreview || "",
+      isRead: !!m.isRead,
+      folderId: m.parentFolderId,
+      webLink: m.webLink || null,
+    }))
+    .sort((a, b) => String(b.receivedAt).localeCompare(String(a.receivedAt)));
 }
 
 // Unread count of a mailbox's inbox (for the badges in the folder pane).
