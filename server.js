@@ -31,7 +31,7 @@ import {
 } from './quoteChase.js';
 import { registerHubAuthRoutes } from './hubAuthRoutes.js';
 import { registerSalesHubRoutes } from './salesHubRoutes.js';
-import { inboxUnread } from './graphMail.js';
+import { inboxUnreadDeep } from './graphMail.js';
 import { registerReturnsRoutes } from './returnsRoutes.js';
 import { registerPickingSheet } from './pickingSheet.js';
 import { registerSaleAlerts, saleAlertsOptOut } from './saleAlerts.js';
@@ -14155,8 +14155,9 @@ app.get("/api/proof-gate/email", async (req, res) => {
   const box = PROOF_GATE_MAILBOXES[String(req.query.user || "").trim().toLowerCase()];
   if (!box) return res.status(404).json({ ok: false, error: "no gate mailbox for that user" });
   try {
-    const n = await inboxUnread(box);
-    res.json({ ok: true, unread: n.unread });
+    // Inbox plus its subfolders: rules file mail into those and Outlook still shows it as unread.
+    const n = await inboxUnreadDeep(box);
+    res.json({ ok: true, unread: n.unread, folders: n.folders });
   } catch (e) {
     console.error("[proof-gate] inbox count failed:", e.message);
     res.json({ ok: false, error: e.status === 403 || e.status === 404 ? "mailbox access not granted" : e.message });

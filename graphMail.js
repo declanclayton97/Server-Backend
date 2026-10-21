@@ -75,6 +75,25 @@ export const mailboxContext = new AsyncLocalStorage();
 export const currentMailbox = () => (mailboxContext.getStore() && mailboxContext.getStore().box) || salesMailbox();
 const mb = () => `/users/${encodeURIComponent(currentMailbox())}`;
 
+// Unread across the inbox AND every folder under it (Outlook rules file mail into
+// subfolders, which the inbox's own unreadItemCount leaves out). Counts and folder names only.
+export async function inboxUnreadDeep(address) {
+  const box = `/users/${encodeURIComponent(address)}/mailFolders`;
+  const top = await graph("GET", `${box}/inbox?$select=id,displayName,unreadItemCount,childFolderCount`);
+  const folders = [{ name: "Inbox", unread: Number(top.unreadItemCount) || 0 }];
+  const walk = async (id, prefix, depth) => {
+    if (depth > 4) return;
+    const j = await graph("GET", `${box}/${id}/childFolders?$select=id,displayName,unreadItemCount,childFolderCount&$top=100`);
+    for (const f of (j && j.value) || []) {
+      const name = `${prefix}/${f.displayName}`;
+      folders.push({ name, unread: Number(f.unreadItemCount) || 0 });
+      if (f.childFolderCount) await walk(f.id, name, depth + 1);
+    }
+  };
+  if (top.childFolderCount) await walk(top.id, "Inbox", 1);
+  return { unread: folders.reduce((n, f) => n + f.unread, 0), folders: folders.filter((f) => f.unread > 0) };
+}
+
 // Unread count of a mailbox's inbox (for the badges in the folder pane).
 export async function inboxUnread(address) {
   const j = await graph("GET", `/users/${encodeURIComponent(address)}/mailFolders/inbox?$select=unreadItemCount,totalItemCount`);
