@@ -11723,6 +11723,22 @@ app.post("/api/approval-sessions", async (req, res) => {
       );
     }
 
+    // A new proof for an order supersedes any earlier one where the customer asked for
+    // changes, so the redone proof clears it from Approval History (Dec, 21 Oct 2026).
+    // Best effort: failing this must never fail sending the new proof.
+    if (orderNumber) {
+      try {
+        const old = await q(
+          `UPDATE approval_sessions SET status = 'archived'
+            WHERE order_number = $1 AND id <> $2 AND status = 'changes_requested'`,
+          [String(orderNumber), session.id]
+        );
+        if (old.rowCount) console.log(`[approval-session] order ${orderNumber}: archived ${old.rowCount} changes-requested proof(s) superseded by ${session.id}`);
+      } catch (e) {
+        console.error("[approval-session] archiving superseded proofs failed:", e.message);
+      }
+    }
+
     const frontendUrl = process.env.FRONTEND_URL || "https://mock-up-creator-hosted-web.onrender.com";
 
     res.json({
