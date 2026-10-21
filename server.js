@@ -1397,6 +1397,83 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
 }
 
 // ---------------------------------------------------------------------------
+// Urgent mock-up watcher (PCF_URGENTMO = Yes, Dec 21 Oct 2026). Its own light loop rather
+// than the urgent scan above, which can be switched off (URGENT_POLL_ENABLED) and does far more
+// per order. Every 3 min: one order-search for orders updated since the last pass, then one
+// custom-field read per order, ~1/sec. A day is ~1,300 updated orders, so a pass is usually a
+// handful of calls. Rate-limited -> stop and retry the same window next pass (cursor not moved).
+// ---------------------------------------------------------------------------
+let urgentMockupSince = Date.now() - 30 * 60 * 1000;
+let urgentMockupInFlight = false;
+
+async function syncUrgentMockupFlag(orderId, headers, baseUrl) {
+  const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`, { method: 'GET', headers });
+  if (r.status === 429 || r.status === 503) return 'limited';
+  if (!r.ok) return 'skip';
+  const j = await r.json().catch(() => ({}));
+  const fields = j.response || j || {};
+  if (isBadgeYes(fields.PCF_URGENTMO)) {
+    await pool.query('INSERT INTO urgent_mockups (order_id) VALUES ($1) ON CONFLICT (order_id) DO NOTHING', [orderId]);
+    return 'yes';
+  }
+  await pool.query('DELETE FROM urgent_mockups WHERE order_id = $1', [orderId]);
+  return 'no';
+}
+
+async function pollUrgentMockups() {
+  if (!useDatabase || !BRIGHTPEARL_API_TOKEN || !BRIGHTPEARL_ACCOUNT_ID) return;
+  if (urgentMockupInFlight || Date.now() < bpRateLimitedUntil) return;
+  urgentMockupInFlight = true;
+  const startedAt = Date.now();
+  try {
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' ? 'https://euw1.brightpearlconnect.com' : 'https://use1.brightpearlconnect.com';
+    const headers = { 'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF, 'brightpearl-account-token': BRIGHTPEARL_API_TOKEN, 'Content-Type': 'application/json' };
+    const from = encodeURIComponent(`${new Date(urgentMockupSince - 2 * 60 * 1000).toISOString()}/`);
+    const ids = [];
+    for (let first = 1, page = 0; page < 10; page++) {
+      const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&updatedOn=${from}&pageSize=500&firstResult=${first}`, { method: 'GET', headers });
+      if (r.status === 429 || r.status === 503) return;
+      if (!r.ok) { console.error('[urgent-mockups] order-search', r.status); return; }
+      const rows = (await r.json()).response?.results || [];
+      if (!rows.length) break;
+      ids.push(...rows.map((x) => (Array.isArray(x) ? x[0] : x)));
+      first += rows.length;
+    }
+    let yes = 0;
+    for (const id of ids) {
+      const res = await syncUrgentMockupFlag(id, headers, baseUrl);
+      if (res === 'limited') { console.warn('[urgent-mockups] rate limited - retrying this window next pass'); return; }
+      if (res === 'yes') yes++;
+      await sleep(1000);
+    }
+    urgentMockupSince = startedAt;
+    if (ids.length) console.log(`[urgent-mockups] checked ${ids.length} updated order(s), ${yes} flagged`);
+  } catch (e) {
+    console.error('[urgent-mockups] pass failed:', e.message);
+  } finally {
+    urgentMockupInFlight = false;
+  }
+}
+setTimeout(() => {
+  pollUrgentMockups();
+  setInterval(pollUrgentMockups, 3 * 60 * 1000);
+}, 60 * 1000);
+
+// POST /api/urgent-mockups/check/:orderId - read one order's PCF_URGENTMO now (one BP call).
+app.post('/api/urgent-mockups/check/:orderId', async (req, res) => {
+  const id = Number(req.params.orderId);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'bad order id' });
+  if (!useDatabase) return res.status(503).json({ error: 'Database disabled' });
+  try {
+    const baseUrl = BRIGHTPEARL_DATACENTER === 'euw1' ? 'https://euw1.brightpearlconnect.com' : 'https://use1.brightpearlconnect.com';
+    const headers = { 'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF, 'brightpearl-account-token': BRIGHTPEARL_API_TOKEN, 'Content-Type': 'application/json' };
+    res.json({ orderId: id, result: await syncUrgentMockupFlag(id, headers, baseUrl) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Stale-order poller — auto-flags orders sitting in production statuses for
 // too long. Configurable via env:
 //   BADGE_STALE_STATUS_IDS = comma-separated, default "24,25" (Embroidery, Print)
