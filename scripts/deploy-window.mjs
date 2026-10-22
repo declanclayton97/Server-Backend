@@ -50,33 +50,34 @@ if (atArg) {
 // Every poller window (start hour:minute, 30 minutes long). KEEP IN STEP WITH server.js — if you
 // add a poller there and not here, this will cheerfully clear a deploy into its window.
 const POLLERS = [
-  { name: 'Blaklader', h: 9, m: 30, days: 'Mon-Fri' },
-  { name: 'Snickers', h: 10, m: 0, days: 'Mon-Fri' },
-  { name: 'Rockfall', h: 10, m: 20, days: 'Mon-Fri' },   // live 10:20 from 2026-10-15
-  { name: 'Fristads', h: 10, m: 40, days: 'Mon-Fri' },
-  { name: 'Helly Hansen', h: 11, m: 0, days: 'Mon-Fri' },
-  { name: 'Tranemo', h: 11, m: 20, days: 'Mon-Fri' },
-  { name: 'Mascot', h: 11, m: 40, days: 'Mon-Fri' },   // moved from 11:30 (2026-10-02)
-  { name: 'Castle', h: 12, m: 0, days: 'Mon-Fri' },
-  { name: 'V12', h: 12, m: 20, days: 'Mon-Fri' },
-  { name: 'Buckler', h: 12, m: 30, days: 'Mon-Fri' },
-  { name: 'Chadwick', h: 12, m: 40, days: 'Mon-Fri' },
-  { name: 'Sterling', h: 13, m: 0, days: 'Mon-Fri' },
-  { name: 'Carhartt', h: 13, m: 20, days: 'Mon/Wed/Fri' },   // moved from 13:30 for BeeSwift (2026-10-01)
-  { name: 'BeeSwift', h: 13, m: 40, days: 'Mon-Fri' },
-  { name: 'Scruffs', h: 14, m: 0, days: 'Mon-Fri' },
-  { name: 'Performance Brands', h: 14, m: 10, days: 'Mon-Fri' },   // 14:10 since 2026-10-14 (was 14:20)
-  { name: 'Brook Taverner', h: 14, m: 30, days: 'Mon-Fri' },   // live 14:30 since 2026-10-14 (was a gated 09:20)
-  { name: 'Engel', h: 14, m: 40, days: 'Mon-Fri' },   // b2b.f-engel.com, live from 2026-10-22 (owner)
-  { name: 'AS Apparel', h: 14, m: 50, days: 'Mon-Fri' },   // 14:50 since 2026-10-14 (was 14:40)
-  { name: 'Portwest', h: 15, m: 0, days: 'Mon-Fri' },
-  { name: 'Hellberg', h: 15, m: 20, days: 'Mon-Fri' },   // emailed PO, split from Snickers 2026-09-16 — runs on Purchasing-Automation
-  { name: 'Uneek', h: 15, m: 30, days: 'Mon-Fri' },   // 15:30 since 2026-10-15 (swapped with Ralawise)
-  { name: 'PenCarrie', h: 15, m: 40, days: 'Mon-Fri' },
-  { name: 'Ralawise', h: 16, m: 0, days: 'Mon-Fri' },   // after PenCarrie; gated off until RALAWISE_SCHEDULE_ENABLED=true
-  { name: 'Leo', h: 16, m: 10, days: 'Mon-Fri' },   // live 16:10 since 2026-10-14 (was a gated 09:00)
-  { name: 'Blaklader reorder', h: 16, m: 30, days: 'Mon-Fri' },   // was 16:20
-  { name: 'Snickers reorder', h: 17, m: 0, days: 'Mon-Fri' },   // was 16:40
+  { name: 'Blaklader', h: 9, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Snickers', h: 9, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Rockfall', h: 10, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Fristads', h: 10, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Helly Hansen', h: 10, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Tranemo', h: 10, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Mascot', h: 11, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Castle', h: 11, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'V12', h: 11, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Buckler', h: 11, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Chadwick', h: 12, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Sterling', h: 12, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Carhartt', h: 12, m: 30, days: 'Mon/Wed/Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'BeeSwift', h: 12, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Scruffs', h: 13, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Performance Brands', h: 13, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Brook Taverner', h: 13, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Supertouch', h: 14, m: 0, days: 'Mon-Fri' },   // supertouch.com via the worker, from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Engel', h: 14, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'AS Apparel', h: 15, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Portwest', h: 15, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Hellberg', h: 15, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Uneek', h: 15, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'PenCarrie', h: 16, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Ralawise', h: 16, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Leo', h: 16, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Blaklader reorder', h: 16, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Snickers reorder', h: 17, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Retry sweep', h: 17, m: 0, days: 'Mon-Fri' },   // re-runs suppliers whose failure never reached them
 ];
 const runsToday = (p) => (p.days === 'Mon/Wed/Fri' ? ['Mon', 'Wed', 'Fri'] : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']).includes(day);
