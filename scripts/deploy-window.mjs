@@ -67,6 +67,7 @@ const POLLERS = [
   { name: 'Scruffs', h: 14, m: 0, days: 'Mon-Fri' },
   { name: 'Performance Brands', h: 14, m: 10, days: 'Mon-Fri' },   // 14:10 since 2026-10-14 (was 14:20)
   { name: 'Brook Taverner', h: 14, m: 30, days: 'Mon-Fri' },   // live 14:30 since 2026-10-14 (was a gated 09:20)
+  { name: 'Engel', h: 14, m: 40, days: 'Mon-Fri' },   // b2b.f-engel.com, live from 2026-10-22 (owner)
   { name: 'AS Apparel', h: 14, m: 50, days: 'Mon-Fri' },   // 14:50 since 2026-10-14 (was 14:40)
   { name: 'Portwest', h: 15, m: 0, days: 'Mon-Fri' },
   { name: 'Hellberg', h: 15, m: 20, days: 'Mon-Fri' },   // emailed PO, split from Snickers 2026-09-16 — runs on Purchasing-Automation

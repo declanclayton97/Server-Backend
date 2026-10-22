@@ -251,6 +251,10 @@ export const SUPPLIERS = {
   // is their code (PM4008/008). portal.rockfall.com via Alt-Items /api/rockfall-order. No PCF_ROCKFALLPO
   // exists, so this shares PCF_STOCKPO like Scruffs, V12, Leo and Brook Taverner (2026-10-14).
   ROCKFALL: { contactId: 38733, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 38733, brandIds: [249], detect: (n) => /rock\s*fall|\bproman\b/i.test(n || '') },
+  // Engel (contact 83093 — NOT "engelbert strauss Ltd" 23986, which \bengel\b cannot match). Product
+  // names start "Engel"; our SKU IS their sku (2366-317-79-42.5). b2b.f-engel.com via Alt-Items
+  // /api/engel-order. No PCF_ENGELPO exists, so this shares PCF_STOCKPO (owner, 2026-10-21).
+  ENGEL: { contactId: 83093, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 83093, detect: (n) => /\bengel\b/i.test(n || '') },
   // portalNeverRaises: the portal is net EXCEPT markdown/outlet lines, which show the ORIGINAL
   // wholesale and take the markdown at invoice (104670 outlet: portal £85.50, our cost £42.75 = 50%
   // off — user, 2026-10-02). So a portal price ABOVE our cost is the markdown, never a correction.
@@ -378,6 +382,7 @@ const _SUPPLIER_NAME_HINTS = {
   'BROOK TAVERNER': /brook\s*taverner/i,
   ROCKFALL: /rock\s*fall/i,
   RALAWISE: /ralawise/i,
+  ENGEL: /\bengel\b/i,
 };
 export function tagFailsToMatch(rawTag) {
   const out = [];
@@ -665,6 +670,9 @@ const TAG_ALIASES = {
   'ROCK FALL': 'ROCKFALL',
   'ROCK FALL UK': 'ROCKFALL',
   'ROCKFALL UK': 'ROCKFALL',
+  'F. ENGEL': 'ENGEL',
+  'F ENGEL': 'ENGEL',
+  'ENGEL WORKWEAR': 'ENGEL',
 };
 // ── ALTERNATIVE SUPPLIERS INSIDE ONE TAG ─────────────────────────────────────
 // The two separators mean DIFFERENT things, and only "/" was ever handled:

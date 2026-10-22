@@ -2749,6 +2749,94 @@ async function placeRockfallOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   return { poId, orderNo, steps };
 }
 
+// ── Engel placement chain (b2b.f-engel.com, Vue SPA over an Azure API) ──────
+// Alt-Items /api/engel-order: refuse if Engel already hold an order carrying our PO number →
+// empty basket → add each line (our SKU IS their sku, 2366-317-79-42.5) → read the basket back and
+// compare every SKU and quantity → the account's one dealer address (LS26 8LG, checked) → confirm
+// on account with our PO number as reference AND requisition number. A card-payment answer is
+// refused, never paid. Freight £15, free from £200 goods (their freightinfo, 21 Oct 2026); it goes
+// on the PO as a row, the way staff added SHIP1 £15 by hand.
+// Owner, 2026-10-21: £100 threshold or 3 working days, 14:40, no padding (a low-volume supplier),
+// shares PCF_STOCKPO. No env gate. Until the first live order the Confirmation answer is unseen —
+// the WEB number is read from confirm's orderNumber, with the order search as the fallback.
+const ENGEL_SUPPLIER_CONTACT = 83093;
+
+async function placeEngelOrder(pool, altItemsUrl, { live = true } = {}) {
+  const steps = {};
+  let po;
+  try { po = await createPo({ supplierKey: 'ENGEL', execute: live, padToThreshold: 0, logPool: pool }); }
+  catch (e) { throw createPoErr(e); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  const soIds = [...new Set((po.soLines || []).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds, skippedBundles: po.skippedBundles || [] };
+
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name, productId: l.productId }));
+  if (!orderLines.length) throw stepErr('cart', 'no orderable Engel lines');
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  let r;
+  try {
+    r = await jfetch('checkout', `${altItemsUrl}/api/engel-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lines: orderLines.map((l) => ({ sku: l.sku, qty: l.qty })), reference: String(poId), execute: live }),
+    });
+  } catch (e) {
+    // The confirm may have gone through even though we lost the answer. Never retry — say so.
+    throw stepErr('checkout', `Engel order call failed: ${e.message} — check b2b.f-engel.com orders for reference ${poId} before re-running PO#${poId}.`, { poId });
+  }
+  steps.engel = { cart: r.steps && r.steps.cart, address: r.steps && r.steps.address, freight: r.steps && r.steps.freight, confirm: r.steps && r.steps.confirm };
+  if (r.rehearsed) throw stepErr('checkout', `Engel rehearsed only (the call was not made with execute:true) — PO#${poId} built, nothing sent.`, { poId, engel: steps.engel });
+  if (r.needsHuman) throw stepErr(r.step || 'checkout', `${r.error} — PO#${poId} left for review. DO NOT re-run Engel until this is resolved in the portal.`, { poId, needsHuman: true, orderNo: r.orderNo || null, engel: steps.engel });
+  if (!r.ok && !r.alreadyPlaced) {
+    const cart = (r.steps && r.steps.cart) || {};
+    throw stepErr(cart.missing && cart.missing.length ? 'cart' : (r.step || 'checkout'), `Engel did not confirm the order: ${r.error || 'no order number returned'}`, { poId, engel: r.steps });
+  }
+  const orderNo = String(r.orderNo).trim();
+  steps.checkout = { ok: true, orderNo, alreadyPlaced: !!r.alreadyPlaced };
+
+  // PRICE CHECK: their basket goods total (ex VAT) against the PO. Diagnostic only — already placed.
+  const goods = r.steps && r.steps.goodsExVat;
+  try {
+    const poNet = +[...(po.soLines || []), ...(po.lowLines || [])].reduce((a, l) => a + (Number(l.cost) || 0) * (Number(l.qty) || 0), 0).toFixed(2);
+    if (goods != null) {
+      const gap = +(goods - poNet).toFixed(2);
+      steps.priceCheck = { theirs: goods, poNet, gap };
+      if (Math.abs(gap) >= 0.01) {
+        const offenders = ((r.steps.cart && r.steps.cart.lines) || []).map((bl) => {
+          // Engel's basket carries THEIR sku (2369-317-3-88 for our 2369-317-3-34.5); map it back.
+          const res = ((r.steps.resolve) || []).find((x) => String(x.engelSku || '').toUpperCase() === String(bl.sku || '').toUpperCase());
+          const ours = orderLines.find((l) => l.sku === String((res && res.sku) || bl.sku || '').toUpperCase());
+          return ours && Math.abs((Number(ours.cost) || 0) - (Number(bl.unitPrice) || 0)) >= 0.01 ? `${ours.sku} ours £${ours.cost} vs theirs £${bl.unitPrice}` : null;
+        }).filter(Boolean);
+        await logPriceCheck(pool, steps, {
+          supplierKey: 'ENGEL', poId, changes: [],
+          message: `Prices don't match: Engel basket £${goods.toFixed(2)} vs our PO net £${poNet.toFixed(2)} (diff £${gap}).${offenders.length ? ` Offending line(s): ${offenders.join('; ')}.` : ''} A Brightpearl cost price (list 20) may need adjusting. Order ${orderNo} still placed.`,
+          context: { poId, orderNo, theirs: goods, poNet, gap },
+        });
+      }
+    }
+  } catch (e) { steps.priceCheck = { skipped: e.message }; }
+  // Freight as Engel quoted it for THIS basket (their freightinfo reads the live basket).
+  const freight = r.steps && r.steps.freight;
+  const carriage = freight && Number(freight.amountUntilFreeFreight) > 0 ? Number(freight.currentFreightCost) || 0 : 0;
+  if (live && !r.alreadyPlaced && carriage > 0) {
+    try { steps.carriage = await bp.addPoMiscRowLive({ poId, name: 'Carriage (Engel, under £200 ex-VAT)', net: carriage, qty: 1, execute: true }); }
+    catch (e) { steps.carriage = { error: e.message }; }
+  }
+
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, orderNo); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Engel — order ${orderNo}. Reference-set failed: ${e.message}`, ENGEL_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: orderNo, refWritten, status: 7 };
+
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'ENGEL', poId, noteContactId: ENGEL_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  return { poId, orderNo, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -4497,6 +4585,7 @@ const SCHEDULED_SUPPLIERS = {
   // Rockfall (contact 38733): portal.rockfall.com via Alt-Items /api/rockfall-order. Free delivery over
   // £200 ex VAT, else Express £7.95 (Dec, 2026-10-14). Weekdays 10:20, between Snickers and Fristads.
   ROCKFALL: { supplierKey: 'ROCKFALL', stateId: 26, placeFn: placeRockfallOrder, threshold: Number(process.env.ROCKFALL_FREESHIP_THRESHOLD || 200) },
+  ENGEL: { supplierKey: 'ENGEL', stateId: 27, placeFn: placeEngelOrder, noPad: true, threshold: 100 }, // b2b.f-engel.com; £100 or 3 working days, no padding (owner, 2026-10-21)
   'BROOK TAVERNER': { supplierKey: 'BROOK TAVERNER', stateId: 25, placeFn: placeBrookTavernerOrder, noPad: true, threshold: Number(process.env.BROOKTAVERNER_FREESHIP_THRESHOLD || 100) },
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
@@ -4532,7 +4621,7 @@ const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
   SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811, BUCKLER: 8981,
-  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205, 'BROOK TAVERNER': 5499, ROCKFALL: 38733,
+  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205, 'BROOK TAVERNER': 5499, ROCKFALL: 38733, ENGEL: 83093,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
@@ -4550,6 +4639,7 @@ const WINDOW_DISPLAY = {
   SCRUFFS: { at: '14:00' },
   'PERFORMANCE BRANDS': { at: '14:10' },
   'BROOK TAVERNER': { at: '14:30' },
+  ENGEL: { at: '14:40' },
   'AS APPAREL': { at: '14:50' },
   PORTWEST: { at: '15:00' },
   UNEEK: { at: '15:30' },
