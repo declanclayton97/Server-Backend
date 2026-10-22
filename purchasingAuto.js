@@ -255,6 +255,9 @@ export const SUPPLIERS = {
   // names start "Engel"; our SKU IS their sku (2366-317-79-42.5). b2b.f-engel.com via Alt-Items
   // /api/engel-order. No PCF_ENGELPO exists, so this shares PCF_STOCKPO (owner, 2026-10-21).
   ENGEL: { contactId: 83093, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 83093, detect: (n) => /\bengel\b/i.test(n || '') },
+  // Supertouch (owner, 2026-10-22): supertouch.com trade portal via the worker (suppliers/supertouch.js).
+  // Our SKU is their code (SYH-751D2, SHV-40R893, J8083). No dedicated PO field, so PCF_STOCKPO.
+  SUPERTOUCH: { contactId: 342, costList: 20, poField: 'PCF_STOCKPO', lowInvSupplierId: 342, detect: (n) => /super\s*touch/i.test(n || '') },
   // portalNeverRaises: the portal is net EXCEPT markdown/outlet lines, which show the ORIGINAL
   // wholesale and take the markdown at invoice (104670 outlet: portal £85.50, our cost £42.75 = 50%
   // off — user, 2026-10-02). So a portal price ABOVE our cost is the markdown, never a correction.
@@ -383,6 +386,7 @@ const _SUPPLIER_NAME_HINTS = {
   ROCKFALL: /rock\s*fall/i,
   RALAWISE: /ralawise/i,
   ENGEL: /\bengel\b/i,
+  SUPERTOUCH: /super\s*touch/i,
 };
 export function tagFailsToMatch(rawTag) {
   const out = [];
@@ -673,6 +677,7 @@ const TAG_ALIASES = {
   'F. ENGEL': 'ENGEL',
   'F ENGEL': 'ENGEL',
   'ENGEL WORKWEAR': 'ENGEL',
+  'SUPER TOUCH': 'SUPERTOUCH',
 };
 // ── ALTERNATIVE SUPPLIERS INSIDE ONE TAG ─────────────────────────────────────
 // The two separators mean DIFFERENT things, and only "/" was ever handled:

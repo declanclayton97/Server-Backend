@@ -2837,6 +2837,91 @@ async function placeEngelOrder(pool, altItemsUrl, { live = true } = {}) {
   return { poId, orderNo, steps };
 }
 
+// ── Supertouch (supertouch.com, Shopblocks) ──────────────────────────────────
+// Supertouch told the owner on 2026-10-22 that ordering through a headless browser is fine (they
+// do not take emailed POs). The worker module suppliers/supertouch.js drives it: Quick Order (their
+// own exact-SKU + stock check), checkout typed to 144-146 Aberford Road (the saved address on the
+// account is our OLD one), Standard Delivery £7.50, credit account, PO number in its own field.
+// Rules (owner, 2026-10-22): £200 or 3 working days; carriage £7.50 below £200.
+//
+// OUT-OF-STOCK LINES. Supertouch's quick order refuses a line it has no stock for (H139 32R/34R were
+// 0 until Jan 2027 on day one). A REHEARSAL first finds those lines; they are kept OFF the PO (a
+// row left on a placed PO counts as on order) and reported, and the rest is ordered.
+const SUPERTOUCH_SUPPLIER_CONTACT = 342;
+const SUPERTOUCH_CARRIAGE = { under: 200, net: 7.5 };
+async function placeSupertouchOrder(pool, altItemsUrl, { live = true } = {}) {
+  const steps = {};
+  // 1. Preflight: value the demand and let Supertouch's own quick order say which lines it will take.
+  let preview;
+  try { preview = await createPo({ supplierKey: 'SUPERTOUCH', execute: false, logPool: pool }); }
+  catch (e) { throw stepErr('preflight', `couldn't value the demand: ${e.message}`); }
+  const preLines = mergePoLinesBySku(preview).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty }));
+  if (!preLines.length) throw stepErr('cart', 'no orderable Supertouch lines');
+  const rehearsal = await workerPlaceOrder({ supplier: 'SUPERTOUCH', ref: 'PREFLIGHT', lines: preLines, execute: false, opts: { checkoutProbe: true, skipInvalid: true } });
+  const sd = (rehearsal && rehearsal.stageDetail) || {};
+  const skipped = ((sd.add && sd.add.skipped) || []).map((x) => ({ sku: String(x.code).toUpperCase(), reason: x.reason }));
+  steps.preflight = { lines: preLines.length, skipped, basket: sd.basket ? { items: sd.basket.items, subtotal: sd.basket.subtotal } : null, emptied: rehearsal && rehearsal.emptied };
+  if (!rehearsal || !rehearsal.ok) throw stepErr('preflight', `Supertouch rehearsal failed: ${(rehearsal && (rehearsal.error || rehearsal.fillError)) || 'no answer'} — PO NOT created.`, { rehearsal: steps.preflight });
+  if (rehearsal.emptied && rehearsal.emptied.empty === false) throw stepErr('preflight', 'Supertouch rehearsal could not empty its basket — PO NOT created. Check the Supertouch basket by hand.', { rehearsal: steps.preflight });
+  if (sd.refused === 'basket-not-empty' || (sd.add && sd.add.refused === 'basket-not-empty')) throw stepErr('preflight', 'The Supertouch basket already holds items (someone mid-order?) — PO NOT created, basket left alone.');
+  const excl = new Set(skipped.map((x) => x.sku));
+  if (excl.size && excl.size >= preLines.length) throw stepErr('cart', `Supertouch will not take any of today's lines (${[...excl].join(', ')}) — out of stock or not found. Nothing ordered.`, { skipped });
+
+  // 2. The PO, without the lines Supertouch cannot sell today.
+  let po;
+  try { po = await createPo({ supplierKey: 'SUPERTOUCH', execute: live, padToThreshold: 0, logPool: pool }); }
+  catch (e) { throw createPoErr(e); }
+  if (!po.created) throw stepErr('create-po', `no PO created: ${po.reason || 'unknown'}` + (po.unresolvedSkus && po.unresolvedSkus.length ? ` — item codes not found in Brightpearl: ${po.unresolvedSkus.join(', ')}` : ''));
+  const poId = po.poId;
+  if (excl.size) {
+    steps.excluded = [];
+    for (const sku of excl) {
+      try { const r = await bp.removePoRowLive({ poId, sku, execute: live }); steps.excluded.push({ sku, removed: !!(r && r.done) }); }
+      catch (e) { steps.excluded.push({ sku, error: e.message }); }
+    }
+  }
+  const soIds = [...new Set((po.soLines || []).filter((l) => !excl.has(String(l.sku).toUpperCase())).map((l) => l.order).filter(Boolean))];
+  const linesByOrder = {};
+  for (const l of (po.soLines || [])) { if (l.order && !excl.has(String(l.sku).toUpperCase())) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+  steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name })).filter((l) => !excl.has(l.sku));
+  if (!orderLines.length) throw stepErr('cart', `PO#${poId}: nothing left to order after removing ${[...excl].join(', ')}`, { poId });
+  steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
+
+  // 3. Place: one worker job, one click. Never retried here.
+  let j;
+  try { j = await workerPlaceOrder({ supplier: 'SUPERTOUCH', ref: poId, lines: orderLines.map((l) => ({ sku: l.sku, qty: l.qty })), execute: live }); }
+  catch (e) { throw stepErr('checkout', `Supertouch worker call failed: ${e.message} — check supertouch.com Sales Orders for Your Ref ${poId} before re-running PO#${poId}.`, { poId, needsHuman: true }); }
+  steps.worker = { jobId: j.jobId, ok: j.ok, placed: j.placed, orderRef: j.orderRef || null, thanked: j.thanked, refused: j.refused || null, problems: j.problems || null, after: j.after ? { url: j.after.url } : null };
+  if (!live) throw stepErr('checkout', `Supertouch rehearsed only — PO#${poId} built, nothing sent.`, { poId, worker: steps.worker });
+  if (!j.ok && /not ready to place/i.test(String(j.error || ''))) throw stepErr('cart', `Supertouch basket did not match PO#${poId} (expected ${steps.lines.units} units) — nothing ordered, basket emptied. PO#${poId} left Pending.`, { poId, worker: { ...steps.worker, staged: j.staged || null } });
+  if (j.refused) throw stepErr('checkout', `Supertouch checkout refused before ordering (${j.refused}${j.problems ? ': ' + j.problems.join('; ') : ''}) — nothing ordered, basket emptied. PO#${poId} left Pending.`, { poId, worker: steps.worker });
+  if (!j.placed) throw stepErr('checkout', `Supertouch did not show an order confirmation for PO#${poId} — it MAY have been placed. Check supertouch.com Sales Orders for Your Ref ${poId}. DO NOT re-run until resolved.`, { poId, needsHuman: true, worker: steps.worker });
+  const orderNo = String(j.orderRef || `ST-${poId}`).trim();
+  steps.checkout = { ok: true, orderNo };
+
+  // 4. Carriage, status, reference, finalise.
+  const goods = +orderLines.reduce((a, l) => a + (Number(l.cost) || 0) * (Number(l.qty) || 0), 0).toFixed(2);
+  if (goods < SUPERTOUCH_CARRIAGE.under) {
+    try { steps.carriage = await bp.addPoMiscRowLive({ poId, name: `Carriage (Supertouch, under £${SUPERTOUCH_CARRIAGE.under} ex-VAT)`, net: SUPERTOUCH_CARRIAGE.net, qty: 1, execute: true }); }
+    catch (e) { steps.carriage = { error: e.message }; }
+  }
+  await bp.setOrderStatusLive(poId, bp.PLACED_WITH_SUPPLIER_STATUS);
+  let refWritten = false;
+  try { await bp.setOrderReferenceLive(poId, orderNo); refWritten = true; }
+  catch (e) { steps.linkWarn = `reference-set failed (non-fatal): ${e.message}`; await bp.addOrderNoteLive(poId, `Placed with Supertouch - order ${orderNo}. Reference-set failed: ${e.message}`, SUPERTOUCH_SUPPLIER_CONTACT).catch(() => {}); }
+  steps.link = { reference: orderNo, refWritten, status: 7 };
+  if (soIds.length) { try { steps.finalize = await bp.finalizeSupplierTagsLive({ orderIds: soIds, supplierKey: 'SUPERTOUCH', poId, noteContactId: SUPERTOUCH_SUPPLIER_CONTACT, setOrderedStatus: true, linesByOrder, execute: live }); } catch (e) { throw stepErr('finalize', `order placed + PO linked, but finalising SOs failed: ${e.message}`); } }
+  if (skipped.length) {
+    await logPurchasingError(pool, {
+      supplier: 'SUPERTOUCH', step: 'out-of-stock', severity: 'review',
+      message: `Supertouch would not take ${skipped.length} line(s) today, so they were left OFF PO#${poId} and are still tagged SUPERTOUCH:\n` + skipped.map((x) => `      ${x.sku} - ${x.reason}`).join('\n'),
+      context: { poId, skipped },
+    }).catch(() => {});
+  }
+  return { poId, orderNo, steps };
+}
+
 // ── Snickers placement chain (Hultafors partner portal) ──────────────────────
 // Placed by the headless worker (portal-order-worker suppliers/hultafors.js): CSV basket
 // import → the checkout wizard (#btnCheckout → #btnDelivery → #btnPayment → #btnSummary →
@@ -4586,6 +4671,7 @@ const SCHEDULED_SUPPLIERS = {
   // £200 ex VAT, else Express £7.95 (Dec, 2026-10-14). Weekdays 10:20, between Snickers and Fristads.
   ROCKFALL: { supplierKey: 'ROCKFALL', stateId: 26, placeFn: placeRockfallOrder, threshold: Number(process.env.ROCKFALL_FREESHIP_THRESHOLD || 200) },
   ENGEL: { supplierKey: 'ENGEL', stateId: 27, placeFn: placeEngelOrder, noPad: true, threshold: 100 }, // b2b.f-engel.com; £100 or 3 working days, no padding (owner, 2026-10-21)
+  SUPERTOUCH: { supplierKey: 'SUPERTOUCH', stateId: 28, placeFn: placeSupertouchOrder, noPad: true, threshold: 200 }, // supertouch.com via the worker; £200 or 3 working days, no padding, £7.50 carriage below £200 (owner, 2026-10-22)
   'BROOK TAVERNER': { supplierKey: 'BROOK TAVERNER', stateId: 25, placeFn: placeBrookTavernerOrder, noPad: true, threshold: Number(process.env.BROOKTAVERNER_FREESHIP_THRESHOLD || 100) },
   CHADWICK: { supplierKey: 'CHADWICK', stateId: 14, placeFn: placeChadwickOrder, threshold: Number(process.env.CHADWICK_FREESHIP_THRESHOLD || 300) }, // portal.chadwicktextiles.co.uk (wcp-ordupload then wcp-cartorder); free carriage @ £300 ex-VAT (user, 2026-08-21). weekdays 12:40 UK — the slot between Castle (12:00) and Sterling (13:00), after V12 at 12:20
 };
@@ -4621,7 +4707,7 @@ const SUPPLIER_CONTACT = {
   FRISTADS: 37419, CARHARTT: 65173, 'HELLY HANSEN': 214, SNICKERS: 331, UNEEK: 322,
   CASTLE: 332, STERLING: 341, PORTWEST: 298, PENCARRIE: 204, BLAKLADER: 323,
   SCRUFFS: 130243, 'PERFORMANCE BRANDS': 11611, MASCOT: 334, CHADWICK: 42485, V12: 92811, BUCKLER: 8981,
-  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205, 'BROOK TAVERNER': 5499, ROCKFALL: 38733, ENGEL: 83093,
+  BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205, 'BROOK TAVERNER': 5499, ROCKFALL: 38733, ENGEL: 83093, SUPERTOUCH: 342,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
 const WINDOW_DISPLAY = {
@@ -4640,6 +4726,7 @@ const WINDOW_DISPLAY = {
   'PERFORMANCE BRANDS': { at: '13:15' },
   'BROOK TAVERNER': { at: '13:30' },
   ENGEL: { at: '14:45' },
+  SUPERTOUCH: { at: '14:00' },
   'AS APPAREL': { at: '15:00' },
   PORTWEST: { at: '15:15' },
   UNEEK: { at: '15:45' },
@@ -5736,4 +5823,21 @@ async function sendReportEmail(report) {
          ${!p && report.workingDaysWaited ? `<li>Working days waited: ${report.workingDaysWaited} of ${MAX_WAIT_WORKING_DAYS}</li>` : ''}
        </ul>`;
   await t.sendMail({ from: '"Tuff Purchasing" <noreply@tuffshop.co.uk>', to: NOTIFY_TO, subject, html, text: subject + '\n\n' + JSON.stringify(report, null, 2) });
+}
+
+// Set a lane's wait-day count by hand (owner's call), e.g. a new lane whose demand was already
+// waiting before it existed: Supertouch's hoodies were left on 21 Oct, so 22 Oct is day 2 and the
+// 23 Oct run must treat itself as day 3 (owner, 2026-10-22). Touches working_days_waited ONLY —
+// never last_run_date, so it can never stop today's or tomorrow's run from happening.
+export async function setWaitDays(pool, { supplier, days, execute = false } = {}) {
+  const cfg = SCHEDULED_SUPPLIERS[String(supplier || '').toUpperCase()];
+  if (!cfg) throw new Error(`unknown scheduled supplier "${supplier}"`);
+  const n = Number(days);
+  if (!Number.isInteger(n) || n < 0 || n >= MAX_WAIT_WORKING_DAYS) throw new Error(`days must be an integer 0..${MAX_WAIT_WORKING_DAYS - 1}`);
+  await ensureTable(pool);
+  const before = await getState(pool, cfg.stateId);
+  if (!execute) return { dryRun: true, supplier: cfg.supplierKey, stateId: cfg.stateId, from: before.working_days_waited, to: n };
+  await pool.query('UPDATE fristads_purchase_schedule SET working_days_waited=$1, updated_at=now() WHERE id=$2', [n, cfg.stateId]);
+  const after = await getState(pool, cfg.stateId);
+  return { supplier: cfg.supplierKey, stateId: cfg.stateId, from: before.working_days_waited, to: after.working_days_waited, lastRunDate: after.last_run_date };
 }
