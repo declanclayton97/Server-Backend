@@ -14193,11 +14193,17 @@ app.get("/api/proof-gate/email", async (req, res) => {
     // Flagged ones don't count: a flag means "this needs a proof" and it's on the Proof Required
     // list instead (Dec, 21 Oct).
     const n = await inboxUnreadDeep(box);
-    let flaggedUnread = 0;
+    let flaggedUnread = 0, flagged = [];
     try {
-      flaggedUnread = (await flaggedMessages(box)).filter((m) => !m.isRead && n.folderIds.has(m.folderId)).length;
-    } catch (e) { console.error("[proof-gate] flagged lookup failed:", e.message); }
-    res.json({ ok: true, unread: Math.max(0, n.unread - flaggedUnread), flaggedUnread, folders: n.folders });
+      const fm = await flaggedMessages(box);
+      flaggedUnread = fm.filter((m) => !m.isRead && n.folderIds.has(m.folderId)).length;
+      // What the Proof Required list sees: each flag and the order number it found (null = none).
+      flagged = fm.map((m) => {
+        const hit = /\b(?:SO\s*-?\s*)?([45]\d{5})\b/i.exec(`${m.subject} ${m.preview}`);
+        return { subject: m.subject.slice(0, 80), receivedAt: m.receivedAt, read: m.isRead, order: hit ? Number(hit[1]) : null };
+      });
+    } catch (e) { console.error("[proof-gate] flagged lookup failed:", e.message); flagged = { error: e.message }; }
+    res.json({ ok: true, unread: Math.max(0, n.unread - flaggedUnread), flaggedUnread, folders: n.folders, flagged });
   } catch (e) {
     console.error("[proof-gate] inbox count failed:", e.message);
     res.json({ ok: false, error: e.status === 403 || e.status === 404 ? "mailbox access not granted" : e.message });
