@@ -3150,6 +3150,38 @@ async function writeHealLog(pool, rows) {
       [r.supplier, r.poId, r.productId, r.sku, r.listId, r.was, r.now, r.action, r.reason || null]);
   }
 }
+// Retired cost lists, cleared one product at a time as the healer touches it (Dec, 2026-10-20).
+// Snickers' old list 10 "Cost (Snickers)": the 1,555 products where it differed from list 20 were
+// blanked 18 Oct; the ~17,800 where it equals list 20 are NOT bulk-cleared — each one's list-10
+// price goes when the healer next rewrites its list-20 cost. The API cannot blank a price-list
+// entry (PRDC-031/032), so this only QUEUES the product; list10Clear.js (PA only) drains the queue
+// through the worker's bppriceclear module, out of hours. Every old value is backed up in
+// "Snickers list10 BACKUP 15-10-26.csv".
+export const CLEAR_ON_HEAL = { SNICKERS: { listId: 10, listCode: 'CostSnickers' } };
+let _clearQueueReady = false;
+export async function ensureListClearQueue(pool) {
+  if (_clearQueueReady || !pool) return;
+  await pool.query(`CREATE TABLE IF NOT EXISTS price_list_clear_queue (
+    product_id INTEGER NOT NULL, list_id INTEGER NOT NULL, list_code TEXT NOT NULL, supplier TEXT, sku TEXT,
+    reason TEXT, queued_at TIMESTAMPTZ DEFAULT now(), cleared_at TIMESTAMPTZ, outcome TEXT,
+    attempts INTEGER DEFAULT 0, last_error TEXT, last_try_at TIMESTAMPTZ,
+    PRIMARY KEY (product_id, list_id))`);
+  _clearQueueReady = true;
+}
+// Already-cleared products are left alone: a blank list stays blank (setCostLive only re-writes
+// lists that still hold a price), so there is nothing to queue twice.
+export async function queueListClear(pool, { supplier, listId, listCode, items, reason }) {
+  await ensureListClearQueue(pool);
+  let queued = 0;
+  for (const it of items || []) {
+    if (!it.productId) continue;
+    const r = await pool.query(`INSERT INTO price_list_clear_queue (product_id, list_id, list_code, supplier, sku, reason)
+      VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (product_id, list_id) DO NOTHING`,
+      [Number(it.productId), listId, listCode, supplier, it.sku || null, reason || null]);
+    queued += r.rowCount || 0;
+  }
+  return { queued };
+}
 // Write one price list on a product, preserving every other populated list (same shape as the
 // /product-price-live route). Cost only — retail is never in `overrides`.
 async function setCostLive(productId, priceListId, value) {
@@ -3231,6 +3263,9 @@ export async function healSupplierCosts({ supplierKey, poId, changes = [], pool 
     logRows.push({ ...rec, action: execute ? 'applied' : 'would-apply', reason: null });
   }
   if (execute) await writeHealLog(pool, logRows).catch(() => {});
+  if (execute && pool && CLEAR_ON_HEAL[key] && applied.length) {
+    await queueListClear(pool, { supplier: key, ...CLEAR_ON_HEAL[key], items: applied.map((a) => ({ productId: a.productId, sku: a.sku })), reason: `cost healed on PO#${poId}` }).catch(() => {});
+  }
   return { supplier: key, listId: reg.costList, dryRun: !execute, applied, escalated, skipped };
 }
 
