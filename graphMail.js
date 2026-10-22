@@ -100,9 +100,13 @@ export async function inboxUnreadDeep(address) {
 
 // Flagged messages anywhere in a mailbox (Outlook's "flag as to do"), newest first:
 // sender, subject, a short preview and read state - what the proof to-do list needs.
-export async function flaggedMessages(address, top = 50) {
+// Newest first and only the last `days`: Harry's mailbox has years of old flags, and an unordered
+// $top=50 handed back 2023's instead of today's. Graph wants the $orderby field first in the $filter.
+export async function flaggedMessages(address, top = 50, days = 30) {
+  const since = new Date(Date.now() - days * 86400000).toISOString();
   const q = new URLSearchParams({
-    $filter: "flag/flagStatus eq 'flagged'",
+    $filter: `receivedDateTime ge ${since} and flag/flagStatus eq 'flagged'`,
+    $orderby: "receivedDateTime desc",
     $select: "id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId,webLink",
     $top: String(top),
   });
