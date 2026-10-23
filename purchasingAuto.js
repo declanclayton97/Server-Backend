@@ -290,7 +290,8 @@ export const SUPPLIERS = {
   // helmet was missed by PO 497064 for exactly this reason.
   BEESWIFT: { contactId: 326, costList: 20, poField: 'PCF_BEESPO', lowInvSupplierId: 326, brandIds: [103], lowInvOwnsAll: true, listedSupplierCounts: true,
     excludeIf: (n, s) => /new\s*balance/i.test(n || '') || /^NWB0/i.test(s || ''),
-    claimProductIds: [53344, 53345, 53346, 53347, 53348, 53349, 53350, 53351, 53352, 53353, 53354, 53355, 53356, 53357, 53358, 53359, 53360, 53361, 56975, 56976],
+    claimProductIds: [53344, 53345, 53346, 53347, 53348, 53349, 53350, 53351, 53352, 53353, 53354, 53355, 53356, 53357, 53358, 53359, 53360, 53361, 56975, 56976,
+      60936], // 60936 = Centurion Reflex hard hat 9019129, bought via BeeSwift as CNS12BHVOA (owner, 2026-10-23)
     detect: (n) => /bee\s*swift|\bb[-\s]?brand\b|\bb[-\s]?seen\b|\bclimax\b|\bclick\b/i.test(n || '') },
   CASTLE:       { contactId: 332,   costList: 20, poField: 'PCF_CASTLEPO', lowInvSupplierId: 332, detect: (n) => /tuffstuff|makita|(?<![-\w])fort\b/i.test(n || '') && !/\bcarhartt\b/i.test(n || '') }, // DeWalt moved to Sterling (Castle no longer sells it). NOT Carhartt's "Fort" shirt (107012) nor Base "T-Fort" boots (SO 489391, 2026-09-25)
   // Sterling Safetywear — brands Apache / City Knights / DeWalt. ⚠ DeWalt ALSO comes
