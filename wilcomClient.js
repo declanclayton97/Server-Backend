@@ -135,9 +135,15 @@ export async function convertDesignToPng(designBuffer, opts = {}) {
     }
   }
   if (!data) {
-    // Keep Wilcom's own words: a bare "status code 503" says nothing about why.
+    // Say it in words the staff can act on. Wilcom's 503 is an HTML error page from
+    // their own server (26 Oct outage) - their side is down, not our file or login.
+    const status = lastErr && lastErr.response && lastErr.response.status;
+    if ([502, 503, 504].includes(status)) {
+      throw new Error(`Wilcom's conversion service is down at the moment (their side, error ${status}). The EMB is kept - try again later or attach a PNG by hand.`);
+    }
     const body = lastErr && lastErr.response && lastErr.response.data;
-    const said = body ? (typeof body === "string" ? body : JSON.stringify(body)).slice(0, 300) : "";
+    const raw = body ? (typeof body === "string" ? body : JSON.stringify(body)) : "";
+    const said = raw.replace(/<(script|style|title)[\s\S]*?<\/\1>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
     throw new Error(`Wilcom transform failed: ${lastErr && lastErr.message}${said ? ` - Wilcom said: ${said}` : ""}`);
   }
 
