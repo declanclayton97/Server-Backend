@@ -4726,7 +4726,7 @@ const WINDOW_DISPLAY = {
   'PERFORMANCE BRANDS': { at: '13:15' },
   'BROOK TAVERNER': { at: '13:30' },
   ENGEL: { at: '14:45' },
-  SUPERTOUCH: { at: '14:00' },
+  SUPERTOUCH: { at: '13:45' },
   'AS APPAREL': { at: '15:00' },
   PORTWEST: { at: '15:15' },
   UNEEK: { at: '15:45' },

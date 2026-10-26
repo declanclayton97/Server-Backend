@@ -67,7 +67,7 @@ const POLLERS = [
   { name: 'Scruffs', h: 13, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Performance Brands', h: 13, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Brook Taverner', h: 13, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
-  { name: 'Supertouch', h: 14, m: 0, days: 'Mon-Fri' },   // supertouch.com via the worker, from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Supertouch', h: 13, m: 45, days: 'Mon-Fri' },   // supertouch.com via the worker, from 2026-10-23 (owner, 2026-10-22)
   { name: 'Engel', h: 14, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'AS Apparel', h: 15, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Portwest', h: 15, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
