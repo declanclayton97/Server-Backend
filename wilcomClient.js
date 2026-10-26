@@ -134,7 +134,12 @@ export async function convertDesignToPng(designBuffer, opts = {}) {
       await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
     }
   }
-  if (!data) throw new Error(`Wilcom transform failed: ${lastErr && lastErr.message}`);
+  if (!data) {
+    // Keep Wilcom's own words: a bare "status code 503" says nothing about why.
+    const body = lastErr && lastErr.response && lastErr.response.data;
+    const said = body ? (typeof body === "string" ? body : JSON.stringify(body)).slice(0, 300) : "";
+    throw new Error(`Wilcom transform failed: ${lastErr && lastErr.message}${said ? ` - Wilcom said: ${said}` : ""}`);
+  }
 
   if (!data.ResultFileBase64) {
     throw new Error("Wilcom transform returned no image");
