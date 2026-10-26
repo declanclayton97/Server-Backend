@@ -1470,9 +1470,26 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
   // human decided this supplier is needed; contributing no rows means we disagree with them, and
   // that disagreement should be argued out loud rather than filed.
   const tagFlags = [];
+  // ONE batched read for every order in the demand status, custom fields included. This used to
+  // be a /custom-field GET per order (that sub-resource is single-id only), then an /order GET
+  // for each tagged one: ~2 x N calls a slot, every slot, run twice (value check + placement).
+  // With 216 orders that held the account's whole 200/min API allowance for minutes at a time,
+  // and every app on the account was refused (09:42, 09:45, 12:00-12:18 on 26 Oct 2026). The
+  // order GET takes an ascending id-set and returns customFields when asked
+  // (includeOptional=customFields) - same values as /custom-field, checked order by order.
+  // Results come back in any order, so they are keyed by id.
+  const orderById = new Map();
+  for (const part of chunk([...ids].sort((a, b) => a - b), 100)) {
+    const got = (await liveGet(`/order-service/order/${part.join(',')}?includeOptional=customFields,nullCustomFields`)) || [];
+    for (const o of (Array.isArray(got) ? got : [got])) if (o && o.id != null) orderById.set(String(o.id), o);
+    await pause(250);
+  }
   for (const id of ids) {
-    const cf = (await liveGet(`/order-service/order/${id}/custom-field`)) || {};
-    await pause(120);
+    // An order that left the demand status between the search and the batch read isn't returned;
+    // it is no longer demand, so it is skipped exactly as an untagged one is.
+    const order = orderById.get(String(id));
+    if (!order) continue;
+    const cf = order.customFields || {};
     const tag = cf.PCF_SUPPLIER;
     if (!tag || isLeaveNote(tag)) continue;
     if (!tagsOf(tag).some((t) => groupHasSupplier(t, supplierKey))) continue;
@@ -1484,8 +1501,6 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
     // finalise step (it clears the tag + moves the SO out of the demand status), NOT the stamp and
     // NOT `onOrder` — see the toOrder calc below for why product-level onOrder can't be trusted as
     // "already covered". Runs are sequential (lock), so there's no stamp-then-regather race.
-    const order = (await liveGet(`/order-service/order/${id}`))[0];
-    await pause(120);
     // Which rows to order (keep the rowId — needed to look up allocation).
     // The PCF_SUPPLIER tag lists the suppliers STILL TO BE ORDERED on this order (each tag
     // is removed as that supplier is placed), so a lone remaining tag means "only THIS
