@@ -26,6 +26,7 @@ import {
   initialsOf,
   returnRef,
   typicalSentence,
+  personalisedSentence,
   isLogoOrder,
   poArrival,
   setSupplierLeadTimes,
@@ -549,6 +550,21 @@ assertTrue("note lists attachments", withFiles.includes("Attached: proof.pdf, ph
   assertTrue("multi: names both suppliers", m.text.startsWith("We're waiting on your items arriving from both Snickers and Portwest."));
   assertTrue("multi: overseas vs UK reason", m.text.includes("come from overseas, whereas Portwest is a UK supplier"));
   assertTrue("multi: when each is due in", /The Portwest items are due in to us .+ and the Snickers items /.test(m.text));
+}
+
+// Personalised-order template (Dec, 26 Oct): 10-14 days quoted, date = placed + 12 working days.
+{
+  const today = new Date("2026-10-26T10:00:00Z");
+  const p = personalisedSentence({ placedOn: "2026-10-22" }, today);   // Thu 22 Oct + 12 wd = Mon 9 Nov
+  assertTrue("personalised: quotes 10-14", p.text.startsWith("Our lead time is 10-14 working days at the moment for personalised orders, so based on this"));
+  assertTrue("personalised: ships Monday 9 November", p.text.endsWith("ready and shipped by Monday 9 November."));
+  assertEq("personalised: one date for the guard", p.dates.length, 1);
+  const late = personalisedSentence({ placedOn: "2026-09-01" }, today);
+  assertTrue("personalised: past date is not quoted", !/shipped by/.test(late.text) && late.dates.length === 0);
+  const r = buildSalesReply({ intent: "personalised", order: { id: 497001, placedOn: "2026-10-22", contactName: "Sam Smith" }, signedBy: "Dec", today });
+  assertEq("personalised: subject", r.subject, "Your personalised order - order 497001");
+  assertTrue("personalised: body has the sentence", r.text.includes("shipped by Monday 9 November"));
+  assertTrue("personalised: not auto-detected", detectIntent("when will my embroidered order be ready?") !== "personalised");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

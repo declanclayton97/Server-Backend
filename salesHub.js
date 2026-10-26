@@ -55,6 +55,11 @@ export const SALES_INTENTS = [
     match: /\b(eta|when|where|due|expect|arrive|arriving|dispatch|despatch|deliver|delivery|update)\b/i,
   },
   {
+    key: "personalised",
+    label: "Personalised order lead time (10-14 working days)",
+    match: /$^/,   // manual choice only: a logo order asking "when" still gets the ETA reply by default
+  },
+  {
     key: "plain",
     label: "Plain reply (no template)",
     match: /$^/,   // never picked by wording; it is the fallback and a manual choice
@@ -1006,6 +1011,27 @@ export function typicalSentence(order, today = new Date()) {
   };
 }
 
+// The personalised-order template (Dec, 26 Oct). The quoted range is what the team
+// tells customers; the date given is the middle of it - 12 working days after the
+// order was placed - as an exact day, which is how the team words this one.
+export const PERSONALISED_LEAD = { lo: 10, hi: 14, quote: 12 };
+
+export function personalisedSentence(order, today = new Date()) {
+  const { lo, hi, quote } = PERSONALISED_LEAD;
+  const lead = `Our lead time is ${lo}-${hi} working days at the moment for personalised orders`;
+  const placed = order && order.placedOn ? ukDay(order.placedOn) : null;
+  if (!placed) return { text: `${lead}.`, dates: [], source: "personalised-undated" };
+  const due = addWorkingDays(placed, quote);
+  if (due < ukDay(today)) {
+    // Past the usual time: a date in the past reads as a mistake, so say we are on it.
+    return { text: `${lead}, so your order is due to be shipped now - I am checking on it for you and will come back to you shortly.`, dates: [], source: "personalised-late" };
+  }
+  return {
+    text: `${lead}, so based on this your order should be ready and shipped by ${formatDay(due)}.`,
+    dates: [windowKey(windowOf(due))], phrase: formatDay(due), source: "personalised",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Returns references: the sender's initials, the date as DDMMYY, then a two-digit
 // count of that person's returns that day — "DC28092601". The count lives in the
@@ -1136,6 +1162,10 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
       `before we can start. As soon as you come back to us with a yes, it goes straight into the queue.`
     );
     lines.push("If the proof has not reached you, let me know and I will resend it.");
+  } else if (intent === "personalised") {
+    eta = personalisedSentence(order, today);
+    lines.push(eta.text);
+    proposedDates = eta.dates;
   } else if (intent === "part_shipped") {
     const outstanding = (order?.lines || []).filter((l) => (l.outstanding ?? 0) > 0);
     lines.push(
@@ -1200,6 +1230,7 @@ export function buildSalesReply({ intent, order, po, blockedLines = [], salesper
     : intent === "proof_approval" ? `Your proof${subjectRef}`
       : intent === "delay" ? `An update on your order${subjectRef}`
         : intent === "part_shipped" ? `The rest of your order${subjectRef}`
+          : intent === "personalised" ? `Your personalised order${subjectRef}`
           : `Update on your order${subjectRef}`;
 
   return {
