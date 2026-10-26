@@ -5841,3 +5841,28 @@ export async function setWaitDays(pool, { supplier, days, execute = false } = {}
   const after = await getState(pool, cfg.stateId);
   return { supplier: cfg.supplierKey, stateId: cfg.stateId, from: before.working_days_waited, to: after.working_days_waited, lastRunDate: after.last_run_date };
 }
+
+// A run that failed and was then placed by hand still showed its failure as the lane's last result
+// (Supertouch, 26 Oct 2026: placed 15:19 in Dec's Chrome, card still read "failed at checkout").
+// Records the hand placement as today's result and resets the wait. The PO itself must already be
+// Placed in Brightpearl — this only writes the schedule's own record, it orders nothing.
+export async function recordManualPlacement(pool, { supplier, poId, orderNo, net, units, note = '', execute = false } = {}) {
+  const cfg = SCHEDULED_SUPPLIERS[String(supplier || '').toUpperCase()];
+  if (!cfg) throw new Error(`unknown scheduled supplier "${supplier}"`);
+  if (!poId || !orderNo) throw new Error('poId and orderNo required');
+  const hdr = ((await bp.bpLiveGet(`/order-service/order/${Number(poId)}`)) || [])[0];
+  const status = hdr && hdr.orderStatus && hdr.orderStatus.orderStatusId;
+  if (!hdr || Number(status) !== Number(bp.PLACED_WITH_SUPPLIER_STATUS)) throw new Error(`PO ${poId} is not Placed with supplier (status ${status}) — place and link it first`);
+  const uk = ukNow();
+  const result = {
+    supplier: cfg.supplierKey, ran: uk.date, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, dryRun: false,
+    netValue: Number(net) || Number(hdr.totalValue && hdr.totalValue.net) || null, units: Number(units) || null,
+    decision: 'placed — by hand', reason: 'manual', workingDaysWaited: 0,
+    placement: { poId: Number(poId), orderNo: String(orderNo), manual: true, note: String(note || '') },
+    ordered: { poId: Number(poId), net: Number(net) || Number(hdr.totalValue && hdr.totalValue.net) || null, units: Number(units) || null },
+  };
+  if (!execute) return { dryRun: true, stateId: cfg.stateId, result };
+  await ensureTable(pool);
+  await saveState(pool, { id: cfg.stateId, workingDaysWaited: 0, lastRunDate: uk.date, result });
+  return { done: true, stateId: cfg.stateId, result };
+}
