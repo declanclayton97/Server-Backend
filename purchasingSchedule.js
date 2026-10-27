@@ -2587,10 +2587,25 @@ async function placeLeoOrder(pool, altItemsUrl, { padToThreshold = 0, live = tru
       const gap = +(totals.goodsExVat - poNet).toFixed(2);
       steps.priceCheck = { theirs: totals.goodsExVat, poNet, gap };
       if (Math.abs(gap) >= 0.01) {
+        // Name the lines: the placed order's own page carries the unit price Leo charged per SKU,
+        // so the gap can be healed instead of reported as a total nobody can act on (PO 499787,
+        // 27 Oct: £3.50 over four lines, all ~3.9% up). Unreadable → the total-only review as before.
+        const changes = [];
+        try {
+          const ol = await jfetch('price-check', `${altItemsUrl}/api/leo-order-lines?order=${encodeURIComponent(orderNo)}`, {});
+          const theirBySku = new Map((ol.lines || []).map((x) => [String(x.sku).toUpperCase(), x.unit]));
+          for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
+            const theirs = theirBySku.get(String(l.sku || '').toUpperCase());
+            const ours = Number(l.cost) || 0;
+            if (theirs != null && Math.abs(theirs - ours) >= 0.01 && !changes.some((c) => c.sku === l.sku)) changes.push({ sku: l.sku, was: ours, now: theirs });
+          }
+          steps.priceCheck.lines = (ol.lines || []).length;
+        } catch (e) { steps.priceCheck.linesWarn = e.message; }
+        const named = changes.length ? ` Lines: ${changes.map((c) => `${c.sku} ours £${c.was.toFixed(2)} vs theirs £${c.now.toFixed(2)}`).join('; ')}.` : '';
         await logPriceCheck(pool, steps, {
-          supplierKey: 'LEO', poId, changes: [],
-          message: `Prices don't match: Leo goods total £${totals.goodsExVat.toFixed(2)} vs our PO net £${poNet.toFixed(2)} (diff £${gap}). A Brightpearl cost price (list 20) may need adjusting. Order ${orderNo} still placed.`,
-          context: { poId, orderNo, theirs: totals.goodsExVat, poNet, gap },
+          supplierKey: 'LEO', poId, changes,
+          message: `Prices don't match: Leo goods total £${totals.goodsExVat.toFixed(2)} vs our PO net £${poNet.toFixed(2)} (diff £${gap}).${named} Order ${orderNo} still placed.`,
+          context: { poId, orderNo, theirs: totals.goodsExVat, poNet, gap, changes },
         });
       }
     }
