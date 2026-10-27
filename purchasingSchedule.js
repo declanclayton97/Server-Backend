@@ -254,6 +254,18 @@ function workerShotFor(supplierKey) {
   return { screenshot: w.data, screenshotJobId: w.jobId };
 }
 
+// A blocked line on a run that STOPPED is a sales matter only when the supplier has said they
+// can't supply it: a stock figure or next-delivery date came back, or the reason says out of stock
+// / discontinued. "Not found", "never reached the basket", "form/tokens not found" are codes or
+// portal faults we fix — and not found is not discontinued ([[not found is not discontinued]]).
+export function lineIsGenuinelyUnavailable(l) {
+  if (!l) return false;
+  // A stock figure only counts when it is SHORT of what we wanted — 89 in stock and still refused is a code fault.
+  if (typeof l.avail === 'number' && Number.isFinite(l.avail)) return l.avail < (Number(l.qty ?? l.want ?? l.wanted) || 1);
+  if (l.deldate) return true;
+  return /out of stock|no stock|insufficient stock|not in stock|sold out|discontinu|obsolete|phased? out|end of line|no longer (?:available|sold|made)|unavailable|back[- ]?order/i.test(String(l.reason || ''));
+}
+
 export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = 'unknown', message = '', context = null, severity = 'error', placed = null, notify = true } = {}) {
   let errorId = null;
   const snap = await storeSnapshots(pool, { supplier, step, context });
@@ -278,10 +290,18 @@ export async function logPurchasingError(pool, { supplier = 'FRISTADS', step = '
       const lines = (Array.isArray(c.dropped) && c.dropped.length)
         ? c.dropped                                            // carries productId — the exact match
         : (await import('./blockedLines.js')).extractBlockedLines({ supplier, step, message, context: c });
-      if (lines && lines.length) {
+      // When the order went through WITHOUT the line, or the line is on a back-order PO, the
+      // salesperson always hears. When the run STOPPED, only lines the supplier genuinely can't
+      // supply (out of stock, discontinued — see lineIsGenuinelyUnavailable) are told; a line that
+      // failed for a reason WE can fix (stale code, portal form, login) is purchasing's alone. On
+      // 2026-10-27 Castle "could not supply" SO 498885's Air Flex lines only because the rows
+      // carried stale codes — fixed and placed 17 minutes later, after the salesperson was told.
+      const settledPlaced = /-dropped$/.test(String(step)) || placed === true;
+      const tell = (settledPlaced || c.backorderPoId) ? (lines || []) : (lines || []).filter(lineIsGenuinelyUnavailable);
+      if (tell.length) {
         await notifyDroppedLines(pool, {
-          supplier, poId: c.poId || null, dropped: lines, linesByOrder: c.linesByOrder || {},
-          placed: /-dropped$/.test(String(step)) || placed === true,
+          supplier, poId: c.poId || null, dropped: tell, linesByOrder: c.linesByOrder || {},
+          placed: settledPlaced,
           backorderPoId: c.backorderPoId || null,
           execute: !c.dryRun,
         });
