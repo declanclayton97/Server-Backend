@@ -1089,7 +1089,26 @@ async function placeCastleOrder(pool, altItemsUrl, { padToThreshold = 0, exclude
   // SKU on two rows, and a basket that does not accumulate repeat adds keeps the LAST qty rather
   // than the sum, leaving the cart short. Castle's cartCount check below would then stall the run
   // — a safe failure, but an avoidable one, and this shape has already cost three orders.
-  const cartLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty })).filter((l) => !excl.has(String(l.sku).toUpperCase()));
+  let cartLines = mergePoLinesBySku(po).map((l) => ({ sku: l.sku, qty: l.qty, productId: l.productId })).filter((l) => !excl.has(String(l.sku).toUpperCase()));
+  // An SO row keeps the SKU it was raised with ([[order rows freeze the SKU]]). SO 498885's Air
+  // Flex rows still read 45813/45826 after the products became 221-NVY-M/921-NVY-M, and Castle
+  // has no style 45813, so the run failed on 2026-10-27. Send the product's CURRENT code — but
+  // only when the row isn't already a Castle STYLE-COLOUR-SIZE code and the current one is, so the
+  // "177" base-SKU degradation above can never replace a good row code.
+  const CASTLE_CODE = /^\d{2,4}-[A-Z]{2,4}-[A-Z0-9.]+$/i;
+  const skuRepaired = [];
+  try {
+    const stale = cartLines.filter((l) => !CASTLE_CODE.test(String(l.sku)) && l.productId);
+    const real = stale.length ? await bp.liveSkusOf(stale.map((l) => l.productId)) : new Map();
+    cartLines = cartLines.map((l) => {
+      const s = real.get(String(l.productId));
+      if (!s || CASTLE_CODE.test(String(l.sku)) || !CASTLE_CODE.test(s) || excl.has(s.toUpperCase())) return l;
+      skuRepaired.push({ productId: l.productId, rowSku: l.sku, sentAs: s });
+      return { ...l, sku: s };
+    });
+  } catch (e) { steps.skuRepairWarn = e.message; }
+  if (skuRepaired.length) steps.skuRepaired = skuRepaired;
+  cartLines = cartLines.map(({ sku, qty }) => ({ sku, qty }));
   if (excl.size) {
     steps.excluded = [];
     for (const sku of excl) {
