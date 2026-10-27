@@ -476,6 +476,42 @@ export function registerSaleAlerts(app, { getPool }) {
         sends: sends.rows, unsubscribed: unsubs.rows[0].n, recentUnsubs });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
+  // Did anyone we messaged buy? (Dec asked 27 Oct - an on-demand check, not daily tracking.)
+  // For each contact sent a sale alert: their BP sales orders placed on/after the first message.
+  // "item" = the order has the product we messaged about, or a sale-labelled row (-sale / #SALE / "sale").
+  // Read-only; about one BP search per contact. Contacts are masked like /status.
+  app.get("/api/sale-alerts/conversions", async (req, res) => {
+    try {
+      const secret = cfg().secret, key = String(req.query.key || "");
+      if (!secret || key.length !== secret.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(secret))) return res.status(403).json({ error: "forbidden" });
+      await ensure();
+      const sent = (await getPool().query(`SELECT to_char(day, 'YYYY-MM-DD') AS day, product_id, contact_id, email, phone, channel FROM sale_alert_sends WHERE status = 'sent' AND contact_id IS NOT NULL ORDER BY day`)).rows;
+      const byContact = new Map();
+      for (const s of sent) {
+        const c = byContact.get(String(s.contact_id)) || { contactId: Number(s.contact_id), first: s.day, pids: new Set(), channel: s.channel, who: s.phone ? "..." + String(s.phone).slice(-4) : String(s.email || "").replace(/^(.).*@/, "$1***@") };
+        c.pids.add(Number(s.product_id)); byContact.set(String(s.contact_id), c);
+      }
+      const people = [];
+      for (const c of byContact.values()) {
+        const found = rowsOf(await bpLiveGet(`/order-service/order-search?contactId=${c.contactId}&orderTypeId=1&placedOn=${c.first}/&columns=orderId`)).map((r) => r.orderId);
+        const os = found.length ? await orders(found) : [];
+        const list = os.map((o) => {
+          const rows = Object.values(o.orderRows || {});
+          const item = rows.some((r) => c.pids.has(Number(r.productId)) || /-sale\b|#sale|\bsale\b/i.test(`${r.productSku || ""} ${r.productName || ""}`));
+          return { orderId: o.id, placedOn: String(o.placedOn || "").slice(0, 10), net: Number(o.totalValue?.net || 0), saleItem: item, channelId: o.assignment?.current?.channelId || null };
+        });
+        people.push({ who: c.who, channel: c.channel, firstMessaged: c.first, items: c.pids.size, orders: list });
+      }
+      const buyers = people.filter((p) => p.orders.length), saleBuyers = people.filter((p) => p.orders.some((o) => o.saleItem));
+      const sum = (ps, f) => Number(ps.flatMap((p) => p.orders.filter(f)).reduce((t, o) => t + o.net, 0).toFixed(2));
+      res.json({
+        messaged: people.length, messages: sent.length,
+        orderedAnything: buyers.length, orderedSaleItem: saleBuyers.length,
+        netAllOrders: sum(people, () => true), netSaleOrders: sum(people, (o) => o.saleItem),
+        people: people.sort((a, b) => b.orders.length - a.orders.length),
+      });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
   // Deliverability check: one email through smtp2go from info@ to the proofing Gmail only (fixed address), so its
   // SPF/DKIM/DMARC verdict can be read. Secret-locked; cannot email anyone else.
   app.post("/api/sale-alerts/smtp-test", async (req, res) => {
