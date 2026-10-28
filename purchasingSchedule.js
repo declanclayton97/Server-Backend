@@ -3368,6 +3368,22 @@ async function existingAutoPo(existingPoId, { contactIds, autoKey }) {
     if (k && Number.isFinite(c) && !costOf.has(k)) costOf.set(k, c);
   }
   const soLines = [], soQty = new Map();
+  // A contributor's SKU is the SO row's, which can be frozen at an old code (SO 499697 "121458" vs
+  // PO row 493021175399L, PO 499902). Before dropping it as "taken off the PO", match it by product:
+  // the SO row's productId against the PO rows'.
+  const rowByPid = new Map(rows.filter((r) => r.productId).map((r) => [String(r.productId), r]));
+  for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
+    if (!items.some((it) => !rowBySku.has(String(it.sku).toUpperCase()))) continue;
+    try {
+      const so = (await bp.bpLiveGet(`/order-service/order/${order}`))[0];
+      for (const it of items) {
+        if (rowBySku.has(String(it.sku).toUpperCase())) continue;
+        const sr = Object.values((so && so.orderRows) || {}).find((r) => String(r.productSku || '').toUpperCase() === String(it.sku).toUpperCase());
+        const pr = sr && rowByPid.get(String(sr.productId));
+        if (pr) it.sku = pr.sku;
+      }
+    } catch { /* fall through: unmatched lines are treated as removed, as before */ }
+  }
   for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
     for (const it of items) {
       // A contributor whose row was taken OFF the PO is not wanted. The note is written once at
@@ -4499,7 +4515,25 @@ async function placeBlakladerOrder(pool, altItemsUrl, { padToThreshold = 0, live
   // ONE, because their 3625 is a "5 pcs multipack" at 4.55 an item against BP's 22.75 unit cost.
   // Alt-Items compares BP cost against their per-piece price and refuses unless that ratio and the
   // pack size in the name agree. Without the cost it has nothing to compare and cannot detect it.
-  const orderLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name }));
+  let orderLines = [...(po.soLines || []), ...(po.lowLines || [])].filter((l) => String(l.productId) !== '1000' && l.sku).map((l) => ({ sku: String(l.sku), qty: Math.round(l.qty), cost: l.cost, name: l.name, productId: l.productId }));
+  // A SALES-ORDER row keeps the SKU it was raised with ([[reference_order_rows_freeze_the_sku]]):
+  // SO 499697 still read "121458" for a 4930 knitted jacket long since renamed 493021175399L, and
+  // Blaklader dropped it from the basket (PO 499902, 2026-10-28). A row that is not a Blaklader part
+  // number (10+ digits) takes the product's current SKU when THAT is one.
+  const BLK_CODE = /^\d{10,}/;
+  try {
+    const stale = orderLines.filter((l) => !BLK_CODE.test(l.sku) && l.productId);
+    const real = stale.length ? await bp.liveSkusOf(stale.map((l) => l.productId)) : new Map();
+    const skuRepaired = [];
+    orderLines = orderLines.map((l) => {
+      const s = real.get(String(l.productId));
+      if (!s || BLK_CODE.test(l.sku) || !BLK_CODE.test(s)) return l;
+      skuRepaired.push({ productId: l.productId, rowSku: l.sku, sentAs: s });
+      return { ...l, sku: s };
+    });
+    if (skuRepaired.length) steps.skuRepaired = skuRepaired;
+  } catch (e) { steps.skuRepairWarn = e.message; }
+  orderLines = orderLines.map(({ productId, ...l }) => l);
   // Carry-forward lines: owed to a sales order that is already finalised, so no demand scan will
   // ever ask for them again. Sent RAW — qty is already in Blaklader's own units (pieces), so the
   // multipack multiplier must not touch them.
