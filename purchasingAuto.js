@@ -311,7 +311,7 @@ export const SUPPLIERS = {
   // Every row is then resolved to an exact Ralawise SKU in Alt-Items (ralawiseResolve.js) or the PO
   // is refused with the line named. No lowInvSupplierId on purpose: reorder from Ralawise would
   // compete with PenCarrie's for the same shared-brand stock. costList 20, like every supplier.
-  RALAWISE:     { contactId: 205,   costList: 20, poField: 'PCF_RALAPO', yieldToPeers: true,
+  RALAWISE:     { contactId: 205,   costList: 20, poField: 'PCF_RALAPO', yieldToPeers: true, claimResolvableOnSoleTag: true,
     // DTF consumables (DuPont Artistri inks, Resolute adhesive powder) are bought from Ralawise but are
     // NOT in their order-API catalogue, so they would refuse every garment on the PO. Held back here
     // (recorded in the demand log) and ordered by a person.
@@ -1649,6 +1649,52 @@ async function gatherLiveDemand({ supplierKey, detect, poField, hasBrandDetect =
         allTags.some((t) => groupHasSupplier(t, k)) || (s2.poField && s2.poField !== 'PCF_STOCKPO' && cf[s2.poField])));
       const peerClaims = (r) => peers.find(([, s2]) => (s2.detect && s2.detect(r.productName, r.productSku))
         || (s2.brandIds && brandOf.has(String(r.productId)) && s2.brandIds.map(String).includes(brandOf.get(String(r.productId)))));
+      // SOLE TAG = "buy these from us" (owner, 2026-10-28: "even products with pencarrie as the main
+      // supplier need to be ordered by ralawise"). SO 499493: tagged RALAWISE alone, 16 Gildan GD01
+      // tees whose BP primary is PenCarrie — neither lane took them and they sat unordered. So on a
+      // lone tag, every remaining orderable row no peer claims is a candidate too, but ONLY if it
+      // resolves to one exact Ralawise SKU (Alt-Items rehearsal — nothing is sent to Ralawise). A row
+      // that does not (a print/decoration line, a code they don't sell) is left off and flagged by
+      // name, instead of refusing the whole PO at 'resolve'.
+      if (singleSupplier && SUPPLIERS[supplierKey].claimResolvableOnSoleTag) {
+        const have = new Set(candidateRows.map(([rowId]) => String(rowId)));
+        const extra = orderableRows.filter(([rowId, r]) => !have.has(String(rowId)) && !peerClaims(r)
+          && !(excludeIf && excludeIf(String(r.productName || ''), String(r.productSku || ''))));
+        if (extra.length) {
+          const ident = new Map();
+          try {
+            const pids = [...new Set(extra.map(([, r]) => r.productId).filter(Boolean))].sort((a, b) => a - b);
+            const arr = await liveGet(`/product-service/product/${pids.join(',')}`) || [];
+            for (const p of (Array.isArray(arr) ? arr : [arr])) if (p && p.id != null) ident.set(String(p.id), p.identity || {});
+          } catch { /* the resolver still has the row SKU and name */ }
+          const lines = extra.map(([rowId, r]) => {
+            const id = ident.get(String(r.productId)) || {}, o = r.productOptions || {};
+            return { rowId: String(rowId), sku: String(id.sku || r.productSku || ''), rowSku: r.productSku || null, mpn: id.mpn || null, ean: id.ean || null, barcode: id.barcode || null,
+              name: r.productName, colour: o.Colour || o.Color || null, size: o.Size || null, qty: Math.round(parseFloat(r.quantity.magnitude) || 0) || 1 };
+          });
+          let resolvedSkus = null;
+          try {
+            const res = await fetch(`${process.env.ALT_ITEMS_URL || 'https://alternate-items.onrender.com'}/api/ralawise-place`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ lines, reference: `RESOLVE-${id}`, execute: false }) });
+            const j = await res.json();
+            resolvedSkus = new Set(((j.ok ? j.plan : j.resolved) || []).filter((x) => x.ralSku).map((x) => String(x.sku).toUpperCase()));
+          } catch (e) { resolvedSkus = null; }
+          for (const l of lines) {
+            const row = extra.find(([rowId]) => String(rowId) === l.rowId);
+            const r = row[1];
+            if (resolvedSkus && resolvedSkus.has(l.sku.toUpperCase())) { candidateRows = [...candidateRows, row]; continue; }
+            const why = resolvedSkus ? 'no exact Ralawise code for it' : 'the Ralawise code check failed this run';
+            demandAudit.push({ soId: id, rowId: row[0], productId: r.productId, sku: r.productSku, name: r.productName,
+              ordered: parseFloat(r.quantity.magnitude), allocated: 0, fulfilled: 0, onOrder: 0, inStock: 0, toOrder: 0,
+              note: `tagged "${tag}" alone, but ${why} — not ordered from ${supplierKey}; order by hand or fix the code` });
+          }
+          const left = lines.filter((l) => !(resolvedSkus && resolvedSkus.has(l.sku.toUpperCase()))
+            && !/^(print|embroider|transfer|dtf|setup|set-up|logo)/i.test(String(l.name || '')));
+          if (left.length) tagFlags.push({ soId: id, tag, reason: `tagged ${supplierKey} alone, but ${left.length} line(s) have no exact Ralawise code — not ordered`,
+            rows: left.map((l) => ({ sku: l.sku, name: l.name, qty: l.qty })) });
+        }
+      }
       if (peers.length) {
         candidateRows = candidateRows.filter(([rowId, r]) => {
           const p = peerClaims(r);
