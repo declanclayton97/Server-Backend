@@ -37,6 +37,7 @@ import { registerPickingSheet } from './pickingSheet.js';
 import { registerSaleAlerts, saleAlertsOptOut } from './saleAlerts.js';
 import { registerCallReport } from './callReport.js';
 import { registerTravelexPo } from './travelexPo.js';
+import { registerShiptheoryExport } from './shiptheoryExport.js';
 import { bpSafeText } from './bpText.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -15740,6 +15741,7 @@ registerCallReport(app, { getPool: () => pool, bpLive });
 
 // Travelex/ASDA bulk-PO tracker: overlay data for the BP extension, warning emails + monthly report to Matt.
 registerTravelexPo(app, { getPool: () => pool, bpLive });
+registerShiptheoryExport(app, { getPool: () => pool, bpLive });
 
 // Whether the SALES WhatsApp number is set up, so the dashboard can say why
 // the chat buttons are missing instead of failing on click.
