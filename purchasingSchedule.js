@@ -31,6 +31,9 @@ const STERLING_WORKER_URL = process.env.STERLING_WORKER_URL || 'https://portal-o
 const STERLING_WORKER_SECRET = process.env.STERLING_WORKER_SECRET || '';
 
 let running = false; // in-process guard against overlapping runs
+// Which run holds it (the SCHEDULED_SUPPLIERS key): run-state reports it so Server-Backend's deploy-window can
+// let an Alternate-Items deploy through while an emailed lane (V12, Buckler...) - which never calls it - runs.
+let runningSupplier = null;
 
 // The PO id of the run IN FLIGHT, so a failure that happens AFTER the PO exists can be adopted by
 // the next attempt instead of minting a second PO for the same demand. Until now only Blaklader's
@@ -2909,7 +2912,18 @@ async function placeSupertouchOrder(pool, altItemsUrl, { live = true } = {}) {
   let preview;
   try { preview = await createPo({ supplierKey: 'SUPERTOUCH', execute: false, logPool: pool }); }
   catch (e) { throw stepErr('preflight', `couldn't value the demand: ${e.message}`); }
-  const preLines = mergePoLinesBySku(preview).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty }));
+  // An SO row keeps the SKU it was raised with ([[order rows freeze the SKU]]): SO 499955's J808 row
+  // still reads ML241120101, which Supertouch's quick order rejects, while the product is now J8077
+  // (checked 29 Oct). Send the product's CURRENT code; the PO row BP writes carries the same one.
+  const liveCode = new Map();
+  try {
+    const all = [...mergePoLinesBySku(preview)].filter((l) => l.productId);
+    const real = all.length ? await bp.liveSkusOf(all.map((l) => l.productId)) : new Map();
+    for (const l of all) { const s = real.get(String(l.productId)); if (s && s.toUpperCase() !== String(l.sku).toUpperCase()) liveCode.set(String(l.sku).toUpperCase(), s.toUpperCase()); }
+  } catch (e) { steps.skuRepairWarn = e.message; }
+  if (liveCode.size) steps.skuRepaired = [...liveCode].map(([rowSku, sentAs]) => ({ rowSku, sentAs }));
+  const toLive = (sku) => liveCode.get(String(sku).trim().toUpperCase()) || String(sku).trim().toUpperCase();
+  const preLines = mergePoLinesBySku(preview).map((l) => ({ sku: toLive(l.sku), qty: l.qty }));
   if (!preLines.length) throw stepErr('cart', 'no orderable Supertouch lines');
   const rehearsal = await workerPlaceOrder({ supplier: 'SUPERTOUCH', ref: 'PREFLIGHT', lines: preLines, execute: false, opts: { checkoutProbe: true, skipInvalid: true } });
   const sd = (rehearsal && rehearsal.stageDetail) || {};
@@ -2934,11 +2948,11 @@ async function placeSupertouchOrder(pool, altItemsUrl, { live = true } = {}) {
       catch (e) { steps.excluded.push({ sku, error: e.message }); }
     }
   }
-  const soIds = [...new Set((po.soLines || []).filter((l) => !excl.has(String(l.sku).toUpperCase())).map((l) => l.order).filter(Boolean))];
+  const soIds = [...new Set((po.soLines || []).filter((l) => !excl.has(toLive(l.sku))).map((l) => l.order).filter(Boolean))];
   const linesByOrder = {};
-  for (const l of (po.soLines || [])) { if (l.order && !excl.has(String(l.sku).toUpperCase())) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
+  for (const l of (po.soLines || [])) { if (l.order && !excl.has(toLive(l.sku))) (linesByOrder[l.order] = linesByOrder[l.order] || []).push({ sku: l.sku, qty: l.qty, name: l.name, productId: l.productId }); }
   steps.po = { poId, soUnits: po.soUnits, lowUnits: po.lowUnits, soIds };
-  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: String(l.sku).trim().toUpperCase(), qty: l.qty, cost: l.cost, name: l.name })).filter((l) => !excl.has(l.sku));
+  const orderLines = mergePoLinesBySku(po).map((l) => ({ sku: toLive(l.sku), qty: l.qty, cost: l.cost, name: l.name })).filter((l) => !excl.has(l.sku));
   if (!orderLines.length) throw stepErr('cart', `PO#${poId}: nothing left to order after removing ${[...excl].join(', ')}`, { poId });
   steps.lines = { count: orderLines.length, units: orderLines.reduce((a, l) => a + l.qty, 0) };
 
@@ -4859,6 +4873,7 @@ export async function schedulerState(pool) {
   return {
     uk: { ...uk, isWeekday: isUkWeekday(uk.weekday) },
     running,
+    runningSupplier,
     suppliers,
     note: 'claimedToday=true means that supplier will NOT fire again today, so a restart cannot cause a duplicate run for it.',
   };
@@ -4877,6 +4892,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
   const threshold = cfg.threshold ?? THRESHOLD_NET; // free-carriage threshold (ex-VAT), per supplier — `??` so a deliberate 0 (no minimum, e.g. Snickers) is honoured, not treated as "unset"
   if (running) return { skipped: 'a run is already in progress' };
   running = true;
+  runningSupplier = String(supplier).toUpperCase();
   activePoId = null;                    // never carry a PO id across runs
   const uk = ukNow();
   // Declared OUT here because the CATCH reports it. A `const` inside the try is block-scoped and
@@ -5064,7 +5080,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     if (notify) await logPurchasingError(pool, { supplier: cfg.supplierKey, step, message: e.message, context: { dryRun, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}`, lineMode, ...(activePoId ? { poId: activePoId } : {}), ...(e.context || {}), ...workerShotFor(cfg.supplierKey) } }).catch(() => {});
     if (!dryRun) { try { await saveState(pool, { id: cfg.stateId, workingDaysWaited: (await getState(pool, cfg.stateId)).working_days_waited, lastRunDate: uk.date, result: report }); } catch {} }
     return report;
-  } finally { running = false; }
+  } finally { running = false; runningSupplier = null; }
 }
 
 
