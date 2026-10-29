@@ -15,6 +15,8 @@
 // PO only needs the new invoice SO number. Orders are found by the Travelex department
 // (22) rather than the customer, because ASDA orders come in under several contacts.
 
+// Off for now (Dec, 29 Oct): no hourly BP read, no emails. The routes still answer on request.
+const ENABLED = false;
 const DEPARTMENT_ID = 22;
 const DEFAULT_INVOICE_ORDER = 473285;
 const REPORT_TO = "matt@tuffshop.co.uk";
@@ -236,6 +238,7 @@ export function registerTravelexPo(app, { bpLive, getPool }) {
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
+  if (!ENABLED) return;
   setTimeout(() => tick().catch(() => {}), 90 * 1000);
   setInterval(() => tick().catch(() => {}), 60 * 60 * 1000);
 }
