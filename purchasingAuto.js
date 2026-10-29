@@ -2569,9 +2569,23 @@ export async function finalizeSupplierTagsLive({ orderIds = [], supplierKey = 'F
     // Read the order too, so a "PLEASE PUT TO PROOF REQUIRED ONCE ORDERED" row can route the
     // status to Proof Required instead of Ordered Stock. Non-fatal: if the read fails we fall
     // back to the normal ordered status rather than block the finalise.
-    let instruction = null;
-    try { instruction = orderStatusInstruction((await liveGet(`/order-service/order/${id}`))[0]); } catch { /* keep default */ }
-    plan.push({ id, before, after: remaining.join(' / '), willClear: remaining.length === 0, instruction, needsProof: !!(instruction && instruction.statusId !== ORDERED_STATUS) });
+    let instruction = null, so = null;
+    try { so = (await liveGet(`/order-service/order/${id}`))[0]; instruction = orderStatusInstruction(so); } catch { /* keep default */ }
+    // A lane can order an SO's lines without being named in its tag — PenCarrie bought SO 494603's
+    // BB310 gloves (PenCarrie is the BP primary) under "RALAWISE / BTC", so the tag never settled and
+    // the SO sat on Stock needs ordering looking unordered. If THIS PO covers every stock row on the
+    // SO, nothing is left for the other suppliers in the tag to supply, whatever the tag meant.
+    let coveredAll = false;
+    if (remaining.length && supplied && so) {
+      const items = (linesByOrder && (linesByOrder[id] || linesByOrder[String(id)])) || [];
+      const got = {};
+      for (const it of items) if (it && typeof it === 'object' && it.sku) got[String(it.sku).toUpperCase()] = (got[String(it.sku).toUpperCase()] || 0) + (Number(it.qty) || 0);
+      const stock = Object.values(so.orderRows || {}).filter((r) => !isNonOrderableRow(r)
+        && !/^(print|embroider|transfer|dtf|setup|set-up|logo)/i.test(String(r.productName || '')));
+      coveredAll = stock.length > 0 && stock.every((r) => (got[String(r.productSku || '').toUpperCase()] || 0) >= Number(r.quantity && r.quantity.magnitude || 0));
+    }
+    const after = coveredAll ? '' : remaining.join(' / ');
+    plan.push({ id, before, after, willClear: !after, coveredAll, instruction, needsProof: !!(instruction && instruction.statusId !== ORDERED_STATUS) });
     await pause(120);
   }
   if (!execute) return { dryRun: true, supplierKey: key, poId, setOrderedStatus, plan };
