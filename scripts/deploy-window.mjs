@@ -21,9 +21,17 @@
 //
 // Usage:  node scripts/deploy-window.mjs          → human readable
 //         node scripts/deploy-window.mjs --json    → { safe, reason, ... } for scripted callers
+//         node scripts/deploy-window.mjs --live --repo alt-items   → for an ALTERNATE-ITEMS deploy
 // Exit 0 = clear to deploy, exit 1 = inside/near a poller window, DO NOT deploy or push.
+//
+// --repo alt-items (owner, 29 Oct 2026): an Alternate-Items restart only hurts a run that CALLS it, so the
+// emailed lanes that never do (alt: false below) don't block it - not their window, not their run in
+// flight. Purchasing-Automation (the default) runs every lane itself, so for it every lane still blocks.
 
 const asJson = process.argv.includes('--json');
+const repoArg = (process.argv.find((a) => a.startsWith('--repo=')) || '').slice(7)
+  || (process.argv.includes('--repo') ? process.argv[process.argv.indexOf('--repo') + 1] : '') || 'purchasing';
+const forAlt = /^alt/i.test(repoArg);
 // --at "Mon 10:35" pins the UK day/time so the BLOCKING branch can actually be tested. Without it
 // the refusal path is only exercised during a real window, i.e. the one moment you must not be
 // experimenting. Affects the answer only, never the poller list.
@@ -55,24 +63,24 @@ const POLLERS = [
   { name: 'Rockfall', h: 10, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Fristads', h: 10, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Helly Hansen', h: 10, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
-  { name: 'Tranemo', h: 10, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Tranemo', h: 10, m: 45, days: 'Mon-Fri', alt: false },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Mascot', h: 11, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Castle', h: 11, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
-  { name: 'V12', h: 11, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
-  { name: 'Buckler', h: 11, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'V12', h: 11, m: 30, days: 'Mon-Fri', alt: false },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Buckler', h: 11, m: 45, days: 'Mon-Fri', alt: false },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Chadwick', h: 12, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Sterling', h: 12, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Carhartt', h: 12, m: 30, days: 'Mon/Wed/Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'BeeSwift', h: 12, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
-  { name: 'Scruffs', h: 13, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Scruffs', h: 13, m: 0, days: 'Mon-Fri', alt: false },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Performance Brands', h: 13, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Brook Taverner', h: 13, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Supertouch', h: 13, m: 45, days: 'Mon-Fri' },   // supertouch.com via the worker, from 2026-10-23 (owner, 2026-10-22)
   { name: 'Engel', h: 14, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
-  { name: 'AS Apparel', h: 15, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'AS Apparel', h: 15, m: 0, days: 'Mon-Fri', alt: false },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Portwest', h: 15, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
-  { name: 'Hellberg', h: 15, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
-  { name: 'Uneek', h: 15, m: 45, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Hellberg', h: 15, m: 30, days: 'Mon-Fri', alt: false },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
+  { name: 'Uneek', h: 15, m: 45, days: 'Mon-Fri', alt: false },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'PenCarrie', h: 16, m: 0, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Ralawise', h: 16, m: 15, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
   { name: 'Leo', h: 16, m: 30, days: 'Mon-Fri' },   // 15-min schedule from 2026-10-23 (owner, 2026-10-22)
@@ -81,6 +89,7 @@ const POLLERS = [
   { name: 'Retry sweep', h: 17, m: 0, days: 'Mon-Fri' },   // re-runs suppliers whose failure never reached them
 ];
 const runsToday = (p) => (p.days === 'Mon/Wed/Fri' ? ['Mon', 'Wed', 'Fri'] : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']).includes(day);
+const counts = (p) => runsToday(p) && !(forAlt && p.alt === false);
 const mins = hh * 60 + mm;
 // A run can overrun its 30-minute window (portal workers take minutes), so treat a window as
 // unsafe from its start until 15 minutes AFTER it closes, and refuse within 10 minutes before one.
@@ -96,13 +105,14 @@ const pad = (n) => String(n).padStart(2, '0');
 // service is not permission to deploy blind.
 const live = process.argv.includes('--live');
 const API = process.env.PURCHASING_API || 'https://purchasing-automation.onrender.com';   // the service that OWNS the schedule since 2026-09-20
-let claimed = null, runInFlight = null, liveError = null;
+let claimed = null, runInFlight = null, runningSupplier = null, liveError = null;
 if (live) {
   try {
     const r = await fetch(`${API}/api/purchasing/run-state`, { signal: AbortSignal.timeout(20000) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const s = await r.json();
     runInFlight = !!s.running;
+    runningSupplier = s.runningSupplier || null;   // older Purchasing-Automation doesn't say: treated as one that calls Alt-Items
     claimed = new Set((s.suppliers || []).filter((x) => x.claimedToday).map((x) => x.supplier.toUpperCase()));
   } catch (e) { liveError = e.message; }
 }
@@ -112,7 +122,7 @@ const hasClaimed = (name) => !!claimed && claimed.has((KEY[name] || name).toUppe
 
 let blocking = null, next = null;
 for (const p of POLLERS) {
-  if (!runsToday(p)) continue;
+  if (!counts(p)) continue;
   // Already ran today → it cannot fire again, so its window no longer blocks.
   if (claimed && hasClaimed(p.name)) continue;
   const start = p.h * 60 + p.m, end = start + 30 + BUFFER_AFTER;
@@ -122,13 +132,16 @@ for (const p of POLLERS) {
 }
 // A run in flight blocks everything, whoever it belongs to — that is the case that actually caused
 // the duplicate order.
-if (runInFlight) blocking = { name: 'a run in flight', h: hh, m: mm, why: 'a purchasing run is executing right now — a restart would lose its day-claim' };
+// For an Alternate-Items deploy, an emailed lane's run never calls it, so that run doesn't block.
+const NO_ALT = new Set(POLLERS.filter((p) => p.alt === false).map((p) => p.name.toUpperCase()));
+const runIgnorable = forAlt && runningSupplier && NO_ALT.has(String(runningSupplier).toUpperCase());
+if (runInFlight && !runIgnorable) blocking = { name: `a run in flight${runningSupplier ? ` (${runningSupplier})` : ''}`, h: hh, m: mm, inFlight: true, why: 'a purchasing run is executing right now — a restart would lose its day-claim' };
 
 // Walk FORWARD past every window that would still block, rather than reporting only when THIS one
 // closes — "clear again at 10:45" is a time you are still blocked at, and on a bad day you believe it.
 let clearAt = null;
 if (blocking) {
-  const windows = POLLERS.filter((p) => runsToday(p) && !(claimed && hasClaimed(p.name)))
+  const windows = POLLERS.filter((p) => counts(p) && !(claimed && hasClaimed(p.name)))
     .map((p) => ({ name: p.name, start: p.h * 60 + p.m })).sort((a, b) => a.start - b.start);
   let clear = blocking.h * 60 + blocking.m + 30 + BUFFER_AFTER, moved = true;
   while (moved) {
@@ -148,6 +161,8 @@ const result = {
   blocking: blocking ? { supplier: blocking.name, window: `${pad(blocking.h)}:${pad(blocking.m)}`, why: blocking.why } : null,
   clearAt,
   next: next ? { supplier: next.name, window: `${pad(next.h)}:${pad(next.m)}`, inMinutes: next.start - mins } : null,
+  deploying: forAlt ? 'Alternate-Items (emailed lanes ignored)' : 'Purchasing-Automation (every lane)',
+  runningSupplier,
   mode: live ? (liveError ? 'clock-only (live check FAILED, fell back to strict)' : 'live') : 'clock-only',
   liveError,
   runInFlight,
@@ -161,7 +176,10 @@ if (asJson) {
   console.log(`UK now: ${result.ukNow} (${result.zone}) — computed from UTC ${result.computedFromUtc}, NOT the shell clock`);
   if (blocking) {
     console.log(`DO NOT DEPLOY — ${blocking.name} ${pad(blocking.h)}:${pad(blocking.m)}: ${blocking.why}`);
-    console.log(clearAt === 'tomorrow' ? 'clear again tomorrow — every remaining window today is blocking' : `clear again at ${clearAt} UK (past every window after it)`);
+    // A run in flight usually ends in minutes and its lane then claims the day, so a gap opens long before
+    // clearAt (which assumes nothing claims): 29 Oct it said 14:30 at 09:32, and Blaklader was done by 09:37.
+    if (blocking.inFlight && live && !liveError) console.log('clear as soon as that run finishes (usually a few minutes) — re-check then');
+    console.log(clearAt === 'tomorrow' ? 'clear again tomorrow — every remaining window today is blocking' : `${blocking.inFlight && live && !liveError ? 'at the latest, ' : ''}clear again at ${clearAt} UK (past every window after it)`);
   } else {
     // result.next, NOT next: `next` is the raw poller ({ name, h, m, start }), and it is line 129
     // that reshapes it to { supplier, window, inMinutes }. Reading those names off the raw object
