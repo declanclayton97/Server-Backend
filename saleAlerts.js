@@ -32,6 +32,7 @@ const WEBSITE_CHANNELS = new Set([2, 3, 14, 17]);                               
 const TRADE_CHANNELS = new Set([1, 4, 5, 6, 8, 10, 11, 12, 15, 16, 21, 33, 34]);    // phone, shop, email, reps, trades hub
 // Everything else (Amazon 9, eBay 7, the company webstores) is never emailed.
 const DECORATION = /^OP(EM|PR)/i, DECORATION_NAME = /embroid|\bprint(ed|ing)?\b|set ?up fee|upload logo|logo design/i;
+const RECENT_BUY_DAYS = 30;   // skip anyone who bought this item more recently than this
 
 const cfg = () => ({
   mode: String(process.env.SALE_ALERTS_ENABLED || "").toLowerCase() === "off" ? "off" : "live",
@@ -105,9 +106,17 @@ export async function recipientsFor(pid, { pool, cutoffDays = 7 } = {}) {
     if (why) { skipped.push({ contactId: cid, orderId: o.id, reason: why }); continue; }
     if (!best.has(cid) || best.get(cid).date < date) best.set(cid, { contactId: cid, orderId: o.id, date });
   }
+  // Bought this item in the last 30 days (Dec, 30 Oct): "the thing you just bought is on sale" only annoys. Seven
+  // were told 1-15 days after buying it, under an OLDER customer record (web guest checkouts make a new one), so
+  // the match is on email + mobile as well as the customer.
+  const recentFrom = new Date(Date.now() - RECENT_BUY_DAYS * 864e5).toISOString().slice(0, 10);
+  const recentBuyers = new Set(sales.filter((o) => String(o.placedOn || o.createdOn || "").slice(0, 10) >= recentFrom).map((o) => o.parties?.customer?.contactId).filter(Boolean));
   const eligible = [];
   const contacts = new Map();
-  for (const cc of chunk([...best.keys()].sort((a, b) => a - b), 60)) for (const x of (await bpLiveGet(`/contact-service/contact/${idSet(cc)}`)) || []) contacts.set(x.contactId, x);
+  for (const cc of chunk([...new Set([...best.keys(), ...recentBuyers])].sort((a, b) => a - b), 60)) for (const x of (await bpLiveGet(`/contact-service/contact/${idSet(cc)}`)) || []) contacts.set(x.contactId, x);
+  const keysOf = (x) => { const tel = x.communication?.telephones || {}, phone = ukMobile(tel.MOB) || ukMobile(tel.PRI) || ukMobile(tel.SEC);
+    return [normEmail(x.communication?.emails?.PRI?.email), phone && "wa:" + phone].filter(Boolean); };
+  const recentBuy = new Set([...recentBuyers].flatMap((cid) => [`c:${cid}`, ...keysOf(contacts.get(cid) || {})]));
   // Opt-outs and history are matched on BOTH the email and the mobile: "Stop promotions" on WhatsApp stores
   // "wa:447...", the email unsubscribe stores the address, and either one stops every channel.
   const unsub = new Set(), recent = new Set(), already = new Set();
@@ -124,6 +133,7 @@ export async function recipientsFor(pid, { pool, cutoffDays = 7 } = {}) {
     const channel = useWa && phone ? "whatsapp" : email ? "email" : null;
     const why = !channel ? (useWa ? "no email or UK mobile" : "no email") : x.relationshipToAccount?.isStaff || x.relationshipToAccount?.isSupplier ? "staff/supplier"
       : keys.some((k) => unsub.has(k)) ? "unsubscribed" : keys.some((k) => already.has(k)) ? "already told about this item"
+      : recentBuy.has(`c:${b.contactId}`) || keys.some((k) => recentBuy.has(k)) ? `bought it in the last ${RECENT_BUY_DAYS} days`
       : keys.some((k) => recent.has(k)) ? "had a sale message in the last 7 days" : keys.some((k) => seen.has(k)) ? "duplicate contact" : "";
     if (why) { skipped.push({ contactId: b.contactId, email, phone, orderId: b.orderId, reason: why }); continue; }
     keys.forEach((k) => seen.add(k));
