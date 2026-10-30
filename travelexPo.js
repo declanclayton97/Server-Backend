@@ -29,6 +29,14 @@ const ukDate = (d) => new Date(d).toLocaleDateString("en-GB", { day: "numeric", 
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const round2 = (n) => Math.round(n * 100) / 100;
 
+// Pure: does an order's TRAVELEX-PO field name this PO? An order split across two POs holds
+// both, slash-separated ("710000000777 - Q1-2026 / 710000000946 - Q2-2026", 471790), with
+// TRAVELEX ORDER VALUE holding the part charged to the newer one.
+export function carriesPo(field, poRef) {
+  const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+  return String(field ?? "").split("/").map(norm).includes(norm(poRef));
+}
+
 // One order's spend against the PO: the saved original value once processed, else (not
 // yet processed, value not zeroed) its own total.
 export function orderSpend(o) {
@@ -157,7 +165,7 @@ export function registerTravelexPo(app, { bpLive, getPool }) {
       const batch = (await bpLive("GET", `/order-service/order/${ids.slice(i, i + 100).join(",")}?includeOptional=customFields`)) || [];
       for (const o of batch) {
         if (o.id === id || /cancel/i.test(o.orderStatus?.name || "")) continue;
-        if (String(o.customFields?.PCF_TRAVLXPO || "").trim() === poRef) orders.push(o);
+        if (carriesPo(o.customFields?.PCF_TRAVLXPO, poRef)) orders.push(o);
       }
     }
     return summarise({ poRef, invoiceOrderId: id, amount, orders });

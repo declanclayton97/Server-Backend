@@ -1,7 +1,7 @@
 // Tests for travelexPo.js.
 // Run with:  node travelexPo.test.js
 
-import { orderSpend, summarise, newThresholds, alertEmail, monthlyEmail } from "./travelexPo.js";
+import { orderSpend, summarise, newThresholds, alertEmail, monthlyEmail, carriesPo } from "./travelexPo.js";
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -50,6 +50,13 @@ eq("plenty left", newThresholds(5000, []), []);
 eq("alert subject", alertEmail(s, 2000).subject, "Travelex bulk PO 710000000946 - Q2-2026: into the final £2,000 - £1,340.00 left");
 eq("used-up subject", alertEmail({ ...s, remaining: 0 }, 0).subject, "Travelex bulk PO 710000000946 - Q2-2026 is used up (£0.00 left)");
 eq("monthly lists orders", (monthlyEmail(s, "November 2026").html.match(/ASDA-1\d/g) || []).length, 3);
+
+// Orders split over two POs (471790) name both, slash-separated, sometimes with a tab.
+eq("exact", carriesPo("710000000946 - Q2-2026", "710000000946 - Q2-2026"), true);
+eq("split", carriesPo("710000000777 - Q1-2026 / 	710000000946 - Q2-2026", "710000000946 - Q2-2026"), true);
+eq("split, older half", carriesPo("710000000777 - Q1-2026 / 	710000000946 - Q2-2026", "710000000777 - Q1-2026"), true);
+eq("other PO", carriesPo("710000000777 - Q1-2026", "710000000946 - Q2-2026"), false);
+eq("blank", carriesPo(undefined, "710000000946 - Q2-2026"), false);
 
 console.log(`${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
