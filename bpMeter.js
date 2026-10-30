@@ -5,7 +5,8 @@
 // endpoint, with BP's own brightpearl-requests-remaining header, and flushed once a minute
 // into bp_usage on the shared database. Server-Backend's /bp-usage page reads it.
 //
-// The same file is copied into Tuff-WMS, Alternate-Items and Purchasing-Automation - keep
+// The same file is copied into Tuff-WMS, Alternate-Items, Purchasing-Automation, Stock
+// Checker and Pick-Pack (backend/bpMeter.mjs, loaded with import() from CommonJS) - keep
 // the copies identical. It never changes a request or a response, and every failure in
 // here is swallowed so metering can't break a BP call.
 import pg from "pg";
