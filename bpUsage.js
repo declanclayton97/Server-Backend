@@ -11,37 +11,39 @@ export function registerBpUsage(app, { getPool }) {
     if (!pool) return res.status(503).json({ error: 'no database' });
     const hours = Math.min(Math.max(Number(req.query.hours) || 6, 0.25), MAX_HOURS);
     const since = `now() - interval '${hours * 60} minutes'`;
+    // Only the live account shares the allowance (tuff-wms-test runs on the test account).
+    const acct = String(req.query.account || process.env.BRIGHTPEARL_ACCOUNT_ID || 'tuffworkwear');
     try {
       const exists = await pool.query(`SELECT to_regclass('bp_usage') AS t`);
       if (!exists.rows[0].t) return res.json({ hours, perMinute: [], callers: [], busiest: [], services: [] });
 
       const perMinute = (await pool.query(`
         SELECT minute, service, SUM(calls)::int AS calls, SUM(throttled)::int AS throttled, MIN(min_remaining) AS min_remaining
-        FROM bp_usage WHERE minute >= ${since} GROUP BY minute, service ORDER BY minute`)).rows;
+        FROM bp_usage WHERE minute >= ${since} AND account = $1 GROUP BY minute, service ORDER BY minute`, [acct])).rows;
 
       const callers = (await pool.query(`
         WITH m AS (
           SELECT service, caller, minute, SUM(calls) AS calls, SUM(throttled) AS throttled
-          FROM bp_usage WHERE minute >= ${since} GROUP BY service, caller, minute)
+          FROM bp_usage WHERE minute >= ${since} AND account = $1 GROUP BY service, caller, minute)
         SELECT m.service, m.caller, SUM(m.calls)::int AS calls, SUM(m.throttled)::int AS throttled,
                MAX(m.calls)::int AS peak, COUNT(*)::int AS active_minutes,
                (SELECT string_agg(endpoint || ' x' || n, ', ' ORDER BY n DESC) FROM (
                   SELECT endpoint, SUM(calls)::int AS n FROM bp_usage b
-                  WHERE b.minute >= ${since} AND b.service = m.service AND b.caller = m.caller
+                  WHERE b.minute >= ${since} AND b.account = $1 AND b.service = m.service AND b.caller = m.caller
                   GROUP BY endpoint ORDER BY n DESC LIMIT 4) e) AS endpoints
-        FROM m GROUP BY m.service, m.caller ORDER BY calls DESC LIMIT 60`)).rows;
+        FROM m GROUP BY m.service, m.caller ORDER BY calls DESC LIMIT 60`, [acct])).rows;
 
       const busiest = (await pool.query(`
         WITH t AS (
           SELECT minute, SUM(calls)::int AS calls, SUM(throttled)::int AS throttled, MIN(min_remaining) AS min_remaining
-          FROM bp_usage WHERE minute >= ${since} GROUP BY minute ORDER BY calls DESC LIMIT 15)
+          FROM bp_usage WHERE minute >= ${since} AND account = $1 GROUP BY minute ORDER BY calls DESC LIMIT 15)
         SELECT t.*, (SELECT json_agg(x) FROM (
             SELECT service, caller, SUM(calls)::int AS calls FROM bp_usage b
-            WHERE b.minute = t.minute GROUP BY service, caller ORDER BY calls DESC LIMIT 4) x) AS top
-        FROM t ORDER BY t.calls DESC`)).rows;
+            WHERE b.minute = t.minute AND b.account = $1 GROUP BY service, caller ORDER BY calls DESC LIMIT 4) x) AS top
+        FROM t ORDER BY t.calls DESC`, [acct])).rows;
 
       const services = [...new Set(perMinute.map((r) => r.service))].sort();
-      res.json({ hours, perMinute, callers, busiest, services, now: new Date().toISOString() });
+      res.json({ hours, account: acct, perMinute, callers, busiest, services, now: new Date().toISOString() });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
