@@ -2096,10 +2096,13 @@ function bpBase() {
   };
   return { baseUrl, headers };
 }
-// Run async fn over items, `size` concurrently at a time.
-async function mapPool(items, size, fn) {
+// Run async fn over items, `size` concurrently at a time, with an optional pause between batches.
+async function mapPool(items, size, fn, gapMs = 0) {
   const out = [];
-  for (let i = 0; i < items.length; i += size) out.push(...await Promise.all(items.slice(i, i + size).map(fn)));
+  for (let i = 0; i < items.length; i += size) {
+    if (i && gapMs) await sleepMs(gapMs);
+    out.push(...await Promise.all(items.slice(i, i + size).map(fn)));
+  }
   return out;
 }
 const orderToQueueItem = (o) => {
@@ -2298,9 +2301,33 @@ async function refreshPrintQueue({ days = 21, maxOrders = 10000 } = {}) {
   return printQueueCache;
 }
 
+// Orders the filter refresh has already read: id -> { order, fetchedAt }. The 10-minute
+// refresh used to re-GET every order on the filter (~150 BP calls in under a minute,
+// 30 Oct /bp-usage); now it re-reads only orders that are new, changed in BP since the
+// last check, or held longer than PRINT_ORDER_MAX_AGE_MS, and rebuilds the queue from
+// this cache - so a colour change still re-renders everything without calling BP.
+const printOrderCache = new Map();
+const PRINT_ORDER_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+let printChangesCheckedAt = 0;   // BP updatedOn has been checked up to here (ms)
+
+// Ids of orders BP says changed since `sinceMs` (null when the search fails).
+async function ordersUpdatedSince(sinceMs, baseUrl, headers) {
+  const from = new Date(sinceMs - 2 * 60 * 1000).toISOString();   // overlap the last check a little
+  const ids = new Set();
+  for (let first = 1; first < 20000; first += 500) {
+    const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?updatedOn=${encodeURIComponent(`${from}/`)}&columns=orderId&pageSize=500&firstResult=${first}`, { headers });
+    if (!r.ok) return null;
+    const rows = (await r.json().catch(() => null))?.response?.results;
+    if (!Array.isArray(rows)) return null;
+    for (const row of rows) ids.add(Number(Array.isArray(row) ? row[0] : row));
+    if (rows.length < 500) break;
+  }
+  return ids;
+}
+
 // PRIMARY refresh: read the operator's curated "Prints Needed" saved report via
 // the fileuploader@ web session, then sync the table to exactly those orders.
-// Cheap (~one report fetch + one GET per listed order) — no scanning.
+// Cheap (~one report fetch + one search + a GET per new/changed order) — no scanning.
 async function refreshPrintQueueFromFilter() {
   if (printQueueCache.refreshing) return printQueueCache;
   if (!pool) { printQueueCache.error = 'no db'; return printQueueCache; }
@@ -2314,12 +2341,31 @@ async function refreshPrintQueueFromFilter() {
     }
     const ids = [...new Set([...html.matchAll(/oID=(\d+)/gi)].map((m) => Number(m[1])))];
 
-    const items = await mapPool(ids, 6, async (id) => {
+    // Which do we need to read? Anything not cached or stale, plus anything BP changed.
+    const checkStarted = Date.now();
+    const changed = printChangesCheckedAt ? await ordersUpdatedSince(printChangesCheckedAt, baseUrl, headers) : null;
+    if (changed) printChangesCheckedAt = checkStarted;
+    const toFetch = ids.filter((id) => {
+      const c = printOrderCache.get(id);
+      return !c || Date.now() - c.fetchedAt > PRINT_ORDER_MAX_AGE_MS || (changed && changed.has(id));
+    });
+    // Without a change list (first run, or the search failed) every cached order counts
+    // as possibly changed, so read them all once and start checking from now.
+    if (!changed) { toFetch.length = 0; toFetch.push(...ids); }
+
+    await mapPool(toFetch, 3, async (id) => {
       try {
         const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}`, { headers });
         const o = (await r.json().catch(() => null))?.response?.[0];
-        return o ? orderToQueueItem(o) : null;
-      } catch { return null; }
+        if (o) printOrderCache.set(id, { order: o, fetchedAt: Date.now() });
+      } catch { /* keep the cached copy, if any */ }
+    }, 2500);   // ~65 calls a minute at most, so even a full first read leaves room for everything else
+    if (!changed && toFetch.length) printChangesCheckedAt = checkStarted;
+    for (const id of printOrderCache.keys()) if (!ids.includes(id)) printOrderCache.delete(id);
+
+    const items = ids.map((id) => {
+      const c = printOrderCache.get(id);
+      return c ? orderToQueueItem(c.order) : null;
     });
     const queue = items.filter(Boolean).sort((a, b) => String(a.customer || '').localeCompare(String(b.customer || '')));
 
@@ -2330,7 +2376,7 @@ async function refreshPrintQueueFromFilter() {
 
     printQueueCache = {
       generatedAt: new Date().toISOString(), refreshing: false, error: null, source: 'filter',
-      filterOrders: ids.length, jobs: queue.length, queue, tookMs: Date.now() - started,
+      filterOrders: ids.length, fetched: toFetch.length, jobs: queue.length, queue, tookMs: Date.now() - started,
     };
   } catch (err) {
     console.error('[print-queue] filter refresh failed:', err.message);
