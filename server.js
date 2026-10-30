@@ -11824,9 +11824,37 @@ app.post("/api/approval-sessions", async (req, res) => {
     }
 
     const pdfBuffer = Buffer.from(pdfBase64, "base64");
-    const primaryLogoBuffer = primaryLogoBase64 ? Buffer.from(primaryLogoBase64, "base64") : null;
-    const promoDarkBuffer = promoLogoDarkBase64 ? Buffer.from(promoLogoDarkBase64, "base64") : null;
-    const promoLightBuffer = promoLogoLightBase64 ? Buffer.from(promoLogoLightBase64, "base64") : null;
+    // 2026-10-30: one session carrying the same 6.5MB logo three times (logo + dark + light promo)
+    // got the 256MB database OOM-killed on every insert, taking every service on it down with it.
+    // The logos only feed the approval page and the cross-sell picture, never production artwork,
+    // so a big one is scaled to fit 1500px, and a promo logo identical to the main logo isn't
+    // stored again (every reader already falls back to primary_logo_data).
+    const shrinkLogo = async (buf) => {
+      if (!buf || buf.length <= 1.5 * 1048576) return buf;
+      try {
+        const { default: Jimp } = await import('jimp');
+        const img = await Jimp.read(buf);
+        if (img.bitmap.width > 1500 || img.bitmap.height > 1500) img.scaleToFit(1500, 1500);
+        const out = await img.getBufferAsync(Jimp.MIME_PNG);
+        return out.length < buf.length ? out : buf;
+      } catch (e) {
+        console.warn(`[approval-session] couldn't shrink a ${(buf.length / 1048576).toFixed(2)}MB logo: ${e.message}`);
+        return buf;
+      }
+    };
+    const rawLogo = primaryLogoBase64 ? Buffer.from(primaryLogoBase64, "base64") : null;
+    const rawDark = promoLogoDarkBase64 ? Buffer.from(promoLogoDarkBase64, "base64") : null;
+    const rawLight = promoLogoLightBase64 ? Buffer.from(promoLogoLightBase64, "base64") : null;
+    const sameAsLogo = (b) => !!(b && rawLogo && b.equals(rawLogo));
+    const primaryLogoBuffer = await shrinkLogo(rawLogo);
+    const promoDarkBuffer = sameAsLogo(rawDark) ? null : await shrinkLogo(rawDark);
+    const promoLightBuffer = sameAsLogo(rawLight) ? null : await shrinkLogo(rawLight);
+    // Last line of defence: refuse a payload big enough to take the database down, with a reason.
+    const totalMb = [pdfBuffer, primaryLogoBuffer, promoDarkBuffer, promoLightBuffer].reduce((s, b) => s + (b ? b.length : 0), 0) / 1048576;
+    if (totalMb > 15) {
+      console.warn(`[approval-session] refused ${orderNumber || '?'}: ${totalMb.toFixed(1)}MB after shrinking`);
+      return res.status(413).json({ error: `This proof is too large to send (${totalMb.toFixed(1)}MB). Use smaller logo files or a smaller PDF and try again.` });
+    }
 
     // A pooled socket Render has just reaped fails the query with "Connection terminated
     // unexpectedly" (seen 2026-10-05, and before). Whether the row committed is unknowable from the
@@ -11855,9 +11883,9 @@ app.post("/api/approval-sessions", async (req, res) => {
       [
         orderNumber || null, customerName || null, recipientName || null, pdfBuffer,
         JSON.stringify(logoPositions), createdBy || null,
-        primaryLogoBuffer, primaryLogoMime || null,
-        promoDarkBuffer, promoLogoDarkMime || null,
-        promoLightBuffer, promoLogoLightMime || null,
+        primaryLogoBuffer, primaryLogoBuffer !== rawLogo ? "image/png" : (primaryLogoMime || null),
+        promoDarkBuffer, promoDarkBuffer && promoDarkBuffer !== rawDark ? "image/png" : (promoDarkBuffer ? promoLogoDarkMime || null : null),
+        promoLightBuffer, promoLightBuffer && promoLightBuffer !== rawLight ? "image/png" : (promoLightBuffer ? promoLogoLightMime || null : null),
         disablePromoOffer === true,
         crossSellCandidate ? JSON.stringify(crossSellCandidate) : null,
         sessionId,
