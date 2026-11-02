@@ -845,40 +845,31 @@ app.get('/api/brightpearl/name-badges', async (req, res) => {
       return res.json([]);
     }
 
-    // Bulk-fetch order details in batches of 50 — gives us customer info for
-    // the queue display. Order detail does NOT include custom fields directly,
-    // so PCF_BADGE has to come from a separate /custom-field call (next step).
+    // Bulk-fetch order details in batches of 50, custom fields included (includeOptional=customFields),
+    // so PCF_BADGE comes with the customer info. It used to be one /custom-field call per order, all at
+    // once - ~33 BP calls in a burst on every load of this tab (/bp-usage, 2 Nov).
     const detailMap = new Map();
-    for (let i = 0; i < allOrderIds.length; i += 50) {
-      const batch = allOrderIds.slice(i, i + 50);
-      const detailUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${batch.join(',')}`;
+    const sortedIds = [...new Set(allOrderIds.map(Number))].sort((a, b) => a - b);   // BP 400s on unordered id-sets
+    for (let i = 0; i < sortedIds.length; i += 50) {
+      const batch = sortedIds.slice(i, i + 50);
+      const detailUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${batch.join(',')}?includeOptional=customFields`;
       const r = await fetch(detailUrl, { method: 'GET', headers });
-      if (!r.ok) continue;
+      if (!r.ok) { console.error(`PCF_BADGE order read failed (${r.status}) for ${batch.length} orders`); continue; }
       const data = await r.json();
       for (const order of (data.response || [])) {
         detailMap.set(order.id, order);
       }
     }
 
-    // Custom-field check on the filtered subset (department-22 + recent
-    // updates is already small, so per-order /custom-field calls are fine).
     const matches = [];
     const debugSamples = [];
-    await Promise.all(allOrderIds.map(async (orderId) => {
-      try {
-        const cfUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderId}/custom-field`;
-        const cfResp = await fetch(cfUrl, { method: 'GET', headers });
-        if (!cfResp.ok) return;
-        const cfData = await cfResp.json();
-        const fields = cfData.response || cfData || {};
-        if (debug && debugSamples.length < 5) {
-          debugSamples.push({ orderId, badgeValue: fields.PCF_BADGE });
-        }
-        if (isBadgeYes(fields.PCF_BADGE)) matches.push(orderId);
-      } catch (err) {
-        console.error(`PCF_BADGE check failed for order ${orderId}:`, err.message);
+    for (const [orderId, order] of detailMap) {
+      const fields = order.customFields || {};
+      if (debug && debugSamples.length < 5) {
+        debugSamples.push({ orderId, badgeValue: fields.PCF_BADGE });
       }
-    }));
+      if (isBadgeYes(fields.PCF_BADGE)) matches.push(orderId);
+    }
 
     if (debug) {
       return res.json({
@@ -2361,13 +2352,16 @@ async function refreshPrintQueueFromFilter() {
     // as possibly changed, so read them all once and start checking from now.
     if (!changed) { toFetch.length = 0; toFetch.push(...ids); }
 
-    await mapPool(toFetch, 3, async (id) => {
+    // 50 orders per BP call (GET order/{id-set}): a full read after a restart is ~3 calls, not ~150
+    // (one GET per order made 126 calls at 14:34 on 2 Nov, after a deploy emptied this cache).
+    const fetchIds = [...new Set(toFetch)].sort((a, b) => a - b);   // BP 400s on unordered id-sets
+    for (let i = 0; i < fetchIds.length; i += 50) {
+      if (i) await sleepMs(1000);
       try {
-        const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}`, { headers });
-        const o = (await r.json().catch(() => null))?.response?.[0];
-        if (o) printOrderCache.set(id, { order: o, fetchedAt: Date.now() });
-      } catch { /* keep the cached copy, if any */ }
-    }, 2500);   // ~65 calls a minute at most, so even a full first read leaves room for everything else
+        const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${fetchIds.slice(i, i + 50).join(',')}`, { headers });
+        for (const o of (await r.json().catch(() => null))?.response || []) printOrderCache.set(Number(o.id), { order: o, fetchedAt: Date.now() });
+      } catch { /* keep the cached copies, if any */ }
+    }
     if (!changed && toFetch.length) printChangesCheckedAt = checkStarted;
     for (const id of printOrderCache.keys()) if (!ids.includes(id)) printOrderCache.delete(id);
 
