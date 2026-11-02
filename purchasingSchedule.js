@@ -3230,8 +3230,9 @@ async function handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, d
       orders: wanting.map((l) => ({ id: l.order, ref: l.orderRef || null, qty: Math.round(Number(l.qty) || 0) })),
       alternatives: String(supplierKey).toUpperCase() === 'SNICKERS' ? await snickersAlternativeSizes(altItemsUrl, d.sku) : [],
     });
-    // 1. the PO row — it is never arriving
-    try {
+    // 1. the PO row — it is never arriving (alreadyOff: the run's drop handler took it off already)
+    if (d.alreadyOff) done.removedRows.push({ sku: d.sku, ok: true, alreadyOff: true });
+    else try {
       const r = await bp.removePoRowLive({ poId, sku: d.sku, execute: true });
       done.removedRows.push({ sku: d.sku, ok: !!(r && r.done) });
     } catch (e) { done.problems.push(`remove PO row ${d.sku}: ${e.message}`); }
@@ -5335,21 +5336,29 @@ export async function fristadsPlaceExisting({ pool, altItemsUrl, poId, discontin
 // finalised as ordered, so beyond the usual (PO row off, recorded, sales emailed) each affected SO
 // must come back OFF "Ordered Stock Awaiting Delivery" onto DISCONTINUED_PARK_STATUS with a note,
 // or it sits looking complete. SOs come from the PO's own contributor note. Dry run unless execute.
-export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey, poId, skus = [], contactId, execute = false }) {
-  const want = new Set(skus.map((s) => String(s).toUpperCase()));
+// dropped: [{ sku, name, qty, soIds }] for customer lines the run's own drop handler ALREADY took off
+// the PO (Portwest "customer-line-dropped", P390WHR on PO 501136 / SO 500812, 2026-11-02). Those
+// have no PO row left to find, so the SO lines come from what the drop recorded instead.
+export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey, poId, skus = [], dropped = [], contactId, execute = false }) {
+  const droppedBySku = new Map((dropped || []).filter((d) => d && d.sku).map((d) => [String(d.sku).toUpperCase(), d]));
+  const want = new Set([...skus.map((s) => String(s).toUpperCase()), ...droppedBySku.keys()]);
   if (!poId || !want.size || !supplierKey) throw new Error('poId, supplierKey and skus required');
   const contrib = await bp.getPoContributors(poId);
   const rows = await bp.getOrderCartLines(poId);
-  const onPo = rows.filter((r) => want.has(String(r.sku).toUpperCase()));
-  if (onPo.length !== want.size) throw new Error(`not every SKU is on PO#${poId}: found ${onPo.map((r) => r.sku).join(', ') || 'none'}`);
+  const onPo = [...rows.filter((r) => want.has(String(r.sku).toUpperCase()) && !droppedBySku.has(String(r.sku).toUpperCase())),
+    ...[...droppedBySku.values()].map((d) => ({ sku: d.sku, qty: Number(d.qty) || 1, name: d.name || null, alreadyOff: true }))];
+  if (onPo.length !== want.size) throw new Error(`not every SKU is on PO#${poId}: found ${onPo.map((r) => r.sku).join(', ') || 'none'} (a line the run already dropped goes in dropped[])`);
   const soLines = [];
   for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
     for (const it of items) { const r = rows.find((x) => String(x.sku).toUpperCase() === String(it.sku).toUpperCase()) || {}; soLines.push({ order: Number(order), sku: it.sku, qty: it.qty, name: r.name || null }); }
   }
+  for (const d of droppedBySku.values()) {
+    for (const so of (d.soIds || [])) if (!soLines.some((l) => l.order === Number(so) && String(l.sku).toUpperCase() === String(d.sku).toUpperCase())) soLines.push({ order: Number(so), sku: d.sku, qty: Number(d.qty) || 1, name: d.name || null });
+  }
   const affected = [...new Set(soLines.filter((l) => want.has(String(l.sku).toUpperCase())).map((l) => l.order))];
   const plan = { poId, supplierKey, skus: onPo.map((r) => ({ sku: r.sku, qty: r.qty, name: r.name })), affectedOrders: affected, poLinesLeft: rows.length - onPo.length };
   if (!execute) return { dryRun: true, ...plan };
-  const done = await handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, dead: onPo.map((r) => ({ sku: r.sku, name: r.name, status: 'Discontinued (supplier, after ordering)' })), po: { soLines } });
+  const done = await handleDiscontinuedLines({ pool, altItemsUrl, supplierKey, poId, dead: onPo.map((r) => ({ sku: r.sku, name: r.name, alreadyOff: !!r.alreadyOff, status: 'Discontinued (supplier, after ordering)' })), po: { soLines } });
   const em = done.emailed || null;
   const emailLine = em && (em.accepted || []).length ? `Emailed (${em.accepted.join(', ')}).` : 'THE DISCONTINUED EMAIL DID NOT SEND — this note is the only record, so tell them.';
   const parked = [];
