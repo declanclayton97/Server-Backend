@@ -3034,6 +3034,23 @@ function performanceBrandsPackMultiples() {
   for (const [k, v] of Object.entries(env)) { const n = Number(v); if (n > 1) out[String(k).toUpperCase()] = n; }
   return out;
 }
+// OUR PRODUCT IS A PACK of a code Hultafors sells singly. 93210448008 is "Snickers 9321 Precision
+// Flex Light Gloves - Pack of 10 Pairs" in Brightpearl, but on the portal one unit of that code is
+// ONE pair: PO 498473 (22 Oct) sent qty 1, Hultafors sent 1 pair, and SO 498177's customer got 1
+// pair instead of 10 (Dec, 2 Nov). Keyed by the 4-digit style AND the pack size must appear in the
+// product name ("Pack of 10"), so a single-pair product on the same style is never multiplied.
+// The PO row stays as it is (1 pack is what we receive); only the basket qty and the price check
+// are scaled. Extend without a deploy via SNICKERS_OURS_IS_PACK='{"<style>":<n>}' on Render.
+const SNICKERS_OURS_IS_PACK = {
+  '9321': 10,   // 9321 Precision Flex Light Gloves, Pack of 10 Pairs (SO 498177, 2026-11-02)
+};
+function snickersOursIsPack(sku, name) {
+  let env = {};
+  try { env = JSON.parse(process.env.SNICKERS_OURS_IS_PACK || '{}'); } catch { /* bad JSON -> built-ins only */ }
+  const n = Number({ ...SNICKERS_OURS_IS_PACK, ...env }[String(sku || '').slice(0, 4)]);
+  if (!(n > 1)) return 1;
+  return new RegExp('pack of ' + n + '(?![0-9])', 'i').test(String(name || '')) ? n : 1;
+}
 function snickersPackMultiples() {
   let env = {};
   try { env = JSON.parse(process.env.SNICKERS_PACK_MULTIPLES || '{}'); } catch { /* bad JSON → built-ins only, never blocks a run */ }
@@ -3446,11 +3463,13 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // up on the portal — that lookup needs the size TEXT ("L"), which only Brightpearl knows, and
   // bySku itself is sku -> qty. See the discontinued check below.
   const detailBySku = new Map();
+  const namesBySku = new Map();
   for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) {
     if (String(l.productId) === '1000' || !l.sku) continue;
     const k = String(l.sku).toUpperCase();
     bySku.set(k, (bySku.get(k) || 0) + Math.round(l.qty));
     if (!detailBySku.has(k)) detailBySku.set(k, { sku: l.sku, productId: l.productId, name: l.name, colour: l.colour, size: l.size });
+    namesBySku.set(k, `${namesBySku.get(k) || ''} | ${l.name || ''}`);   // every name a line carried, for snickersOursIsPack
   }
   // Codes already proven discontinued are dropped BEFORE the basket is built, so a dead line is
   // rediscovered by failing exactly once and never again.
@@ -3463,9 +3482,14 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   if (excluded.length) steps.excluded = excluded;
   const packs = snickersPackMultiples();
   let packApplied = [];
+  const oursPackBySku = new Map();   // stockCode -> pairs per one of OUR units (see SNICKERS_OURS_IS_PACK)
   const buildLines = () => {
     packApplied = [];
-    return [...bySku.entries()].map(([stockCode, qty]) => {
+    oursPackBySku.clear();
+    return [...bySku.entries()].map(([stockCode, ourQty]) => {
+      const ourPack = snickersOursIsPack(stockCode, namesBySku.get(stockCode));
+      if (ourPack > 1) oursPackBySku.set(stockCode, ourPack);
+      const qty = ourQty * ourPack;
       const p = Number(packs[stockCode]);
       if (p > 1 && qty % p !== 0) {
         const q = Math.ceil(qty / p) * p;
@@ -3504,6 +3528,7 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   let lines = buildLines();
   if (!lines.length) throw stepErr('resolve', 'no orderable Snickers lines');
   if (packApplied.length) steps.packRounding = packApplied;
+  if (oursPackBySku.size) steps.oursIsPack = [...oursPackBySku].map(([sku, n]) => ({ sku, ourUnits: bySku.get(sku), sentAs: bySku.get(sku) * n, packOf: n }));
   steps.resolve = { lines: lines.length, units: lines.reduce((a, l) => a + l.qty, 0) };
 
   // REHEARSAL: the worker stages the basket and reads it back, and never presses Confirm.
@@ -3700,7 +3725,8 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
   // alert names the offending SKU; otherwise the cart total alone, like Fristads.
   const costBySku = new Map();
   for (const l of [...(po.soLines || []), ...(po.lowLines || [])]) { if (l.sku) costBySku.set(String(l.sku).toUpperCase(), Number(l.cost) || 0); }
-  const orderedNet = +lines.reduce((a, l) => a + (costBySku.get(l.stockCode) || 0) * l.qty, 0).toFixed(2);
+  // Our cost is per OUR unit; a pack line went to the basket as pairs, so count it back in packs.
+  const orderedNet = +lines.reduce((a, l) => a + (costBySku.get(l.stockCode) || 0) * l.qty / (oursPackBySku.get(l.stockCode) || 1), 0).toFixed(2);
   const cartTotal = Number(wr.cart && wr.cart.totalCost) || 0;
   const gap = cartTotal ? +(cartTotal - orderedNet).toFixed(2) : 0;
   const lineGaps = [];
@@ -3708,8 +3734,10 @@ async function placeSnickersOrder(pool, altItemsUrl, { padToThreshold = 0, live 
     if (!cl.code || cl.unit == null) continue;
     const ours = costBySku.get(String(cl.code).toUpperCase());
     if (ours == null) continue;                                   // not a line we sent (e.g. the add-article row)
-    const d = +(cl.unit - ours).toFixed(2);
-    if (Math.abs(d) > 0.02) lineGaps.push({ sku: cl.code, ours: +ours.toFixed(2), theirs: cl.unit, diffEach: d, qty: cl.qty });
+    const per = oursPackBySku.get(String(cl.code).toUpperCase()) || 1;   // their unit is a pair; ours may be a pack of them
+    const theirs = +(cl.unit * per).toFixed(2);
+    const d = +(theirs - ours).toFixed(2);
+    if (Math.abs(d) > 0.02) lineGaps.push({ sku: cl.code, ours: +ours.toFixed(2), theirs, diffEach: d, qty: cl.qty / per });
   }
   steps.priceCheck = { cartTotal: cartTotal || null, orderedNet, gap, lineGaps };
   if (lineGaps.length || (cartTotal && Math.abs(gap) > 0.50)) {
