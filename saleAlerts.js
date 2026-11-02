@@ -24,7 +24,7 @@
 //   SALE_ALERTS_SITE_HEADER  "Name: secret" sent to tuffshop.co.uk so a Cloudflare skip rule lets the sale pages through
 
 import crypto from "crypto";
-import { bpLiveGet } from "./purchasingAuto.js";
+import { bpLiveGet as bpLiveGetRaw } from "./purchasingAuto.js";
 import { sendNew, mailboxContext, graphConfigured, salesMailbox } from "./graphMail.js";
 
 const WAREHOUSE = 2;
@@ -62,6 +62,15 @@ export function unsubToken(email, secret = cfg().secret) {
 const unsubUrl = (email) => { const c = cfg(); return `${c.publicUrl}/sale-alerts/unsubscribe?e=${encodeURIComponent(normEmail(email))}&t=${unsubToken(email)}`; };
 
 // ---- BP reads ---------------------------------------------------------------------------------
+// Paced to ~100 calls/min (half BP's 200/min allowance): the 10:00 run hit 196 in one minute on 2 Nov and left
+// nothing for the purchasing runs. It is a once-a-day job, so slower costs nothing.
+let lastBpAt = 0;
+async function bpLiveGet(path) {
+  const wait = lastBpAt + 600 - Date.now();
+  lastBpAt = Math.max(Date.now(), lastBpAt + 600);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  return bpLiveGetRaw(path);
+}
 async function movements(pid, type) {
   const out = [];
   for (let first = 1; ; first += 500) {
@@ -90,7 +99,15 @@ export async function recipientsFor(pid, { pool, cutoffDays = 7 } = {}) {
   const returned = new Set();
   const gi = await movements(pid, "GI");
   for (const o of await orders(gi.map((m) => m.orderId).filter(Boolean))) if (o.orderTypeCode === "SC") returned.add(o.parties?.customer?.contactId);
+  // Credits raised against the sale itself: one search per order, so only for customers who could still be
+  // messaged (website channel, recent, undecorated) - marketplace/old/decorated buyers are skipped anyway.
+  const salesWhy = (o) => { const cid = o.parties?.customer?.contactId, date = String(o.placedOn || o.createdOn || "").slice(0, 10), ch = Number(o.assignment?.current?.channelId);
+    return !cid ? "no customer" : date < since ? "bought too long ago"
+      : !(WEBSITE_CHANNELS.has(ch) || (c.trade && TRADE_CHANNELS.has(ch))) ? (TRADE_CHANNELS.has(ch) ? "trade channel (off)" : "marketplace / company webstore")
+      : Object.values(o.orderRows || {}).some((r) => DECORATION.test(String(r.productSku || "")) || DECORATION_NAME.test(String(r.productName || ""))) ? "decorated order" : ""; };
+  const candidates = new Set(sales.filter((o) => !salesWhy(o)).map((o) => o.parties?.customer?.contactId));
   for (const o of sales) {
+    if (!candidates.has(o.parties?.customer?.contactId) || returned.has(o.parties?.customer?.contactId)) continue;
     const cr = rowsOf(await bpLiveGet(`/order-service/order-search?orderTypeId=3&parentOrderId=${o.id}&columns=orderId`));
     if (!cr.length) continue;
     for (const credit of await orders(cr.map((x) => x.orderId)))
@@ -99,10 +116,8 @@ export async function recipientsFor(pid, { pool, cutoffDays = 7 } = {}) {
   // one candidate per customer: their latest qualifying purchase
   const best = new Map(), skipped = [];
   for (const o of sales) {
-    const cid = o.parties?.customer?.contactId, date = String(o.placedOn || o.createdOn || "").slice(0, 10), ch = Number(o.assignment?.current?.channelId);
-    const why = !cid ? "no customer" : returned.has(cid) ? "returned it" : date < since ? "bought too long ago"
-      : !(WEBSITE_CHANNELS.has(ch) || (c.trade && TRADE_CHANNELS.has(ch))) ? (TRADE_CHANNELS.has(ch) ? "trade channel (off)" : "marketplace / company webstore")
-      : Object.values(o.orderRows || {}).some((r) => DECORATION.test(String(r.productSku || "")) || DECORATION_NAME.test(String(r.productName || ""))) ? "decorated order" : "";
+    const cid = o.parties?.customer?.contactId, date = String(o.placedOn || o.createdOn || "").slice(0, 10);
+    const why = cid && returned.has(cid) ? "returned it" : salesWhy(o);
     if (why) { skipped.push({ contactId: cid, orderId: o.id, reason: why }); continue; }
     if (!best.has(cid) || best.get(cid).date < date) best.set(cid, { contactId: cid, orderId: o.id, date });
   }

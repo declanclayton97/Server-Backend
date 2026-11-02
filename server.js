@@ -1437,9 +1437,11 @@ async function pollUrgentOrdersInner({ sinceMs, label, refreshAllCached = false 
 // ---------------------------------------------------------------------------
 // Urgent mock-up watcher (PCF_URGENTMO = Yes, Dec 21 Oct 2026). Its own light loop rather
 // than the urgent scan above, which can be switched off (URGENT_POLL_ENABLED) and does far more
-// per order. Every 3 min: one order-search for orders updated since the last pass, then one
-// custom-field read per order, ~1/sec. A day is ~1,300 updated orders, so a pass is usually a
-// handful of calls. Rate-limited -> stop and retry the same window next pass (cursor not moved).
+// per order. Every 3 min: one order-search for orders updated since the last pass, then the
+// orders' custom fields read 100 at a time (GET order/{id-set}?includeOptional=customFields) -
+// a pass is usually 2 calls. It used to read each order's custom-field on its own (~23 calls a
+// minute all day, the steadiest BP user on /bp-usage, 2 Nov). Rate-limited -> stop and retry the
+// same window next pass (cursor not moved).
 // ---------------------------------------------------------------------------
 let urgentMockupSince = Date.now() - 30 * 60 * 1000;
 let urgentMockupInFlight = false;
@@ -1469,7 +1471,7 @@ async function pollUrgentMockups() {
     const from = encodeURIComponent(`${new Date(urgentMockupSince - 2 * 60 * 1000).toISOString()}/`);
     const ids = [];
     for (let first = 1, page = 0; page < 10; page++) {
-      const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&updatedOn=${from}&pageSize=500&firstResult=${first}`, { method: 'GET', headers });
+      const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order-search?orderTypeId=1&updatedOn=${from}&columns=orderId&pageSize=500&firstResult=${first}`, { method: 'GET', headers });
       if (r.status === 429 || r.status === 503) return;
       if (!r.ok) { console.error('[urgent-mockups] order-search', r.status); return; }
       const rows = (await r.json()).response?.results || [];
@@ -1478,11 +1480,17 @@ async function pollUrgentMockups() {
       first += rows.length;
     }
     let yes = 0;
-    for (const id of ids) {
-      const res = await syncUrgentMockupFlag(id, headers, baseUrl);
-      if (res === 'limited') { console.warn('[urgent-mockups] rate limited - retrying this window next pass'); return; }
-      if (res === 'yes') yes++;
-      await sleep(1000);
+    const sorted = [...new Set(ids.map(Number))].sort((a, b) => a - b);   // BP 400s on unordered id-sets
+    for (let i = 0; i < sorted.length; i += 100) {
+      if (i) await sleep(1000);
+      const r = await fetch(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${sorted.slice(i, i + 100).join(',')}?includeOptional=customFields`, { method: 'GET', headers });
+      if (r.status === 429 || r.status === 503) { console.warn('[urgent-mockups] rate limited - retrying this window next pass'); return; }
+      if (!r.ok) { console.error('[urgent-mockups] order read', r.status); return; }
+      const on = [], off = [];
+      for (const o of (await r.json()).response || []) (isBadgeYes(o.customFields?.PCF_URGENTMO) ? on : off).push(o.id);
+      if (on.length) await pool.query('INSERT INTO urgent_mockups (order_id) SELECT unnest($1::bigint[]) ON CONFLICT (order_id) DO NOTHING', [on]);
+      if (off.length) await pool.query('DELETE FROM urgent_mockups WHERE order_id = ANY($1::bigint[])', [off]);
+      yes += on.length;
     }
     urgentMockupSince = startedAt;
     if (ids.length) console.log(`[urgent-mockups] checked ${ids.length} updated order(s), ${yes} flagged`);
