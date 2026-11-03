@@ -5345,8 +5345,13 @@ export async function discontinuedAfterPlacing({ pool, altItemsUrl, supplierKey,
   if (!poId || !want.size || !supplierKey) throw new Error('poId, supplierKey and skus required');
   const contrib = await bp.getPoContributors(poId);
   const rows = await bp.getOrderCartLines(poId);
-  const onPo = [...rows.filter((r) => want.has(String(r.sku).toUpperCase()) && !droppedBySku.has(String(r.sku).toUpperCase())),
-    ...[...droppedBySku.values()].map((d) => ({ sku: d.sku, qty: Number(d.qty) || 1, name: d.name || null, alreadyOff: true }))];
+  // A "dropped" SKU still has its row on the PO when the SUPPLIER dropped it rather than our run
+  // (Blaklader erp-check, 335911589633XL on PO 501007, 2026-11-03): its soIds are still useful,
+  // but it is NOT alreadyOff, or the row stays on the PO as stock that never arrives.
+  const rowSkus = new Set(rows.map((r) => String(r.sku).toUpperCase()));
+  const onPo = [...rows.filter((r) => want.has(String(r.sku).toUpperCase())),
+    ...[...droppedBySku.values()].filter((d) => !rowSkus.has(String(d.sku).toUpperCase()))
+      .map((d) => ({ sku: d.sku, qty: Number(d.qty) || 1, name: d.name || null, alreadyOff: true }))];
   if (onPo.length !== want.size) throw new Error(`not every SKU is on PO#${poId}: found ${onPo.map((r) => r.sku).join(', ') || 'none'} (a line the run already dropped goes in dropped[])`);
   const soLines = [];
   for (const [order, items] of Object.entries(contrib.linesByOrder || {})) {
