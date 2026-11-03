@@ -4850,7 +4850,7 @@ const SUPPLIER_DATE_RULES = {
     skip: ['2026-11-27'],
     place: {
       '2026-11-30': { note: '48% discount as agreed with Benny' },
-      '2026-12-01': { note: '48% discount as agreed with Benny' },
+      '2026-12-01': { note: '48% discount as agreed with Benny', ask: true },   // Dec checks it is worth placing first
     },
   },
 };
@@ -5009,7 +5009,16 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       const wouldBeDay = state.working_days_waited + 1;
       // forcePlace: a deliberate MANUAL override to place NOW regardless of the free-carriage
       // threshold (e.g. an URGENT back-order of a single OOS line). Never set by the pollers.
-      if (over) { willPlace = true; reason = 'over-threshold'; }
+      // ask: Dec decides that day whether it is worth placing. Held (the day is still marked run, so
+      // this asks once), emailed with the value; a forced re-run then places it WITH the note.
+      if (dayRule && dayRule.ask && !force && !dryRun) {
+        decision = `held for Dec — ${cfg.supplierKey} date rule ${uk.date}: £${netValue} (${units} units) waiting, not placed`;
+        await logPurchasingError(pool, { supplier: cfg.supplierKey, step: 'date-rule-ask', severity: 'review', placed: false,
+          message: `${cfg.supplierKey} ${uk.date}: £${netValue} across ${units} units is ready but NOT placed — you asked to decide today whether it is worth placing. `
+            + `To place it (with "${dayRule.note || ''}" in the comments), re-run ${cfg.supplierKey} with force; otherwise do nothing and it orders on the next normal run without the note.`,
+          context: { supplier: cfg.supplierKey, date: uk.date, netValue, units } }).catch(() => {});
+      }
+      else if (over) { willPlace = true; reason = 'over-threshold'; }
       else if (dayRule) { willPlace = true; reason = `supplier date rule ${uk.date} (under £${threshold}, placed anyway)`; }
       else if (forcePlace) { willPlace = true; padOnPlace = !!topUp; reason = topUp ? `forced place (manual — topped up with low-inv toward £${threshold})` : `forced place (manual — under £${threshold}, threshold ignored)`; }
       else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS && cfg.noPad) { willPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — placed as it stands with carriage, never padded)`; }
