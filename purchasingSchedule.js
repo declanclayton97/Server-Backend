@@ -5457,6 +5457,7 @@ async function beeswiftFreshToken() {
 const BEESWIFT_PACK_SEED = [
   { sku: 'UV9302245', code: 'UV9302245', packSize: 4, oursIsPack: false },   // "PK 4" @ £34, ours is one goggle
   { sku: 'BBP3VN', code: 'BBP3VN', packSize: 5, oursIsPack: true },           // "Bx 5", ours is the box
+  { sku: 'UV2124001', code: 'UV2124001', packSize: 50, oursIsPack: true },    // "PK 50" @ £49.98, ours is the pack (PO 501327, 2026-11-03)
 ];
 async function beeswiftPacksTable(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS beeswift_packs (sku TEXT PRIMARY KEY, code TEXT, pack_size INT NOT NULL, ours_is_pack BOOLEAN NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
@@ -5475,7 +5476,9 @@ async function rememberBeeswiftPacks(pool, packs) {
 async function beeswiftPackExtraNet(pool, rawLines) {
   const known = new Map(BEESWIFT_PACK_SEED.map((p) => [p.sku.toUpperCase(), p]));
   if (pool) {
-    try { await beeswiftPacksTable(pool); for (const r of (await pool.query('SELECT sku, pack_size, ours_is_pack FROM beeswift_packs')).rows) known.set(String(r.sku).toUpperCase(), { packSize: r.pack_size, oursIsPack: r.ours_is_pack }); }
+    // A seed entry is a checked fact and wins over what a checkout recorded (UV2124001 was recorded
+    // as singles before the pack-price test existed).
+    try { await beeswiftPacksTable(pool); for (const r of (await pool.query('SELECT sku, pack_size, ours_is_pack FROM beeswift_packs')).rows) { const k = String(r.sku).toUpperCase(); if (!BEESWIFT_PACK_SEED.some((p) => p.sku.toUpperCase() === k)) known.set(k, { packSize: r.pack_size, oursIsPack: r.ours_is_pack }); } }
     catch { /* seed only */ }
   }
   let extra = 0;
