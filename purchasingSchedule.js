@@ -3888,7 +3888,7 @@ async function withVariantDetail(lines) {
   } catch { /* additive only — without it we simply fall back to the old behaviour */ }
   return lines;
 }
-async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, basketPath, padToThreshold = 0, live = true, excludeSkus = [] } = {}) {
+async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, basketPath, padToThreshold = 0, live = true, excludeSkus = [], orderNote = null } = {}) {
   // excludeSkus: lines the supplier genuinely cannot sell us (discontinued colour, dead code).
   // They come off BOTH the portal basket AND the PO — unlike the Portwest equivalent, which
   // leaves them on the PO on purpose for manual handling. Leaving them on here would tell
@@ -3999,7 +3999,7 @@ async function placeElasticOrder(pool, altItemsUrl, { supplierKey, contactId, ba
 
   // Build + submit the document via the Alt-Items basket route (ref = PO# → the document PO field).
   // The route refuses if any line is unresolved, so a null/short order can never be submitted.
-  const r = await jfetch('checkout', `${altItemsUrl}${basketPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines, purchaseOrder: String(poId), place: live }) });
+  const r = await jfetch('checkout', `${altItemsUrl}${basketPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines, purchaseOrder: String(poId), place: live, ...(orderNote ? { note: orderNote } : {}) }) });
   if (r.unresolved && r.unresolved.length) throw stepErr('resolve', `${supplierKey} lines not in the availability sheet (order NOT placed): ${r.unresolved.join(', ')}`);
   if (!r.placed) throw stepErr('checkout', `${supplierKey} did not confirm placement: ${JSON.stringify(r.error || r).slice(0, 250)}`);
   const orderNo = r.orderNo || null;
@@ -4841,6 +4841,19 @@ const SUPPLIER_CONTACT = {
   BEESWIFT: 326, 'AS APPAREL': 47921, TRANEMO: 11780, LEO: 7919, RALAWISE: 205, 'BROOK TAVERNER': 5499, ROCKFALL: 38733, ENGEL: 83093, SUPERTOUCH: 342,
   HELLBERG: 331,   // shares the Snickers contact — the hub tells the two apart by which RUN placed the PO
 };
+// Dates a supplier asked us to treat differently, by UK date. skip = no run that day; place = run
+// and place whatever there is (the free-carriage wait does not apply), with an order note where
+// the supplier's portal takes one. Helly Hansen, Dec 2026-11-03: no order on Black Friday, order
+// Cyber Monday + Tuesday instead with the agreed discount in the comments box of those two only.
+const SUPPLIER_DATE_RULES = {
+  'HELLY HANSEN': {
+    skip: ['2026-11-27'],
+    place: {
+      '2026-11-30': { note: '48% discount as agreed with Benny' },
+      '2026-12-01': { note: '48% discount as agreed with Benny' },
+    },
+  },
+};
 const WINDOW_DISPLAY = {
   BLAKLADER: { at: '09:30' },
   SNICKERS: { at: '09:45' },
@@ -4937,6 +4950,11 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
     if (!force && !dryRun && state.last_run_date && ukDateStr(state.last_run_date) === uk.date) {
       return { skipped: `already ran today (${uk.date})`, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}` };
     }
+    const dateRule = SUPPLIER_DATE_RULES[cfg.supplierKey] || {};
+    if (!force && (dateRule.skip || []).includes(uk.date)) {
+      return { skipped: `${cfg.supplierKey} asked for no order on ${uk.date}`, ukTime: `${uk.weekday} ${uk.hour}:${String(uk.minute).padStart(2, '0')}` };
+    }
+    const dayRule = (dateRule.place || {})[uk.date] || null;
 
     // Blaklader's final check runs with the morning run, before today's demand is read, so a line
     // their back office dropped yesterday is reported the next morning rather than at delivery.
@@ -4992,6 +5010,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
       // forcePlace: a deliberate MANUAL override to place NOW regardless of the free-carriage
       // threshold (e.g. an URGENT back-order of a single OOS line). Never set by the pollers.
       if (over) { willPlace = true; reason = 'over-threshold'; }
+      else if (dayRule) { willPlace = true; reason = `supplier date rule ${uk.date} (under £${threshold}, placed anyway)`; }
       else if (forcePlace) { willPlace = true; padOnPlace = !!topUp; reason = topUp ? `forced place (manual — topped up with low-inv toward £${threshold})` : `forced place (manual — under £${threshold}, threshold ignored)`; }
       else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS && cfg.noPad) { willPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — placed as it stands with carriage, never padded)`; }
       else if (wouldBeDay >= MAX_WAIT_WORKING_DAYS) { willPlace = true; padOnPlace = true; reason = `held ${MAX_WAIT_WORKING_DAYS} working days (under £${threshold} — top up low-inv to reach free delivery, else carriage)`; }
@@ -5023,7 +5042,7 @@ export async function runSupplierScheduled({ pool, altItemsUrl, supplier = 'FRIS
         // (place as it stands), failed at resolve leaving PO 496818, and the retry-sweep then read
         // "day 1 of 3" and waited, so a held order looked like a fresh one.
         await saveState(pool, { id: cfg.stateId, workingDaysWaited: state.working_days_waited, lastRunDate: uk.date, result: { supplier: cfg.supplierKey, ran: uk.date, claimedAt: `${uk.hour}:${String(uk.minute).padStart(2, '0')}`, state: 'placing — day claimed before contacting the supplier' } }).catch(() => {});
-        placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo, excludeSkus, ...splitOpts });
+        placement = await cfg.placeFn(pool, altItemsUrl, { padToThreshold: padTo, excludeSkus, ...splitOpts, ...(dayRule && dayRule.note ? { orderNote: dayRule.note } : {}) });
         decision = `placed — ${reason}` + (lineMode === 'so' ? ' (customer orders)' : lineMode === 'low' ? ' (reorder)' : '');
         newWaitDays = 0;
         // The order placed: the carry-forward lines createPo reserved against this PO are bought.
