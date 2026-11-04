@@ -106,9 +106,11 @@ export async function recipientsFor(pid, { pool, cutoffDays = 7 } = {}) {
       : !(WEBSITE_CHANNELS.has(ch) || (c.trade && TRADE_CHANNELS.has(ch))) ? (TRADE_CHANNELS.has(ch) ? "trade channel (off)" : "marketplace / company webstore")
       : Object.values(o.orderRows || {}).some((r) => DECORATION.test(String(r.productSku || "")) || DECORATION_NAME.test(String(r.productName || ""))) ? "decorated order" : ""; };
   const candidates = new Set(sales.filter((o) => !salesWhy(o)).map((o) => o.parties?.customer?.contactId));
-  for (const o of sales) {
-    if (!candidates.has(o.parties?.customer?.contactId) || returned.has(o.parties?.customer?.contactId)) continue;
-    const cr = rowsOf(await bpLiveGet(`/order-service/order-search?orderTypeId=3&parentOrderId=${o.id}&columns=orderId`));
+  // parentOrderId takes a set (checked live 4 Nov), so 50 sales per search instead of one each - the
+  // per-order search was the run's biggest caller (32 calls in two minutes at 10:02 that day).
+  const toCheck = sales.filter((o) => candidates.has(o.parties?.customer?.contactId) && !returned.has(o.parties?.customer?.contactId)).map((o) => o.id);
+  for (const c of chunk([...new Set(toCheck)].sort((a, b) => a - b), 50)) {
+    const cr = rowsOf(await bpLiveGet(`/order-service/order-search?orderTypeId=3&parentOrderId=${c.join(",")}&columns=orderId&pageSize=500`));
     if (!cr.length) continue;
     for (const credit of await orders(cr.map((x) => x.orderId)))
       if (Object.values(credit.orderRows || {}).some((r) => Number(r.productId) === Number(pid))) returned.add(credit.parties?.customer?.contactId);
@@ -225,12 +227,13 @@ async function bpSize(pid) {
   try { const p = ((await bpLiveGet(`/product-service/product/${pid}`)) || [])[0] || {};
     return String(((p.variations || []).find((v) => /size/i.test(v.optionName || "")) || {}).optionValue || "").trim(); } catch { return ""; }
 }
-async function originalProductId(saleSku) {
+// needSize: the BP size is only read when the sale page didn't give one (it was a product read per variant).
+async function originalProductId(saleSku, needSize = true) {
   const base = originalSkuOf(saleSku);
   const tries = base !== saleSku ? [base, saleSku.replace(/#sale$/i, ""), saleSku] : [saleSku];
   for (const sku of tries) {
     const rows = rowsOf(await bpLiveGet(`/product-service/product-search?SKU=${encodeURIComponent(sku)}&pageSize=10`)).filter((r) => String(r.SKU).toUpperCase() === sku.toUpperCase());
-    if (rows.length) return { pid: rows[0].productId, sku: rows[0].SKU, size: await bpSize(rows[0].productId) };
+    if (rows.length) return { pid: rows[0].productId, sku: rows[0].SKU, size: needSize ? await bpSize(rows[0].productId) : "" };
   }
   return null;
 }
@@ -298,7 +301,7 @@ export async function runSaleAlerts({ pool, dryRun = false, mode = cfg().mode, m
     const page = await salePage(url);
     const eligible = new Map(), skipped = [], sizes = [];
     for (const v of page.variants) {
-      const orig = await originalProductId(v.sku);
+      const orig = await originalProductId(v.sku, !v.size);
       if (!orig) { skipped.push({ reason: `sale SKU ${v.sku} not matched to a product` }); continue; }
       if (!v.size && orig.size) v.size = orig.size;   // single-size "-sale" page: the size lives on the BP product
       sizes.push({ ...v, pid: orig.pid, origSku: orig.sku });
