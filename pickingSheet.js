@@ -112,16 +112,65 @@ function fontBuffers() {
 }
 // Columns sized for a phone: what Bob looks for first (location) is near the front.
 const LAYOUT = [
-  { k: "LOCATION", w: 150, max: 14 }, { k: "QTY", w: 56, max: 4, align: "middle" }, { k: "DESC", w: 480, max: 47 },
-  { k: "SIZE", w: 120, max: 11 }, { k: "COLOUR", w: 170, max: 16 }, { k: "SKU", w: 230, max: 22 }, { k: "ORDER", w: 140, max: 12 },
+  { k: "LOCATION", w: 150 }, { k: "QTY", w: 56, align: "middle" }, { k: "DESC", w: 480 },
+  { k: "SIZE", w: 120 }, { k: "COLOUR", w: 170 }, { k: "SKU", w: 230 }, { k: "ORDER", w: 140 },
 ];
-// Word-wrap to lines of at most n characters (a word longer than a line is split).
-export function wrap(s, n) {
+const FONT_PX = 19, CELL_PAD = 10;
+
+// Text width in px at FONT_PX, from the font's own advance widths (hmtx + cmap format 4).
+// Wrapping used to count characters, and a name in CAPITALS ran wider than its column and
+// over the SIZE beside it (4 Nov: "adidas MOTIX LOW ... SHOES" hid size 9).
+let advances = null;
+function fontAdvances() {
+  if (advances) return advances;
+  const b = fontBuffers()[0], tables = {};
+  for (let i = 0, n = b.readUInt16BE(4); i < n; i++) {
+    const o = 12 + i * 16;
+    tables[b.toString("latin1", o, o + 4)] = b.readUInt32BE(o + 8);
+  }
+  const upem = b.readUInt16BE(tables.head + 18), nMetrics = b.readUInt16BE(tables.hhea + 34);
+  const adv = (g) => b.readUInt16BE(tables.hmtx + 4 * Math.min(g, nMetrics - 1));
+  let sub = null;
+  for (let i = 0, n = b.readUInt16BE(tables.cmap + 2); i < n; i++) {
+    const o = tables.cmap + 4 + i * 8, off = tables.cmap + b.readUInt32BE(o + 4);
+    if (b.readUInt16BE(o) === 3 && b.readUInt16BE(o + 2) === 1 && b.readUInt16BE(off) === 4) sub = off;
+  }
+  const segX2 = b.readUInt16BE(sub + 6), ends = sub + 14, starts = ends + segX2 + 2, deltas = starts + segX2, ranges = deltas + segX2;
+  const glyph = (cp) => {
+    for (let s = 0; s < segX2; s += 2) {
+      if (cp > b.readUInt16BE(ends + s)) continue;
+      const start = b.readUInt16BE(starts + s);
+      if (cp < start) return 0;
+      const delta = b.readUInt16BE(deltas + s), ro = b.readUInt16BE(ranges + s);
+      if (!ro) return (cp + delta) & 0xffff;
+      const g = b.readUInt16BE(ranges + s + ro + (cp - start) * 2);
+      return g ? (g + delta) & 0xffff : 0;
+    }
+    return 0;
+  };
+  const cache = new Map();
+  advances = (ch) => {
+    if (!cache.has(ch)) cache.set(ch, adv(glyph(ch.codePointAt(0))) / upem);
+    return cache.get(ch);
+  };
+  return advances;
+}
+// Bold is drawn wider than the regular font measures; allow for it.
+export const textPx = (s, bold = false) => [...String(s)].reduce((a, ch) => a + fontAdvances()(ch), 0) * FONT_PX * (bold ? 1.1 : 1);
+
+// Word-wrap to lines no wider than maxPx (a word longer than a line is split).
+export function wrap(s, maxPx, bold = false) {
+  const fits = (t) => textPx(t, bold) <= maxPx;
   const words = String(s || "").split(/\s+/).filter(Boolean), lines = [];
   let cur = "";
   for (let w of words) {
-    while (w.length > n) { if (cur) { lines.push(cur); cur = ""; } lines.push(w.slice(0, n)); w = w.slice(n); }
-    if (!cur) cur = w; else if ((cur + " " + w).length <= n) cur += " " + w; else { lines.push(cur); cur = w; }
+    while (!fits(w)) {
+      if (cur) { lines.push(cur); cur = ""; }
+      let n = w.length - 1;
+      while (n > 1 && !fits(w.slice(0, n))) n--;
+      lines.push(w.slice(0, n)); w = w.slice(n);
+    }
+    if (!cur) cur = w; else if (fits(cur + " " + w)) cur += " " + w; else { lines.push(cur); cur = w; }
   }
   if (cur) lines.push(cur);
   return lines.length ? lines : [""];
@@ -137,23 +186,27 @@ export function pickingSvg(rows, title) {
   const width = LAYOUT.reduce((a, c) => a + c.w, 0) + pad * 2;
   let x = pad;
   const xs = LAYOUT.map((c) => { const at = x; x += c.w; return at; });
-  const noteMax = Math.floor((width - pad * 2 - 20) / 11);
+  const noteMax = width - pad * 2 - CELL_PAD * 2;
+  const bold = (c) => c.k === "LOCATION" || c.k === "QTY";
   const laid = rows.map((r) => {
     if (isNote(r)) {
       const text = [r.DESC, r.SIZE, r.COLOUR, r.ORDER].filter(Boolean).join("  ");
-      const lines = wrap(text, noteMax);
+      const lines = wrap(text, noteMax, true);
       return { r, note: lines, h: Math.max(40, lines.length * lineH + 16) };
     }
-    const cells = LAYOUT.map((c) => wrap(r[c.k] || "", c.max));
+    const cells = LAYOUT.map((c) => wrap(r[c.k] || "", c.w - CELL_PAD * 2, bold(c)));
     return { r, cells, h: Math.max(40, Math.max(...cells.map((l) => l.length)) * lineH + 16) };
   });
   const bodyH = laid.reduce((a, l) => a + l.h, 0);
   const height = top + headH + bodyH + pad;
+  // Each column clips its own text, so even a mis-measured line is cut short at the column
+  // edge instead of drawing over the next one.
   const textAt = (c, i, lines, y, bold) => {
-    const tx = c.align === "middle" ? xs[i] + c.w / 2 : xs[i] + 10;
-    return lines.map((ln, k) => `<text x="${tx}" y="${y + 27 + k * lineH}" font-size="19" ${bold ? 'font-weight="700"' : ""} text-anchor="${c.align === "middle" ? "middle" : "start"}" fill="#111">${esc(ln)}</text>`).join("");
+    const tx = c.align === "middle" ? xs[i] + c.w / 2 : xs[i] + CELL_PAD;
+    return `<g clip-path="url(#col${i})">` + lines.map((ln, k) => `<text x="${tx}" y="${y + 27 + k * lineH}" font-size="${FONT_PX}" ${bold ? 'font-weight="700"' : ""} text-anchor="${c.align === "middle" ? "middle" : "start"}" fill="#111">${esc(ln)}</text>`).join("") + "</g>";
   };
   let out = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="DejaVu Sans">`;
+  out += "<defs>" + LAYOUT.map((c, i) => `<clipPath id="col${i}"><rect x="${xs[i] + 2}" y="0" width="${c.w - 4}" height="${height}"/></clipPath>`).join("") + "</defs>";
   out += `<rect width="${width}" height="${height}" fill="#ffffff"/>`;
   out += `<text x="${pad}" y="40" font-size="24" font-weight="700" fill="#111">${esc(title)}</text>`;
   out += `<rect x="${pad}" y="${top}" width="${width - pad * 2}" height="${headH}" fill="#FFFF00" stroke="#000"/>`;
