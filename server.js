@@ -13421,25 +13421,20 @@ app.get("/api/whatsapp/conversations", requireHubForSales, async (req, res) => {
              -- inbox preview and the Approval-History WhatsApp pill reflect
              -- the last human exchange, not the canned "proof-only" reply
              -- that fires after every inbound message.
-             (SELECT body FROM whatsapp_messages x
-                WHERE x.peer_number = m.peer_number AND x.channel = $1
-                  AND x.msg_type <> 'auto_reply'
-                ORDER BY x.created_at DESC LIMIT 1) AS last_body,
-             (SELECT direction FROM whatsapp_messages x
-                WHERE x.peer_number = m.peer_number AND x.channel = $1
-                  AND x.msg_type <> 'auto_reply'
-                ORDER BY x.created_at DESC LIMIT 1) AS last_direction,
-             (SELECT order_number FROM whatsapp_messages x
-                WHERE x.peer_number = m.peer_number AND x.channel = $1
-                  AND x.order_number IS NOT NULL
-                ORDER BY x.created_at DESC LIMIT 1) AS order_number,
+             -- Each "latest X" is the first of an ordered aggregate over the same
+             -- group (was 4 correlated subqueries per conversation: ~4,100 index
+             -- lookups, 0.6s on the 0.1-CPU database, and the inbox polls it).
+             (array_agg(m.body ORDER BY m.created_at DESC)
+                FILTER (WHERE m.msg_type <> 'auto_reply'))[1] AS last_body,
+             (array_agg(m.direction ORDER BY m.created_at DESC)
+                FILTER (WHERE m.msg_type <> 'auto_reply'))[1] AS last_direction,
+             (array_agg(m.order_number ORDER BY m.created_at DESC)
+                FILTER (WHERE m.order_number IS NOT NULL))[1] AS order_number,
              -- The name on the customer's WhatsApp profile, captured from the
              -- webhook contacts[] block. For a sales chat with no quote this is
              -- the only name we have.
-             (SELECT raw->>'contactName' FROM whatsapp_messages x
-                WHERE x.peer_number = m.peer_number AND x.channel = $1
-                  AND x.direction = 'in' AND x.raw->>'contactName' IS NOT NULL
-                ORDER BY x.created_at DESC LIMIT 1) AS contact_name
+             (array_agg(m.raw->>'contactName' ORDER BY m.created_at DESC)
+                FILTER (WHERE m.direction = 'in' AND m.raw->>'contactName' IS NOT NULL))[1] AS contact_name
         FROM whatsapp_messages m
        WHERE m.channel = $1
        GROUP BY m.peer_number
