@@ -1,0 +1,9253 @@
+{
+ "copiedFrom": "Brightpearl /automation/rule, 5 Nov 2026 13:00, in BP priority order",
+ "rules": [
+  {
+   "id": "6ad9d0993184a3d3f8d7a4bf",
+   "name": "Bob Custom Fields",
+   "conditions": [
+    {
+     "id": "conditionw3kg",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "120"
+      ],
+      "optionsLabel": [
+       "Item Out of Stock"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiono0nq",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_BOBSORTI"
+      ],
+      "fieldType": "YES_NO",
+      "value": "1"
+     }
+    }
+   ],
+   "lastModified": "2026-10-22T09:00:09.914Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6a7c84188ab9b154285d8246",
+   "name": "Ebay Automation - DPD",
+   "conditions": [
+    {
+     "id": "conditionc0fc",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "7"
+      ],
+      "optionsLabel": [
+       "eBay: Tuffworkwearltd"
+      ]
+     }
+    },
+    {
+     "id": "conditioneskp",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SHIPDPD"
+      ]
+     }
+    },
+    {
+     "id": "conditionoxs5",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionwow",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "2"
+      ],
+      "optionsLabel": [
+       "New order"
+      ]
+     }
+    },
+    {
+     "id": "conditionuvmn",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionm4y5",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "14"
+      ],
+      "optionsLabel": [
+       "Interlink Next Day"
+      ]
+     }
+    },
+    {
+     "id": "action7sni",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-08-12T14:32:56.885Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6a7c5f8b8ab9b154285d820b",
+   "name": "Ebay Automation - Royal Mail",
+   "conditions": [
+    {
+     "id": "conditiononif",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "7"
+      ],
+      "optionsLabel": [
+       "eBay: Tuffworkwearltd"
+      ]
+     }
+    },
+    {
+     "id": "conditionlrb8",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SHIPT24"
+      ]
+     }
+    },
+    {
+     "id": "conditionjo",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionkg2",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "2"
+      ],
+      "optionsLabel": [
+       "New order"
+      ]
+     }
+    },
+    {
+     "id": "conditione1p7",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionpipm",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "104"
+      ],
+      "optionsLabel": [
+       "Royal Mail Tracked 24"
+      ]
+     }
+    },
+    {
+     "id": "action7qm",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-08-12T11:56:59.190Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6a7ac17a81f9fc8a07a93b9c",
+   "name": "Ebay Automation - FedEx",
+   "conditions": [
+    {
+     "id": "condition01v9",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "7"
+      ],
+      "optionsLabel": [
+       "eBay: Tuffworkwearltd"
+      ]
+     }
+    },
+    {
+     "id": "conditiongk4p",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SHIPFDX"
+      ]
+     }
+    },
+    {
+     "id": "conditionuwzp",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionbc0c",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "2"
+      ],
+      "optionsLabel": [
+       "New order"
+      ]
+     }
+    },
+    {
+     "id": "conditionhsp1",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiond3yc",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "115"
+      ],
+      "optionsLabel": [
+       "Fedex Priority - Pak"
+      ]
+     }
+    },
+    {
+     "id": "actionb9wf",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-08-11T06:30:18.416Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6a424415f39bd7318dd26958",
+   "name": "Payment Link Sent Paid",
+   "conditions": [
+    {
+     "id": "conditionkugt",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "117"
+      ],
+      "optionsLabel": [
+       "Await Payment - Link Sent"
+      ]
+     }
+    },
+    {
+     "id": "conditionmrcg",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionguei",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "118"
+      ],
+      "optionsLabel": [
+       "Payment Link Sent - **PAID**"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-06-29T10:08:21.358Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6a3d4db3937b3d170f92ceb6",
+   "name": "Prints Needed New",
+   "conditions": [
+    {
+     "id": "conditionglld",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "50",
+       "22",
+       "25"
+      ],
+      "optionsLabel": [
+       "Instock - pick & put in workshop",
+       "Ordered Stock Awaiting Delivery",
+       "Print Room ready"
+      ]
+     }
+    },
+    {
+     "id": "conditionq87",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "120480",
+       "120481",
+       "120482",
+       "150554",
+       "150555",
+       "PRNTCNTRCHST",
+       "120483",
+       "120484",
+       "145506",
+       "120485",
+       "120486",
+       "152128",
+       "145509",
+       "145507",
+       "134024",
+       "145043",
+       "134025",
+       "134026",
+       "134027",
+       "197437",
+       "120487",
+       "120488",
+       "120489",
+       "171793",
+       "145508",
+       "120526",
+       "197438",
+       "197439",
+       "PRNTCNTRCHST-OWN",
+       "120527",
+       "197440",
+       "120529",
+       "120530",
+       "197441",
+       "197442",
+       "197443",
+       "197444",
+       "197445",
+       "197446",
+       "197447",
+       "197448",
+       "197449",
+       "120531",
+       "120532",
+       "120533",
+       "197451",
+       "197450",
+       "OPPR-FRONT-CAP",
+       "OPPR-FRONT-CAPx5",
+       "OPPR-FRONT-CAPx10",
+       "OPPR-FCS",
+       "OPPR-FCSx5",
+       "OPPR-FCSx10",
+       "OPPR-1-LF",
+       "OPPR-1-LFx5",
+       "OPPR-1-LFx10",
+       "OPPR-1-LA",
+       "OPPR-1-LAx5",
+       "OPPR-1-LAx10",
+       "OPPR-1-LB",
+       "OPPR-1-LBx5",
+       "OPPR-1-LBx10",
+       "OPPR-1-LR",
+       "OPPR-1-LRx5",
+       "OPPR-1-LRx10",
+       "OPPR-1-NAPE",
+       "OPPR-1-NAPEx5",
+       "OPPR-1-NAPEx10",
+       "OPPR-1-RA",
+       "OPPR-1-RAx5",
+       "OPPR-1-RAx10",
+       "OPPR-1-RB",
+       "OPPR-1-RBx5",
+       "OPPR-1-RBx10",
+       ""
+      ]
+     }
+    },
+    {
+     "id": "conditionzvx7",
+     "condition-type": "custom-field-name",
+     "predicate": "IS",
+     "options": {
+      "fieldType": "YES_NO",
+      "value": "empty",
+      "ids": [
+       "PCF_PRINTSNE"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionyfc",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_PRINTSNE"
+      ],
+      "fieldType": "YES_NO",
+      "value": "1"
+     }
+    }
+   ],
+   "lastModified": "2026-06-26T14:20:58.133Z",
+   "modifiedBy": "Super Admin"
+  },
+  {
+   "id": "69ef3700d9aec30c12f47a03",
+   "name": "Name Badges",
+   "conditions": [
+    {
+     "id": "conditiondxql",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "22"
+      ],
+      "optionsLabel": [
+       "Travelex"
+      ]
+     }
+    },
+    {
+     "id": "conditionqg7b",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "XP4012",
+       "SB1536"
+      ]
+     }
+    },
+    {
+     "id": "conditiontye",
+     "condition-type": "order-status",
+     "predicate": "IS_NOT",
+     "options": {
+      "ids": [
+       "96",
+       "115"
+      ],
+      "optionsLabel": [
+       "Travelex Orders",
+       "Travelex Orders - Requested PO"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiond7vp",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_BADGE"
+      ],
+      "fieldType": "YES_NO",
+      "value": "1"
+     }
+    }
+   ],
+   "lastModified": "2026-09-21T10:54:08.229Z",
+   "modifiedBy": "Declan Clayton"
+  },
+  {
+   "id": "67ed2775bac19835f7cee0df",
+   "name": "S2S ORDERS",
+   "conditions": [
+    {
+     "id": "conditionr30e",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionnv5j",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionq7smh",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition5goa",
+     "condition-type": "delivery-address",
+     "predicate": "IS",
+     "options": {
+      "typeCondition": "contains",
+      "stringContains": "S2S"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionqrg",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "109"
+      ],
+      "optionsLabel": [
+       "S2S ORDERS"
+      ]
+     }
+    },
+    {
+     "id": "action03l4",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "14"
+      ],
+      "optionsLabel": [
+       "Interlink Next Day"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-03-30T08:00:13.007Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6995f6b63b3e06611d100fea",
+   "name": "NR CLAIM CATCHER - ALERT MATT/TOM TO ORDER",
+   "conditions": [
+    {
+     "id": "condition625p",
+     "condition-type": "customer-tag",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "83",
+       "82"
+      ],
+      "optionsLabel": [
+       "MULTIPLE NR CLAIMS",
+       "NR CLAIM"
+      ]
+     }
+    },
+    {
+     "id": "conditioncgrr",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "2",
+       "87",
+       "109"
+      ],
+      "optionsLabel": [
+       "New order",
+       "Pending Magento Orders",
+       "S2S ORDERS"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionufpf",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_QUERYWIT"
+      ],
+      "fieldType": "YES_NO",
+      "value": "1"
+     }
+    },
+    {
+     "id": "actions1r",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_QRYSTAFF"
+      ],
+      "fieldType": "TEXT",
+      "value": "ML / TB"
+     }
+    },
+    {
+     "id": "actione08",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_QRYSTATS"
+      ],
+      "fieldType": "SELECT",
+      "value": "153"
+     }
+    },
+    {
+     "id": "actionmw8x",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "55"
+      ],
+      "optionsLabel": [
+       "ON STOP DO NOT PROCESS WITHOUT A"
+      ]
+     }
+    },
+    {
+     "id": "actionw0w3",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "*DO NOT PROCESS - SEE MATT/TOM*"
+     }
+    },
+    {
+     "id": "action58i",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_XPICKINF"
+      ],
+      "fieldType": "TEXT_AREA",
+      "value": "****DO NOT PROCESS - SEE MATT/TOM****\n****DO NOT PROCESS - SEE MATT/TOM****\n****DO NOT PROCESS - SEE MATT/TOM****\n****DO NOT PROCESS - SEE MATT/TOM****"
+     }
+    },
+    {
+     "id": "actioncrp9",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "116"
+      ],
+      "optionsLabel": [
+       "NR CLAIM CUSTOMER - ALERT MATT/T"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-03-19T13:01:53.777Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "698a18d1fb62f0862dd0c643",
+   "name": "BT Postcode Catcher",
+   "conditions": [
+    {
+     "id": "condition1b55",
+     "condition-type": "shipping-method",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "14"
+      ],
+      "optionsLabel": [
+       "Interlink Next Day"
+      ]
+     }
+    },
+    {
+     "id": "condition74rk",
+     "condition-type": "delivery-zip-code",
+     "predicate": "IS",
+     "options": {
+      "partialMatches": true,
+      "ids": [
+       "BT1",
+       "BT2",
+       "BT3",
+       "BT4",
+       "BT5",
+       "BT6",
+       "BT7",
+       "BT8",
+       "BT9",
+       "BT10",
+       "BT11",
+       "BT12",
+       "BT13",
+       "BT14",
+       "BT15",
+       "BT16",
+       "BT17",
+       "BT18",
+       "BT19",
+       "BT20",
+       "BT21",
+       "BT22",
+       "BT23",
+       "BT24",
+       "BT25",
+       "BT26",
+       "BT27",
+       "BT28",
+       "BT29",
+       "BT30",
+       "BT31",
+       "BT32",
+       "BT33",
+       "BT34",
+       "BT35",
+       "BT36",
+       "BT37",
+       "BT38",
+       "BT39",
+       "BT40",
+       "BT41",
+       "BT42",
+       "BT43",
+       "BT44",
+       "BT45",
+       "BT46",
+       "BT47",
+       "BT48",
+       "BT49",
+       "BT51",
+       "BT52",
+       "BT53",
+       "BT54",
+       "BT55",
+       "BT56",
+       "BT57",
+       "BT60",
+       "BT61",
+       "BT62",
+       "BT63",
+       "BT64",
+       "BT65",
+       "BT66",
+       "BT67",
+       "BT68",
+       "BT69",
+       "BT70",
+       "BT71",
+       "BT74",
+       "BT75",
+       "BT76",
+       "BT77",
+       "BT78",
+       "BT79",
+       "BT80",
+       "BT81",
+       "BT82",
+       "BT83",
+       "BT84",
+       "BT85",
+       "BT86",
+       "BT87",
+       "BT88",
+       "BT89",
+       "BT90",
+       "BT91",
+       "BT92",
+       "BT93",
+       "BT94"
+      ]
+     }
+    },
+    {
+     "id": "conditionz0n",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action0ccs",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "92"
+      ],
+      "optionsLabel": [
+       "DPD Local Two Day"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-02-09T17:26:41.269Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6931ab042c5095ecbd72dfa1",
+   "name": "International Shipping",
+   "conditions": [
+    {
+     "id": "condition5b0e",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "13",
+       "38",
+       "153",
+       "405",
+       "412",
+       "223"
+      ],
+      "optionsLabel": [
+       "Australia",
+       "Canada",
+       "New Zealand",
+       "Singapore",
+       "South Korea",
+       "United States"
+      ],
+      "countryIsoCode3Char": [
+       "AUS",
+       "CAN",
+       "NZL",
+       "SGP",
+       "KOR",
+       "USA"
+      ],
+      "countryIsoCode2Char": [
+       "AU",
+       "CA",
+       "NZ",
+       "SG",
+       "KR",
+       "US"
+      ]
+     }
+    },
+    {
+     "id": "conditionv8ao",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "2",
+       "87"
+      ],
+      "optionsLabel": [
+       "New order",
+       "Pending Magento Orders"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionx8ts",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "97"
+      ],
+      "optionsLabel": [
+       "DPD International - Classic"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-12-04T15:38:44.656Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "69020cd9f632f6a7380e9c22",
+   "name": "Prints No Longer Needed",
+   "conditions": [
+    {
+     "id": "conditionxm7d",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "47",
+       "5",
+       "95",
+       "93",
+       "94",
+       "46",
+       "4",
+       "103",
+       "102"
+      ],
+      "optionsLabel": [
+       "Accounts Complete",
+       "Cancelled",
+       "Collection - Credit Account",
+       "Collection - Paid",
+       "Collection - To Pay",
+       "Complete awaiting Payment",
+       "Invoiced and Completed",
+       "Sportswear Collection Paid",
+       "Sportswear Collection To Pay"
+      ]
+     }
+    },
+    {
+     "id": "conditionucs9",
+     "condition-type": "custom-field-name",
+     "predicate": "IS",
+     "options": {
+      "fieldType": "YES_NO",
+      "value": "1",
+      "ids": [
+       "PCF_PRINTSNE"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action1q7",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_PRINTSNE"
+      ],
+      "fieldType": "YES_NO",
+      "value": "0"
+     }
+    }
+   ],
+   "lastModified": "2025-11-21T12:42:49.211Z",
+   "modifiedBy": "Declan Clayton"
+  },
+  {
+   "id": "6901d817f4bee60409b58d4b",
+   "name": "Old/Forgotten Orders",
+   "conditions": [
+    {
+     "id": "conditiongut",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "24",
+       "25"
+      ],
+      "optionsLabel": [
+       "Embroidery Room ready",
+       "Print Room ready"
+      ]
+     }
+    },
+    {
+     "id": "conditionbx1j",
+     "condition-type": "updated-date",
+     "predicate": "IS",
+     "options": {
+      "typeRule": "updatedDate",
+      "operatorRule": "greater",
+      "valueRule": "14",
+      "subOperator": "days"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actioneyoa",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "52"
+      ],
+      "optionsLabel": [
+       "Old Order - Check Status"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-29T09:02:15.638Z",
+   "modifiedBy": "Declan Clayton"
+  },
+  {
+   "id": "68d65fb7e2af185802824864",
+   "name": "Update Accounts Complete",
+   "conditions": [
+    {
+     "id": "conditione97f",
+     "condition-type": "fulfilment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SOA"
+      ],
+      "optionsLabel": [
+       "All fulfilled"
+      ]
+     }
+    },
+    {
+     "id": "conditionnn9",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "4"
+      ],
+      "optionsLabel": [
+       "Invoiced and Completed"
+      ]
+     }
+    },
+    {
+     "id": "conditionl8hm",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "condition2emo",
+     "condition-type": "custom-field-name",
+     "predicate": "IS",
+     "options": {
+      "fieldType": "YES_NO",
+      "value": "1",
+      "ids": [
+       "PCF_ACCOUNTS"
+      ]
+     }
+    },
+    {
+     "id": "conditioni9b",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "condition4i4i",
+     "condition-type": "invoiced",
+     "predicate": "IS",
+     "options": {
+      "invoiced": true
+     }
+    },
+    {
+     "id": "conditionz3eb",
+     "condition-type": "payment-method",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "1275",
+       "1245"
+      ],
+      "optionsLabel": [
+       "1275 Braintree",
+       "1245 Paypal"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionke3f",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "47"
+      ],
+      "optionsLabel": [
+       "Accounts Complete"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-09T12:40:55.492Z",
+   "modifiedBy": "Tom  Boynton"
+  },
+  {
+   "id": "68c0202e65127cbe14162c6d",
+   "name": "Accounts Custom Fields Clear",
+   "conditions": [
+    {
+     "id": "condition5w2d",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "63",
+       "2"
+      ],
+      "optionsLabel": [
+       "EXCH. ORDERS - AWAIT RETURN",
+       "New order"
+      ]
+     }
+    },
+    {
+     "id": "conditionslsn",
+     "condition-type": "created-by",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "56618",
+       "22784",
+       "35288",
+       "11310",
+       "98351",
+       "106419",
+       "11945",
+       "207",
+       "86363",
+       "64850",
+       "90715",
+       "8606",
+       "100611",
+       "75381",
+       "41867",
+       "42758",
+       "59339",
+       "82710",
+       "85410",
+       "41723",
+       "45544",
+       "54093",
+       "42820",
+       "33171",
+       "30394",
+       "6433",
+       "105374",
+       "22086",
+       "5666",
+       "45547",
+       "71978",
+       "444",
+       "72162",
+       "32327",
+       "34270",
+       "53010",
+       "61342",
+       "74131",
+       "38541",
+       "445",
+       "14759",
+       "49220",
+       "94942",
+       "101216",
+       "54385",
+       "8105",
+       "7605",
+       "4",
+       "10544",
+       "18696"
+      ],
+      "optionsLabel": [
+       "Abigail Birtwhistle",
+       "Adam James",
+       "Alfie Marston",
+       "Charlie Dobson",
+       "Charlie Mann",
+       "Chitua  Hani-Okoroafor",
+       "Chris Batty",
+       "Declan Clayton",
+       "Demi-Leigh McMenamin",
+       "Eddie Robshaw",
+       "Ellie Cawthera",
+       "Ellis Sweeting",
+       "Ewan Jackson",
+       "Finley Burnell ",
+       "Harry Batty",
+       "Harry Sykes",
+       "Helen Jackson",
+       "Jack Ellis-Haynes",
+       "Jack Clay",
+       "James Burnell",
+       "James Sonley",
+       "James Mace",
+       "Jevan Tate",
+       "Joe Hepper",
+       "Josh Lunn",
+       "Keith Taylor",
+       "Kekul Sonawala",
+       "Kian Wade",
+       "Lee Dennison",
+       "Liz Bell",
+       "Madi Plevin",
+       "Matthew Lund",
+       "Mazie Walker",
+       "Michael Hodgkins",
+       "Michelle Bulloch",
+       "Mick Cawthera",
+       "Nicky Everall",
+       "Owen Adams",
+       "Paula  James",
+       "Robert Lodge",
+       "Ryan Whiteley",
+       "Ryan Wilson",
+       "Saffie Baye Jammeh",
+       "Somtochi  Hani-Okoroafor",
+       "Sports Test Account",
+       "Stacey Boynton",
+       "Thomas (PRINT) Irvine",
+       "Tim Banks",
+       "Tom  Boynton",
+       "Yash Kapur"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionpad",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_ACCOUNTS"
+      ],
+      "fieldType": "YES_NO",
+      "value": "0"
+     }
+    },
+    {
+     "id": "actionq3zk",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_DATESEEN"
+      ],
+      "fieldType": "DATE",
+      "operator": "2",
+      "value": 36500
+     }
+    }
+   ],
+   "lastModified": "2025-10-06T12:11:06.099Z",
+   "modifiedBy": "Tom  Boynton"
+  },
+  {
+   "id": "68a5f3b0ce3d376948a7b582",
+   "name": "Amazon ROYAL MAIL ITEMS",
+   "conditions": [
+    {
+     "id": "conditionmavb",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "9"
+      ],
+      "optionsLabel": [
+       "Amazon: UK"
+      ]
+     }
+    },
+    {
+     "id": "condition3jb",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "100544-539-175",
+       "117230-540-408D",
+       "138092",
+       "194650",
+       "194653",
+       "194655",
+       "194656",
+       "197558",
+       "197778",
+       "26166",
+       "26194",
+       "27151604004",
+       "5055338429714",
+       "5711074543663",
+       "5711074543762",
+       "5711074544066",
+       "75554",
+       "80323",
+       "B310.BLK.M4S",
+       "BBNVSG604N",
+       "CB210",
+       "ML130220298",
+       "ML251021048",
+       "PUGBLL",
+       "PUGBLM",
+       "PUGBLS",
+       "PUGBLXL",
+       "S156BKR",
+       "TB290421022",
+       "TB290421023",
+       "TB290421025",
+       "TB290421028",
+       "TB290421029",
+       "TB290421030",
+       "TB290421031",
+       "TB290421032",
+       "TB290421033",
+       "TB290421034",
+       "TB290421035",
+       "TB290421038",
+       "TB290421039",
+       "TB290421040",
+       "100288-940-125",
+       "100427-940-174",
+       "152805",
+       "173922",
+       "194651",
+       "194652",
+       "194654",
+       "194679",
+       "194684",
+       "25049500004",
+       "711J-GRY-13",
+       "75143",
+       "CB030222006",
+       "ML110222116",
+       "ML1504210005",
+       "ML231121015",
+       "RL1301202115541",
+       "TB290421024",
+       "TB290421026",
+       "TB290421027",
+       "TB290421036",
+       "TB290421037",
+       "TB290421041",
+       "TB290421042",
+       "23892",
+       "91100604000",
+       "23840",
+       "90330400006"
+      ]
+     }
+    },
+    {
+     "id": "conditionwzm",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "2"
+      ],
+      "optionsLabel": [
+       "New order"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionw0oq",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "104"
+      ],
+      "optionsLabel": [
+       "Royal Mail - Tracked 24"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-09-25T08:10:18.647Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "69c266bfb1d21ed0bd1869cd",
+   "name": "HOBART ISPPS",
+   "conditions": [
+    {
+     "id": "conditiondavd",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionljyg",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionvmb",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionwg90p",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "392601-040-SND",
+       "392601-050-SND",
+       "392601-055-SND",
+       "392601-060-SND",
+       "392601-070-SND",
+       "392601-080-SND",
+       "392601-090-SND",
+       "392601-095-SND",
+       "392601-100-SND",
+       "392601-110-SND",
+       "392601-120-SND",
+       "392601-130-SND",
+       "392601-140-SND",
+       "392601-040-RBN",
+       "392601-050-RBN",
+       "392601-055-RBN",
+       "392601-060-RBN",
+       "392601-070-RBN",
+       "392601-080-RBN",
+       "392601-090-RBN",
+       "392601-095-RBN",
+       "392601-100-RBN",
+       "392601-110-RBN",
+       "392601-120-RBN",
+       "392601-130-RBN",
+       "392601-140-RBN"
+      ]
+     }
+    },
+    {
+     "id": "condition4onq",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "condition5g5l",
+     "condition-type": "fulfilment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SON"
+      ],
+      "optionsLabel": [
+       "Not fulfilled"
+      ]
+     }
+    },
+    {
+     "id": "conditionrf2",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditiondp5q",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 11899,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionb64a",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "action57rs",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "115"
+      ],
+      "optionsLabel": [
+       "Fedex Priority - Pak"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-03-24T10:26:07.986Z",
+   "modifiedBy": "Tom  Boynton"
+  },
+  {
+   "id": "67ef9d22bac19835f7cee556",
+   "name": "6243 ISPPS",
+   "conditions": [
+    {
+     "id": "conditiond6sr",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionhusb",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62435504044",
+       "62435504088",
+       "62436604044",
+       "62436604088",
+       "62436695044",
+       "62436695088",
+       "62435504046",
+       "62435504092",
+       "62435504146",
+       "62436604046",
+       "62436604092",
+       "62436604146",
+       "62436695046",
+       "62436695092",
+       "62436695146",
+       "62435504048",
+       "62435504096",
+       "62435504148",
+       "62436604048",
+       "62436604096",
+       "62436604148",
+       "62436695048",
+       "62436695096",
+       "62436695148",
+       "62435504050",
+       "62435504100",
+       "62435504150",
+       "62435504250",
+       "62436604050",
+       "62436604100",
+       "62436604150",
+       "62436695050",
+       "62436695100",
+       "62436695150",
+       "62436604250",
+       "62436695250",
+       "62435504052",
+       "62435504104",
+       "62435504152",
+       "62435504252",
+       "62436604052",
+       "62436604104",
+       "62436604152",
+       "62436695052",
+       "62436695104",
+       "62436695152",
+       "62436604252",
+       "62436695252",
+       "62435504054",
+       "62435504108",
+       "62435504154",
+       "62435504254",
+       "62436604054",
+       "62436604108",
+       "62436604154",
+       "62436695054",
+       "62436695108",
+       "62436695154",
+       "62436604254",
+       "62436695254",
+       "62435504056",
+       "62435504112",
+       "62435504156",
+       "62435504256",
+       "62436604056",
+       "62436604112",
+       "62436604156",
+       "62436695056",
+       "62436695112",
+       "62436695156",
+       "62436604256",
+       "62436695256",
+       "62435504058",
+       "62435504116",
+       "62435504158",
+       "62435504258",
+       "62436604058",
+       "62436604116",
+       "62436604158",
+       "62436695058",
+       "62436695116",
+       "62436695158",
+       "62436604258",
+       "62436695258",
+       "62435504060",
+       "62435504120",
+       "62435504160",
+       "62436604060",
+       "62436604120",
+       "62436604160",
+       "62436695060",
+       "62436695120",
+       "62436695160",
+       "62435504062",
+       "62435504124",
+       "62435504162",
+       "62436604062",
+       "62436604124",
+       "62436604162",
+       "62436695062",
+       "62436695124",
+       "62436695162",
+       "62435504064",
+       "62436604064",
+       "62436695064"
+      ]
+     }
+    },
+    {
+     "id": "conditionb72",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "condition1fhk",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionbofo",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition2puj",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition3rdc",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 9994,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionlogs",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "actionkzds",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "104"
+      ],
+      "optionsLabel": [
+       "Royal Mail - Tracked 24"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-09-24T15:14:56.260Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "69c264338f22152d3496f16d",
+   "name": "PARKES ISPPS",
+   "conditions": [
+    {
+     "id": "conditionm3zk",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditiontdgvpr",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionpnwl",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionfs6",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "398599-040-GTE",
+       "398599-050-GTE",
+       "398599-055-GTE",
+       "398599-060-GTE",
+       "398599-070-GTE",
+       "398599-080-GTE",
+       "398599-090-GTE",
+       "398599-095-GTE",
+       "398599-100-GTE",
+       "398599-110-GTE",
+       "398599-120-GTE",
+       "398599-130-GTE",
+       "398599-140-GTE",
+       "392658-040-BLK",
+       "392658-050-BLK",
+       "392658-055-BLK",
+       "392658-060-BLK",
+       "392658-070-BLK",
+       "392658-080-BLK",
+       "392658-090-BLK",
+       "392658-095-BLK",
+       "392658-100-BLK",
+       "392658-110-BLK",
+       "392658-120-BLK",
+       "392658-130-BLK",
+       "392658-140-BLK",
+       "392658-040-SND",
+       "392658-050-SND",
+       "392658-055-SND",
+       "392658-060-SND",
+       "392658-070-SND",
+       "392658-080-SND",
+       "392658-090-SND",
+       "392658-095-SND",
+       "392658-100-SND",
+       "392658-110-SND",
+       "392658-120-SND",
+       "392658-130-SND",
+       "392658-140-SND",
+       "398599-040-BBG",
+       "398599-050-BBG",
+       "398599-060-BBG",
+       "398599-070-BBG",
+       "398599-080-BBG",
+       "398599-090-BBG",
+       "398599-100-BBG",
+       "398599-110-BBG",
+       "398599-120-BBG",
+       "398599-130-BBG",
+       "398599-140-BBG",
+       "398599-055-BBG",
+       "398599-095-BBG"
+      ]
+     }
+    },
+    {
+     "id": "conditionw851d",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "condition5hl6",
+     "condition-type": "fulfilment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SON"
+      ],
+      "optionsLabel": [
+       "Not fulfilled"
+      ]
+     }
+    },
+    {
+     "id": "condition757i",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition5ija",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 11899,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action24ud",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "action5d79",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "115"
+      ],
+      "optionsLabel": [
+       "Fedex Priority - Pak"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-04-23T13:40:48.337Z",
+   "modifiedBy": "Tom  Boynton"
+  },
+  {
+   "id": "6a0c52245ed6b5a094a1c4bd",
+   "name": "STEEL BLUE 392603 WP SC ISPPS",
+   "conditions": [
+    {
+     "id": "condition5qko",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "condition9j6e",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionfc2",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "condition1rg",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "392603-040-BLK",
+       "392603-050-BLK",
+       "392603-060-BLK",
+       "392603-070-BLK",
+       "392603-080-BLK",
+       "392603-090-BLK",
+       "392603-100-BLK",
+       "392603-110-BLK",
+       "392603-120-BLK",
+       "392603-130-BLK",
+       "392603-140-BLK",
+       "392603-055-BLK",
+       "392603-095-BLK"
+      ]
+     }
+    },
+    {
+     "id": "conditionmdfl",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionuygk",
+     "condition-type": "fulfilment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SON"
+      ],
+      "optionsLabel": [
+       "Not fulfilled"
+      ]
+     }
+    },
+    {
+     "id": "conditionh4s6",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionf0f5ea",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 13495,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action2m4",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "actiongc3l",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "115"
+      ],
+      "optionsLabel": [
+       "Fedex Priority - Pak"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-05-19T12:05:56.891Z",
+   "modifiedBy": "Tom  Boynton"
+  },
+  {
+   "id": "6481e27afc9282bf9eedf5f8",
+   "name": "Shipping Method ROYAL MAIL under £165 UK",
+   "conditions": [
+    {
+     "id": "conditionnby",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "condition9u3",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 16500,
+      "operator": "3"
+     }
+    },
+    {
+     "id": "conditionfoxq",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionuzf9",
+     "condition-type": "delivery-address",
+     "predicate": "IS_NOT",
+     "options": {
+      "typeCondition": "contains",
+      "stringContains": "S2S"
+     }
+    },
+    {
+     "id": "conditionr75s",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionoglf",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "104"
+      ],
+      "optionsLabel": [
+       "Royal Mail - Tracked 24"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T06:17:23.313Z",
+   "modifiedBy": "Tom  Boynton"
+  },
+  {
+   "id": "6abfd52820ff608b34ae9bb0",
+   "name": "CREMORNE MID ISPPS",
+   "conditions": [
+    {
+     "id": "conditionb2r",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "NWB003BLGY07",
+       "NWB003BLGY08",
+       "NWB003BLGY09",
+       "NWB003BLGY10",
+       "NWB003BLGY11",
+       "NWB003BLGY12",
+       "NWB003BLGY13"
+      ]
+     }
+    },
+    {
+     "id": "condition7f6p",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionikkk",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionpxum",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition3v8",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionke7s",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 10500,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionoz8",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiongh6",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-10-02T16:03:35.954Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "67ef9de0678530219251026c",
+   "name": "6243 SNO",
+   "conditions": [
+    {
+     "id": "condition452hf",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62435504044",
+       "62435504088",
+       "62436604044",
+       "62436604088",
+       "62436695044",
+       "62436695088",
+       "62435504046",
+       "62435504092",
+       "62435504146",
+       "62436604046",
+       "62436604092",
+       "62436604146",
+       "62436695046",
+       "62436695092",
+       "62436695146",
+       "62435504048",
+       "62435504096",
+       "62435504148",
+       "62436604048",
+       "62436604096",
+       "62436604148",
+       "62436695048",
+       "62436695096",
+       "62436695148",
+       "62435504050",
+       "62435504100",
+       "62435504150",
+       "62435504250",
+       "62436604050",
+       "62436604100",
+       "62436604150",
+       "62436695050",
+       "62436695100",
+       "62436695150",
+       "62436604250",
+       "62436695250",
+       "62435504052",
+       "62435504104",
+       "62435504152",
+       "62435504252",
+       "62436604052",
+       "62436604104",
+       "62436604152",
+       "62436695052",
+       "62436695104",
+       "62436695152",
+       "62436604252",
+       "62436695252",
+       "62435504054",
+       "62435504108",
+       "62435504154",
+       "62435504254",
+       "62436604054",
+       "62436604108",
+       "62436604154",
+       "62436695054",
+       "62436695108",
+       "62436695154",
+       "62436604254",
+       "62436695254",
+       "62435504056",
+       "62435504112",
+       "62435504156",
+       "62435504256",
+       "62436604056",
+       "62436604112",
+       "62436604156",
+       "62436695056",
+       "62436695112",
+       "62436695156",
+       "62436604256",
+       "62436695256",
+       "62435504058",
+       "62435504116",
+       "62435504158",
+       "62435504258",
+       "62436604058",
+       "62436604116",
+       "62436604158",
+       "62436695058",
+       "62436695116",
+       "62436695158",
+       "62436604258",
+       "62436695258",
+       "62435504060",
+       "62435504120",
+       "62435504160",
+       "62436604060",
+       "62436604120",
+       "62436604160",
+       "62436695060",
+       "62436695120",
+       "62436695160",
+       "62435504062",
+       "62435504124",
+       "62435504162",
+       "62436604062",
+       "62436604124",
+       "62436604162",
+       "62436695062",
+       "62436695124",
+       "62436695162",
+       "62435504064",
+       "62436604064",
+       "62436695064"
+      ]
+     }
+    },
+    {
+     "id": "conditionvpo9",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 9994,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionqi8j",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionukln",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionkzwv",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionyy3r",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionll7l",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action853p",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "SNICKERS"
+     }
+    },
+    {
+     "id": "actionqgss",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    },
+    {
+     "id": "actionl6zh",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "104"
+      ],
+      "optionsLabel": [
+       "Royal Mail - Tracked 24"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-09-24T15:15:16.844Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6704fe4aa082100422e46e9a",
+   "name": "SOUTHERN CROSS ISPPS",
+   "conditions": [
+    {
+     "id": "condition9t0i",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionbkjh",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionbv2",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionja3j",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "398590-040-GTE",
+       "398590-050-GTE",
+       "398590-055-GTE",
+       "398590-060-GTE",
+       "398590-070-GTE",
+       "398590-080-GTE",
+       "398590-090-GTE",
+       "398590-095-GTE",
+       "398590-100-GTE",
+       "398590-110-GTE",
+       "398590-120-GTE",
+       "398590-130-GTE",
+       "398590-140-GTE",
+       "392661-040-STE",
+       "392661-050-STE",
+       "392661-055-STE",
+       "392661-060-STE",
+       "392661-070-STE",
+       "392661-080-STE",
+       "392661-090-STE",
+       "392661-095-STE",
+       "392661-100-STE",
+       "392661-110-STE",
+       "392661-120-STE",
+       "392661-130-STE",
+       "392661-140-STE",
+       "392661-040-SND",
+       "392661-050-SND",
+       "392661-055-SND",
+       "392661-060-SND",
+       "392661-070-SND",
+       "392661-080-SND",
+       "392661-090-SND",
+       "392661-095-SND",
+       "392661-100-SND",
+       "392661-110-SND",
+       "392661-120-SND",
+       "392661-130-SND",
+       "392661-140-SND",
+       "398590-040-BBG",
+       "398590-050-BBG",
+       "398590-060-BBG",
+       "398590-070-BBG",
+       "398590-080-BBG",
+       "398590-090-BBG",
+       "398590-100-BBG",
+       "398590-110-BBG",
+       "398590-120-BBG",
+       "398590-130-BBG",
+       "398590-140-BBG",
+       "398590-055-BBG",
+       "398590-095-BBG"
+      ]
+     }
+    },
+    {
+     "id": "conditionf1lj",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionfo87w",
+     "condition-type": "fulfilment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SON"
+      ],
+      "optionsLabel": [
+       "Not fulfilled"
+      ]
+     }
+    },
+    {
+     "id": "condition92y",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionp49v",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 12795,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionuo9i",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "actionsgd",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "115"
+      ],
+      "optionsLabel": [
+       "Fedex Priority - Pak"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-04-23T13:38:01.700Z",
+   "modifiedBy": "Tom  Boynton"
+  },
+  {
+   "id": "69e22034423d8d8c405b0e20",
+   "name": "SOUTHERN CROSS DB ISPPS",
+   "conditions": [
+    {
+     "id": "condition5yoq",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditiondrr6",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionacox",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionsb5h",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "392651-040-BBR",
+       "392651-050-BBR",
+       "392651-060-BBR",
+       "392651-070-BBR",
+       "392651-080-BBR",
+       "392651-090-BBR",
+       "392651-100-BBR",
+       "392651-110-BBR",
+       "392651-120-BBR",
+       "392651-130-BBR",
+       "392651-140-BBR",
+       "392651-055-BBR",
+       "392651-095-BBR"
+      ]
+     }
+    },
+    {
+     "id": "conditionv08f",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionex4",
+     "condition-type": "fulfilment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SON"
+      ],
+      "optionsLabel": [
+       "Not fulfilled"
+      ]
+     }
+    },
+    {
+     "id": "conditionlxam",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionroj",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 13995,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionrlm",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "action58yq",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "115"
+      ],
+      "optionsLabel": [
+       "Fedex Priority - Pak"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-04-24T09:04:28.832Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6752d6b1c9345f2be935f05e",
+   "name": "LANDER SNO",
+   "conditions": [
+    {
+     "id": "condition2oyf",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionbb8r",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "5055160081616",
+       "5055160081494",
+       "5055160081500",
+       "5055160081517",
+       "5055160081524",
+       "5055160081531",
+       "5055160081548"
+      ]
+     }
+    },
+    {
+     "id": "condition2ghm",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionrgm",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition50ib",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "condition2jo",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition2x5h",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 10098,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionj3x6",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    },
+    {
+     "id": "action0lmi",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "STERLING, "
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:15:00.856Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6752d599ea2f1ff9fda9ade6",
+   "name": "LANDER ISPPS",
+   "conditions": [
+    {
+     "id": "conditiond49",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "condition5od",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "5055160081616",
+       "5055160081494",
+       "5055160081500",
+       "5055160081517",
+       "5055160081524",
+       "5055160081531",
+       "5055160081548",
+       "5061060828756",
+       "5061060828763",
+       "5061060828770",
+       "5061060828787",
+       "5061060828794",
+       "5061060828800",
+       "5061060828817"
+      ]
+     }
+    },
+    {
+     "id": "conditionsfj",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditiondm7h",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionwgvc",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 10098,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditione4tn",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditiontvbb",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action45mf",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "actionje3e",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "14"
+      ],
+      "optionsLabel": [
+       "Interlink Next Day"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-12-04T16:29:04.299Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "672c9b047e11a4b0607eb787",
+   "name": "ASDA-TRAV-DETAILS",
+   "conditions": [
+    {
+     "id": "conditionolfe",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "22"
+      ],
+      "optionsLabel": [
+       "Travelex"
+      ]
+     }
+    },
+    {
+     "id": "condition382",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "96"
+      ],
+      "optionsLabel": [
+       "Travelex Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionnidp",
+     "condition-type": "customer-tag",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "86"
+      ],
+      "optionsLabel": [
+       "ASDA"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionzrv7",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "PENCARRIE / RALAWISE / PRESTIGE, BROOK TAVERNER"
+     }
+    },
+    {
+     "id": "actionrjlo",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_EXTRADEL"
+      ],
+      "fieldType": "TEXT",
+      "value": "PLEASE DELIVER TO TRAVEL MONEY KIOSK IN STORE"
+     }
+    },
+    {
+     "id": "actionhsx9",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_TRAVLXPO"
+      ],
+      "fieldType": "TEXT",
+      "value": "710000000946 - Q2-2026"
+     }
+    },
+    {
+     "id": "actiongb6",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_CUSTPONU"
+      ],
+      "fieldType": "TEXT",
+      "value": "COVERED BY TRAVELEX PO 710000000946 AS INVOICED VIA SO#473285"
+     }
+    },
+    {
+     "id": "actionnvqi",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_TRVORASD"
+      ],
+      "fieldType": "SELECT",
+      "value": "122"
+     }
+    }
+   ],
+   "lastModified": "2026-07-03T08:15:17.916Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "672c9cf07e11a4b0607eb796",
+   "name": "ASDA-TRAV-AREA6",
+   "conditions": [
+    {
+     "id": "conditionio0o",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "22"
+      ],
+      "optionsLabel": [
+       "Travelex"
+      ]
+     }
+    },
+    {
+     "id": "condition2tzs",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "96"
+      ],
+      "optionsLabel": [
+       "Travelex Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionhjjt",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionbcgn",
+     "condition-type": "delivery-zip-code",
+     "predicate": "IS",
+     "options": {
+      "partialMatches": false,
+      "ids": [
+       "MK1 1QB",
+       "IP1 5PD",
+       "RM9 6SJ",
+       "SS3 8DA",
+       "BR8 7UN",
+       "NR6 5DT",
+       "SG1 1LA",
+       "KT20 5NZ",
+       "NR33 0PX",
+       "BN1 8AS",
+       "CO4 5TU",
+       "NW9 0AS",
+       "CT10 2NR",
+       "CT1 1DG",
+       "HA9 9EX",
+       "ME7 1RZ",
+       "UB3 4AZ",
+       "WD24 7RT",
+       "BN2 5UT",
+       "DA11 0DQ"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action0xvh",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_ASDAAREA"
+      ],
+      "fieldType": "SELECT",
+      "value": "146"
+     }
+    }
+   ],
+   "lastModified": "2025-10-22T09:41:59.569Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6704ffeaa082100422e46ea7",
+   "name": "SOUTHERN CROSS SNO",
+   "conditions": [
+    {
+     "id": "conditionb47s",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "392661-040-SND",
+       "392661-040-STE",
+       "392661-050-SND",
+       "392661-050-STE",
+       "392661-060-SND",
+       "392661-060-STE",
+       "392661-070-SND",
+       "392661-070-STE",
+       "392661-080-SND",
+       "392661-080-STE",
+       "392661-090-SND",
+       "392661-090-STE",
+       "392661-100-SND",
+       "392661-100-STE",
+       "392661-110-SND",
+       "392661-110-STE",
+       "392661-120-SND",
+       "392661-120-STE",
+       "392661-130-SND",
+       "392661-130-STE",
+       "392661-140-SND",
+       "392661-140-STE",
+       "392661-055-SND",
+       "392661-055-STE",
+       "392661-095-SND",
+       "392661-095-STE"
+      ]
+     }
+    },
+    {
+     "id": "condition33oe",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionefgr",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditiondy77",
+     "condition-type": "fulfilment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SON"
+      ],
+      "optionsLabel": [
+       "Not fulfilled"
+      ]
+     }
+    },
+    {
+     "id": "conditionvrzg",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionv2be",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "condition70fi",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionyth",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 12795,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action1ndi",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "STEEL BLUE"
+     }
+    },
+    {
+     "id": "actionz94",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:13:35.437Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "672c9c767e11a4b0607eb794",
+   "name": "ASDA-TRAV-AREA5",
+   "conditions": [
+    {
+     "id": "conditioneqst",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "22"
+      ],
+      "optionsLabel": [
+       "Travelex"
+      ]
+     }
+    },
+    {
+     "id": "conditionhws9",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "96"
+      ],
+      "optionsLabel": [
+       "Travelex Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition0hj",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionijj5",
+     "condition-type": "delivery-zip-code",
+     "predicate": "IS",
+     "options": {
+      "partialMatches": true,
+      "ids": [
+       "PO9 3QW",
+       "CF14 7EW",
+       "SA6 8PS",
+       "HP12 4NU",
+       "GL1 1DS",
+       "SN5 7DL",
+       "SO53 3YJ",
+       "BH8 8DL",
+       "BH15 1JQ",
+       "SN25 4BG",
+       "SL1 9LA",
+       "DT4 8JQ",
+       "BH8 9UP",
+       "PO14 1TT",
+       "BS3 4JY",
+       "HR2 7JE",
+       "TR10 9LY",
+       "RG6 5TT",
+       "BS23 3UZ",
+       "SO40 3ZA"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionins",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_ASDAAREA"
+      ],
+      "fieldType": "SELECT",
+      "value": "145"
+     }
+    }
+   ],
+   "lastModified": "2025-10-22T09:42:11.476Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "672c9c21b053000faeb3645f",
+   "name": "ASDA-TRAV-AREA4",
+   "conditions": [
+    {
+     "id": "condition2vug",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "22"
+      ],
+      "optionsLabel": [
+       "Travelex"
+      ]
+     }
+    },
+    {
+     "id": "condition6t0b",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "96"
+      ],
+      "optionsLabel": [
+       "Travelex Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionl0no",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionq8nj",
+     "condition-type": "delivery-zip-code",
+     "predicate": "IS",
+     "options": {
+      "partialMatches": false,
+      "ids": [
+       "WS1 1RS",
+       "NG2 7JA",
+       "B43 7HA",
+       "CV2 2PN",
+       "NG19 0HA",
+       "LN6 8JY",
+       "LE4 8GN",
+       "PE21 8EQ",
+       "B78 3HB",
+       "TF2 7RX",
+       "LL13 8HL",
+       "NN10 6AA",
+       "DE24 3DS",
+       "ST5 0AP",
+       "WV1 4DE",
+       "DY4 7HW",
+       "CV11 4FL",
+       "B90 3GG",
+       "LE3 2LL",
+       "DE21 7UY",
+       "ST16 3TA",
+       "B76 1XL",
+       "LU2 9TA",
+       "NG31 6NZ"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiony9b",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_ASDAAREA"
+      ],
+      "fieldType": "SELECT",
+      "value": "144"
+     }
+    }
+   ],
+   "lastModified": "2025-10-22T09:42:45.391Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "672c9bce7e11a4b0607eb792",
+   "name": "ASDA-TRAV-AREA3",
+   "conditions": [
+    {
+     "id": "condition6vbd",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "22"
+      ],
+      "optionsLabel": [
+       "Travelex"
+      ]
+     }
+    },
+    {
+     "id": "conditioni1dq",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "96"
+      ],
+      "optionsLabel": [
+       "Travelex Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition4bhf",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionb9ft",
+     "condition-type": "delivery-zip-code",
+     "predicate": "IS",
+     "options": {
+      "partialMatches": false,
+      "ids": [
+       "YO32 9LF",
+       "DN4 5NW",
+       "S71 1LN",
+       "LS14 6UF",
+       "WF10 5EL",
+       "BB12 0EQ",
+       "OL12 6XT",
+       "BB5 1PY",
+       "BB8 8LU",
+       "M41 7ZA",
+       "OL6 7DP",
+       "DN17 2XF",
+       "LS27 0BP",
+       "M11 4BD",
+       "LS28 6AR",
+       "M26 3DA",
+       "HD2 2LQ",
+       "WF2 7EQ"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionyz8s",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_ASDAAREA"
+      ],
+      "fieldType": "SELECT",
+      "value": "143"
+     }
+    }
+   ],
+   "lastModified": "2025-10-22T09:43:06.374Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "672c9b7a7e11a4b0607eb789",
+   "name": "ASDA-TRAV-AREA2",
+   "conditions": [
+    {
+     "id": "condition26r",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "22"
+      ],
+      "optionsLabel": [
+       "Travelex"
+      ]
+     }
+    },
+    {
+     "id": "conditionhhar",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "96"
+      ],
+      "optionsLabel": [
+       "Travelex Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionjl7c",
+     "condition-type": "delivery-zip-code",
+     "predicate": "IS",
+     "options": {
+      "partialMatches": false,
+      "ids": [
+       "L10 3LN",
+       "L36 7TX",
+       "L24 9WA",
+       "BL6 6JA",
+       "WN7 5RZ",
+       "WA5 8UG",
+       "WA8 6AH",
+       "CH62 3QP",
+       "PR6 7JY",
+       "WA7 2PY",
+       "WA3 7PG",
+       "BB2 3DY",
+       "PR7 3DL",
+       "LA9 7JA",
+       "L4 9XU",
+       "FY4 4QH",
+       "WN5 0XA",
+       "PR2 9NP",
+       "CH65 0BZ"
+      ]
+     }
+    },
+    {
+     "id": "conditionje6dn",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiontjn",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_ASDAAREA"
+      ],
+      "fieldType": "SELECT",
+      "value": "142"
+     }
+    }
+   ],
+   "lastModified": "2025-10-22T09:43:21.484Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "672c99e47e11a4b0607eb785",
+   "name": "ASDA-TRAV-AREA1",
+   "conditions": [
+    {
+     "id": "condition3fi5",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "22"
+      ],
+      "optionsLabel": [
+       "Travelex"
+      ]
+     }
+    },
+    {
+     "id": "conditionjm2t",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "96"
+      ],
+      "optionsLabel": [
+       "Travelex Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditioncrzj",
+     "condition-type": "delivery-zip-code",
+     "predicate": "IS",
+     "options": {
+      "partialMatches": false,
+      "ids": [
+       "NE12 9SJ",
+       "NE11 9YA",
+       "SR2 9TT",
+       "NE24 4LZ",
+       "NE3 5BU",
+       "CA3 0JQ",
+       "NE35 9AR",
+       "G31 4EB",
+       "G33 1AD",
+       "G42 0AE",
+       "G51 3HR",
+       "G67 1JW",
+       "TS24 0XR",
+       "BT41 4GY",
+       "PA1 2AB",
+       "ML3 6AD",
+       "SR8 5HA",
+       "KY1 3NG",
+       "KY11 4LP",
+       "ML1 1YR",
+       "DD4 7RX",
+       "G82 1RB",
+       "AB10 7QA",
+       "SR8 1AR"
+      ]
+     }
+    },
+    {
+     "id": "conditioncq4p",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionqtv",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_ASDAAREA"
+      ],
+      "fieldType": "SELECT",
+      "value": "141"
+     }
+    }
+   ],
+   "lastModified": "2025-10-22T12:06:59.301Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "66e3ef75b7e4d4bdb1b7aefe",
+   "name": "Memphis ISPPS",
+   "conditions": [
+    {
+     "id": "conditionyyka",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "TB290421015",
+       "TB290421016",
+       "TB290421017",
+       "TB290421018",
+       "TB290421019",
+       "TB290421020",
+       "TB290421021",
+       "TB290421001",
+       "TB290421002",
+       "TB290421003",
+       "TB290421004",
+       "TB290421005",
+       "TB290421006",
+       "TB290421007",
+       "TB290421008",
+       "TB290421009",
+       "TB290421010",
+       "TB290421011",
+       "TB290421012",
+       "TB290421013",
+       "TB290421014"
+      ]
+     }
+    },
+    {
+     "id": "condition3pnt",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 5298,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionv59v",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionfxze",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionvpo2",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition50pn",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionsvza",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionk68",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:12:41.947Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6697822e5aa600103382de39",
+   "name": "1990 SNO",
+   "conditions": [
+    {
+     "id": "conditiont7kr",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "199011419900C148",
+       "199011419900C48",
+       "199011419900D100",
+       "199011419900D104",
+       "199011419900D108",
+       "199011419900D112",
+       "199011419900D116",
+       "199011419900D120",
+       "199011419900D124",
+       "199011419900C44",
+       "199011419900C46",
+       "199011419900C50",
+       "199011419900C52",
+       "199011419900C54",
+       "199011419900C56",
+       "199011419900C58",
+       "199011419900C60",
+       "199011419900C62",
+       "199011419900C146",
+       "199011419900C150",
+       "199011419900C152",
+       "199011419900C154",
+       "199011419900C156",
+       "199011419900C158",
+       "199011419900D84",
+       "199011419900D88",
+       "199011419900D92",
+       "199011419900D96",
+       "199011419999C44",
+       "199011419999C46",
+       "199011419999C48",
+       "199011419999C50",
+       "199011419999C52",
+       "199011419999C54",
+       "199011419999C56",
+       "199011419999C58",
+       "199011419999C60",
+       "199011419999C62",
+       "199011419999D84",
+       "199011419999D88",
+       "199011419999D92",
+       "199011419999D96",
+       "199011419999C146",
+       "199011419999C148",
+       "199011419999C150",
+       "199011419999C152",
+       "199011419999C154",
+       "199011419999C156",
+       "199011419999C158",
+       "199011419999D100",
+       "199011419999D104",
+       "199011419999D108",
+       "199011419999D112",
+       "199011419999D116",
+       "199011419999D120",
+       "199011419999D124",
+       "199011418999C148",
+       "199011418999C48",
+       "199011418999D100",
+       "199011418999D104",
+       "199011418999D108",
+       "199011418999D112",
+       "199011418999D116",
+       "199011418999D120",
+       "199011418999D124",
+       "199011418999C44",
+       "199011418999C46",
+       "199011418999C50",
+       "199011418999C52",
+       "199011418999C54",
+       "199011418999C56",
+       "199011418999C58",
+       "199011418999C60",
+       "199011418999C62",
+       "199011418999C146",
+       "199011418999C150",
+       "199011418999C152",
+       "199011418999C154",
+       "199011418999C156",
+       "199011418999C158",
+       "199011418999D84",
+       "199011418999D88",
+       "199011418999D92",
+       "199011418999D96"
+      ]
+     }
+    },
+    {
+     "id": "conditionb1xw",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionoos3j",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditioni0h",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition3nqv",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 15499,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditiongmt",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditiondxza",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionujef",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "BLAKLADER"
+     }
+    },
+    {
+     "id": "action4myt",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:12:15.148Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "66212cf6cbf92039e0d7317e",
+   "name": "6341 SNO",
+   "conditions": [
+    {
+     "id": "conditione02n",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "63410404088",
+       "63410404092",
+       "63410404096",
+       "63410404100",
+       "63410404104",
+       "63410404108",
+       "63410404112",
+       "63410404116",
+       "63410404044",
+       "63410404046",
+       "63410404048",
+       "63410404050",
+       "63410404052",
+       "63410404054",
+       "63410404056",
+       "63410404058",
+       "63410404146",
+       "63410404148",
+       "63410404150",
+       "63410404152",
+       "63410404154",
+       "63410404156",
+       "63410404158",
+       "63410404062",
+       "63410404064",
+       "63410404124",
+       "63410404162",
+       "63410404192",
+       "63410404196",
+       "63410404200",
+       "63410404204",
+       "63410404208",
+       "63410404212",
+       "63410404250",
+       "63410404252",
+       "63410404254",
+       "63410404256",
+       "63410404258",
+       "63410404060",
+       "63410404120",
+       "63410404160",
+       "63419504088",
+       "63419504092",
+       "63419504096",
+       "63419504100",
+       "63419504104",
+       "63419504108",
+       "63419504112",
+       "63419504116",
+       "63419504044",
+       "63419504046",
+       "63419504048",
+       "63419504050",
+       "63419504052",
+       "63419504054",
+       "63419504056",
+       "63419504058",
+       "63419504146",
+       "63419504148",
+       "63419504150",
+       "63419504152",
+       "63419504154",
+       "63419504156",
+       "63419504158",
+       "63419504062",
+       "63419504064",
+       "63419504124",
+       "63419504162",
+       "63419504192",
+       "63419504196",
+       "63419504200",
+       "63419504204",
+       "63419504208",
+       "63419504212",
+       "63419504250",
+       "63419504252",
+       "63419504254",
+       "63419504256",
+       "63419504258",
+       "63419504060",
+       "63419504120",
+       "63419504160",
+       "63415804088",
+       "63415804092",
+       "63415804096",
+       "63415804100",
+       "63415804104",
+       "63415804108",
+       "63415804112",
+       "63415804116",
+       "63415804044",
+       "63415804046",
+       "63415804048",
+       "63415804050",
+       "63415804052",
+       "63415804054",
+       "63415804056",
+       "63415804058",
+       "63415804146",
+       "63415804148",
+       "63415804150",
+       "63415804152",
+       "63415804154",
+       "63415804156",
+       "63415804158",
+       "63415804062",
+       "63415804064",
+       "63415804124",
+       "63415804162",
+       "63415804192",
+       "63415804196",
+       "63415804200",
+       "63415804204",
+       "63415804208",
+       "63415804212",
+       "63415804250",
+       "63415804252",
+       "63415804254",
+       "63415804256",
+       "63415804258",
+       "63415804060",
+       "63415804120",
+       "63415804160"
+      ]
+     }
+    },
+    {
+     "id": "conditionhoc8",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionhcso",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionwxs",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditioncwcq",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 8698,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionvnq",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditiong91c",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiont0q",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    },
+    {
+     "id": "actiongxji",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "SNICKERS"
+     }
+    }
+   ],
+   "lastModified": "2026-03-02T17:49:03.399Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "66212c85cbf92039e0d7317c",
+   "name": "6341 ISPPS",
+   "conditions": [
+    {
+     "id": "conditionqqk",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "63410404088",
+       "63410404092",
+       "63410404096",
+       "63410404100",
+       "63410404104",
+       "63410404108",
+       "63410404112",
+       "63410404116",
+       "63410404044",
+       "63410404046",
+       "63410404048",
+       "63410404050",
+       "63410404052",
+       "63410404054",
+       "63410404056",
+       "63410404058",
+       "63410404146",
+       "63410404148",
+       "63410404150",
+       "63410404152",
+       "63410404154",
+       "63410404156",
+       "63410404158",
+       "63410404062",
+       "63410404064",
+       "63410404124",
+       "63410404162",
+       "63410404192",
+       "63410404196",
+       "63410404200",
+       "63410404204",
+       "63410404208",
+       "63410404212",
+       "63410404250",
+       "63410404252",
+       "63410404254",
+       "63410404256",
+       "63410404258",
+       "63410404060",
+       "63410404120",
+       "63410404160",
+       "63419504088",
+       "63419504092",
+       "63419504096",
+       "63419504100",
+       "63419504104",
+       "63419504108",
+       "63419504112",
+       "63419504116",
+       "63419504044",
+       "63419504046",
+       "63419504048",
+       "63419504050",
+       "63419504052",
+       "63419504054",
+       "63419504056",
+       "63419504058",
+       "63419504146",
+       "63419504148",
+       "63419504150",
+       "63419504152",
+       "63419504154",
+       "63419504156",
+       "63419504158",
+       "63419504062",
+       "63419504064",
+       "63419504124",
+       "63419504162",
+       "63419504192",
+       "63419504196",
+       "63419504200",
+       "63419504204",
+       "63419504208",
+       "63419504212",
+       "63419504250",
+       "63419504252",
+       "63419504254",
+       "63419504256",
+       "63419504258",
+       "63419504060",
+       "63419504120",
+       "63419504160",
+       "63415804088",
+       "63415804092",
+       "63415804096",
+       "63415804100",
+       "63415804104",
+       "63415804108",
+       "63415804112",
+       "63415804116",
+       "63415804044",
+       "63415804046",
+       "63415804048",
+       "63415804050",
+       "63415804052",
+       "63415804054",
+       "63415804056",
+       "63415804058",
+       "63415804146",
+       "63415804148",
+       "63415804150",
+       "63415804152",
+       "63415804154",
+       "63415804156",
+       "63415804158",
+       "63415804062",
+       "63415804064",
+       "63415804124",
+       "63415804162",
+       "63415804192",
+       "63415804196",
+       "63415804200",
+       "63415804204",
+       "63415804208",
+       "63415804212",
+       "63415804250",
+       "63415804252",
+       "63415804254",
+       "63415804256",
+       "63415804258",
+       "63415804060",
+       "63415804120",
+       "63415804160"
+      ]
+     }
+    },
+    {
+     "id": "conditionno2c",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 8698,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionoxx5",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionstrt",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionrwwr",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionnr8m",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionfn2q",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiond5d",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-03-02T17:48:51.722Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "6621281e2185100a3d19e2e2",
+   "name": "Hamden ISPPS",
+   "conditions": [
+    {
+     "id": "condition014l",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ML0206210001",
+       "ML0206210002",
+       "ML0206210003",
+       "ML0206210004",
+       "ML0206210005",
+       "ML0206210006",
+       "ML0206210007"
+      ]
+     }
+    },
+    {
+     "id": "conditiont75t",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditiona6sf",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionktv6",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionzabe",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 4498,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionsj6e",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditiond0t",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action2czg",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-03-05T17:37:28.643Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "65fac31c320eebf7fde6cd9f",
+   "name": "6140 SNO",
+   "conditions": [
+    {
+     "id": "condition2em",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "61400467044",
+       "61403158044",
+       "61405695044",
+       "61400467046",
+       "61403158046",
+       "61405695046",
+       "61400467048",
+       "61403158048",
+       "61405695048",
+       "61400467050",
+       "61403158050",
+       "61405695050",
+       "61400467052",
+       "61403158052",
+       "61405695052",
+       "61400467054",
+       "61403158054",
+       "61405695054",
+       "61400467056",
+       "61403158056",
+       "61405695056",
+       "61400467058",
+       "61403158058",
+       "61405695058",
+       "61400467060",
+       "61403158060",
+       "61405695060",
+       "61400467062",
+       "61403158062",
+       "61405695062",
+       "61400467064",
+       "61403158064",
+       "61405695064"
+      ]
+     }
+    },
+    {
+     "id": "conditionuf7",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionu2yo",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionjawf",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionvjv9",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 12295,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "condition23v",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "condition3ncs",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionyhc",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    },
+    {
+     "id": "action3dl",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "SNICKERS"
+     }
+    }
+   ],
+   "lastModified": "2026-06-24T07:44:25.496Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "65fac286320eebf7fde6cd9d",
+   "name": "1992 SNO",
+   "conditions": [
+    {
+     "id": "conditionwn4",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "80994",
+       "80992",
+       "80993",
+       "80995",
+       "80996",
+       "80997",
+       "80998",
+       "80999",
+       "81000",
+       "81001",
+       "155858",
+       "155859",
+       "155860",
+       "155861",
+       "155862",
+       "155863",
+       "155864",
+       "155865",
+       "155866",
+       "155867",
+       "199211419999C44",
+       "199211419999C46",
+       "199211419999C48",
+       "199211419999C50",
+       "199211419999C52",
+       "199211419999C54",
+       "199211419999C56",
+       "199211419999C58",
+       "199211419999C60",
+       "199211419999C62",
+       "199211419999C64",
+       "199211419900C48",
+       "199211419900C44",
+       "199211419900C46",
+       "199211419900C50",
+       "199211419900C52",
+       "199211419900C54",
+       "199211419900C56",
+       "199211419900C58",
+       "199211419900C60",
+       "199211419900C62",
+       "199211418999C44",
+       "199211418999C46",
+       "199211418999C48",
+       "199211418999C50",
+       "199211418999C52",
+       "199211418999C54",
+       "199211418999C56",
+       "199211418999C58",
+       "199211418999C60",
+       "199211418999C62",
+       "199211419999C44",
+       "199211419999C46",
+       "199211419999C48",
+       "199211419999C50",
+       "199211419999C52",
+       "199211419999C54",
+       "199211419999C56",
+       "199211419999C58",
+       "199211419999C60",
+       "199211419999C62",
+       "199211419999C64",
+       "199211414298C44",
+       "199211414298C46",
+       "199211414298C48",
+       "199211414298C50",
+       "199211414298C52",
+       "199211414298C54",
+       "199211414298C56",
+       "199211414298C58",
+       "199211414298C60",
+       "199211414298C62",
+       "199211414298C64",
+       "199211419699C44",
+       "199211419699C46",
+       "199211419699C48",
+       "199211419699C50",
+       "199211419699C52",
+       "199211419699C54",
+       "199211419699C56",
+       "199211419699C58",
+       "199211419699C60",
+       "199211419699C62",
+       "199211419699C64"
+      ]
+     }
+    },
+    {
+     "id": "conditionxrct",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "condition7wl",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditiont0ob",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionlhtf",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 10598,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionlaag",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "condition5gqg",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionef4n",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    },
+    {
+     "id": "action0d3f",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "BLAKLADER"
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:08:43.357Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "65fac17deefb2347e0382e31",
+   "name": "1992 ISPPS",
+   "conditions": [
+    {
+     "id": "conditionlklm",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "80994",
+       "80992",
+       "80993",
+       "80995",
+       "80996",
+       "80997",
+       "80998",
+       "80999",
+       "81000",
+       "81001",
+       "155858",
+       "155859",
+       "155860",
+       "155861",
+       "155862",
+       "155863",
+       "155864",
+       "155865",
+       "155866",
+       "155867",
+       "199211419999C44",
+       "199211419999C46",
+       "199211419999C48",
+       "199211419999C50",
+       "199211419999C52",
+       "199211419999C54",
+       "199211419999C56",
+       "199211419999C58",
+       "199211419999C60",
+       "199211419999C62",
+       "199211419999C64",
+       "199211419900C48",
+       "199211419900C44",
+       "199211419900C46",
+       "199211419900C50",
+       "199211419900C52",
+       "199211419900C54",
+       "199211419900C56",
+       "199211419900C58",
+       "199211419900C60",
+       "199211419900C62",
+       "199211418999C44",
+       "199211418999C46",
+       "199211418999C48",
+       "199211418999C50",
+       "199211418999C52",
+       "199211418999C54",
+       "199211418999C56",
+       "199211418999C58",
+       "199211418999C60",
+       "199211418999C62",
+       "199211419999C44",
+       "199211419999C46",
+       "199211419999C48",
+       "199211419999C50",
+       "199211419999C52",
+       "199211419999C54",
+       "199211419999C56",
+       "199211419999C58",
+       "199211419999C60",
+       "199211419999C62",
+       "199211419999C64",
+       "199211414298C44",
+       "199211414298C46",
+       "199211414298C48",
+       "199211414298C50",
+       "199211414298C52",
+       "199211414298C54",
+       "199211414298C56",
+       "199211414298C58",
+       "199211414298C60",
+       "199211414298C62",
+       "199211414298C64",
+       "199211419699C44",
+       "199211419699C46",
+       "199211419699C48",
+       "199211419699C50",
+       "199211419699C52",
+       "199211419699C54",
+       "199211419699C56",
+       "199211419699C58",
+       "199211419699C60",
+       "199211419699C62",
+       "199211419699C64"
+      ]
+     }
+    },
+    {
+     "id": "conditionrg8h",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionhdy9",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionz08d",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionfcrw",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 10598,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionh3zq",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionsjo",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action2wau",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:07:43.873Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "65fabffd320eebf7fde6cd9b",
+   "name": "6140 ISPPS",
+   "conditions": [
+    {
+     "id": "condition5rdr",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "61400467044",
+       "61403158044",
+       "61405695044",
+       "61400467046",
+       "61403158046",
+       "61405695046",
+       "61400467048",
+       "61403158048",
+       "61405695048",
+       "61400467050",
+       "61403158050",
+       "61405695050",
+       "61400467052",
+       "61403158052",
+       "61405695052",
+       "61400467054",
+       "61403158054",
+       "61405695054",
+       "61400467056",
+       "61403158056",
+       "61405695056",
+       "61400467058",
+       "61403158058",
+       "61405695058",
+       "61400467060",
+       "61403158060",
+       "61405695060",
+       "61400467062",
+       "61403158062",
+       "61405695062",
+       "61400467064",
+       "61403158064",
+       "61405695064"
+      ]
+     }
+    },
+    {
+     "id": "condition2j39",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionmuzs",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition9q5w",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditiondmvd",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 12295,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionj31cb",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionn5ip",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionzya8",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-06-24T07:44:12.910Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "65f45661eefb2347e0382b81",
+   "name": "6175 SNO",
+   "conditions": [
+    {
+     "id": "conditionr3tv",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "61750404044",
+       "61753104044",
+       "61759504044",
+       "61755804044",
+       "61750404046",
+       "61753104046",
+       "61759504046",
+       "61755804046",
+       "61750404048",
+       "61753104048",
+       "61759504048",
+       "61755804048",
+       "61750404050",
+       "61753104050",
+       "61759504050",
+       "61755804050",
+       "61750404052",
+       "61753104052",
+       "61759504052",
+       "61755804052",
+       "61750404054",
+       "61753104054",
+       "61759504054",
+       "61755804054",
+       "61750404056",
+       "61753104056",
+       "61759504056",
+       "61755804056",
+       "61750404058",
+       "61753104058",
+       "61759504058",
+       "61755804058",
+       "61750404060",
+       "61753104060",
+       "61759504060",
+       "61755804060",
+       "61750404062",
+       "61753104062",
+       "61759504062",
+       "61755804062",
+       "61750404064",
+       "61753104064",
+       "61759504064",
+       "61755804064"
+      ]
+     }
+    },
+    {
+     "id": "conditionwlna",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionkdfvi",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 9098,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionmi8",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionxbkt",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionrio",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditiontx3h",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionfcwm",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    },
+    {
+     "id": "actionusx9",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "SNICKERS"
+     }
+    }
+   ],
+   "lastModified": "2026-03-02T17:44:50.524Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "65f4552feefb2347e0382b7f",
+   "name": "6175 ISPPS",
+   "conditions": [
+    {
+     "id": "condition0whw",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "61750404044",
+       "61753104044",
+       "61759504044",
+       "61755804044",
+       "61750404046",
+       "61753104046",
+       "61759504046",
+       "61755804046",
+       "61750404048",
+       "61753104048",
+       "61759504048",
+       "61755804048",
+       "61750404050",
+       "61753104050",
+       "61759504050",
+       "61755804050",
+       "61750404052",
+       "61753104052",
+       "61759504052",
+       "61755804052",
+       "61750404054",
+       "61753104054",
+       "61759504054",
+       "61755804054",
+       "61750404056",
+       "61753104056",
+       "61759504056",
+       "61755804056",
+       "61750404058",
+       "61753104058",
+       "61759504058",
+       "61755804058",
+       "61750404060",
+       "61753104060",
+       "61759504060",
+       "61755804060",
+       "61750404062",
+       "61753104062",
+       "61759504062",
+       "61755804062",
+       "61750404064",
+       "61753104064",
+       "61759504064",
+       "61755804064"
+      ]
+     }
+    },
+    {
+     "id": "condition2i8k",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionvsfa",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "condition60qd",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionqz4o",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionlhct",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionoom1",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 9098,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionadrq",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-03-02T17:44:35.209Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "657c8b6773901ae9b81a8469",
+   "name": "1990 ISPPS",
+   "conditions": [
+    {
+     "id": "conditiondyp",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "199011419900C148",
+       "199011419900C48",
+       "199011419900D100",
+       "199011419900D104",
+       "199011419900D108",
+       "199011419900D112",
+       "199011419900D116",
+       "199011419900D120",
+       "199011419900D124",
+       "199011419900C44",
+       "199011419900C46",
+       "199011419900C50",
+       "199011419900C52",
+       "199011419900C54",
+       "199011419900C56",
+       "199011419900C58",
+       "199011419900C60",
+       "199011419900C62",
+       "199011419900C146",
+       "199011419900C150",
+       "199011419900C152",
+       "199011419900C154",
+       "199011419900C156",
+       "199011419900C158",
+       "199011419900D84",
+       "199011419900D88",
+       "199011419900D92",
+       "199011419900D96",
+       "199011419999C44",
+       "199011419999C46",
+       "199011419999C48",
+       "199011419999C50",
+       "199011419999C52",
+       "199011419999C54",
+       "199011419999C56",
+       "199011419999C58",
+       "199011419999C60",
+       "199011419999C62",
+       "199011419999D84",
+       "199011419999D88",
+       "199011419999D92",
+       "199011419999D96",
+       "199011419999C146",
+       "199011419999C148",
+       "199011419999C150",
+       "199011419999C152",
+       "199011419999C154",
+       "199011419999C156",
+       "199011419999C158",
+       "199011419999D100",
+       "199011419999D104",
+       "199011419999D108",
+       "199011419999D112",
+       "199011419999D116",
+       "199011419999D120",
+       "199011419999D124",
+       "199011418999C148",
+       "199011418999C48",
+       "199011418999D100",
+       "199011418999D104",
+       "199011418999D108",
+       "199011418999D112",
+       "199011418999D116",
+       "199011418999D120",
+       "199011418999D124",
+       "199011418999C44",
+       "199011418999C46",
+       "199011418999C50",
+       "199011418999C52",
+       "199011418999C54",
+       "199011418999C56",
+       "199011418999C58",
+       "199011418999C60",
+       "199011418999C62",
+       "199011418999C146",
+       "199011418999C150",
+       "199011418999C152",
+       "199011418999C154",
+       "199011418999C156",
+       "199011418999C158",
+       "199011418999D84",
+       "199011418999D88",
+       "199011418999D92",
+       "199011418999D96"
+      ]
+     }
+    },
+    {
+     "id": "conditiontm1u",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionfixi",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition6256",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionbsek",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 15499,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionbq5s",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionvl21",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action3gh",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "104"
+      ],
+      "optionsLabel": [
+       "Royal Mail - Tracked 24"
+      ]
+     }
+    },
+    {
+     "id": "actionm92",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:04:59.322Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "657c8a5d73901ae9b81a8467",
+   "name": "1999 ISPPS",
+   "conditions": [
+    {
+     "id": "conditionn7ki",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "199911419900C44",
+       "60311",
+       "199911419900C46",
+       "60312",
+       "199911419900C48",
+       "60313",
+       "199911419900C50",
+       "60314",
+       "199911419900C52",
+       "60315",
+       "199911419900C54",
+       "60316",
+       "199911419900C56",
+       "60317",
+       "199911419900C58",
+       "60318",
+       "199911419900C60",
+       "60319",
+       "199911419900C62",
+       "60320",
+       "199911419900D84",
+       "60328",
+       "199911419900D88",
+       "60329",
+       "199911419900D92",
+       "60330",
+       "199911419900D96",
+       "60331",
+       "199911419900C146",
+       "60304",
+       "199911419900C148",
+       "60305",
+       "199911419900C150",
+       "60306",
+       "199911419900C152",
+       "60307",
+       "199911419900C154",
+       "60308",
+       "199911419900C156",
+       "60309",
+       "199911419900C158",
+       "60310",
+       "199911419900D100",
+       "60321",
+       "199911419900D104",
+       "60322",
+       "199911419900D108",
+       "60323",
+       "199911419900D112",
+       "60324",
+       "199911419900D116",
+       "60325",
+       "199911419900D120",
+       "60326",
+       "199911419900D124",
+       "60327"
+      ]
+     }
+    },
+    {
+     "id": "condition2ztt",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionc1ce",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionjldt",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition5ts",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition9ch",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionlt3j",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 15999,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiono01d",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "actiontdzg",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "104"
+      ],
+      "optionsLabel": [
+       "Royal Mail - Tracked 24"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:04:33.103Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "652036389916fc44950aedd0",
+   "name": "6241 ISPPS (NO SHIPPING)",
+   "conditions": [
+    {
+     "id": "condition64j",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62410404044",
+       "62410404046",
+       "62410404048",
+       "62410404050",
+       "62410404052",
+       "62410404054",
+       "62410404056",
+       "62410404058",
+       "62410404060",
+       "62410404062",
+       "62410404064",
+       "62410404088",
+       "62410404092",
+       "62410404096",
+       "62410404100",
+       "62410404104",
+       "62410404108",
+       "62410404112",
+       "62410404116",
+       "62410404120",
+       "62410404124",
+       "62410404146",
+       "62410404148",
+       "62410404150",
+       "62410404152",
+       "62410404154",
+       "62410404156",
+       "62410404158",
+       "62410404160",
+       "62410404162",
+       "62410404192",
+       "62410404196",
+       "62410404200",
+       "62410404204",
+       "62410404208",
+       "62410404212",
+       "62410404250",
+       "62410404252",
+       "62410404254",
+       "62410404256",
+       "62410404258",
+       "62410904044",
+       "62410904046",
+       "62410904048",
+       "62410904050",
+       "62410904052",
+       "62410904054",
+       "62410904056",
+       "62410904058",
+       "62410904060",
+       "62410904062",
+       "62410904064",
+       "62410904088",
+       "62410904092",
+       "62410904096",
+       "62410904100",
+       "62410904104",
+       "62410904108",
+       "62410904112",
+       "62410904116",
+       "62410904120",
+       "62410904124",
+       "62410904146",
+       "62410904148",
+       "62410904150",
+       "62410904152",
+       "62410904154",
+       "62410904156",
+       "62410904158",
+       "62410904160",
+       "62410904162",
+       "62410904192",
+       "62410904196",
+       "62410904200",
+       "62410904204",
+       "62410904208",
+       "62410904212",
+       "62410904250",
+       "62410904252",
+       "62410904254",
+       "62410904256",
+       "62410904258",
+       "62415804044",
+       "62415804046",
+       "62415804048",
+       "62415804050",
+       "62415804052",
+       "62415804054",
+       "62415804056",
+       "62415804058",
+       "62415804060",
+       "62415804062",
+       "62415804064",
+       "62415804088",
+       "62415804092",
+       "62415804096",
+       "62415804100",
+       "62415804104",
+       "62415804108",
+       "62415804112",
+       "62415804116",
+       "62415804120",
+       "62415804124",
+       "62415804146",
+       "62415804148",
+       "62415804150",
+       "62415804152",
+       "62415804154",
+       "62415804156",
+       "62415804158",
+       "62415804160",
+       "62415804162",
+       "62415804192",
+       "62415804196",
+       "62415804200",
+       "62415804204",
+       "62415804208",
+       "62415804212",
+       "62415804250",
+       "62415804252",
+       "62415804254",
+       "62415804256",
+       "62415804258",
+       "62419504044",
+       "62419504046",
+       "62419504048",
+       "62419504050",
+       "62419504052",
+       "62419504054",
+       "62419504056",
+       "62419504058",
+       "62419504060",
+       "62419504062",
+       "62419504064",
+       "62419504088",
+       "62419504092",
+       "62419504096",
+       "62419504100",
+       "62419504104",
+       "62419504108",
+       "62419504112",
+       "62419504116",
+       "62419504120",
+       "62419504124",
+       "62419504146",
+       "62419504148",
+       "62419504150",
+       "62419504152",
+       "62419504154",
+       "62419504156",
+       "62419504158",
+       "62419504160",
+       "62419504162",
+       "62419504192",
+       "62419504196",
+       "62419504200",
+       "62419504204",
+       "62419504208",
+       "62419504212",
+       "62419504250",
+       "62419504252",
+       "62419504254",
+       "62419504256",
+       "62419504258"
+      ]
+     }
+    },
+    {
+     "id": "conditionwgv",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionjlwj",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionudud",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditioncwzi",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionsg5",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition0bcr",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 8795,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionob94",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-09-24T15:22:56.820Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "650afe550fac6da6df554bb1",
+   "name": "6275 SNO",
+   "conditions": [
+    {
+     "id": "condition7x8",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62750404044",
+       "62750404088",
+       "62759504044",
+       "62759504088",
+       "62755804044",
+       "62755804088",
+       "62750404192",
+       "62759504192",
+       "62755804192",
+       "62750404046",
+       "62750404092",
+       "62750404146",
+       "62759504046",
+       "62759504092",
+       "62759504146",
+       "62755804046",
+       "62755804092",
+       "62755804146",
+       "62750404196",
+       "62759504196",
+       "62755804196",
+       "62750404048",
+       "62750404096",
+       "62750404148",
+       "62759504048",
+       "62759504096",
+       "62759504148",
+       "62755804048",
+       "62755804096",
+       "62755804148",
+       "62750404200",
+       "62759504200",
+       "62755804200",
+       "62750404050",
+       "62750404100",
+       "62750404150",
+       "62750404250",
+       "62759504050",
+       "62759504100",
+       "62759504150",
+       "62759504250",
+       "62755804050",
+       "62755804100",
+       "62755804150",
+       "62755804250",
+       "62750404204",
+       "62759504204",
+       "62755804204",
+       "62750404052",
+       "62750404104",
+       "62750404152",
+       "62750404252",
+       "62759504052",
+       "62759504104",
+       "62759504152",
+       "62759504252",
+       "62755804052",
+       "62755804104",
+       "62755804152",
+       "62755804252",
+       "62750404208",
+       "62759504208",
+       "62755804208",
+       "62750404054",
+       "62750404108",
+       "62750404154",
+       "62750404254",
+       "62759504054",
+       "62759504108",
+       "62759504154",
+       "62759504254",
+       "62755804054",
+       "62755804108",
+       "62755804154",
+       "62755804254",
+       "62750404212",
+       "62759504212",
+       "62755804212",
+       "62750404056",
+       "62750404112",
+       "62750404156",
+       "62750404256",
+       "62759504056",
+       "62759504112",
+       "62759504156",
+       "62759504256",
+       "62755804056",
+       "62755804112",
+       "62755804156",
+       "62755804256",
+       "62750404058",
+       "62750404116",
+       "62750404158",
+       "62750404258",
+       "62759504058",
+       "62759504116",
+       "62759504158",
+       "62759504258",
+       "62755804058",
+       "62755804116",
+       "62755804158",
+       "62755804258",
+       "62750404060",
+       "62750404120",
+       "62750404160",
+       "62759504060",
+       "62759504120",
+       "62759504160",
+       "62755804060",
+       "62755804120",
+       "62755804160",
+       "62750404062",
+       "62750404124",
+       "62750404162",
+       "62759504062",
+       "62759504124",
+       "62759504162",
+       "62755804062",
+       "62755804124",
+       "62755804162",
+       "62750404064",
+       "62759504064",
+       "62755804064"
+      ]
+     }
+    },
+    {
+     "id": "conditionaukr",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "condition9ser",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition4c7b",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionq2h",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 10494,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionb5n",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionfx6q",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionpx68",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "SNICKERS"
+     }
+    },
+    {
+     "id": "actionm9q8",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-09-16T15:37:50.249Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "650afde70fac6da6df554baf",
+   "name": "6275 ISPPS",
+   "conditions": [
+    {
+     "id": "condition4f9r",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62750404044",
+       "62750404088",
+       "62759504044",
+       "62759504088",
+       "62755804044",
+       "62755804088",
+       "62750404192",
+       "62759504192",
+       "62755804192",
+       "62750404046",
+       "62750404092",
+       "62750404146",
+       "62759504046",
+       "62759504092",
+       "62759504146",
+       "62755804046",
+       "62755804092",
+       "62755804146",
+       "62750404196",
+       "62759504196",
+       "62755804196",
+       "62750404048",
+       "62750404096",
+       "62750404148",
+       "62759504048",
+       "62759504096",
+       "62759504148",
+       "62755804048",
+       "62755804096",
+       "62755804148",
+       "62750404200",
+       "62759504200",
+       "62755804200",
+       "62750404050",
+       "62750404100",
+       "62750404150",
+       "62750404250",
+       "62759504050",
+       "62759504100",
+       "62759504150",
+       "62759504250",
+       "62755804050",
+       "62755804100",
+       "62755804150",
+       "62755804250",
+       "62750404204",
+       "62759504204",
+       "62755804204",
+       "62750404052",
+       "62750404104",
+       "62750404152",
+       "62750404252",
+       "62759504052",
+       "62759504104",
+       "62759504152",
+       "62759504252",
+       "62755804052",
+       "62755804104",
+       "62755804152",
+       "62755804252",
+       "62750404208",
+       "62759504208",
+       "62755804208",
+       "62750404054",
+       "62750404108",
+       "62750404154",
+       "62750404254",
+       "62759504054",
+       "62759504108",
+       "62759504154",
+       "62759504254",
+       "62755804054",
+       "62755804108",
+       "62755804154",
+       "62755804254",
+       "62750404212",
+       "62759504212",
+       "62755804212",
+       "62750404056",
+       "62750404112",
+       "62750404156",
+       "62750404256",
+       "62759504056",
+       "62759504112",
+       "62759504156",
+       "62759504256",
+       "62755804056",
+       "62755804112",
+       "62755804156",
+       "62755804256",
+       "62750404058",
+       "62750404116",
+       "62750404158",
+       "62750404258",
+       "62759504058",
+       "62759504116",
+       "62759504158",
+       "62759504258",
+       "62755804058",
+       "62755804116",
+       "62755804158",
+       "62755804258",
+       "62750404060",
+       "62750404120",
+       "62750404160",
+       "62759504060",
+       "62759504120",
+       "62759504160",
+       "62755804060",
+       "62755804120",
+       "62755804160",
+       "62750404062",
+       "62750404124",
+       "62750404162",
+       "62759504062",
+       "62759504124",
+       "62759504162",
+       "62755804062",
+       "62755804124",
+       "62755804162",
+       "62750404064",
+       "62759504064",
+       "62755804064"
+      ]
+     }
+    },
+    {
+     "id": "conditionqjjq",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionpifm",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionknyd",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionkwu",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 10494,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "condition5v0f",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionbcok",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action9he",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-09-16T15:37:39.092Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "650af9e30fac6da6df554bac",
+   "name": "6902 (BL/SG/NV) SNO",
+   "conditions": [
+    {
+     "id": "conditionhl3g",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "69020404250",
+       "69020404252",
+       "69020404254",
+       "69020404256",
+       "69020404258",
+       "69020404192",
+       "69020404196",
+       "69020404200",
+       "69020404204",
+       "69020404208",
+       "69020404212",
+       "69020404146",
+       "69020404148",
+       "69020404150",
+       "69020404152",
+       "69020404154",
+       "69020404156",
+       "69020404158",
+       "69020404160",
+       "69020404162",
+       "69020404044",
+       "69020404046",
+       "69020404048",
+       "69020404050",
+       "69020404052",
+       "69020404054",
+       "69020404056",
+       "69020404058",
+       "69020404060",
+       "69020404062",
+       "69020404064",
+       "69020404100",
+       "69020404104",
+       "69020404108",
+       "69020404112",
+       "69020404116",
+       "69020404120",
+       "69020404124",
+       "69020404088",
+       "69020404092",
+       "69020404096",
+       "69025804250",
+       "69025804252",
+       "69025804254",
+       "69025804256",
+       "69025804258",
+       "69025804192",
+       "69025804196",
+       "69025804200",
+       "69025804204",
+       "69025804208",
+       "69025804212",
+       "69025804146",
+       "69025804148",
+       "69025804150",
+       "69025804152",
+       "69025804154",
+       "69025804156",
+       "69025804158",
+       "69025804160",
+       "69025804162",
+       "69025804044",
+       "69025804046",
+       "69025804048",
+       "69025804050",
+       "69025804052",
+       "69025804054",
+       "69025804056",
+       "69025804058",
+       "69025804060",
+       "69025804062",
+       "69025804064",
+       "69025804100",
+       "69025804104",
+       "69025804108",
+       "69025804112",
+       "69025804116",
+       "69025804120",
+       "69025804124",
+       "69025804088",
+       "69025804092",
+       "69025804096",
+       "69029504250",
+       "69029504252",
+       "69029504254",
+       "69029504256",
+       "69029504258",
+       "69029504192",
+       "69029504196",
+       "69029504200",
+       "69029504204",
+       "69029504208",
+       "69029504212",
+       "69029504146",
+       "69029504148",
+       "69029504150",
+       "69029504152",
+       "69029504154",
+       "69029504156",
+       "69029504158",
+       "69029504160",
+       "69029504162",
+       "69029504044",
+       "69029504046",
+       "69029504048",
+       "69029504050",
+       "69029504052",
+       "69029504054",
+       "69029504056",
+       "69029504058",
+       "69029504060",
+       "69029504062",
+       "69029504064",
+       "69029504100",
+       "69029504104",
+       "69029504108",
+       "69029504112",
+       "69029504116",
+       "69029504120",
+       "69029504124",
+       "69029504088",
+       "69029504092",
+       "69029504096"
+      ]
+     }
+    },
+    {
+     "id": "conditionx67q",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 12499,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionn3wm",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionptj",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionf0i",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionsk1s",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionoc9",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionxhjc",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "SNICKERS"
+     }
+    },
+    {
+     "id": "action0w7k",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:02:16.471Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "650af86d0fac6da6df554baa",
+   "name": "6902 (BL,SG,NV) ISPPS",
+   "conditions": [
+    {
+     "id": "conditionpija",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "69020404250",
+       "69020404252",
+       "69020404254",
+       "69020404256",
+       "69020404258",
+       "69020404192",
+       "69020404196",
+       "69020404200",
+       "69020404204",
+       "69020404208",
+       "69020404212",
+       "69020404146",
+       "69020404148",
+       "69020404150",
+       "69020404152",
+       "69020404154",
+       "69020404156",
+       "69020404158",
+       "69020404160",
+       "69020404162",
+       "69020404044",
+       "69020404046",
+       "69020404048",
+       "69020404050",
+       "69020404052",
+       "69020404054",
+       "69020404056",
+       "69020404058",
+       "69020404060",
+       "69020404062",
+       "69020404064",
+       "69020404100",
+       "69020404104",
+       "69020404108",
+       "69020404112",
+       "69020404116",
+       "69020404120",
+       "69020404124",
+       "69020404088",
+       "69020404092",
+       "69020404096",
+       "69025804250",
+       "69025804252",
+       "69025804254",
+       "69025804256",
+       "69025804258",
+       "69025804192",
+       "69025804196",
+       "69025804200",
+       "69025804204",
+       "69025804208",
+       "69025804212",
+       "69025804146",
+       "69025804148",
+       "69025804150",
+       "69025804152",
+       "69025804154",
+       "69025804156",
+       "69025804158",
+       "69025804160",
+       "69025804162",
+       "69025804044",
+       "69025804046",
+       "69025804048",
+       "69025804050",
+       "69025804052",
+       "69025804054",
+       "69025804056",
+       "69025804058",
+       "69025804060",
+       "69025804062",
+       "69025804064",
+       "69025804100",
+       "69025804104",
+       "69025804108",
+       "69025804112",
+       "69025804116",
+       "69025804120",
+       "69025804124",
+       "69025804088",
+       "69025804092",
+       "69025804096",
+       "69029504250",
+       "69029504252",
+       "69029504254",
+       "69029504256",
+       "69029504258",
+       "69029504192",
+       "69029504196",
+       "69029504200",
+       "69029504204",
+       "69029504208",
+       "69029504212",
+       "69029504146",
+       "69029504148",
+       "69029504150",
+       "69029504152",
+       "69029504154",
+       "69029504156",
+       "69029504158",
+       "69029504160",
+       "69029504162",
+       "69029504044",
+       "69029504046",
+       "69029504048",
+       "69029504050",
+       "69029504052",
+       "69029504054",
+       "69029504056",
+       "69029504058",
+       "69029504060",
+       "69029504062",
+       "69029504064",
+       "69029504100",
+       "69029504104",
+       "69029504108",
+       "69029504112",
+       "69029504116",
+       "69029504120",
+       "69029504124",
+       "69029504088",
+       "69029504092",
+       "69029504096"
+      ]
+     }
+    },
+    {
+     "id": "condition8cnj",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionozq",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionxj2",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditiongwyd",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditioni0lh",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 12499,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionmy1t",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionwxj9",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2025-10-23T07:01:43.465Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "64fac73c3fe378016fd3f738",
+   "name": "AUTO INVOICE",
+   "conditions": [
+    {
+     "id": "condition6exq",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "47",
+       "95",
+       "93",
+       "94",
+       "46",
+       "4",
+       "103",
+       "102"
+      ],
+      "optionsLabel": [
+       "Accounts Complete",
+       "Collection - Credit Account",
+       "Collection - Paid",
+       "Collection - To Pay",
+       "Complete awaiting Payment",
+       "Invoiced and Completed",
+       "Sportswear Collection Paid",
+       "Sportswear Collection To Pay"
+      ]
+     }
+    },
+    {
+     "id": "condition1v5f",
+     "condition-type": "fulfilment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "SOA",
+       "NON"
+      ],
+      "optionsLabel": [
+       "All fulfilled",
+       "Non stock-tracked"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionr2ca",
+     "action-type": "invoice-order",
+     "options": {
+      "emailEnabled": true
+     }
+    }
+   ],
+   "lastModified": "2025-06-30T10:46:25.693Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "64f60896246752444e3edaf1",
+   "name": "2687 ISPPS",
+   "conditions": [
+    {
+     "id": "conditionvj5e",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "131144-940-404",
+       "131144-940-405",
+       "131144-940-406",
+       "131144-940-407",
+       "131144-940-408",
+       "131144-940-409",
+       "131144-940-410"
+      ]
+     }
+    },
+    {
+     "id": "condition1fpt",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "condition7lu",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditioni2s",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditiony7mf",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "condition3pb8",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionats4",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 9894,
+      "operator": "2"
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "action4zyda",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-06-10T14:11:01.242Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "64f5de443fe378016fd3f3a9",
+   "name": "6141 ISPPS",
+   "conditions": [
+    {
+     "id": "conditionihzg",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "allRows": false,
+      "ids": [
+       "61410404044",
+       "61410404046",
+       "61410404048",
+       "61410404050",
+       "61410404052",
+       "61410404054",
+       "61410404056",
+       "61410404058",
+       "61410404060",
+       "61410404062",
+       "61410404064",
+       "61413904044",
+       "61413904046",
+       "61413904048",
+       "61413904050",
+       "61413904052",
+       "61413904054",
+       "61413904056",
+       "61413904058",
+       "61413904060",
+       "61413904062",
+       "61413904064",
+       "61412004044",
+       "61412004046",
+       "61412004048",
+       "61412004050",
+       "61412004052",
+       "61412004054",
+       "61412004056",
+       "61412004058",
+       "61412004060",
+       "61412004062",
+       "61412004064",
+       "61413104044",
+       "61413104046",
+       "61413104048",
+       "61413104050",
+       "61413104052",
+       "61413104054",
+       "61413104056",
+       "61413104058",
+       "61413104060",
+       "61413104062",
+       "61413104064",
+       "61419504044",
+       "61419504046",
+       "61419504048",
+       "61419504050",
+       "61419504052",
+       "61419504054",
+       "61419504056",
+       "61419504058",
+       "61419504060",
+       "61419504062",
+       "61419504064",
+       "61415804044",
+       "61415804046",
+       "61415804048",
+       "61415804050",
+       "61415804052",
+       "61415804054",
+       "61415804056",
+       "61415804058",
+       "61415804060",
+       "61415804062",
+       "61415804064",
+       "61415604044",
+       "61415604046",
+       "61415604048",
+       "61415604050",
+       "61415604052",
+       "61415604054",
+       "61415604056",
+       "61415604058",
+       "61415604060",
+       "61415604062",
+       "61415604064",
+       "61410904044",
+       "61410904046",
+       "61410904048",
+       "61410904050",
+       "61410904052",
+       "61410904054",
+       "61410904056",
+       "61410904058",
+       "61410904060",
+       "61410904062",
+       "61410904064"
+      ]
+     }
+    },
+    {
+     "id": "conditiondqdr",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditiony2te",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 7548,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "condition2tcn",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionmhfw",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "condition1q6s",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditiond8qi",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionry3",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-06-24T07:37:14.112Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "64f5b9763fe378016fd3f330",
+   "name": "6241 ISPPS (Black,White,Steel,Navy)- NI",
+   "conditions": [
+    {
+     "id": "conditionujhl",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62410404044",
+       "62410404046",
+       "62410404048",
+       "62410404050",
+       "62410404052",
+       "62410404054",
+       "62410404056",
+       "62410404058",
+       "62410404060",
+       "62410404062",
+       "62410404064",
+       "62410404088",
+       "62410404092",
+       "62410404096",
+       "62410404100",
+       "62410404104",
+       "62410404108",
+       "62410404112",
+       "62410404116",
+       "62410404120",
+       "62410404124",
+       "62410404146",
+       "62410404148",
+       "62410404150",
+       "62410404152",
+       "62410404154",
+       "62410404156",
+       "62410404158",
+       "62410404160",
+       "62410404162",
+       "62410404192",
+       "62410404196",
+       "62410404200",
+       "62410404204",
+       "62410404208",
+       "62410404212",
+       "62410404250",
+       "62410404252",
+       "62410404254",
+       "62410404256",
+       "62410404258",
+       "62410904044",
+       "62410904046",
+       "62410904048",
+       "62410904050",
+       "62410904052",
+       "62410904054",
+       "62410904056",
+       "62410904058",
+       "62410904060",
+       "62410904062",
+       "62410904064",
+       "62410904088",
+       "62410904092",
+       "62410904096",
+       "62410904100",
+       "62410904104",
+       "62410904108",
+       "62410904112",
+       "62410904116",
+       "62410904120",
+       "62410904124",
+       "62410904146",
+       "62410904148",
+       "62410904150",
+       "62410904152",
+       "62410904154",
+       "62410904156",
+       "62410904158",
+       "62410904160",
+       "62410904162",
+       "62410904192",
+       "62410904196",
+       "62410904200",
+       "62410904204",
+       "62410904208",
+       "62410904212",
+       "62410904250",
+       "62410904252",
+       "62410904254",
+       "62410904256",
+       "62410904258",
+       "62415804044",
+       "62415804046",
+       "62415804048",
+       "62415804050",
+       "62415804052",
+       "62415804054",
+       "62415804056",
+       "62415804058",
+       "62415804060",
+       "62415804062",
+       "62415804064",
+       "62415804088",
+       "62415804092",
+       "62415804096",
+       "62415804100",
+       "62415804104",
+       "62415804108",
+       "62415804112",
+       "62415804116",
+       "62415804120",
+       "62415804124",
+       "62415804146",
+       "62415804148",
+       "62415804150",
+       "62415804152",
+       "62415804154",
+       "62415804156",
+       "62415804158",
+       "62415804160",
+       "62415804162",
+       "62415804192",
+       "62415804196",
+       "62415804200",
+       "62415804204",
+       "62415804208",
+       "62415804212",
+       "62415804250",
+       "62415804252",
+       "62415804254",
+       "62415804256",
+       "62415804258",
+       "62419504044",
+       "62419504046",
+       "62419504048",
+       "62419504050",
+       "62419504052",
+       "62419504054",
+       "62419504056",
+       "62419504058",
+       "62419504060",
+       "62419504062",
+       "62419504064",
+       "62419504088",
+       "62419504092",
+       "62419504096",
+       "62419504100",
+       "62419504104",
+       "62419504108",
+       "62419504112",
+       "62419504116",
+       "62419504120",
+       "62419504124",
+       "62419504146",
+       "62419504148",
+       "62419504150",
+       "62419504152",
+       "62419504154",
+       "62419504156",
+       "62419504158",
+       "62419504160",
+       "62419504162",
+       "62419504192",
+       "62419504196",
+       "62419504200",
+       "62419504204",
+       "62419504208",
+       "62419504212",
+       "62419504250",
+       "62419504252",
+       "62419504254",
+       "62419504256",
+       "62419504258"
+      ]
+     }
+    },
+    {
+     "id": "conditionc9pm",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditiony1xv",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "condition63w7",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "condition8gp",
+     "condition-type": "shipping-method",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "92"
+      ],
+      "optionsLabel": [
+       "DPD Local Two Day"
+      ]
+     }
+    },
+    {
+     "id": "condition5pti",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 9649,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "condition3bd",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditionwcq",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiongylh",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-06-05T16:18:23.596Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "64f20067246752444e3ed968",
+   "name": "6241 ISPPS (Black,White,Steel,Navy) 2 pair",
+   "conditions": [
+    {
+     "id": "conditiontz1",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62410404044",
+       "62410404046",
+       "62410404048",
+       "62410404050",
+       "62410404052",
+       "62410404054",
+       "62410404056",
+       "62410404058",
+       "62410404060",
+       "62410404062",
+       "62410404064",
+       "62410404088",
+       "62410404092",
+       "62410404096",
+       "62410404100",
+       "62410404104",
+       "62410404108",
+       "62410404112",
+       "62410404116",
+       "62410404120",
+       "62410404124",
+       "62410404146",
+       "62410404148",
+       "62410404150",
+       "62410404152",
+       "62410404154",
+       "62410404156",
+       "62410404158",
+       "62410404160",
+       "62410404162",
+       "62410404192",
+       "62410404196",
+       "62410404200",
+       "62410404204",
+       "62410404208",
+       "62410404212",
+       "62410404250",
+       "62410404252",
+       "62410404254",
+       "62410404256",
+       "62410404258",
+       "62410904044",
+       "62410904046",
+       "62410904048",
+       "62410904050",
+       "62410904052",
+       "62410904054",
+       "62410904056",
+       "62410904058",
+       "62410904060",
+       "62410904062",
+       "62410904064",
+       "62410904088",
+       "62410904092",
+       "62410904096",
+       "62410904100",
+       "62410904104",
+       "62410904108",
+       "62410904112",
+       "62410904116",
+       "62410904120",
+       "62410904124",
+       "62410904146",
+       "62410904148",
+       "62410904150",
+       "62410904152",
+       "62410904154",
+       "62410904156",
+       "62410904158",
+       "62410904160",
+       "62410904162",
+       "62410904192",
+       "62410904196",
+       "62410904200",
+       "62410904204",
+       "62410904208",
+       "62410904212",
+       "62410904250",
+       "62410904252",
+       "62410904254",
+       "62410904256",
+       "62410904258",
+       "62415804044",
+       "62415804046",
+       "62415804048",
+       "62415804050",
+       "62415804052",
+       "62415804054",
+       "62415804056",
+       "62415804058",
+       "62415804060",
+       "62415804062",
+       "62415804064",
+       "62415804088",
+       "62415804092",
+       "62415804096",
+       "62415804100",
+       "62415804104",
+       "62415804108",
+       "62415804112",
+       "62415804116",
+       "62415804120",
+       "62415804124",
+       "62415804146",
+       "62415804148",
+       "62415804150",
+       "62415804152",
+       "62415804154",
+       "62415804156",
+       "62415804158",
+       "62415804160",
+       "62415804162",
+       "62415804192",
+       "62415804196",
+       "62415804200",
+       "62415804204",
+       "62415804208",
+       "62415804212",
+       "62415804250",
+       "62415804252",
+       "62415804254",
+       "62415804256",
+       "62415804258",
+       "62419504044",
+       "62419504046",
+       "62419504048",
+       "62419504050",
+       "62419504052",
+       "62419504054",
+       "62419504056",
+       "62419504058",
+       "62419504060",
+       "62419504062",
+       "62419504064",
+       "62419504088",
+       "62419504092",
+       "62419504096",
+       "62419504100",
+       "62419504104",
+       "62419504108",
+       "62419504112",
+       "62419504116",
+       "62419504120",
+       "62419504124",
+       "62419504146",
+       "62419504148",
+       "62419504150",
+       "62419504152",
+       "62419504154",
+       "62419504156",
+       "62419504158",
+       "62419504160",
+       "62419504162",
+       "62419504192",
+       "62419504196",
+       "62419504200",
+       "62419504204",
+       "62419504208",
+       "62419504212",
+       "62419504250",
+       "62419504252",
+       "62419504254",
+       "62419504256",
+       "62419504258"
+      ]
+     }
+    },
+    {
+     "id": "conditionjccj",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "condition5o5c",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditiongoaf",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionmw2c",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionhgsi",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 17590,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionqf8",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionkcij",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    },
+    {
+     "id": "actiond1ho",
+     "action-type": "update-shipping-method",
+     "options": {
+      "ids": [
+       "104"
+      ],
+      "optionsLabel": [
+       "Royal Mail - Tracked 24"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-09-24T15:22:45.290Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "64f1ebea3fe378016fd3f25a",
+   "name": "6241 SNO (BK/WH/SG/NV)",
+   "conditions": [
+    {
+     "id": "conditionmzsd",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62410404044",
+       "62410404046",
+       "62410404048",
+       "62410404050",
+       "62410404052",
+       "62410404054",
+       "62410404056",
+       "62410404058",
+       "62410404060",
+       "62410404062",
+       "62410404064",
+       "62410404088",
+       "62410404092",
+       "62410404096",
+       "62410404100",
+       "62410404104",
+       "62410404108",
+       "62410404112",
+       "62410404116",
+       "62410404120",
+       "62410404124",
+       "62410404146",
+       "62410404148",
+       "62410404150",
+       "62410404152",
+       "62410404154",
+       "62410404156",
+       "62410404158",
+       "62410404160",
+       "62410404162",
+       "62410404192",
+       "62410404196",
+       "62410404200",
+       "62410404204",
+       "62410404208",
+       "62410404212",
+       "62410404250",
+       "62410404252",
+       "62410404254",
+       "62410404256",
+       "62410404258",
+       "62410904044",
+       "62410904046",
+       "62410904048",
+       "62410904050",
+       "62410904052",
+       "62410904054",
+       "62410904056",
+       "62410904058",
+       "62410904060",
+       "62410904062",
+       "62410904064",
+       "62410904088",
+       "62410904092",
+       "62410904096",
+       "62410904100",
+       "62410904104",
+       "62410904108",
+       "62410904112",
+       "62410904116",
+       "62410904120",
+       "62410904124",
+       "62410904146",
+       "62410904148",
+       "62410904150",
+       "62410904152",
+       "62410904154",
+       "62410904156",
+       "62410904158",
+       "62410904160",
+       "62410904162",
+       "62410904192",
+       "62410904196",
+       "62410904200",
+       "62410904204",
+       "62410904208",
+       "62410904212",
+       "62410904250",
+       "62410904252",
+       "62410904254",
+       "62410904256",
+       "62410904258",
+       "62415804044",
+       "62415804046",
+       "62415804048",
+       "62415804050",
+       "62415804052",
+       "62415804054",
+       "62415804056",
+       "62415804058",
+       "62415804060",
+       "62415804062",
+       "62415804064",
+       "62415804088",
+       "62415804092",
+       "62415804096",
+       "62415804100",
+       "62415804104",
+       "62415804108",
+       "62415804112",
+       "62415804116",
+       "62415804120",
+       "62415804124",
+       "62415804146",
+       "62415804148",
+       "62415804150",
+       "62415804152",
+       "62415804154",
+       "62415804156",
+       "62415804158",
+       "62415804160",
+       "62415804162",
+       "62415804192",
+       "62415804196",
+       "62415804200",
+       "62415804204",
+       "62415804208",
+       "62415804212",
+       "62415804250",
+       "62415804252",
+       "62415804254",
+       "62415804256",
+       "62415804258",
+       "62419504044",
+       "62419504046",
+       "62419504048",
+       "62419504050",
+       "62419504052",
+       "62419504054",
+       "62419504056",
+       "62419504058",
+       "62419504060",
+       "62419504062",
+       "62419504064",
+       "62419504088",
+       "62419504092",
+       "62419504096",
+       "62419504100",
+       "62419504104",
+       "62419504108",
+       "62419504112",
+       "62419504116",
+       "62419504120",
+       "62419504124",
+       "62419504146",
+       "62419504148",
+       "62419504150",
+       "62419504152",
+       "62419504154",
+       "62419504156",
+       "62419504158",
+       "62419504160",
+       "62419504162",
+       "62419504192",
+       "62419504196",
+       "62419504200",
+       "62419504204",
+       "62419504208",
+       "62419504212",
+       "62419504250",
+       "62419504252",
+       "62419504254",
+       "62419504256",
+       "62419504258"
+      ]
+     }
+    },
+    {
+     "id": "conditionxoni",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditionydxc",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 9394,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditionf8s1",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "ANA"
+      ],
+      "optionsLabel": [
+       "No Stock Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionxcn",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "conditionlzo",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    },
+    {
+     "id": "conditiong86v",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actiona72e",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "23"
+      ],
+      "optionsLabel": [
+       "Stock needs ordering"
+      ]
+     }
+    },
+    {
+     "id": "actionoz5",
+     "action-type": "update-custom-field",
+     "options": {
+      "fieldContextType": "sales",
+      "ids": [
+       "PCF_SUPPLIER"
+      ],
+      "fieldType": "TEXT",
+      "value": "SNICKERS"
+     }
+    },
+    {
+     "id": "actionw7s",
+     "action-type": "unallocate-stock",
+     "options": {
+      "ids": []
+     }
+    }
+   ],
+   "lastModified": "2026-09-24T15:22:34.660Z",
+   "modifiedBy": "Matthew Lund"
+  },
+  {
+   "id": "64f17dcb246752444e3ed864",
+   "name": "6241 ISPPS (Black,White,Steel,Navy)",
+   "conditions": [
+    {
+     "id": "conditionbooq",
+     "condition-type": "contains-item",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "62410404044",
+       "62410404046",
+       "62410404048",
+       "62410404050",
+       "62410404052",
+       "62410404054",
+       "62410404056",
+       "62410404058",
+       "62410404060",
+       "62410404062",
+       "62410404064",
+       "62410404088",
+       "62410404092",
+       "62410404096",
+       "62410404100",
+       "62410404104",
+       "62410404108",
+       "62410404112",
+       "62410404116",
+       "62410404120",
+       "62410404124",
+       "62410404146",
+       "62410404148",
+       "62410404150",
+       "62410404152",
+       "62410404154",
+       "62410404156",
+       "62410404158",
+       "62410404160",
+       "62410404162",
+       "62410404192",
+       "62410404196",
+       "62410404200",
+       "62410404204",
+       "62410404208",
+       "62410404212",
+       "62410404250",
+       "62410404252",
+       "62410404254",
+       "62410404256",
+       "62410404258",
+       "62410904044",
+       "62410904046",
+       "62410904048",
+       "62410904050",
+       "62410904052",
+       "62410904054",
+       "62410904056",
+       "62410904058",
+       "62410904060",
+       "62410904062",
+       "62410904064",
+       "62410904088",
+       "62410904092",
+       "62410904096",
+       "62410904100",
+       "62410904104",
+       "62410904108",
+       "62410904112",
+       "62410904116",
+       "62410904120",
+       "62410904124",
+       "62410904146",
+       "62410904148",
+       "62410904150",
+       "62410904152",
+       "62410904154",
+       "62410904156",
+       "62410904158",
+       "62410904160",
+       "62410904162",
+       "62410904192",
+       "62410904196",
+       "62410904200",
+       "62410904204",
+       "62410904208",
+       "62410904212",
+       "62410904250",
+       "62410904252",
+       "62410904254",
+       "62410904256",
+       "62410904258",
+       "62415804044",
+       "62415804046",
+       "62415804048",
+       "62415804050",
+       "62415804052",
+       "62415804054",
+       "62415804056",
+       "62415804058",
+       "62415804060",
+       "62415804062",
+       "62415804064",
+       "62415804088",
+       "62415804092",
+       "62415804096",
+       "62415804100",
+       "62415804104",
+       "62415804108",
+       "62415804112",
+       "62415804116",
+       "62415804120",
+       "62415804124",
+       "62415804146",
+       "62415804148",
+       "62415804150",
+       "62415804152",
+       "62415804154",
+       "62415804156",
+       "62415804158",
+       "62415804160",
+       "62415804162",
+       "62415804192",
+       "62415804196",
+       "62415804200",
+       "62415804204",
+       "62415804208",
+       "62415804212",
+       "62415804250",
+       "62415804252",
+       "62415804254",
+       "62415804256",
+       "62415804258",
+       "62419504044",
+       "62419504046",
+       "62419504048",
+       "62419504050",
+       "62419504052",
+       "62419504054",
+       "62419504056",
+       "62419504058",
+       "62419504060",
+       "62419504062",
+       "62419504064",
+       "62419504088",
+       "62419504092",
+       "62419504096",
+       "62419504100",
+       "62419504104",
+       "62419504108",
+       "62419504112",
+       "62419504116",
+       "62419504120",
+       "62419504124",
+       "62419504146",
+       "62419504148",
+       "62419504150",
+       "62419504152",
+       "62419504154",
+       "62419504156",
+       "62419504158",
+       "62419504160",
+       "62419504162",
+       "62419504192",
+       "62419504196",
+       "62419504200",
+       "62419504204",
+       "62419504208",
+       "62419504212",
+       "62419504250",
+       "62419504252",
+       "62419504254",
+       "62419504256",
+       "62419504258"
+      ],
+      "allRows": false
+     }
+    },
+    {
+     "id": "conditionfd5b",
+     "condition-type": "delivery-country",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "222"
+      ],
+      "optionsLabel": [
+       "United Kingdom"
+      ],
+      "countryIsoCode3Char": [
+       "GBR"
+      ],
+      "countryIsoCode2Char": [
+       "GB"
+      ]
+     }
+    },
+    {
+     "id": "condition4yuo",
+     "condition-type": "stock-allocation-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "AAA"
+      ],
+      "optionsLabel": [
+       "Stock Fully Allocated"
+      ]
+     }
+    },
+    {
+     "id": "conditionqz",
+     "condition-type": "order-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "87"
+      ],
+      "optionsLabel": [
+       "Pending Magento Orders"
+      ]
+     }
+    },
+    {
+     "id": "conditionf32i",
+     "condition-type": "total-value",
+     "predicate": "IS",
+     "options": {
+      "totalValue": 9394,
+      "operator": "2"
+     }
+    },
+    {
+     "id": "conditiona1v1",
+     "condition-type": "channel",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "17"
+      ],
+      "optionsLabel": [
+       "Magento TuffShop.co.uk"
+      ]
+     }
+    },
+    {
+     "id": "conditioni4e",
+     "condition-type": "payment-status",
+     "predicate": "IS",
+     "options": {
+      "ids": [
+       "PAID"
+      ],
+      "optionsLabel": [
+       "Fully Paid"
+      ]
+     }
+    }
+   ],
+   "actions": [
+    {
+     "id": "actionprkc",
+     "action-type": "update-status",
+     "options": {
+      "ids": [
+       "48"
+      ],
+      "optionsLabel": [
+       "In stock, pick/pack/ship"
+      ]
+     }
+    }
+   ],
+   "lastModified": "2026-09-24T15:22:19.281Z",
+   "modifiedBy": "Matthew Lund"
+  }
+ ]
+}

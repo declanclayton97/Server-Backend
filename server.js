@@ -40,6 +40,7 @@ import { registerCallReport } from './callReport.js';
 import { registerTravelexPo } from './travelexPo.js';
 import { registerShiptheoryExport } from './shiptheoryExport.js';
 import { registerBpUsage } from './bpUsage.js';
+import { registerOrderRules } from './orderRules.js';
 import { bpSafeText } from './bpText.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -15821,6 +15822,7 @@ registerCallReport(app, { getPool: () => pool, bpLive });
 registerTravelexPo(app, { getPool: () => pool, bpLive });
 registerShiptheoryExport(app, { getPool: () => pool, bpLive });
 registerBpUsage(app, { getPool: () => pool });
+registerOrderRules(app, { getPool: () => pool });   // BP automation-rule replacement: WATCH ONLY (logs what 8 rules would do, writes nothing to BP)
 
 // Whether the SALES WhatsApp number is set up, so the dashboard can say why
 // the chat buttons are missing instead of failing on click.
