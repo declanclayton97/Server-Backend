@@ -5433,7 +5433,10 @@ async function beeswiftLines(po) {
     try {
       for (const p of (await bp.bpLiveGet(`/product-service/product/${ids.slice(i, i + 100).join(',')}`)) || []) {
         const sc = p.salesChannels && p.salesChannels[0];
-        cur.set(Number(p.id), { productSku: (p.identity && p.identity.sku) || null, productName: (sc && sc.productName) || null });
+        // Size from the variation: footwear codes carry it (Click CF115 size 8 = CF11508, PO 501893) and
+        // neither the row nor the product name does.
+        const sz = (p.variations || []).find((v) => /size/i.test(v.optionName || ''));
+        cur.set(Number(p.id), { productSku: (p.identity && p.identity.sku) || null, productName: (sc && sc.productName) || null, size: (sz && sz.optionValue) || undefined });
       }
     } catch { /* fall back to the row text */ }
   }
