@@ -30,7 +30,11 @@ const BROWSER_HEADERS = {
   'Accept-Language': 'en-GB,en;q=0.9',
 };
 
-const sessions = new Map(); // client (clients_id) -> { jar: CookieJar, loggedInAt: number }
+const sessions = new Map(); // client (clients_id), or client#account -> { jar: CookieJar, loggedInAt: number }
+// Named logins besides the default one. 'order' = the Order Processor user (BP_ORDER_USER/BP_ORDER_PASS) that the
+// order-screen automation (bpScreen.js) saves as, so its changes show under its own name and never share a session.
+const ACCOUNTS = { order: ['BP_ORDER_USER', 'BP_ORDER_PASS'] };
+const sessionKey = (client, account) => (account ? `${client}#${account}` : client);
 
 function extractSetCookies(res) {
   if (typeof res.headers.getSetCookie === 'function') {
@@ -109,17 +113,20 @@ async function followRedirects(jar, res, originUrl) {
 
 const TEST_CLIENT = process.env.BP_WEB_TEST_CLIENT || 'tuffbsitc';
 
-async function login(client = BP_CLIENT, trace = null) {
+async function login(client = BP_CLIENT, trace = null, account = null) {
   // Sandbox (test) account uses its own login; live uses the uploader account.
   // Sandbox (tuffbsitc) = the user's own login (DEC_USER/DEC_PASS) for safe testing.
   // >>> GO-LIVE TODO: the LIVE reference-write (tuffworkwear) uses the FILE UPLOADER
   //     account (BP_WEB_EMAIL/BP_WEB_PASSWORD). Confirm that env is the fileuploader@
   //     account and verify a reference-write works on live before switching on. <<<
   const isTest = client === TEST_CLIENT;
-  const email = isTest ? (process.env.DEC_USER || process.env.BP_WEB_TEST_EMAIL || process.env.BP_WEB_EMAIL) : process.env.BP_WEB_EMAIL;
-  const password = isTest ? (process.env.DEC_PASS || process.env.BP_WEB_TEST_PASSWORD || process.env.BP_WEB_PASSWORD) : process.env.BP_WEB_PASSWORD;
+  if (account && !ACCOUNTS[account]) throw new Error(`BP web login: unknown account '${account}'`);
+  const email = account ? process.env[ACCOUNTS[account][0]]
+    : isTest ? (process.env.DEC_USER || process.env.BP_WEB_TEST_EMAIL || process.env.BP_WEB_EMAIL) : process.env.BP_WEB_EMAIL;
+  const password = account ? process.env[ACCOUNTS[account][1]]
+    : isTest ? (process.env.DEC_PASS || process.env.BP_WEB_TEST_PASSWORD || process.env.BP_WEB_PASSWORD) : process.env.BP_WEB_PASSWORD;
   if (!email || !password) {
-    throw new Error(`BP web credentials not configured for client ${client}`);
+    throw new Error(account ? `BP web credentials not configured: ${ACCOUNTS[account].join('/')}` : `BP web credentials not configured for client ${client}`);
   }
   const tstep = (o) => { if (trace) trace.push(o); };
 
@@ -182,20 +189,20 @@ async function login(client = BP_CLIENT, trace = null) {
     );
   }
 
-  console.log(`[bp-web] login OK (${client}) after ${hops} redirect(s), cookies in jar: ${cookieNames.join(',')}`);
+  console.log(`[bp-web] login OK (${sessionKey(client, account)}) after ${hops} redirect(s), cookies in jar: ${cookieNames.join(',')}`);
   const session = { jar, loggedInAt: Date.now() };
-  sessions.set(client, session);
+  sessions.set(sessionKey(client, account), session);
   return session;
 }
 
-async function getSession(client = BP_CLIENT) {
-  const s = sessions.get(client);
+async function getSession(client = BP_CLIENT, account = null) {
+  const s = sessions.get(sessionKey(client, account));
   if (s && Date.now() - s.loggedInAt < SESSION_TTL_MS) return s;
-  return await login(client);
+  return await login(client, null, account);
 }
 
-function invalidateSession(client = BP_CLIENT) {
-  sessions.delete(client);
+function invalidateSession(client = BP_CLIENT, account = null) {
+  sessions.delete(sessionKey(client, account));
 }
 
 async function fetchCsrfToken(jar, orderId) {
@@ -301,9 +308,9 @@ async function attachFileToOrder(orderId, filename, buffer, mimeType = 'applicat
 
 // GET an authenticated Brightpearl web page using the cached session (re-logs
 // in once if expired). Follows redirects. Returns { status, html, finalUrl }.
-async function fetchAuthed(url, { client = BP_CLIENT, method = 'GET', body, headers } = {}) {
+async function fetchAuthed(url, { client = BP_CLIENT, account = null, method = 'GET', body, headers } = {}) {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const session = await getSession(client);
+    const session = await getSession(client, account);
     const cookieHeader = await getCookieHeader(session.jar, url);
     let res = await fetch(url, { method, body, headers: { ...BROWSER_HEADERS, Cookie: cookieHeader, ...(headers || {}) }, redirect: 'manual' });
     await ingestCookies(session.jar, res, url);
@@ -313,7 +320,7 @@ async function fetchAuthed(url, { client = BP_CLIENT, method = 'GET', body, head
       res = r.finalRes; finalUrl = r.finalUrl;
     }
     const html = await res.text();
-    if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(client); continue; }
+    if (looksLikeLoginPage(html) && attempt === 0) { invalidateSession(client, account); continue; }
     return { status: res.status, html, finalUrl, location: res.headers.get('location') || null };
   }
   return { status: 0, html: '', finalUrl: url };

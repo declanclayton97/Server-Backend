@@ -9,7 +9,7 @@
 //   node bpScreen.live.mjs <orderId> --client=tuffworkwear [--write]
 //
 // Login: bpWebSession's credentials for the client (sandbox: DEC_USER/DEC_PASS
-// or BP_WEB_TEST_EMAIL/BP_WEB_TEST_PASSWORD; live: BP_WEB_EMAIL/BP_WEB_PASSWORD).
+// or BP_WEB_TEST_EMAIL/BP_WEB_TEST_PASSWORD; live: the Order Processor user, BP_ORDER_USER/BP_ORDER_PASS).
 // Env is read from ./.env, then C:/Users/DeclanClayton/Downloads/Server-Backend.env.
 import fs from 'node:fs';
 import { readOrder, updateOrder, webTransport } from './bpScreen.js';

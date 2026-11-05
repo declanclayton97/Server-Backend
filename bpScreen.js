@@ -320,8 +320,9 @@ async function updateOrder(orderId, changes, { transport, dryRun = false, getApi
   return { ok: misses.length === 0, orderId, diff: real, misses, after };
 }
 
-// The real transport: bpWebSession's cookie session for `client`.
-async function webTransport(client) {
+// The real transport: bpWebSession's cookie session for `client`. On live it signs in as the Order Processor user
+// (BP_ORDER_USER/BP_ORDER_PASS) so the saves show under that name; the sandbox keeps its default login.
+async function webTransport(client, { account = client === 'tuffbsitc' ? null : 'order' } = {}) {
   const ws = await import('./bpWebSession.js');
   const host = ws.BP_HOST;
   const ingest = async (jar, res, url) => {
@@ -334,11 +335,11 @@ async function webTransport(client) {
     host,
     client,
     async get(url) {
-      const r = await ws.fetchAuthed(url, { client });
+      const r = await ws.fetchAuthed(url, { client, account });
       return r.html || '';
     },
     async post(url, pairs) {
-      const { jar } = await ws.getSession(client);
+      const { jar } = await ws.getSession(client, account);
       const fd = new FormData();
       for (const [k, v] of pairs) fd.append(k, v);
       const res = await fetch(url, {
