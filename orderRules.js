@@ -163,6 +163,10 @@ async function changedOrderIds(get, since) {
   }
 }
 
+// The rule a BP note says ran. Custom-field rules write "Automation rule 'X': Updating ...", shipping and status
+// rules write "Updating shipping method to "Y" by Automation with rule "X"".
+export const noteRuleName = (text) => String(text || '').match(/^Automation rule '([^']+)'|by Automation with rule "([^"]+)"/)?.slice(1).find(Boolean) || null;
+
 // BP's own rule notes added since `since`: [{ orderId, ruleName }].
 async function bpRuleNotes(get, since) {
   const out = [];
@@ -171,14 +175,13 @@ async function bpRuleNotes(get, since) {
     const col = s.metaData.columns.map((c) => c.name);
     for (const r of s.results) {
       const n = Object.fromEntries(col.map((k, i) => [k, r[i]]));
-      const m = String(n.noteText || '').match(/^Automation rule '([^']+)'/);
-      if (m) out.push({ orderId: n.orderId, ruleName: m[1] });
+      const ruleName = noteRuleName(n.noteText);
+      if (ruleName) out.push({ orderId: n.orderId, ruleName });
     }
     if (!s.metaData.morePagesAvailable) return out;
     first += s.metaData.resultsReturned;
   }
 }
-const leavesNotes = (rule) => rule.actions.some((a) => a['action-type'] === 'update-custom-field');
 
 async function ensureTables(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS order_rules_state (k text PRIMARY KEY, v text NOT NULL)`);
@@ -211,12 +214,10 @@ export async function pollOnce({ pool, get = bpApi(), now = new Date() } = {}) {
           // Once per order: anything already logged for this order and rule means it has fired.
           const fired = (await pool.query(`SELECT 1 FROM order_rules_log WHERE order_id = $1 AND rule_id = $2 AND verdict <> 'would'`, [o.id, r.rule.id])).rows.length;
           if (fired) continue;
-          // Fired before we started watching? BP's note says so for the custom-field rules.
-          if (leavesNotes(r.rule)) {
-            const s = await get(`/order-service/order-note-search?orderId=${o.id}&pageSize=500`);
-            const col = s.metaData.columns.map((c) => c.name).indexOf('noteText');
-            if (s.results.some((row) => String(row[col] || '').startsWith(`Automation rule '${r.rule.name}'`))) { await log(o.id, r.rule, 'bp'); continue; }
-          }
+          // Fired before we started watching and someone has since undone it? BP's note says so, and BP won't redo it.
+          const s = await get(`/order-service/order-note-search?orderId=${o.id}&pageSize=500`);
+          const col = s.metaData.columns.map((c) => c.name).indexOf('noteText');
+          if (s.results.some((row) => noteRuleName(row[col]) === r.rule.name)) { await log(o.id, r.rule, 'already'); continue; }
         }
         await log(o.id, r.rule, r.verdict, r.changes, o.orderStatus?.orderStatusId ?? null);
       }
@@ -236,7 +237,7 @@ export async function watchReport(pool, { hours = 24, graceMin = 15 } = {}) {
            (SELECT array_agg(o.verdict) FROM order_rules_log o WHERE o.order_id = w.order_id AND o.rule_id = w.rule_id AND o.verdict <> w.verdict) AS other
     FROM order_rules_log w
     WHERE w.first_seen > now() - ($1 || ' hours')::interval`, [String(hours)])).rows;
-  const blank = () => ({ would: 0, done: 0, bp: 0, agreed: 0, oursOnly: [], bpOnly: [] });
+  const blank = () => ({ would: 0, done: 0, bp: 0, already: 0, agreed: 0, oursOnly: [], bpOnly: [] });
   const rules = Object.fromEntries(WATCHED.map((n) => [n, blank()]));
   const late = (r) => Date.now() - new Date(r.first_seen).getTime() > graceMin * 60000;
   for (const r of rows) {
@@ -244,10 +245,12 @@ export async function watchReport(pool, { hours = 24, graceMin = 15 } = {}) {
     const other = r.other || [];
     s[r.verdict]++;
     if (r.verdict === 'would') {
+      if (other.includes('bp')) continue; // counted on the bp row
       if (other.length) s.agreed++;
       else if (late(r)) s.oursOnly.push({ orderId: Number(r.order_id), since: r.first_seen, changes: r.changes });
-    } else if (r.verdict === 'bp' && !other.length && late(r)) {
-      s.bpOnly.push({ orderId: Number(r.order_id), since: r.first_seen });
+    } else if (r.verdict === 'bp') {
+      if (other.length) s.agreed++;
+      else if (late(r)) s.bpOnly.push({ orderId: Number(r.order_id), since: r.first_seen });
     }
   }
   const last = (await pool.query(`SELECT v FROM order_rules_state WHERE k = 'cursor'`)).rows[0]?.v || null;

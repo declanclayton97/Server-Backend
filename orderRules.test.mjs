@@ -5,7 +5,7 @@
 // Run: node orderRules.test.mjs
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { evaluate, runRules, unsupported, pollOnce, watchReport, WATCHED } from './orderRules.js';
+import { evaluate, runRules, unsupported, pollOnce, watchReport, noteRuleName, WATCHED } from './orderRules.js';
 
 const RULES = JSON.parse(fs.readFileSync(new URL('./orderRules.rules.json', import.meta.url), 'utf8')).rules;
 const rule = (name) => RULES.find((r) => r.name === name);
@@ -107,8 +107,8 @@ await test('pollOnce: logs would, reads BP\'s rule notes, and never re-fires a r
     return orders;
   };
   await pollOnce({ pool, get });
-  // order 1: first time -> would. order 2: BP's note shows the rule already ran before someone set it back -> bp, no would.
-  assert.deepEqual(pool.rows.map((r) => `${r.order_id}:${r.verdict}`).sort(), ['1:would', '2:bp']);
+  // order 1: first time -> would. order 2: BP's note shows the rule already ran before someone set it back -> no would.
+  assert.deepEqual(pool.rows.map((r) => `${r.order_id}:${r.verdict}`).sort(), ['1:would', '2:already']);
 
   // BP then does it on order 1 and leaves its note: done + bp, and the report counts it as agreed.
   orders = [order({ id: 1, status: 120, cf: { PCF_BOBSORTI: true } })];
@@ -124,6 +124,37 @@ await test('pollOnce: logs would, reads BP\'s rule notes, and never re-fires a r
   await pollOnce({ pool, get });
   assert.equal(pool.rows.filter((r) => r.order_id === 1 && r.verdict === 'would').length, 1);
   assert.ok(!calls.some((c) => /\/order\/\d.*\/(row|note)$/.test(c)), 'read-only: nothing but GETs of search/order');
+});
+
+await test('noteRuleName reads both of the note formats BP writes, and nothing else', () => {
+  assert.equal(noteRuleName("Automation rule 'Name Badges': Updating sales custom field PCF_BADGE"), 'Name Badges');
+  assert.equal(noteRuleName('Updating shipping method to "DPD Local Two Day" by Automation with rule "BT Postcode Catcher"'), 'BT Postcode Catcher');
+  assert.equal(noteRuleName('Updated status to "Stock needs ordering"<br />'), null);
+  assert.equal(noteRuleName(null), null);
+});
+
+await test('a shipping rule BP ran before we watched and someone undid is not fired again (SO 501902)', async () => {
+  const pool = fakePool();
+  const o = order({ id: 7, ship: 14, pc: 'BT31 9ED' });
+  const get = async (p) => (p.includes('/order-search') ? search([7])
+    : p.includes('order-note-search?dateAdded') ? notes([])
+      : p.includes('order-note-search?orderId=') ? notes([[7, 'Updating shipping method to "DPD Local Two Day" by Automation with rule "BT Postcode Catcher"']])
+        : [o]);
+  await pollOnce({ pool, get });
+  assert.deepEqual(pool.rows.map((r) => r.verdict), ['already']);
+  const rep = await watchReport(pool);
+  assert.deepEqual([rep.rules['BT Postcode Catcher'].oursOnly, rep.rules['BT Postcode Catcher'].bpOnly], [[], []]);
+});
+
+await test('BP beats our poll on a shipping rule: its note plus our done counts as agreed; its note alone is bpOnly', async () => {
+  const pool = fakePool();
+  const bt = rule('BT Postcode Catcher');
+  await pool.query('INSERT INTO order_rules_log', [8, bt.id, bt.name, 'bp', '[]']);
+  await pool.query('INSERT INTO order_rules_log', [8, bt.id, bt.name, 'done', '[]']);
+  await pool.query('INSERT INTO order_rules_log', [9, bt.id, bt.name, 'bp', '[]']);
+  const s = (await watchReport(pool)).rules['BT Postcode Catcher'];
+  assert.equal(s.agreed, 1);
+  assert.deepEqual(s.bpOnly.map((o) => o.orderId), [9]);
 });
 
 await test('watchReport: a would that BP never followed is listed as oursOnly', async () => {
