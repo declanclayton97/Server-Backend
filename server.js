@@ -41,6 +41,7 @@ import { registerTravelexPo } from './travelexPo.js';
 import { registerShiptheoryExport } from './shiptheoryExport.js';
 import { registerBpUsage } from './bpUsage.js';
 import { registerOrderRules } from './orderRules.js';
+import { overdueProofs } from './proofOverdue.js';
 import { bpSafeText } from './bpText.js';
 import { generateJigEps, tileVectorEps, placementsFromTemplate, isVectorEps, buildGangSheetEps, parseEps, epsSizeMm } from './jigEps.js';
 import { nestPrints } from './gangNest.js';
@@ -591,11 +592,31 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
       return res.json([]);
     }
     
-    // Now fetch the details for these orders
-    // Limit to first 10 orders to avoid URL being too long (urgent ones always included).
+    // Over 36 hours in Proof Required, weekends and bank holidays aside: urgent, and Harry's
+    // screens lock to these until each has had a proof sent (Dec, 12 Nov 2026).
+    let overdueByOrder = new Map();
+    try {
+      overdueByOrder = await overdueProofs({
+        pool,
+        orderIds,
+        getNotes: async (id) => {
+          const r = await bpFetchThrottled(`${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${id}/note`, {
+            headers: { 'brightpearl-app-ref': process.env.BRIGHTPEARL_APP_REF, 'brightpearl-account-token': BRIGHTPEARL_API_TOKEN },
+          }, { label: 'proof-overdue-notes' });
+          if (!r.ok) throw new Error(`notes ${r.status}`);
+          return (await r.json()).response || [];
+        },
+      });
+    } catch (e) {
+      console.error('[proof-required] overdue check failed:', e.message);
+    }
+
+    // Now fetch the details for these orders (every status-34 order, up to the search's 50;
+    // it used to stop at 10, which could hide an overdue one). Urgent ones are always included.
     // Brightpearl 400s an id list that isn't ascending.
     const urgentSet = new Set(urgentIds.filter((id) => !emailByOrder.has(id) || urgentMockupIds.has(id)));
-    const limitedOrderIds = [...new Set([...urgentIds, ...orderIds.slice(0, 10).map(Number)])].sort((a, b) => a - b);
+    for (const [id, o] of overdueByOrder) if (o.overdue) urgentSet.add(id);
+    const limitedOrderIds = [...new Set([...urgentIds, ...orderIds.map(Number)])].sort((a, b) => a - b);
     const orderRange = limitedOrderIds.join(',');
     const detailsUrl = `${baseUrl}/public-api/${BRIGHTPEARL_ACCOUNT_ID}/order-service/order/${orderRange}`;
     
@@ -630,6 +651,9 @@ app.get('/api/brightpearl/proof-required', async (req, res) => {
       deliveryDate: order.delivery?.deliveryDate || null,
       urgent: urgentSet.has(Number(order.id)),
       email: emailByOrder.get(Number(order.id)) || null,
+      overdue: !!overdueByOrder.get(Number(order.id))?.overdue,
+      onProofSince: overdueByOrder.get(Number(order.id))?.since || null,
+      onProofHours: overdueByOrder.get(Number(order.id))?.hours ?? null,
     }));
     orders.sort((a, b) => (Number(b.urgent) * 2 + Number(!!b.email)) - (Number(a.urgent) * 2 + Number(!!a.email)));
     
