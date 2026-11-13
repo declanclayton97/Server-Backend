@@ -32,6 +32,7 @@ import { graphConfigured, graphRequest } from "./graphMail.js";
 const COLS = ["DATE", "SKU", "DESC", "SIZE", "COLOUR", "LOCATION", "QTY", "ORDER"];   // A..H, what Bob needs
 const SCAN_ROWS = 150;        // fill colours are read for the last 150 data rows (older ones are long picked)
 const SENT_PURPLE = "#CCC0DA";   // Excel's light purple: dark text stays readable on it
+const PAGE_ROWS = 5;             // rows per WhatsApp image
 
 const cfg = () => ({
   drive: process.env.PICKING_DRIVE_ID, item: process.env.PICKING_ITEM_ID,
@@ -246,7 +247,10 @@ export function pickingSvg(rows, title) {
 }
 export async function pickingPng(rows, title) {
   const { Resvg } = await import("@resvg/resvg-js");
-  const r = new Resvg(pickingSvg(rows, title), { font: { fontBuffers: fontBuffers(), defaultFontFamily: "DejaVu Sans", loadSystemFonts: false } });
+  // Drawn at 1.5x: WhatsApp recompresses header images, and bigger text survives it. Scaled
+  // in the SVG itself (the viewBox stays) - resvg 2.6 ignores fitTo when fontBuffers is set.
+  const svg = pickingSvg(rows, title).replace(/^<svg ([^>]*?)width="(\d+)" height="(\d+)"/, (m, pre, w, h) => `<svg ${pre}width="${Math.round(w * 1.5)}" height="${Math.round(h * 1.5)}"`);
+  const r = new Resvg(svg, { font:{ fontBuffers: fontBuffers(), defaultFontFamily: "DejaVu Sans", loadSystemFonts: false } });
   return Buffer.from(r.render().asPng());
 }
 
@@ -304,12 +308,20 @@ export async function runPicking({ waPhoneNumberId, dryRun = false, to = null, m
     result.sent = true;
     return result;
   }
-  const png = await pickingPng(pending, title);
-  const mediaId = await waUploadPng(phoneNumberId, png);
-  result.messageId = await waTemplate(phoneNumberId, recipient, c.template, c.lang, [
-    { type: "header", parameters: [{ type: "image", image: { id: mediaId } }] },
-    { type: "body", parameters: [{ type: "text", text: day }, { type: "text", text: summary }] },
-  ]);
+  // At most PAGE_ROWS rows per image, one WhatsApp each: a 9-row image came through
+  // unreadable after WhatsApp's compression while a 3-row one was fine (13 Nov).
+  const pages = [];
+  for (let i = 0; i < pending.length; i += PAGE_ROWS) pages.push(pending.slice(i, i + PAGE_ROWS));
+  result.messageIds = [];
+  for (const [n, rows] of pages.entries()) {
+    const part = pages.length > 1 ? ` (${n + 1} of ${pages.length})` : "";
+    const mediaId = await waUploadPng(phoneNumberId, await pickingPng(rows, title + part));
+    result.messageIds.push(await waTemplate(phoneNumberId, recipient, c.template, c.lang, [
+      { type: "header", parameters: [{ type: "image", image: { id: mediaId } }] },
+      { type: "body", parameters: [{ type: "text", text: day }, { type: "text", text: summary + part }] },
+    ]));
+  }
+  result.messageId = result.messageIds[0];
   result.sent = true;
   if (markGreen) {
     try {
