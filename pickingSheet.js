@@ -91,12 +91,31 @@ export async function readPickingSheet() {
   return { pending: recent.filter((r) => isWhite(r.fill)), green, totalRows: rows.length };
 }
 
-// Turn the given rows green (A..J, the same span the team colours).
+// Turn the given rows green (A..J, the same span the team colours). Each row gets three tries
+// and one stuck row no longer stops the rest (13 Nov: a Graph 504 on row 765 left 765-767
+// white, so they would have gone to Bob again on Monday). Returns how many were coloured.
 export async function markRowsGreen(rows, green) {
   const c = cfg();
+  let done = 0;
+  const failed = [];
   for (const r of rows) {
-    await graphRequest("PATCH", `${wb(c)}/range(address='A${r.rowNo}:J${r.rowNo}')/format/fill`, { color: green });
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await graphRequest("PATCH", `${wb(c)}/range(address='A${r.rowNo}:J${r.rowNo}')/format/fill`, { color: green });
+        done++;
+        break;
+      } catch (e) {
+        if (attempt >= 3) { failed.push(`${r.rowNo}: ${e.message}`); break; }
+        await new Promise((res) => setTimeout(res, 3000 * attempt));
+      }
+    }
   }
+  if (failed.length) {
+    const err = new Error(`${failed.length} row(s) not coloured - ${failed.join("; ")}`);
+    err.marked = done;
+    throw err;
+  }
+  return done;
 }
 
 // ---- the table image -----------------------------------------------------------------
@@ -260,10 +279,13 @@ const ukToday = () => new Date().toLocaleDateString("en-GB", { weekday: "short",
  * One run. dryRun: read + draw only (nothing sent, nothing coloured). to: override the
  * recipient (testing). markGreen=false: send without colouring (testing on the real sheet).
  */
-export async function runPicking({ waPhoneNumberId, dryRun = false, to = null, markGreen = true } = {}) {
+export async function runPicking({ waPhoneNumberId, dryRun = false, to = null, markGreen = true, resend = null } = {}) {
   const c = cfg();
-  const { pending, green, totalRows } = await readPickingSheet();
-  const day = ukToday();
+  // resend: { pending, day } from a stored run - the same rows again, whatever their colour now.
+  const { pending, green, totalRows } = resend
+    ? { pending: resend.pending, green: process.env.PICKING_SENT_COLOUR || SENT_PURPLE, totalRows: null }
+    : await readPickingSheet();
+  const day = resend?.day || ukToday();
   // Notes (a row with words but no item) go to Bob too, but are not items to count.
   const items = pending.filter((r) => !isNote(r)), notes = pending.length - items.length;
   const units = items.reduce((a, r) => a + (Number(r.QTY) || 1), 0);
@@ -290,8 +312,17 @@ export async function runPicking({ waPhoneNumberId, dryRun = false, to = null, m
   ]);
   result.sent = true;
   if (markGreen) {
-    try { await markRowsGreen(pending, green); result.marked = pending.length; }
-    catch (e) { result.markError = e.message; }   // they will simply go again tomorrow
+    try {
+      // On a resend only rows still white are coloured: a row the team has since turned green
+      // (picked) must keep that colour.
+      let toMark = pending;
+      if (resend) {
+        const white = new Set((await readPickingSheet()).pending.map((r) => r.rowNo));
+        toMark = pending.filter((r) => white.has(r.rowNo));
+      }
+      result.marked = await markRowsGreen(toMark, green);
+    }
+    catch (e) { result.marked = e.marked || 0; result.markError = e.message; }   // they will simply go again tomorrow
   }
   return result;
 }
@@ -305,6 +336,15 @@ export function registerPickingSheet(app, { getPool, waPhoneNumberId }) {
   // number WITHOUT colouring the sheet; nothing at all is sent without ?send=1.
   app.get("/api/picking/preview", requireUser, async (req, res) => {
     try {
+      // ?resend=YYYY-MM-DD: send that day's 15:00 list to Bob again (the exact rows it sent),
+      // and colour any of them still white so they don't go again tomorrow.
+      if (req.query.resend) {
+        const day = String(req.query.resend);
+        const run = await getPool().query(`SELECT result FROM picking_runs WHERE day = $1`, [day]);
+        const stored = run.rows[0] && run.rows[0].result;
+        if (!stored || !Array.isArray(stored.pending)) return res.status(404).json({ error: `No picking run stored for ${day}` });
+        return res.json(await runPicking({ waPhoneNumberId, to: String(req.query.to || ""), resend: { pending: stored.pending, day: stored.day } }));
+      }
       if (req.query.send) return res.json(await runPicking({ waPhoneNumberId, to: String(req.query.to || ""), markGreen: false }));
       const r = await runPicking({ waPhoneNumberId, dryRun: true });
       if (req.query.png) { res.type("png"); return res.send(await pickingPng(r.pending, r.title)); }
