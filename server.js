@@ -8592,7 +8592,7 @@ app.post('/api/purchasing/debug-pick-test', async (req, res) => {
   if (!requirePurchasing(res)) return;
   try {
     const { runPickTest } = await import('./sbxPickTest.js');
-    res.json(await runPickTest(purchasingAuto.bpApi, { productId: Number(req.query.productId) || null }));
+    res.json(await runPickTest(purchasingAuto.bpApi, { productId: Number(req.query.productId) || null, bFirst: req.query.bFirst === '1' }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

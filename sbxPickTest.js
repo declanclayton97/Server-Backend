@@ -7,7 +7,7 @@
 const iso = () => new Date().toISOString().replace(/\.\d+Z$/, '+00:00');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function runPickTest(bpApi, { productId = null } = {}) {
+export async function runPickTest(bpApi, { productId = null, bFirst = false } = {}) {
   const log = [];
   const say = (k, v) => { log.push({ step: k, ...(v === undefined ? {} : { value: v }) }); return v; };
   const warehouses = await bpApi('GET', '/warehouse-service/warehouse');
@@ -47,11 +47,13 @@ export async function runPickTest(bpApi, { productId = null } = {}) {
   };
   await avail('stock before');
 
-  // Stock: 2 into A first (older), then 2 into B.
-  await bpApi('POST', `/warehouse-service/warehouse/${W}/stock-correction`, { corrections: [{ quantity: 2, productId, locationId: A, reason: 'pick test A (older)', cost: { currency: 'GBP', value: '1.00' } }] });
+  // Stock: 2 into one location first (older), then 2 into the other. bFirst: B gets the older stock - is it FIFO, or
+  // the lowest location id?
+  const [first, second] = bFirst ? [B, A] : [A, B];
+  await bpApi('POST', `/warehouse-service/warehouse/${W}/stock-correction`, { corrections: [{ quantity: 2, productId, locationId: first, reason: 'pick test (older)', cost: { currency: 'GBP', value: '1.00' } }] });
   await sleep(2000);
-  await bpApi('POST', `/warehouse-service/warehouse/${W}/stock-correction`, { corrections: [{ quantity: 2, productId, locationId: B, reason: 'pick test B (newer)', cost: { currency: 'GBP', value: '1.00' } }] });
-  await avail('stock after adding 2 to A then 2 to B');
+  await bpApi('POST', `/warehouse-service/warehouse/${W}/stock-correction`, { corrections: [{ quantity: 2, productId, locationId: second, reason: 'pick test (newer)', cost: { currency: 'GBP', value: '1.00' } }] });
+  await avail(bFirst ? 'stock after adding 2 to B then 2 to A' : 'stock after adding 2 to A then 2 to B');
 
   // An order for 1, allocated, with a goods-out note.
   const so = await bpApi('POST', '/order-service/order', {
@@ -73,18 +75,18 @@ export async function runPickTest(bpApi, { productId = null } = {}) {
   say('goods-out note', noteId);
   const where = async (label) => {
     const n = (await bpApi('GET', `/warehouse-service/order/${so}/goods-note/goods-out`))[noteId];
-    const locsOn = Object.values(n.orderRows || {}).flat().map((x) => ({ locationId: x.locationId, quantity: x.quantity, name: x.locationId === A ? 'A (older stock)' : x.locationId === B ? 'B (newer stock)' : x.locationId === def ? 'default' : 'other' }));
+    const locsOn = Object.values(n.orderRows || {}).flat().map((x) => ({ locationId: x.locationId, quantity: x.quantity, name: x.locationId === A ? 'A' : x.locationId === B ? 'B' : x.locationId === def ? 'default' : 'other' }));
     return say(label, locsOn);
   };
   await where('note takes it from (BP chose)');
   await avail('stock after the note');
 
-  // The pick message: it came from B.
+  // The pick message: it came from the NEWER stock's location.
   let pickErr = null;
-  try { await bpApi('POST', `/warehouse-service/order/${so}/goods-note/goods-out/${noteId}/pick`, { items: [{ salesOrderRowId: rowId, productId, locationId: B, quantity: 1 }] }); }
+  try { await bpApi('POST', `/warehouse-service/order/${so}/goods-note/goods-out/${noteId}/pick`, { items: [{ salesOrderRowId: rowId, productId, locationId: second, quantity: 1 }] }); }
   catch (e) { pickErr = e.message; }
   say('pick message', pickErr ? { error: pickErr } : 'accepted');
-  await where('note takes it from (after pick = B)');
+  await where('note takes it from (after the pick)');
   await avail('stock after the pick');
   return { ok: !pickErr, so, noteId, productId, A, B, log };
 }
