@@ -8586,6 +8586,16 @@ app.get('/api/purchasing/debug-bp', async (req, res) => {
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// TEMP (sandbox only, Dec 13 Nov): which location a goods-out note takes stock from when it's in two, and whether a
+// pick message moves it (for the warehouse hub's pick screen). Writes ONLY to the TEST account. Remove after the test.
+app.post('/api/purchasing/debug-pick-test', async (req, res) => {
+  if (!requirePurchasing(res)) return;
+  try {
+    const { runPickTest } = await import('./sbxPickTest.js');
+    res.json(await runPickTest(purchasingAuto.bpApi, { productId: Number(req.query.productId) || null }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Apply an identifier to a product via the safe merge-write helper. This is the
 // write primitive for the stock auto-heal (fill a blank EAN so lookups resolve).
 // body: { productId, ean?, sku? }. Preserves all other identifiers; reversible by
