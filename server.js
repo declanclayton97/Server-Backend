@@ -13180,7 +13180,9 @@ app.post("/api/whatsapp/send-template", requireHubForSales, async (req, res) => 
     : [];
   // Link buttons with a variable (order_tracking's "Track parcel" -> /track/{{1}}): one value
   // each, in button order. Missing values refuse the send rather than sending a dead button.
-  const dynButtons = (tpl.buttons || []).map((b, i) => ({ ...b, index: i })).filter((b) => b.type === "URL" && /{{1}}/.test(b.url || ""));
+  // The braces must be escaped: /{{1}}/ reads as "{ once, then }" and never matched, so the
+  // button went without its value and WhatsApp refused every tracking send (#131008, to 16 Nov).
+  const dynButtons = (tpl.buttons || []).map((b, i) => ({ ...b, index: i })).filter((b) => b.type === "URL" && /\{\{\d+\}\}/.test(b.url || ""));
   const bVals = Array.isArray(buttonParams) ? buttonParams.map((v) => String(v == null ? "" : v).trim()) : [];
   if (dynButtons.length && dynButtons.some((_, i) => !bVals[i])) {
     return res.status(400).json({ error: `Template "${name}" has a link button that needs a value - pass buttonParams` });
